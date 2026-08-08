@@ -1,5 +1,8 @@
 #pragma once
 
+#include <optional>
+#include <string>
+
 namespace engine::gfx {
 
 // Owns one GL_TEXTURE_2D object, move-only.
@@ -23,6 +26,16 @@ public:
     // the render path ahead of Stage E's real EXR loader. Delegates to
     // createFromFloatPixels — no separate upload path to maintain.
     static Texture createPlaceholderCheckerboard(int size);
+
+    // Loads a scanline EXR via OpenEXR's RgbaInputFile, converts half to
+    // float, and uploads through createFromFloatPixels. OpenEXR's C++ API
+    // throws Iex-derived (std::exception-derived) exceptions on I/O
+    // failure; failures are caught here and translated to nullopt,
+    // mirroring ShaderProgram::loadFromFiles's precedent for recoverable
+    // bad external input. A source file missing an alpha channel reads
+    // back as 1.0 — RgbaInputFile's own documented default fill, not
+    // something this loader adds.
+    static std::optional<Texture> createFromExr(const std::string& path);
 
     void bind(unsigned int unit) const;
 

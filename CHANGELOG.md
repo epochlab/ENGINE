@@ -24,3 +24,9 @@
 - feat: `quad.vert`/`.frag`, `fullscreen_triangle.vert`, `passthrough.frag` (placeholder, superseded by Stage F's OCIO shader)
 - feat: render loop now draws checkerboard quad into HDR FBO, blits to screen; `Window`'s resize callback wired to `HdrFramebuffer::resize`
 - note: unencoded checkpoint (expected washed out until Stage F)
+
+### E — Test EXR
+- feat: `gen_test_pattern` — writes 700x100 calibration EXR (black/18%grey/white/R/G/B/ramp)
+- feat: `Texture::createFromExr` — `RgbaInputFile` load, half→float, exception boundary → `optional`
+- feat: quad now displays `test_pattern.exr`
+- note: `*.exr` now gitignored — generated assets are local-only, not committed

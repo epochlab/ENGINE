@@ -32,4 +32,6 @@ target_link_libraries(engine PRIVATE
     OpenEXR::OpenEXR Imath::Imath OpenColorIO::OpenColorIO)
 
 add_executable(gen_test_pattern tools/gen_test_pattern.cpp)
+target_compile_definitions(gen_test_pattern PRIVATE
+    ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets")
 target_link_libraries(gen_test_pattern PRIVATE OpenEXR::OpenEXR Imath::Imath)
