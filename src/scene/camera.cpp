@@ -32,14 +32,18 @@ glm::vec3 forwardFromEuler(float yawRadians, float pitchRadians) {
 }  // namespace
 
 Camera::Camera(const glm::vec3& position, float yawDegrees, float pitchDegrees, FilmBack filmBack,
-               float focalLengthMm, float nearClip, float farClip)
+               float focalLengthMm, float nearClip, float farClip, float aperture,
+               float shutterSeconds, float iso)
     : position_(position),
       yawRadians_(glm::radians(yawDegrees)),
       pitchRadians_(glm::radians(pitchDegrees)),
       filmBack_(filmBack),
       focalLengthMm_(focalLengthMm),
       nearClip_(nearClip),
-      farClip_(farClip) {}
+      farClip_(farClip),
+      aperture_(aperture),
+      shutterSeconds_(shutterSeconds),
+      iso_(iso) {}
 
 float Camera::verticalFovRadians() const {
     return 2.0F * std::atan(filmBack_.heightMm / (2.0F * focalLengthMm_));
@@ -54,6 +58,14 @@ glm::mat4 Camera::viewMatrix() const {
 
 glm::mat4 Camera::projectionMatrix(float aspect) const {
     return glm::perspective(verticalFovRadians(), aspect, nearClip_, farClip_);
+}
+
+float Camera::ev100() const {
+    return std::log2((aperture_ * aperture_) / shutterSeconds_ * (100.0F / iso_));
+}
+
+float Camera::exposure() const {
+    return 1.0F / (std::pow(2.0F, ev100()) * 1.2F);
 }
 
 }  // namespace engine::scene

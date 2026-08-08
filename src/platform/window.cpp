@@ -25,6 +25,7 @@ Window::Window(int width, int height, const std::string& title) {
     glfwMakeContextCurrent(window_);
     glfwSetWindowUserPointer(window_, this);
     glfwSetFramebufferSizeCallback(window_, &Window::framebufferSizeCallback);
+    glfwSetKeyCallback(window_, &Window::keyCallback);
 }
 
 Window::~Window() {
@@ -35,7 +36,8 @@ Window::~Window() {
 
 Window::Window(Window&& other) noexcept
     : window_(std::exchange(other.window_, nullptr)),
-      resizeCallback_(std::move(other.resizeCallback_)) {
+      resizeCallback_(std::move(other.resizeCallback_)),
+      keyCallback_(std::move(other.keyCallback_)) {
     if (window_ != nullptr) {
         glfwSetWindowUserPointer(window_, this);
     }
@@ -48,6 +50,7 @@ Window& Window::operator=(Window&& other) noexcept {
         }
         window_ = std::exchange(other.window_, nullptr);
         resizeCallback_ = std::move(other.resizeCallback_);
+        keyCallback_ = std::move(other.keyCallback_);
         if (window_ != nullptr) {
             glfwSetWindowUserPointer(window_, this);
         }
@@ -82,6 +85,18 @@ void Window::framebufferSizeCallback(GLFWwindow* window, int width, int height) 
     auto* self = static_cast<Window*>(glfwGetWindowUserPointer(window));
     if (self != nullptr && self->resizeCallback_) {
         self->resizeCallback_(width, height);
+    }
+}
+
+void Window::setKeyCallback(KeyCallback callback) {
+    keyCallback_ = std::move(callback);
+}
+
+void Window::keyCallback(GLFWwindow* window, int key, int /*scancode*/, int action,
+                          int /*mods*/) {
+    auto* self = static_cast<Window*>(glfwGetWindowUserPointer(window));
+    if (self != nullptr && self->keyCallback_) {
+        self->keyCallback_(key, action);
     }
 }
 

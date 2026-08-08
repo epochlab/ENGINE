@@ -39,11 +39,20 @@ public:
     using ResizeCallback = std::function<void(int, int)>;
     void setResizeCallback(ResizeCallback callback);
 
+    // Invoked on GLFW's key event (GLFW_PRESS/GLFW_RELEASE/GLFW_REPEAT).
+    // Scancode/mods aren't forwarded — no consumer needs them yet. First
+    // consumer is Stage F's debug LUT-toggle key ('L'); Phase 1's
+    // WASD/QE/R debug camera is expected to be the second.
+    using KeyCallback = std::function<void(int key, int action)>;
+    void setKeyCallback(KeyCallback callback);
+
 private:
     static void framebufferSizeCallback(GLFWwindow* window, int width, int height);
+    static void keyCallback(GLFWwindow* window, int key, int scancode, int action, int mods);
 
     GLFWwindow* window_ = nullptr;
     ResizeCallback resizeCallback_;
+    KeyCallback keyCallback_;
 };
 
 }  // namespace engine::platform
