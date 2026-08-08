@@ -11,11 +11,11 @@ Ordered checklist for implementation. Full rationale: `~/.claude/plans/construct
 - [x] `cmake -S . -B build` configures clean
 
 ## B — Window & GL context
-- [ ] `include/engine/platform/window.h` + `src/platform/window.cpp`: `Window` (GL4.1 core fwd-compat hints, `shouldClose`/`pollEvents`/`swapBuffers`/`framebufferSize`)
-- [ ] `glfwInit`/`glfwTerminate` bracket `Window` in `main.cpp`
-- [ ] GLEW init: `glewExperimental=GL_TRUE`, drain init `glGetError`, `glfwSwapInterval(1)`
-- [ ] `include/engine/gfx/gl_debug.h` + `src/gfx/gl_debug.cpp`: `checkError`, `GL_CALL` macro, `khrDebugAvailable`
-- [ ] render loop: poll → bind HDR FBO → clear → draw quad → post-process blit → swap
+- [x] `include/engine/platform/window.h` + `src/platform/window.cpp`: `Window` (GL4.1 core fwd-compat hints, `shouldClose`/`pollEvents`/`swapBuffers`/`framebufferSize`)
+- [x] `glfwInit`/`glfwTerminate` bracket `Window` in `main.cpp`
+- [x] GLEW init: `glewExperimental=GL_TRUE`, drain init `glGetError`, `glfwSwapInterval(1)`
+- [x] `include/engine/gfx/gl_debug.h` + `src/gfx/gl_debug.cpp`: `checkError`, `GL_CALL` macro, `khrDebugAvailable`
+- [x] render loop: poll → clear → swap (bind HDR FBO / draw quad / post-process blit land in Stage D/F)
 
 ## C — Camera
 - [ ] `include/engine/scene/camera.h`: doc convention (RH, +Y up, −Z forward)
