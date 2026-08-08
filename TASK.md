@@ -38,14 +38,14 @@ Ordered checklist for implementation. Full rationale: `~/.claude/plans/construct
 - [x] swap quad texture: checkerboard → `test_pattern.exr`
 
 ## F — OCIO viewer LUT + exposure
-- [ ] confirm `BuiltinTransform` names (sRGB, Rec.709/1886) against installed OCIO 2.5.2
-- [ ] extend `Camera` with `aperture`/`shutterSeconds`/`iso`, `ev100()`, `exposure()` (standard photographic EV100 model)
-- [ ] `include/engine/gfx/ocio_display_transform.h` + `src/gfx/ocio_display_transform.cpp`: build both `{sRGB,Rec709}` `GpuShaderDesc`/shaders once (`GLSL_4_0`), splice into frag template, upload LUTs if any
-- [ ] exposure uniform `pow(2,ev)` before OCIO call, seeded from `Camera::exposure()`
-- [ ] interface: `setActiveLut`, `setExposureEv`, `activeShader`, `bind`
-- [ ] swap render-loop shader: placeholder → `ocioTransform.activeShader()`
-- [ ] confirm `GLFW_SRGB_CAPABLE`/`GL_FRAMEBUFFER_SRGB` never enabled
-- [ ] debug key (`L`) toggles `setActiveLut`
+- [x] confirm `BuiltinTransform` names (sRGB, Rec.709/1886) against installed OCIO 2.5.2 — corrected an earlier wrong assumption: no plain `CURVE - LINEAR_to_sRGB` style exists; uses the real Display/View API (`getProcessor(scene, display, "Un-tone-mapped", FORWARD)`) against OCIO's bundled `cg-config-v1.0.0_aces-v1.3_ocio-v2.1`, empirically verified (0.18→0.4614 sRGB / 0.4894 Rec.1886, 0→0, 1→1, zero LUT textures)
+- [x] extend `Camera` with `aperture`/`shutterSeconds`/`iso`, `ev100()`, `exposure()` (standard photographic EV100 model)
+- [x] `include/engine/gfx/ocio_display_transform.h` + `src/gfx/ocio_display_transform.cpp`: build both `{sRGB,Rec709}` `GpuShaderDesc`/shaders once (`GLSL_4_0`), splice into frag template; zero LUT textures needed (verified)
+- [x] exposure uniform `pow(2,ev)` before OCIO call — left at neutral EV=0 for now rather than seeded from `Camera::exposure()`: the test pattern's values are calibration constants, not real scene-referred radiance, so a physical f/2.8 exposure crushed them to near-black; `exposure()`/`ev100()` still exercised via the startup log, gain a real render-path consumer once scene-referred content exists (Phase 2+)
+- [x] interface: `setActiveLut`, `setExposureEv`, `activeShader`, `bind`
+- [x] swap render-loop shader: placeholder → `ocioTransform.activeShader()`
+- [x] confirm `GLFW_SRGB_CAPABLE`/`GL_FRAMEBUFFER_SRGB` never enabled
+- [x] debug key (`L`) cycles `setActiveLut` — sRGB → Rec709 → Raw (genuine no-display-encode passthrough, for direct encoded-vs-unencoded comparison) → sRGB
 
 ## G — Verify
 - [ ] visual: grey mid-grey, white pure white, ramp smooth
