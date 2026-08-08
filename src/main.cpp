@@ -5,8 +5,11 @@
 #include <GL/glew.h>
 #include <GLFW/glfw3.h>
 
+#include <glm/glm.hpp>
+
 #include "engine/gfx/gl_debug.h"
 #include "engine/platform/window.h"
+#include "engine/scene/camera.h"
 
 namespace {
 
@@ -47,6 +50,20 @@ int main() {
 
             std::cout << "GL_KHR_debug available: " << std::boolalpha
                       << engine::gfx::khrDebugAvailable() << '\n';
+
+            // Verification-only: Stage C has no render path yet to consume
+            // these matrices as uniforms (that lands in Stage D once a
+            // shader/quad exists to bind them). This proves the Euler-angle
+            // and lens math actually run and produce sane output, mirroring
+            // the GL_KHR_debug log above. Superseded once Stage D wires
+            // viewMatrix()/projectionMatrix() into real uniforms.
+            const engine::scene::Camera camera(glm::vec3(0.0F, 0.0F, 3.0F), 0.0F, 0.0F,
+                                                engine::scene::Camera::FilmBack{36.0F, 24.0F},
+                                                50.0F, 0.1F, 100.0F);
+            const glm::vec3 camPos = camera.position();
+            std::cout << "Camera: position=(" << camPos.x << ", " << camPos.y << ", " << camPos.z
+                      << ") verticalFov=" << glm::degrees(camera.verticalFovRadians())
+                      << " deg\n";
 
             // Stage B loop: poll -> clear default framebuffer -> swap.
             // HDR FBO bind / quad draw / post-process blit land in

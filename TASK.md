@@ -18,8 +18,8 @@ Ordered checklist for implementation. Full rationale: `~/.claude/plans/construct
 - [x] render loop: poll → clear → swap (bind HDR FBO / draw quad / post-process blit land in Stage D/F)
 
 ## C — Camera
-- [ ] `include/engine/scene/camera.h`: doc convention (RH, +Y up, −Z forward)
-- [ ] `include/engine/scene/camera.h` + `src/scene/camera.cpp`: position+yaw/pitch, `viewMatrix`, `projectionMatrix(aspect)`
+- [x] `include/engine/scene/camera.h`: doc convention (RH, +Y up, −Z forward)
+- [x] `include/engine/scene/camera.h` + `src/scene/camera.cpp`: position+yaw/pitch, film back + focal length → derived vertical FOV, `viewMatrix`, `projectionMatrix(aspect)`
 
 ## D — HDR FBO + polygon
 - [ ] `include/engine/gfx/mesh.h` + `src/gfx/mesh.cpp`: `Vertex{pos,uv}`, `createQuad`, RAII VAO/VBO/EBO
@@ -39,8 +39,9 @@ Ordered checklist for implementation. Full rationale: `~/.claude/plans/construct
 
 ## F — OCIO viewer LUT + exposure
 - [ ] confirm `BuiltinTransform` names (sRGB, Rec.709/1886) against installed OCIO 2.5.2
+- [ ] extend `Camera` with `aperture`/`shutterSeconds`/`iso`, `ev100()`, `exposure()` (standard photographic EV100 model)
 - [ ] `include/engine/gfx/ocio_display_transform.h` + `src/gfx/ocio_display_transform.cpp`: build both `{sRGB,Rec709}` `GpuShaderDesc`/shaders once (`GLSL_4_0`), splice into frag template, upload LUTs if any
-- [ ] exposure uniform `pow(2,ev)` before OCIO call
+- [ ] exposure uniform `pow(2,ev)` before OCIO call, seeded from `Camera::exposure()`
 - [ ] interface: `setActiveLut`, `setExposureEv`, `activeShader`, `bind`
 - [ ] swap render-loop shader: placeholder → `ocioTransform.activeShader()`
 - [ ] confirm `GLFW_SRGB_CAPABLE`/`GL_FRAMEBUFFER_SRGB` never enabled
