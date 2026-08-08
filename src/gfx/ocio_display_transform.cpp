@@ -124,9 +124,9 @@ std::string buildOcioFragmentSource(const char* display, const char* functionNam
 }  // namespace
 
 std::optional<OcioDisplayTransform> OcioDisplayTransform::create() {
-    // Reuses the same fullscreen-triangle vertex shader as the Stage D/E
-    // placeholder passthrough.frag pairing; only the fragment side varies
-    // per shader (OCIO-generated for the two LUTs, hand-written for Raw).
+    // Same fullscreen-triangle vertex shader for all three; only the
+    // fragment side varies (OCIO-generated for the two LUTs, hand-written
+    // for Raw).
     const std::optional<std::string> vertSrc =
         readFile(ASSET_ROOT_DIR "/shaders/fullscreen_triangle.vert");
     if (!vertSrc) {

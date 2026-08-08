@@ -55,27 +55,6 @@ Texture Texture::createFromFloatPixels(int width, int height, const float* rgba)
     return Texture(id);
 }
 
-Texture Texture::createPlaceholderCheckerboard(int size) {
-    std::vector<float> pixels(static_cast<std::size_t>(size) * static_cast<std::size_t>(size) *
-                               4);
-    constexpr int kSquarePixels = 8;
-    for (int y = 0; y < size; ++y) {
-        for (int x = 0; x < size; ++x) {
-            const bool isLight = ((x / kSquarePixels) + (y / kSquarePixels)) % 2 == 0;
-            const float value = isLight ? 0.5F : 0.04F;
-            const std::size_t idx =
-                (static_cast<std::size_t>(y) * static_cast<std::size_t>(size) +
-                 static_cast<std::size_t>(x)) *
-                4;
-            pixels[idx + 0] = value;
-            pixels[idx + 1] = value;
-            pixels[idx + 2] = value;
-            pixels[idx + 3] = 1.0F;
-        }
-    }
-    return createFromFloatPixels(size, size, pixels.data());
-}
-
 std::optional<Texture> Texture::createFromExr(const std::string& path) {
     try {
         Imf::RgbaInputFile file(path.c_str());

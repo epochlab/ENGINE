@@ -20,13 +20,6 @@ public:
     // EXR's native precision without GL_RGBA32F's extra bandwidth.
     static Texture createFromFloatPixels(int width, int height, const float* rgba);
 
-    // In-memory checkerboard (alternating grey values, deliberately not
-    // 0/1 so the unencoded Stage D checkpoint still shows visible
-    // structure rather than a binary black/white image) for exercising
-    // the render path ahead of Stage E's real EXR loader. Delegates to
-    // createFromFloatPixels — no separate upload path to maintain.
-    static Texture createPlaceholderCheckerboard(int size);
-
     // Loads a scanline EXR via OpenEXR's RgbaInputFile, converts half to
     // float, and uploads through createFromFloatPixels. OpenEXR's C++ API
     // throws Iex-derived (std::exception-derived) exceptions on I/O

@@ -48,11 +48,13 @@ Ordered checklist for implementation. Full rationale: `~/.claude/plans/construct
 - [x] debug key (`L`) cycles `setActiveLut` — sRGB → Rec709 → Raw (genuine no-display-encode passthrough, for direct encoded-vs-unencoded comparison) → sRGB
 
 ## G — Verify
-- [ ] visual: grey mid-grey, white pure white, ramp smooth
-- [ ] numeric: `glReadPixels` at known coords vs hand-computed sRGB bytes (18% grey ≈124/255)
-- [ ] sRGB vs Rec709 differ minutely on toggle
-- [ ] resize correct (framebuffer size, no retina 2x bug)
-- [ ] remove/mark-unused placeholder checkerboard + passthrough shader
+- [x] visual: grey mid-grey, white pure white, ramp smooth — confirmed via screenshot
+- [x] numeric: `logColorCheck` (`glReadPixels` at known coords) vs hand-computed bytes — sRGB grey=118 (expect ~118), Rec709 grey=125 (expect ~125, matches the ≈124/255 figure — that's the Rec.1886 curve, not sRGB's), black=0/white=255 in all LUTs
+- [x] sRGB vs Rec709 differ minutely on toggle — confirmed live (118 vs 125), `logColorCheck` re-fires on every `L` press
+- [x] resize correct (framebuffer size, no retina 2x bug) — confirmed via screenshot, quad stays centered/proportioned
+- [x] remove/mark-unused placeholder checkerboard + passthrough shader — both deleted (zero remaining callers/loads)
 
 ## Deferred
 Tone-mapping · debug camera/HUD/AOV selector (Phase 1) · glTF/textures beyond test pattern (Phase 2)
+
+**Phase 0 complete.**
