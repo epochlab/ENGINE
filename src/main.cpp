@@ -24,6 +24,36 @@ void glfwErrorCallback(int error, const char* description) {
     std::cerr << "GLFW error " << error << ": " << description << '\n';
 }
 
+// Stage G verification: reads back test_pattern.exr's known patch centers
+// from the backbuffer and logs actual vs. hand-computed expected bytes.
+// Coordinates derive from the current framebuffer size and the quad's
+// fixed [-0.5,0.5] NDC footprint, so this stays correct after a resize.
+void logColorCheck(int fbWidth, int fbHeight, engine::gfx::OcioDisplayTransform::Lut lut) {
+    using Lut = engine::gfx::OcioDisplayTransform::Lut;
+    const char* lutName = lut == Lut::SRGB ? "sRGB" : lut == Lut::Rec709 ? "Rec709" : "Raw";
+    const int expectedGrey = lut == Lut::SRGB ? 118 : lut == Lut::Rec709 ? 125 : 46;
+
+    const int quadLeft = fbWidth / 4;
+    const int quadWidth = fbWidth / 2;
+    const int y = fbHeight / 2;
+
+    // test_pattern.exr is 700px wide; u is the fraction across it.
+    auto sampleAt = [&](float textureX) {
+        unsigned char px[3] = {0, 0, 0};
+        const int x = quadLeft + static_cast<int>(textureX / 700.0F * static_cast<float>(quadWidth));
+        glReadPixels(x, y, 1, 1, GL_RGB, GL_UNSIGNED_BYTE, px);
+        return static_cast<int>(px[0]);  // patches are achromatic/primary; R alone suffices
+    };
+
+    std::cout << "ColorCheck[" << lutName << "]: black=" << sampleAt(50.0F) << " (expect 0), grey="
+              << sampleAt(150.0F) << " (expect ~" << expectedGrey
+              << "), white=" << sampleAt(250.0F) << " (expect 255), ramp =";
+    for (int i = 0; i < 5; ++i) {
+        std::cout << ' ' << sampleAt(600.0F + static_cast<float>(i) * 99.0F / 4.0F);
+    }
+    std::cout << " (expect non-decreasing)\n";
+}
+
 }  // namespace
 
 int main() {
@@ -139,6 +169,7 @@ int main() {
                 // poll -> bind HDR FBO -> clear -> draw quad -> post-process
                 // blit (exposure + OCIO display transform) to the default
                 // framebuffer -> swap.
+                std::optional<engine::gfx::OcioDisplayTransform::Lut> lastLoggedLut;
                 while (!window.shouldClose()) {
                     window.pollEvents();
 
@@ -151,8 +182,18 @@ int main() {
                     quad.draw();
 
                     ocioTransform->bind();
+                    const auto [winWidth, winHeight] = window.framebufferSize();
                     postProcess.draw(hdrFbo.colorTexture(), ocioTransform->activeShader(),
-                                      window.framebufferSize());
+                                      {winWidth, winHeight});
+
+                    // Stage G verification: logs once at startup and again
+                    // on every LUT toggle (see logColorCheck above) —
+                    // covers both the numeric-check and
+                    // differs-minutely-on-toggle checklist items.
+                    if (lastLoggedLut != ocioTransform->activeLut()) {
+                        logColorCheck(winWidth, winHeight, ocioTransform->activeLut());
+                        lastLoggedLut = ocioTransform->activeLut();
+                    }
 
                     window.swapBuffers();
                 }
