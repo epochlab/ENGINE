@@ -73,8 +73,9 @@ int main() {
             engine::gfx::HdrFramebuffer hdrFbo(fbWidth, fbHeight);
 
             const engine::gfx::Mesh quad = engine::gfx::Mesh::createQuad();
-            const engine::gfx::Texture checkerboard =
-                engine::gfx::Texture::createPlaceholderCheckerboard(256);
+
+            std::optional<engine::gfx::Texture> testPattern =
+                engine::gfx::Texture::createFromExr(ASSET_ROOT_DIR "/textures/test_pattern.exr");
 
             std::optional<engine::gfx::ShaderProgram> sceneShader =
                 engine::gfx::ShaderProgram::loadFromFiles(ASSET_ROOT_DIR "/shaders/quad.vert",
@@ -84,8 +85,9 @@ int main() {
                     ASSET_ROOT_DIR "/shaders/fullscreen_triangle.vert",
                     ASSET_ROOT_DIR "/shaders/passthrough.frag");
 
-            if (!sceneShader || !displayShader) {
-                std::cerr << "main: shader compile/link failed, aborting startup\n";
+            if (!sceneShader || !displayShader || !testPattern) {
+                std::cerr << "main: shader compile/link or EXR texture load failed, aborting "
+                             "startup\n";
                 exitCode = EXIT_FAILURE;
             } else {
                 const engine::gfx::PostProcessPass postProcess;
@@ -116,7 +118,7 @@ int main() {
                     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
                     sceneShader->use();
-                    checkerboard.bind(0);
+                    testPattern->bind(0);
                     quad.draw();
 
                     postProcess.draw(hdrFbo.colorTexture(), *displayShader,

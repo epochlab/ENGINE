@@ -32,10 +32,10 @@ Ordered checklist for implementation. Full rationale: `~/.claude/plans/construct
 - [x] checkpoint: checkerboard quad visible (unencoded, expected washed out) — confirmed via screenshot, correctly bounded/scaled quad, no viewer LUT yet (Stage F)
 
 ## E — Test EXR
-- [ ] `tools/gen_test_pattern.cpp` (no `engine/` dependency) → `assets/textures/test_pattern.exr` (black / 18%grey / white / R,G,B / ramp)
-- [ ] run once, commit `.exr`
-- [ ] EXR loader: `RgbaInputFile` → validate `dataWindow` → `createFromFloatPixels`
-- [ ] swap quad texture: checkerboard → `test_pattern.exr`
+- [x] `tools/gen_test_pattern.cpp` (no `engine/` dependency) → `assets/textures/test_pattern.exr` (black / 18%grey / white / R,G,B / ramp — 700x100, 100px column-uniform stripes)
+- [x] run once, kept local (`*.exr` now gitignored, not committed)
+- [x] EXR loader: `Texture::createFromExr` — `RgbaInputFile` → validate `dataWindow` → `createFromFloatPixels`
+- [x] swap quad texture: checkerboard → `test_pattern.exr`
 
 ## F — OCIO viewer LUT + exposure
 - [ ] confirm `BuiltinTransform` names (sRGB, Rec.709/1886) against installed OCIO 2.5.2
