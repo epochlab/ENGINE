@@ -18,7 +18,7 @@ Eight build phases carry this pipeline from a bare camera to a spectral path tra
 
 | Phase | Name | Adds |
 |---|---|---|
-| 0 | Foundation | OpenGL camera, Euclidean space, OCIO, OpenEXR linear pipeline, exposure, tone-mapping |
+| 0 | Foundation | OpenGL renderer, camera, Euclidean space, OCIO, OpenEXR linear pipeline, exposure, tone-mapping |
 | 1 | Debug HUD & system feedback | GPU/system readout, frame-timing HUD, memory HUD, scene/viewport stats, camera & lens readout, debug camera controls (WASD/QE/R), camera framing overlays, AOV selector, live histogram |
 | 2 | Geometry, textures & basic material | glTF mesh loading, UV texture mapping, linear EXR textures, tangent-space normal mapping, basic metallic-roughness PBR shading |
 | 3 | Direct lighting & acceleration | BVH, area lights, shadows, next-event estimation, HDR IBL, energy conservation |
