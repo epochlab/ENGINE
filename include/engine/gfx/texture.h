@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <optional>
 #include <string>
 
@@ -33,9 +34,10 @@ public:
     void bind(unsigned int unit) const;
 
 private:
-    explicit Texture(unsigned int id);
+    Texture(unsigned int id, std::size_t byteSize);
 
     unsigned int id_ = 0;
+    std::size_t byteSize_ = 0;  // reported to engine::debug's GPU memory tracker
 };
 
 }  // namespace engine::gfx
