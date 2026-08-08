@@ -100,12 +100,21 @@ std::optional<Texture> Texture::createFromExr(const std::string& path) {
         // One-time load, not a hot path: a plain float conversion loop is
         // enough — no half-accepting overload added to
         // createFromFloatPixels for a call site used exactly once.
+        //
+        // Row order is flipped here (EXR row 0 -> floatPixels' last row):
+        // EXR scanline 0 is the top of the image, but glTexImage2D treats
+        // row 0 of the uploaded buffer as texture v=0, which Mesh's quad
+        // UVs (v=0 at the bottom vertices) sample as the bottom of the
+        // screen. Without this flip every EXR-loaded texture renders
+        // upside down — invisible on the row-uniform test_pattern.exr,
+        // confirmed visually on a real HDRI.
         std::vector<float> floatPixels(static_cast<std::size_t>(width) *
                                         static_cast<std::size_t>(height) * 4);
         for (int y = 0; y < height; ++y) {
+            const int flippedY = height - 1 - y;
             for (int x = 0; x < width; ++x) {
                 const Imf::Rgba& texel = pixels[y][x];
-                const std::size_t idx = (static_cast<std::size_t>(y) *
+                const std::size_t idx = (static_cast<std::size_t>(flippedY) *
                                               static_cast<std::size_t>(width) +
                                           static_cast<std::size_t>(x)) *
                                          4;

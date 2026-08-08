@@ -30,6 +30,7 @@
 - feat: `Texture::createFromExr` — `RgbaInputFile` load, half→float, exception boundary → `optional`
 - feat: quad now displays `test_pattern.exr`
 - note: `*.exr` now gitignored — generated assets are local-only, not committed
+- fix: `Texture::createFromExr` now flips row order on load — EXR row 0 is the image top, but `glTexImage2D` row 0 is texture `v=0` (bottom); previously every EXR-loaded texture rendered upside down, invisible on the row-uniform `test_pattern.exr`, confirmed on a real HDRI
 
 ### F — OCIO viewer LUT + exposure
 - feat: `OcioDisplayTransform` — sRGB/Rec.1886-Rec.709 viewer LUTs via OCIO's real Display/View API (`Un-tone-mapped` view, no filmic tone-mapping), built once at startup, no LUT textures
