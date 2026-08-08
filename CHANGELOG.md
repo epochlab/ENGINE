@@ -16,3 +16,11 @@
 ### C — Camera
 - feat: `Camera` — position/yaw/pitch, film back + focal length → derived vertical FOV, `viewMatrix`/`projectionMatrix`
 - note: aperture/shutter/ISO/exposure deferred to Stage F (first real consumer is the OCIO exposure uniform)
+
+### D — HDR FBO + polygon
+- feat: `Mesh` (RAII VAO/VBO/EBO, `createQuad`), `ShaderProgram` (`loadFromFiles`/`loadFromSource` → `optional`), `Texture` (`GL_RGBA16F` upload, placeholder checkerboard)
+- feat: `HdrFramebuffer` (RGBA16F color + depth renderbuffer, completeness check, `resize`/`bind`)
+- feat: `PostProcessPass` — attribute-less-VAO fullscreen-triangle blit
+- feat: `quad.vert`/`.frag`, `fullscreen_triangle.vert`, `passthrough.frag` (placeholder, superseded by Stage F's OCIO shader)
+- feat: render loop now draws checkerboard quad into HDR FBO, blits to screen; `Window`'s resize callback wired to `HdrFramebuffer::resize`
+- note: unencoded checkpoint (expected washed out until Stage F)

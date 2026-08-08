@@ -22,14 +22,14 @@ Ordered checklist for implementation. Full rationale: `~/.claude/plans/construct
 - [x] `include/engine/scene/camera.h` + `src/scene/camera.cpp`: position+yaw/pitch, film back + focal length → derived vertical FOV, `viewMatrix`, `projectionMatrix(aspect)`
 
 ## D — HDR FBO + polygon
-- [ ] `include/engine/gfx/mesh.h` + `src/gfx/mesh.cpp`: `Vertex{pos,uv}`, `createQuad`, RAII VAO/VBO/EBO
-- [ ] `include/engine/gfx/shader_program.h` + `src/gfx/shader_program.cpp`: `loadFromFiles`→optional, `loadFromSource`, `use`, `uniformLocation`
-- [ ] `assets/shaders/quad.vert`/`quad.frag` (`#version 410 core`, unlit passthrough)
-- [ ] `include/engine/gfx/texture.h` + `src/gfx/texture.cpp`: `createFromFloatPixels`→`GL_RGBA16F`, `createPlaceholderCheckerboard`
-- [ ] `include/engine/gfx/hdr_framebuffer.h` + `src/gfx/hdr_framebuffer.cpp`: RGBA16F color tex + depth renderbuffer, completeness check, `resize`/`bind`/`colorTexture`
-- [ ] `include/engine/gfx/post_process_pass.h` + `src/gfx/post_process_pass.cpp`: attribute-less-VAO fullscreen-triangle draw
-- [ ] `assets/shaders/fullscreen_triangle.vert` + placeholder passthrough frag
-- [ ] checkpoint: checkerboard quad visible (unencoded, expected washed out)
+- [x] `include/engine/gfx/mesh.h` + `src/gfx/mesh.cpp`: `Vertex{pos,uv}`, `createQuad`, RAII VAO/VBO/EBO
+- [x] `include/engine/gfx/shader_program.h` + `src/gfx/shader_program.cpp`: `loadFromFiles`→optional, `loadFromSource`, `use`, `uniformLocation`
+- [x] `assets/shaders/quad.vert`/`quad.frag` (`#version 410 core`, unlit passthrough)
+- [x] `include/engine/gfx/texture.h` + `src/gfx/texture.cpp`: `createFromFloatPixels`→`GL_RGBA16F`, `createPlaceholderCheckerboard`
+- [x] `include/engine/gfx/hdr_framebuffer.h` + `src/gfx/hdr_framebuffer.cpp`: RGBA16F color tex + depth renderbuffer, completeness check, `resize`/`bind`/`colorTexture`
+- [x] `include/engine/gfx/post_process_pass.h` + `src/gfx/post_process_pass.cpp`: attribute-less-VAO fullscreen-triangle draw
+- [x] `assets/shaders/fullscreen_triangle.vert` + placeholder passthrough frag
+- [x] checkpoint: checkerboard quad visible (unencoded, expected washed out) — confirmed via screenshot, correctly bounded/scaled quad, no viewer LUT yet (Stage F)
 
 ## E — Test EXR
 - [ ] `tools/gen_test_pattern.cpp` (no `engine/` dependency) → `assets/textures/test_pattern.exr` (black / 18%grey / white / R,G,B / ramp)
