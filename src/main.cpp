@@ -1,3 +1,4 @@
+#include <chrono>
 #include <cstdlib>
 #include <iostream>
 #include <optional>
@@ -183,6 +184,13 @@ int main() {
                 // blit (exposure + OCIO display transform) to the default
                 // framebuffer -> swap.
                 std::optional<engine::gfx::OcioDisplayTransform::Lut> lastLoggedLut;
+                // task_info() is a real syscall; the HUD is read by human
+                // eyes, not per-frame logic, so re-sampling RAM 4x/sec
+                // instead of every frame drops one source of frame-time
+                // jitter for free.
+                std::size_t ramBytes = engine::debug::residentSetBytes();
+                std::chrono::steady_clock::time_point lastRamSample =
+                    std::chrono::steady_clock::now();
                 while (!window.shouldClose()) {
                     window.pollEvents();
                     hud.beginFrame();
@@ -214,10 +222,16 @@ int main() {
                         lastLoggedLut = ocioTransform->activeLut();
                     }
 
+                    const auto now = std::chrono::steady_clock::now();
+                    if (now - lastRamSample >= std::chrono::milliseconds(250)) {
+                        ramBytes = engine::debug::residentSetBytes();
+                        lastRamSample = now;
+                    }
+
                     hud.draw(gpuInfo, frameStats, geomTimer.millisecondsElapsed(),
                              postTimer.millisecondsElapsed(), quad.triangleCount(),
-                             static_cast<long long>(winWidth) * winHeight,
-                             engine::debug::residentSetBytes(), engine::debug::gpuAllocatedBytes());
+                             static_cast<long long>(winWidth) * winHeight, ramBytes,
+                             engine::debug::gpuAllocatedBytes());
                     hud.render();
 
                     window.swapBuffers();
