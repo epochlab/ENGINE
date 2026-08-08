@@ -3,12 +3,12 @@
 Ordered checklist for implementation. Full rationale: `~/.claude/plans/construct-a-refined-plan-curried-stearns.md`
 
 ## A — Scaffolding
-- [ ] `brew install glm opencolorio`
-- [ ] dirs: `assets/{shaders,textures}`, `include/engine/{platform,gfx,scene}`, `src/{platform,gfx,scene}`, `tools/`
-- [ ] `.gitignore`: `build/`, `.DS_Store`, `compile_commands.json`
-- [ ] `CMakeLists.txt`: C++20, `engine` + `gen_test_pattern` targets, `find_package(OpenGL glfw3 GLEW glm Imath OpenEXR OpenColorIO)`, `target_include_directories(engine PRIVATE include)`
-- [ ] verify target names (`OpenColorIO::OpenColorIO`, `OpenEXR::OpenEXR`, `Imath::Imath`) post-install
-- [ ] `cmake -S . -B build` configures clean
+- [x] `brew install glm opencolorio`
+- [x] dirs: `assets/{shaders,textures}`, `include/engine/{platform,gfx,scene}`, `src/{platform,gfx,scene}`, `tools/`
+- [x] `.gitignore`: `build/`, `.DS_Store`, `compile_commands.json`
+- [x] `CMakeLists.txt`: C++20, `engine` + `gen_test_pattern` targets, `find_package(OpenGL glfw3 GLEW glm Imath OpenEXR OpenColorIO)`, `target_include_directories(engine PRIVATE include)`
+- [x] verify target names (`OpenColorIO::OpenColorIO`, `OpenEXR::OpenEXR`, `Imath::Imath`) post-install
+- [x] `cmake -S . -B build` configures clean
 
 ## B — Window & GL context
 - [ ] `include/engine/platform/window.h` + `src/platform/window.cpp`: `Window` (GL4.1 core fwd-compat hints, `shouldClose`/`pollEvents`/`swapBuffers`/`framebufferSize`)
