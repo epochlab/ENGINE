@@ -11,26 +11,33 @@
 #include <OpenEXR/ImfArray.h>
 #include <OpenEXR/ImfRgbaFile.h>
 
+#include "engine/debug/memory_tracker.h"
 #include "engine/gfx/gl_debug.h"
 
 namespace engine::gfx {
 
-Texture::Texture(unsigned int id) : id_(id) {}
+Texture::Texture(unsigned int id, std::size_t byteSize) : id_(id), byteSize_(byteSize) {
+    engine::debug::trackGpuAlloc(byteSize_);
+}
 
 Texture::~Texture() {
     if (id_ != 0) {
+        engine::debug::trackGpuFree(byteSize_);
         glDeleteTextures(1, &id_);
     }
 }
 
-Texture::Texture(Texture&& other) noexcept : id_(std::exchange(other.id_, 0)) {}
+Texture::Texture(Texture&& other) noexcept
+    : id_(std::exchange(other.id_, 0)), byteSize_(std::exchange(other.byteSize_, 0)) {}
 
 Texture& Texture::operator=(Texture&& other) noexcept {
     if (this != &other) {
         if (id_ != 0) {
+            engine::debug::trackGpuFree(byteSize_);
             glDeleteTextures(1, &id_);
         }
         id_ = std::exchange(other.id_, 0);
+        byteSize_ = std::exchange(other.byteSize_, 0);
     }
     return *this;
 }
@@ -52,7 +59,9 @@ Texture Texture::createFromFloatPixels(int width, int height, const float* rgba)
     GL_CALL(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR));
 
     GL_CALL(glBindTexture(GL_TEXTURE_2D, 0));
-    return Texture(id);
+    // RGBA16F = 4 channels * 2 bytes/channel.
+    const std::size_t byteSize = static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 8;
+    return Texture(id, byteSize);
 }
 
 std::optional<Texture> Texture::createFromExr(const std::string& path) {

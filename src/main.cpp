@@ -1,3 +1,4 @@
+#include <chrono>
 #include <cstdlib>
 #include <iostream>
 #include <optional>
@@ -8,6 +9,11 @@
 
 #include <glm/glm.hpp>
 
+#include "engine/debug/frame_stats.h"
+#include "engine/debug/gpu_timer.h"
+#include "engine/debug/hud_overlay.h"
+#include "engine/debug/memory_tracker.h"
+#include "engine/debug/system_info.h"
 #include "engine/gfx/gl_debug.h"
 #include "engine/gfx/hdr_framebuffer.h"
 #include "engine/gfx/mesh.h"
@@ -69,7 +75,7 @@ int main() {
         // Window construction creates the GL 4.1 core/fwd-compat context
         // and makes it current; fatal failure inside it exits the process
         // directly (see window.cpp) since nothing recoverable exists yet.
-        engine::platform::Window window(1280, 720, "Engine");
+        engine::platform::Window window(1024, 576, "ENGINE");
 
         glewExperimental = GL_TRUE;
         const GLenum glewStatus = glewInit();
@@ -87,6 +93,10 @@ int main() {
 
             std::cout << "GL_KHR_debug available: " << std::boolalpha
                       << engine::gfx::khrDebugAvailable() << '\n';
+            std::cout << "GL_ARB_timer_query available: " << std::boolalpha
+                      << engine::debug::gpuTimerQueryAvailable() << '\n';
+
+            const engine::debug::GpuInfo gpuInfo = engine::debug::queryGpuInfo();
 
             // Verification-only: viewMatrix()/projectionMatrix() have no
             // render-path consumer yet (Stage D's quad has no MVP) — first
@@ -123,6 +133,10 @@ int main() {
                 exitCode = EXIT_FAILURE;
             } else {
                 const engine::gfx::PostProcessPass postProcess;
+                engine::debug::HudOverlay hud(window.nativeHandle());
+                engine::debug::FrameStats frameStats;
+                engine::debug::GpuTimer geomTimer;
+                engine::debug::GpuTimer postTimer;
 
                 // One-time texture-unit assignment: uAlbedo samples from
                 // GL_TEXTURE0. Explicit even though unit 0 is GL's
@@ -170,9 +184,19 @@ int main() {
                 // blit (exposure + OCIO display transform) to the default
                 // framebuffer -> swap.
                 std::optional<engine::gfx::OcioDisplayTransform::Lut> lastLoggedLut;
+                // task_info() is a real syscall; the HUD is read by human
+                // eyes, not per-frame logic, so re-sampling RAM 4x/sec
+                // instead of every frame drops one source of frame-time
+                // jitter for free.
+                std::size_t ramBytes = engine::debug::residentSetBytes();
+                std::chrono::steady_clock::time_point lastRamSample =
+                    std::chrono::steady_clock::now();
                 while (!window.shouldClose()) {
                     window.pollEvents();
+                    hud.beginFrame();
+                    frameStats.tick();
 
+                    geomTimer.begin();
                     hdrFbo.bind();
                     glClearColor(0.0F, 0.0F, 0.0F, 1.0F);
                     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -180,11 +204,14 @@ int main() {
                     sceneShader->use();
                     testPattern->bind(0);
                     quad.draw();
+                    geomTimer.end();
 
+                    postTimer.begin();
                     ocioTransform->bind();
                     const auto [winWidth, winHeight] = window.framebufferSize();
                     postProcess.draw(hdrFbo.colorTexture(), ocioTransform->activeShader(),
                                       {winWidth, winHeight});
+                    postTimer.end();
 
                     // Stage G verification: logs once at startup and again
                     // on every LUT toggle (see logColorCheck above) —
@@ -194,6 +221,18 @@ int main() {
                         logColorCheck(winWidth, winHeight, ocioTransform->activeLut());
                         lastLoggedLut = ocioTransform->activeLut();
                     }
+
+                    const auto now = std::chrono::steady_clock::now();
+                    if (now - lastRamSample >= std::chrono::milliseconds(250)) {
+                        ramBytes = engine::debug::residentSetBytes();
+                        lastRamSample = now;
+                    }
+
+                    hud.draw(gpuInfo, frameStats, geomTimer.millisecondsElapsed(),
+                             postTimer.millisecondsElapsed(), quad.triangleCount(),
+                             static_cast<long long>(winWidth) * winHeight, ramBytes,
+                             engine::debug::gpuAllocatedBytes());
+                    hud.render();
 
                     window.swapBuffers();
                 }
