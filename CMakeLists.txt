@@ -12,6 +12,11 @@ find_package(Imath REQUIRED)
 find_package(OpenEXR REQUIRED)
 find_package(OpenColorIO REQUIRED)
 
+set(IMGUI_DIR ${CMAKE_SOURCE_DIR}/third_party/imgui)
+if(NOT EXISTS ${IMGUI_DIR}/imgui.cpp)
+    message(FATAL_ERROR "third_party/imgui is empty — run: git submodule update --init")
+endif()
+
 add_executable(engine
     src/main.cpp
     src/platform/window.cpp
@@ -22,8 +27,19 @@ add_executable(engine
     src/gfx/hdr_framebuffer.cpp
     src/gfx/post_process_pass.cpp
     src/gfx/ocio_display_transform.cpp
-    src/scene/camera.cpp)
-target_include_directories(engine PRIVATE include)
+    src/scene/camera.cpp
+    src/debug/system_info.cpp
+    src/debug/frame_stats.cpp
+    src/debug/gpu_timer.cpp
+    src/debug/memory_tracker.cpp
+    src/debug/hud_overlay.cpp
+    ${IMGUI_DIR}/imgui.cpp
+    ${IMGUI_DIR}/imgui_draw.cpp
+    ${IMGUI_DIR}/imgui_tables.cpp
+    ${IMGUI_DIR}/imgui_widgets.cpp
+    ${IMGUI_DIR}/backends/imgui_impl_glfw.cpp
+    ${IMGUI_DIR}/backends/imgui_impl_opengl3.cpp)
+target_include_directories(engine PRIVATE include ${IMGUI_DIR} ${IMGUI_DIR}/backends)
 target_compile_definitions(engine PRIVATE
     GL_SILENCE_DEPRECATION
     ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets")

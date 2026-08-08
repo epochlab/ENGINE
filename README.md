@@ -19,13 +19,14 @@ Eight build phases carry this pipeline from a bare camera to a spectral path tra
 | Phase | Name | Adds |
 |---|---|---|
 | 0 | Foundation | OpenGL renderer, camera, Euclidean space, OCIO, OpenEXR linear pipeline, exposure, tone-mapping |
-| 1 | Debug HUD & system feedback | GPU/system readout, frame-timing HUD, memory HUD, scene/viewport stats, camera & lens readout, debug camera controls (WASD/QE/R), camera framing overlays, AOV selector, live histogram |
+| 1 | Debug HUD & system feedback | GPU/system readout, frame-timing HUD, memory HUD |
 | 2 | Geometry, textures & basic material | glTF mesh loading, UV texture mapping, linear EXR textures, tangent-space normal mapping, basic metallic-roughness PBR shading |
-| 3 | Direct lighting & acceleration | BVH, area lights, shadows, next-event estimation, HDR IBL, energy conservation |
-| 4 | Materials & recursive transport | BSDF/PBR, BRDF importance sampling, Fresnel, recursive tracing, Russian roulette, throughput accumulation, radiance estimator |
-| 5 | Real-time integration | Adaptive sampling, progressive accumulation, backend migration (OpenGL → Vulkan/CUDA-OptiX) |
-| 6 | Global illumination | Unbiased Monte Carlo GI, MIS, caustics |
-| 7 | Spectral upgrade | Spectral light transport, wavelength sampling, spectral materials, spectral dispersion |
+| 3 | Scene controls | Scene/viewport stats, camera & lens readout, debug camera controls (WASD/QE/R), camera framing overlays, AOV selector, live histogram |
+| 4 | Direct lighting & acceleration | BVH, area lights, shadows, next-event estimation, HDR IBL, energy conservation |
+| 5 | Materials & recursive transport | BSDF/PBR, BRDF importance sampling, Fresnel, recursive tracing, Russian roulette, throughput accumulation, radiance estimator |
+| 6 | Real-time integration | Adaptive sampling, progressive accumulation, backend migration (OpenGL → Vulkan/CUDA-OptiX) |
+| 7 | Global illumination | Unbiased Monte Carlo GI, MIS, caustics |
+| 8 | Spectral upgrade | Spectral light transport, wavelength sampling, spectral materials, spectral dispersion |
 
 Phases 0–5 deliberately contain no global illumination — they establish a correct, direct-lighting-only ray tracer through physically based materials, made real-time via adaptive sampling and progressive accumulation, before any indirect complexity is added.
 

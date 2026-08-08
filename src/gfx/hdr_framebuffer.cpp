@@ -6,6 +6,7 @@
 
 #include <GL/glew.h>
 
+#include "engine/debug/memory_tracker.h"
 #include "engine/gfx/gl_debug.h"
 
 namespace engine::gfx {
@@ -44,7 +45,8 @@ HdrFramebuffer::HdrFramebuffer(HdrFramebuffer&& other) noexcept
       colorTexture_(std::exchange(other.colorTexture_, 0)),
       depthRenderbuffer_(std::exchange(other.depthRenderbuffer_, 0)),
       width_(std::exchange(other.width_, 0)),
-      height_(std::exchange(other.height_, 0)) {}
+      height_(std::exchange(other.height_, 0)),
+      byteSize_(std::exchange(other.byteSize_, 0)) {}
 
 HdrFramebuffer& HdrFramebuffer::operator=(HdrFramebuffer&& other) noexcept {
     if (this != &other) {
@@ -57,6 +59,7 @@ HdrFramebuffer& HdrFramebuffer::operator=(HdrFramebuffer&& other) noexcept {
         depthRenderbuffer_ = std::exchange(other.depthRenderbuffer_, 0);
         width_ = std::exchange(other.width_, 0);
         height_ = std::exchange(other.height_, 0);
+        byteSize_ = std::exchange(other.byteSize_, 0);
     }
     return *this;
 }
@@ -94,9 +97,17 @@ void HdrFramebuffer::createAttachments(int width, int height) {
     GL_CALL(glBindFramebuffer(GL_FRAMEBUFFER, 0));
     GL_CALL(glBindTexture(GL_TEXTURE_2D, 0));
     GL_CALL(glBindRenderbuffer(GL_RENDERBUFFER, 0));
+
+    // Color: RGBA16F (4 channels * 2 bytes). Depth: GL_DEPTH_COMPONENT24
+    // is driver-allocated at 4 bytes/texel in practice, not the nominal 3.
+    const auto pixels = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+    byteSize_ = pixels * 8 + pixels * 4;
+    engine::debug::trackGpuAlloc(byteSize_);
 }
 
 void HdrFramebuffer::destroyAttachments() {
+    engine::debug::trackGpuFree(byteSize_);
+    byteSize_ = 0;
     if (colorTexture_ != 0) {
         glDeleteTextures(1, &colorTexture_);
         colorTexture_ = 0;

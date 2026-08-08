@@ -1,60 +1,48 @@
-# Phase 0 — Foundation: task list
+# Phase 1 — Debug HUD & system feedback: task list
 
-Ordered checklist for implementation. Full rationale: `~/.claude/plans/construct-a-refined-plan-curried-stearns.md`
+Ordered checklist for implementation. Full rationale: `~/.claude/plans/i-have-defered-the-squishy-pebble.md`
 
-## A — Scaffolding
-- [x] `brew install glm opencolorio`
-- [x] dirs: `assets/{shaders,textures}`, `include/engine/{platform,gfx,scene}`, `src/{platform,gfx,scene}`, `tools/`
-- [x] `.gitignore`: `build/`, `.DS_Store`, `compile_commands.json`
-- [x] `CMakeLists.txt`: C++20, `engine` + `gen_test_pattern` targets, `find_package(OpenGL glfw3 GLEW glm Imath OpenEXR OpenColorIO)`, `target_include_directories(engine PRIVATE include)`
-- [x] verify target names (`OpenColorIO::OpenColorIO`, `OpenEXR::OpenEXR`, `Imath::Imath`) post-install
-- [x] `cmake -S . -B build` configures clean
+## A — Vendor ImGui
+- [x] `git submodule add` Dear ImGui (tagged stable release, not `docking`) at `third_party/imgui` (v1.92.9)
+- [x] `CMakeLists.txt`: add ImGui core (`imgui.cpp`, `imgui_draw.cpp`, `imgui_tables.cpp`, `imgui_widgets.cpp`) + `backends/imgui_impl_glfw.cpp` + `backends/imgui_impl_opengl3.cpp` to `engine`'s sources; add `third_party/imgui`(`/backends`) include dirs; define `IMGUI_IMPL_OPENGL_LOADER_GLEW`
+- [x] configure-time guard: fail with a clear message if `third_party/imgui/imgui.cpp` is missing (submodule not initialized)
+- [x] verify: clean build, no engine-side ImGui usage yet
 
-## B — Window & GL context
-- [x] `include/engine/platform/window.h` + `src/platform/window.cpp`: `Window` (GL4.1 core fwd-compat hints, `shouldClose`/`pollEvents`/`swapBuffers`/`framebufferSize`)
-- [x] `glfwInit`/`glfwTerminate` bracket `Window` in `main.cpp`
-- [x] GLEW init: `glewExperimental=GL_TRUE`, drain init `glGetError`, `glfwSwapInterval(1)`
-- [x] `include/engine/gfx/gl_debug.h` + `src/gfx/gl_debug.cpp`: `checkError`, `GL_CALL` macro, `khrDebugAvailable`
-- [x] render loop: poll → clear → swap (bind HDR FBO / draw quad / post-process blit land in Stage D/F)
+## B — ImGui bring-up
+- [x] `Window::nativeHandle()` accessor (`include/engine/platform/window.h`); fix stale "Phase 1's WASD/QE/R" comment → Phase 3
+- [x] `engine::debug::HudOverlay` (`include/engine/debug/hud_overlay.h` + `src/debug/hud_overlay.cpp`): context/backend init+shutdown, `beginFrame()`/`render()`
+- [x] wire into `main.cpp`: construct after `window`, `beginFrame()` after `pollEvents()`, `render()` after the post-process blit and before `swapBuffers()`, empty panel
+- [x] verify: borderless empty panel top-left; `L` key LUT toggle still works; resize doesn't break it
 
-## C — Camera
-- [x] `include/engine/scene/camera.h`: doc convention (RH, +Y up, −Z forward)
-- [x] `include/engine/scene/camera.h` + `src/scene/camera.cpp`: position+yaw/pitch, film back + focal length → derived vertical FOV, `viewMatrix`, `projectionMatrix(aspect)`
+## C — GPU/system readout
+- [x] `engine::debug::system_info` — `queryGpuInfo()` (`GL_VENDOR`/`GL_RENDERER`/`GL_VERSION` + monitor refresh rate), queried once at startup
+- [x] HUD panel GPU section
+- [x] verify: matches actual hardware string (Apple M1 / 4.1 Metal - 90.5)
 
-## D — HDR FBO + polygon
-- [x] `include/engine/gfx/mesh.h` + `src/gfx/mesh.cpp`: `Vertex{pos,uv}`, `createQuad`, RAII VAO/VBO/EBO
-- [x] `include/engine/gfx/shader_program.h` + `src/gfx/shader_program.cpp`: `loadFromFiles`→optional, `loadFromSource`, `use`, `uniformLocation`
-- [x] `assets/shaders/quad.vert`/`quad.frag` (`#version 410 core`, unlit passthrough)
-- [x] `include/engine/gfx/texture.h` + `src/gfx/texture.cpp`: `createFromFloatPixels`→`GL_RGBA16F`, `createPlaceholderCheckerboard`
-- [x] `include/engine/gfx/hdr_framebuffer.h` + `src/gfx/hdr_framebuffer.cpp`: RGBA16F color tex + depth renderbuffer, completeness check, `resize`/`bind`/`colorTexture`
-- [x] `include/engine/gfx/post_process_pass.h` + `src/gfx/post_process_pass.cpp`: attribute-less-VAO fullscreen-triangle draw
-- [x] `assets/shaders/fullscreen_triangle.vert` + placeholder passthrough frag
-- [x] checkpoint: checkerboard quad visible (unencoded, expected washed out) — confirmed via screenshot, correctly bounded/scaled quad, no viewer LUT yet (Stage F)
+## D — Frame-timing HUD
+- [x] `engine::debug::FrameStats` — 120-entry ring buffer, `tick()`, `fps()`/`avgMs()`/`minMs()`/`maxMs()`
+- [x] `engine::debug::GpuTimer` — double-buffered `GL_TIME_ELAPSED`, `gpuTimerQueryAvailable()`
+- [x] `Mesh::triangleCount()` getter
+- [x] wrap geometry pass + post-process pass in `main.cpp` with a `GpuTimer` each
+- [x] HUD Frame section: fps/avg, sparkline, min/max, geom/post ms, Mtri/s + Mpix/s, vsync cap line
+- [x] verify: fps caps at monitor refresh (~118-120 FPS), sparkline moves, geom/post ms both nonzero and plausible
 
-## E — Test EXR
-- [x] `tools/gen_test_pattern.cpp` (no `engine/` dependency) → `assets/textures/test_pattern.exr` (black / 18%grey / white / R,G,B / ramp — 700x100, 100px column-uniform stripes)
-- [x] run once, kept local (`*.exr` now gitignored, not committed)
-- [x] EXR loader: `Texture::createFromExr` — `RgbaInputFile` → validate `dataWindow` → `createFromFloatPixels`
-- [x] swap quad texture: checkerboard → `test_pattern.exr`
+## E — Memory HUD
+- [x] `engine::debug::memory_tracker` — `residentSetBytes()` (`mach_task_basic_info`), `trackGpuAlloc`/`trackGpuFree`, `gpuAllocatedBytes()` (one atomic counter)
+- [x] byte-tracking hooks + move-op fixes in `Texture`, `Mesh`, `HdrFramebuffer` (`resize()`'s untrack/track pairing must be exact)
+- [x] HUD Memory section
+- [x] verify: GPU alloc MB matches a hand-computed figure (2048x1152 HDR FBO + EXR texture ≈ 27.5 MB, confirmed exactly); repeated resizing tracks proportionally (10.6 → 42.7 → 13.9 MB), no upward drift
 
-## F — OCIO viewer LUT + exposure
-- [x] confirm `BuiltinTransform` names (sRGB, Rec.709/1886) against installed OCIO 2.5.2 — corrected an earlier wrong assumption: no plain `CURVE - LINEAR_to_sRGB` style exists; uses the real Display/View API (`getProcessor(scene, display, "Un-tone-mapped", FORWARD)`) against OCIO's bundled `cg-config-v1.0.0_aces-v1.3_ocio-v2.1`, empirically verified (0.18→0.4614 sRGB / 0.4894 Rec.1886, 0→0, 1→1, zero LUT textures)
-- [x] extend `Camera` with `aperture`/`shutterSeconds`/`iso`, `ev100()`, `exposure()` (standard photographic EV100 model)
-- [x] `include/engine/gfx/ocio_display_transform.h` + `src/gfx/ocio_display_transform.cpp`: build both `{sRGB,Rec709}` `GpuShaderDesc`/shaders once (`GLSL_4_0`), splice into frag template; zero LUT textures needed (verified)
-- [x] exposure uniform `pow(2,ev)` before OCIO call — left at neutral EV=0 for now rather than seeded from `Camera::exposure()`: the test pattern's values are calibration constants, not real scene-referred radiance, so a physical f/2.8 exposure crushed them to near-black; `exposure()`/`ev100()` still exercised via the startup log, gain a real render-path consumer once scene-referred content exists (Phase 2+)
-- [x] interface: `setActiveLut`, `setExposureEv`, `activeShader`, `bind`
-- [x] swap render-loop shader: placeholder → `ocioTransform.activeShader()`
-- [x] confirm `GLFW_SRGB_CAPABLE`/`GL_FRAMEBUFFER_SRGB` never enabled
-- [x] debug key (`L`) cycles `setActiveLut` — sRGB → Rec709 → Raw (genuine no-display-encode passthrough, for direct encoded-vs-unencoded comparison) → sRGB
+## F — Styling pass
+- [x] borderless/pinned-top-left window flags, cyan `TextColored` section headers, `IniFilename = nullptr`
+- [x] verify: visual match against reference layout
 
 ## G — Verify
-- [x] visual: grey mid-grey, white pure white, ramp smooth — confirmed via screenshot
-- [x] numeric: `logColorCheck` (`glReadPixels` at known coords) vs hand-computed bytes — sRGB grey=118 (expect ~118), Rec709 grey=125 (expect ~125, matches the ≈124/255 figure — that's the Rec.1886 curve, not sRGB's), black=0/white=255 in all LUTs
-- [x] sRGB vs Rec709 differ minutely on toggle — confirmed live (118 vs 125), `logColorCheck` re-fires on every `L` press
-- [x] resize correct (framebuffer size, no retina 2x bug) — confirmed via screenshot, quad stays centered/proportioned
-- [x] remove/mark-unused placeholder checkerboard + passthrough shader — both deleted (zero remaining callers/loads)
+- [x] visual: matches reference (GPU/Frame/Memory sections, no chrome, top-left)
+- [x] numeric: GPU alloc bytes hand-computed vs HUD readout; fps caps correctly; RAM MB plausible (~94 MB)
+- [x] regression: `L` key still cycles sRGB→Rec709→Raw correctly; window resize doesn't misplace the panel or leak tracked bytes
 
 ## Deferred
-Tone-mapping · debug camera/HUD/AOV selector (Phase 1) · glTF/textures beyond test pattern (Phase 2)
+Scene/viewport stats · camera & lens readout · debug camera controls (WASD/QE/R) · camera framing overlays · AOV selector · live histogram — all Phase 3, need real scene geometry (Phase 2) to be meaningful
 
-**Phase 0 complete.**
+**Phase 1 complete.**

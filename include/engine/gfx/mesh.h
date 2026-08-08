@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <vector>
 
 #include <glm/glm.hpp>
@@ -34,11 +35,14 @@ public:
 
     void draw() const;
 
+    [[nodiscard]] int triangleCount() const { return indexCount_ / 3; }
+
 private:
     unsigned int vao_ = 0;
     unsigned int vbo_ = 0;
     unsigned int ebo_ = 0;
     int indexCount_ = 0;
+    std::size_t byteSize_ = 0;  // reported to engine::debug's GPU memory tracker
 };
 
 }  // namespace engine::gfx

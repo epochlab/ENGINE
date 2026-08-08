@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstddef>
+
 namespace engine::gfx {
 
 // Owns one FBO with a GL_RGBA16F color texture attachment and a depth
@@ -37,6 +39,7 @@ private:
     unsigned int depthRenderbuffer_ = 0;
     int width_ = 0;
     int height_ = 0;
+    std::size_t byteSize_ = 0;  // reported to engine::debug's GPU memory tracker
 };
 
 }  // namespace engine::gfx

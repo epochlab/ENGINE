@@ -5,12 +5,15 @@
 
 #include <GL/glew.h>
 
+#include "engine/debug/memory_tracker.h"
 #include "engine/gfx/gl_debug.h"
 
 namespace engine::gfx {
 
 Mesh::Mesh(const std::vector<Vertex>& vertices, const std::vector<unsigned int>& indices)
-    : indexCount_(static_cast<int>(indices.size())) {
+    : indexCount_(static_cast<int>(indices.size())),
+      byteSize_(vertices.size() * sizeof(Vertex) + indices.size() * sizeof(unsigned int)) {
+    engine::debug::trackGpuAlloc(byteSize_);
     GL_CALL(glGenVertexArrays(1, &vao_));
     GL_CALL(glGenBuffers(1, &vbo_));
     GL_CALL(glGenBuffers(1, &ebo_));
@@ -42,6 +45,7 @@ Mesh::Mesh(const std::vector<Vertex>& vertices, const std::vector<unsigned int>&
 }
 
 Mesh::~Mesh() {
+    engine::debug::trackGpuFree(byteSize_);
     if (ebo_ != 0) {
         glDeleteBuffers(1, &ebo_);
     }
@@ -57,10 +61,12 @@ Mesh::Mesh(Mesh&& other) noexcept
     : vao_(std::exchange(other.vao_, 0)),
       vbo_(std::exchange(other.vbo_, 0)),
       ebo_(std::exchange(other.ebo_, 0)),
-      indexCount_(std::exchange(other.indexCount_, 0)) {}
+      indexCount_(std::exchange(other.indexCount_, 0)),
+      byteSize_(std::exchange(other.byteSize_, 0)) {}
 
 Mesh& Mesh::operator=(Mesh&& other) noexcept {
     if (this != &other) {
+        engine::debug::trackGpuFree(byteSize_);
         if (ebo_ != 0) {
             glDeleteBuffers(1, &ebo_);
         }
@@ -74,6 +80,7 @@ Mesh& Mesh::operator=(Mesh&& other) noexcept {
         vbo_ = std::exchange(other.vbo_, 0);
         ebo_ = std::exchange(other.ebo_, 0);
         indexCount_ = std::exchange(other.indexCount_, 0);
+        byteSize_ = std::exchange(other.byteSize_, 0);
     }
     return *this;
 }
