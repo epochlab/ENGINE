@@ -89,7 +89,7 @@ int main() {
                       << reinterpret_cast<const char*>(glewGetErrorString(glewStatus)) << '\n';
             exitCode = EXIT_FAILURE;
         } else {
-            glfwSwapInterval(1);
+            glfwSwapInterval(0);
 
             std::cout << "GL_KHR_debug available: " << std::boolalpha
                       << engine::gfx::khrDebugAvailable() << '\n';
