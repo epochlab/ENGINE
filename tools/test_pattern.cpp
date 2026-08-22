@@ -69,12 +69,12 @@ int main() {
         file.setFrameBuffer(pixels.data(), 1, kWidth);
         file.writePixels(kHeight);
     } catch (const std::exception& e) {
-        std::cerr << "gen_test_pattern: failed to write " << outputPath << ": " << e.what()
+        std::cerr << "test_pattern: failed to write " << outputPath << ": " << e.what()
                   << '\n';
         return EXIT_FAILURE;
     }
 
-    std::cout << "gen_test_pattern: wrote " << outputPath << " (" << kWidth << "x" << kHeight
+    std::cout << "test_pattern: wrote " << outputPath << " (" << kWidth << "x" << kHeight
                << ")\n";
     return EXIT_SUCCESS;
 }
