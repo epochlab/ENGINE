@@ -54,8 +54,12 @@ target_link_libraries(engine PRIVATE
     glfw GLEW::GLEW OpenGL::GL glm::glm
     OpenEXR::OpenEXR Imath::Imath OpenColorIO::OpenColorIO)
 
-add_executable(gen_test_pattern tools/gen_test_pattern.cpp)
-target_compile_definitions(gen_test_pattern PRIVATE
+add_executable(test_pattern tools/test_pattern.cpp)
+target_compile_definitions(test_pattern PRIVATE
     ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets")
-target_compile_options(gen_test_pattern PRIVATE -Wall -Wextra -Werror)
-target_link_libraries(gen_test_pattern PRIVATE OpenEXR::OpenEXR Imath::Imath)
+target_compile_options(test_pattern PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(test_pattern PRIVATE OpenEXR::OpenEXR Imath::Imath)
+
+add_executable(downsample tools/downsample.cpp)
+target_compile_options(downsample PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(downsample PRIVATE OpenEXR::OpenEXR Imath::Imath)
