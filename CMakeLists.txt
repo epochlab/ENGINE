@@ -28,6 +28,10 @@ set(IMGUI_SOURCES
 # ApplicationServices.h via GLFW's native-handle header, which warns against itself).
 set_source_files_properties(${IMGUI_SOURCES} PROPERTIES COMPILE_OPTIONS "-w")
 
+set(CGLTF_DIR ${CMAKE_SOURCE_DIR}/third_party/cgltf)
+# Vendored code: not ours to fix (C99, implicit conversions -Wall/-Wextra flag).
+set_source_files_properties(src/scene/cgltf_impl.cpp PROPERTIES COMPILE_OPTIONS "-w")
+
 add_executable(engine
     src/main.cpp
     src/platform/window.cpp
@@ -39,13 +43,14 @@ add_executable(engine
     src/gfx/post_process_pass.cpp
     src/gfx/ocio_display_transform.cpp
     src/scene/camera.cpp
+    src/scene/cgltf_impl.cpp
     src/debug/system_info.cpp
     src/debug/frame_stats.cpp
     src/debug/gpu_timer.cpp
     src/debug/memory_tracker.cpp
     src/debug/hud_overlay.cpp
     ${IMGUI_SOURCES})
-target_include_directories(engine PRIVATE include ${IMGUI_DIR} ${IMGUI_DIR}/backends)
+target_include_directories(engine PRIVATE include ${IMGUI_DIR} ${IMGUI_DIR}/backends ${CGLTF_DIR})
 target_compile_definitions(engine PRIVATE
     GL_SILENCE_DEPRECATION
     ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets")
