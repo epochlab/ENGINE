@@ -100,7 +100,7 @@ int main() {
 
             // Verification-only: viewMatrix()/projectionMatrix() have no
             // render-path consumer yet (Stage D's quad has no MVP) — first
-            // real consumer is Phase 1/2. exposure()/ev100() are logged
+            // real consumer is Phase 2/3. exposure()/ev100() are logged
             // below but not render-path-consumed either yet; see the
             // exposure comment further down for why.
             const engine::scene::Camera camera(
@@ -163,7 +163,7 @@ int main() {
                 // (sRGB -> Rec709 -> Raw -> sRGB -> ...), Raw being a
                 // genuine no-display-encode passthrough for direct
                 // encoded-vs-unencoded comparison. No general input-mapping
-                // system introduced for this one key — Phase 1's WASD/QE/R
+                // system introduced for this one key — Phase 3's WASD/QE/R
                 // debug camera is expected to be the second consumer of
                 // Window::setKeyCallback.
                 window.setKeyCallback([&ocioTransform](int key, int action) {
