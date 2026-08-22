@@ -2,6 +2,40 @@
 
 *Design overview: a physically based render engine, built progressively from geometric/radiometric correctness toward full spectral path tracing*
 
+## Build
+
+C++20, built with CMake. Currently developed against macOS only.
+
+### Prerequisites
+
+```
+brew install cmake glfw glew glm imath openexr opencolorio
+```
+
+Dear ImGui is vendored as a git submodule (`third_party/imgui`) — initialise it before configuring:
+
+```
+git submodule update --init --recursive
+```
+
+### Configure & build
+
+```
+cmake -B build
+cmake --build build
+```
+
+This produces two targets:
+
+- `build/engine` — the render engine
+- `build/gen_test_pattern` — EXR calibration-pattern generator (`tools/gen_test_pattern.cpp`)
+
+### Run
+
+```
+./build/engine
+```
+
 ## 1. Full pipeline overview
 
 The target feature set is a full spectral, physically based, GPU path tracer with unbiased Monte Carlo global illumination — normally an offline technique. Rather than resolve the real-time/unbiased tension up front with a denoiser or biased shortcut, the build starts with a simple direct-lighting ray tracer and layers in real-time adaptation, global illumination, and spectral transport as separate, later phases (§5 records what's still open here).
@@ -118,8 +152,7 @@ Arbitrary output variables exposed via the Phase 1 AOV selector, beyond the comp
 | Backend migration | At what phase does compute move from OpenGL to Vulkan/CUDA-OptiX for hardware-accelerated BVH/RT? Likely Phase 5/6, as real-time integration then GI demand it, but not committed. |
 | HUD GPU timing | Phase 1's per-pass GPU timing uses OpenGL timer query objects; the Phase 5 backend migration to Vulkan/CUDA-OptiX needs an equivalent timestamp mechanism, not yet decided. |
 | Spectral rendering cost | Hero-wavelength sampling multiplies the sample budget — is full spectral rendering reserved for offline validation renders, with an RGB approximation used elsewhere? |
-| Texture/mesh compression | BC6H vs ASTC for compressed linear HDR textures, and whether Draco/meshopt mesh compression is worth the decode cost — deferred alongside the implementation-language decision below. |
-| Implementation | Engine language and build system are not decided; deferred to a future scaffolding pass. |
+| Texture/mesh compression | BC6H vs ASTC for compressed linear HDR textures, and whether Draco/meshopt mesh compression is worth the decode cost. |
 
 ## 5. References
 
