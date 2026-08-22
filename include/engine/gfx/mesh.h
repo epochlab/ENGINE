@@ -10,6 +10,8 @@ namespace engine::gfx {
 struct Vertex {
     glm::vec3 position;
     glm::vec2 uv;
+    glm::vec3 normal;
+    glm::vec4 tangent;  // .w = bitangent handedness (glTF convention)
 };
 
 // Owns one VAO + VBO + EBO triple (indexed draw), move-only: GL object
