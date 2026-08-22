@@ -6,7 +6,7 @@ namespace engine::gfx {
 
 // Owns one FBO with a GL_RGBA16F color texture attachment and a depth
 // renderbuffer attachment, move-only. Depth is a renderbuffer, not a
-// sampled texture: nothing in Phase 0 reads depth back (Phase 1's AOV
+// sampled texture: nothing in Phase 0 reads depth back (Phase 3's AOV
 // selector is the first plausible consumer) — a renderbuffer is the
 // simplest thing that satisfies the actual need.
 class HdrFramebuffer {
