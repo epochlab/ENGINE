@@ -36,6 +36,12 @@ Mesh::Mesh(const std::vector<Vertex>& vertices, const std::vector<unsigned int>&
     GL_CALL(glEnableVertexAttribArray(1));
     GL_CALL(glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex),
                                    reinterpret_cast<const void*>(offsetof(Vertex, uv))));
+    GL_CALL(glEnableVertexAttribArray(2));
+    GL_CALL(glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex),
+                                   reinterpret_cast<const void*>(offsetof(Vertex, normal))));
+    GL_CALL(glEnableVertexAttribArray(3));
+    GL_CALL(glVertexAttribPointer(3, 4, GL_FLOAT, GL_FALSE, sizeof(Vertex),
+                                   reinterpret_cast<const void*>(offsetof(Vertex, tangent))));
 
     // GL_ELEMENT_ARRAY_BUFFER's binding is VAO state, so it must survive
     // the VAO unbind below; GL_ARRAY_BUFFER's binding isn't VAO state but
@@ -86,11 +92,13 @@ Mesh& Mesh::operator=(Mesh&& other) noexcept {
 }
 
 Mesh Mesh::createQuad() {
+    constexpr glm::vec3 kFlatNormal{0.0F, 0.0F, 1.0F};
+    constexpr glm::vec4 kFlatTangent{1.0F, 0.0F, 0.0F, 1.0F};
     const std::vector<Vertex> vertices = {
-        {{-0.5F, -0.5F, 0.0F}, {0.0F, 0.0F}},  // bottom-left
-        {{0.5F, -0.5F, 0.0F}, {1.0F, 0.0F}},   // bottom-right
-        {{0.5F, 0.5F, 0.0F}, {1.0F, 1.0F}},    // top-right
-        {{-0.5F, 0.5F, 0.0F}, {0.0F, 1.0F}},   // top-left
+        {{-0.5F, -0.5F, 0.0F}, {0.0F, 0.0F}, kFlatNormal, kFlatTangent},  // bottom-left
+        {{0.5F, -0.5F, 0.0F}, {1.0F, 0.0F}, kFlatNormal, kFlatTangent},   // bottom-right
+        {{0.5F, 0.5F, 0.0F}, {1.0F, 1.0F}, kFlatNormal, kFlatTangent},    // top-right
+        {{-0.5F, 0.5F, 0.0F}, {0.0F, 1.0F}, kFlatNormal, kFlatTangent},   // top-left
     };
     const std::vector<unsigned int> indices = {0, 1, 2, 0, 2, 3};  // CCW
     return Mesh(vertices, indices);
