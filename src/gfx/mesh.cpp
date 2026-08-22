@@ -13,6 +13,11 @@ namespace engine::gfx {
 Mesh::Mesh(const std::vector<Vertex>& vertices, const std::vector<unsigned int>& indices)
     : indexCount_(static_cast<int>(indices.size())),
       byteSize_(vertices.size() * sizeof(Vertex) + indices.size() * sizeof(unsigned int)) {
+    for (const Vertex& v : vertices) {
+        boundsMin_ = glm::min(boundsMin_, v.position);
+        boundsMax_ = glm::max(boundsMax_, v.position);
+    }
+
     engine::debug::trackGpuAlloc(byteSize_);
     GL_CALL(glGenVertexArrays(1, &vao_));
     GL_CALL(glGenBuffers(1, &vbo_));
@@ -68,7 +73,9 @@ Mesh::Mesh(Mesh&& other) noexcept
       vbo_(std::exchange(other.vbo_, 0)),
       ebo_(std::exchange(other.ebo_, 0)),
       indexCount_(std::exchange(other.indexCount_, 0)),
-      byteSize_(std::exchange(other.byteSize_, 0)) {}
+      byteSize_(std::exchange(other.byteSize_, 0)),
+      boundsMin_(other.boundsMin_),
+      boundsMax_(other.boundsMax_) {}
 
 Mesh& Mesh::operator=(Mesh&& other) noexcept {
     if (this != &other) {
@@ -87,6 +94,8 @@ Mesh& Mesh::operator=(Mesh&& other) noexcept {
         ebo_ = std::exchange(other.ebo_, 0);
         indexCount_ = std::exchange(other.indexCount_, 0);
         byteSize_ = std::exchange(other.byteSize_, 0);
+        boundsMin_ = other.boundsMin_;
+        boundsMax_ = other.boundsMax_;
     }
     return *this;
 }
