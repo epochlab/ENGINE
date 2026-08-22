@@ -10,7 +10,7 @@ void main() {
     // No view/projection this stage: Mesh::createQuad()'s vertices are
     // already authored directly in clip space, so passing position
     // straight through is correct. Camera's matrices gain their first
-    // real consumer once Phase 1/2 needs to place geometry relative to a
+    // real consumer once Phase 2/3 needs to place geometry relative to a
     // moving viewpoint.
     gl_Position = vec4(aPosition, 1.0);
 }

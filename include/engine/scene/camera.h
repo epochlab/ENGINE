@@ -5,7 +5,7 @@
 namespace engine::scene {
 
 // A camera's pose, lens, and exposure, immutable once constructed. No
-// input handling lives here — Phase 1's debug camera decides how pose
+// input handling lives here — Phase 3's debug camera decides how pose
 // gets mutated frame-to-frame (WASD/QE/R).
 //
 // Convention: right-handed, +Y up, -Z forward in view space. At yaw=0,
