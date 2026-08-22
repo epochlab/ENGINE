@@ -44,6 +44,7 @@ add_executable(engine
     src/gfx/ocio_display_transform.cpp
     src/scene/camera.cpp
     src/scene/cgltf_impl.cpp
+    src/scene/frustum.cpp
     src/debug/system_info.cpp
     src/debug/frame_stats.cpp
     src/debug/gpu_timer.cpp
