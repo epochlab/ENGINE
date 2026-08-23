@@ -94,9 +94,8 @@ std::optional<Texture> Texture::createFromExr(const std::string& path, unsigned 
         // No row flip: EXR scanline 0 is the top of the image, and
         // glTexImage2D's row 0 of the uploaded buffer becomes texture
         // v=0 — which is exactly glTF's UV convention (v=0 at the top).
-        // A flip is needed only against a non-glTF, bottom-origin UV
-        // convention (Mesh::createQuad()'s hand-authored quad used one;
-        // it's gone once that quad is deleted).
+        // A flip would only be needed against a non-glTF, bottom-origin
+        // UV convention -- nothing in this codebase uses one anymore.
         std::vector<float> floatPixels(static_cast<std::size_t>(width) *
                                         static_cast<std::size_t>(height) * 4);
         for (int y = 0; y < height; ++y) {

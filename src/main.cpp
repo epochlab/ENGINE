@@ -8,6 +8,7 @@
 #include <GLFW/glfw3.h>
 
 #include <glm/glm.hpp>
+#include <glm/gtc/matrix_inverse.hpp>
 
 #include "engine/debug/frame_stats.h"
 #include "engine/debug/gpu_timer.h"
@@ -29,36 +30,6 @@ namespace {
 
 void glfwErrorCallback(int error, const char* description) {
     std::cerr << "GLFW error " << error << ": " << description << '\n';
-}
-
-// Stage G verification: reads back test_pattern.exr's known patch centers
-// from the backbuffer and logs actual vs. hand-computed expected bytes.
-// Coordinates derive from the current framebuffer size and the quad's
-// fixed [-0.5,0.5] NDC footprint, so this stays correct after a resize.
-void logColorCheck(int fbWidth, int fbHeight, engine::gfx::OcioDisplayTransform::Lut lut) {
-    using Lut = engine::gfx::OcioDisplayTransform::Lut;
-    const char* lutName = lut == Lut::SRGB ? "sRGB" : lut == Lut::Rec709 ? "Rec709" : "Raw";
-    const int expectedGrey = lut == Lut::SRGB ? 118 : lut == Lut::Rec709 ? 125 : 46;
-
-    const int quadLeft = fbWidth / 4;
-    const int quadWidth = fbWidth / 2;
-    const int y = fbHeight / 2;
-
-    // test_pattern.exr is 700px wide; u is the fraction across it.
-    auto sampleAt = [&](float textureX) {
-        unsigned char px[3] = {0, 0, 0};
-        const int x = quadLeft + static_cast<int>(textureX / 700.0F * static_cast<float>(quadWidth));
-        glReadPixels(x, y, 1, 1, GL_RGB, GL_UNSIGNED_BYTE, px);
-        return static_cast<int>(px[0]);  // patches are achromatic/primary; R alone suffices
-    };
-
-    std::cout << "ColorCheck[" << lutName << "]: black=" << sampleAt(50.0F) << " (expect 0), grey="
-              << sampleAt(150.0F) << " (expect ~" << expectedGrey
-              << "), white=" << sampleAt(250.0F) << " (expect 255), ramp =";
-    for (int i = 0; i < 5; ++i) {
-        std::cout << ' ' << sampleAt(600.0F + static_cast<float>(i) * 99.0F / 4.0F);
-    }
-    std::cout << " (expect non-decreasing)\n";
 }
 
 }  // namespace
@@ -90,7 +61,18 @@ int main() {
                       << reinterpret_cast<const char*>(glewGetErrorString(glewStatus)) << '\n';
             exitCode = EXIT_FAILURE;
         } else {
-            glfwSwapInterval(0);
+            // Re-enabled (was 0 for raw-FPS measurement against the
+            // trivial placeholder scene): with real heavy content and no
+            // vsync throttling, the CPU submits draw calls far faster
+            // than the GPU can complete a 5M-triangle frame, with no
+            // backpressure -- risks unbounded GPU queue growth. Uncapped
+            // measurement can still be done deliberately/short-lived when
+            // actually needed, not left on by default once real content
+            // exists.
+            glfwSwapInterval(1);
+            // GL_DEPTH_TEST is deliberately not enabled globally here --
+            // see its scoped enable/disable around the scene draw in the
+            // render loop below for why.
 
             std::cout << "GL_KHR_debug available: " << std::boolalpha
                       << engine::gfx::khrDebugAvailable() << '\n';
@@ -99,11 +81,10 @@ int main() {
 
             const engine::debug::GpuInfo gpuInfo = engine::debug::queryGpuInfo();
 
-            // Verification-only: viewMatrix()/projectionMatrix() have no
-            // render-path consumer yet (Stage D's quad has no MVP) — first
-            // real consumer is Phase 2/3. exposure()/ev100() are logged
-            // below but not render-path-consumed either yet; see the
-            // exposure comment further down for why.
+            // exposure()/ev100() are logged but not render-path-consumed
+            // yet: no scene-referred exposure multiply exists, only OCIO's
+            // display-encode step (Phase 4+ real lighting is the natural
+            // point to seed it from here).
             const engine::scene::Camera camera(
                 glm::vec3(0.0F, 0.0F, 3.0F), 0.0F, 0.0F,
                 engine::scene::Camera::FilmBack{36.0F, 24.0F}, 50.0F, 0.1F, 100.0F,
@@ -114,47 +95,33 @@ int main() {
                       << " deg ev100=" << camera.ev100() << " exposure=" << camera.exposure()
                       << '\n';
 
-            // Verification-only, matching the camera log above: measures
-            // parse/decode cost in isolation before Step 9 wires this
-            // model into the actual draw loop (replacing the quad below).
             const auto loadStart = std::chrono::steady_clock::now();
             std::optional<engine::scene::LoadedModel> stumpModel = engine::scene::loadGltf(
                 ASSET_ROOT_DIR "/geometry/broken_stump_rkswd_raw/Broken_Stump_rkswd_Raw.gltf");
             const double loadMs = std::chrono::duration<double, std::milli>(
                                        std::chrono::steady_clock::now() - loadStart)
                                        .count();
+            int totalTriangles = 0;
             if (stumpModel) {
-                int totalTriangles = 0;
                 for (const engine::scene::MeshInstance& instance : stumpModel->instances) {
                     totalTriangles += instance.mesh.triangleCount();
                 }
                 std::cout << "loadGltf: " << stumpModel->instances.size() << " instance(s), "
                           << totalTriangles << " triangles, " << loadMs << " ms\n"
                           << std::flush;
-            } else {
-                std::cerr << "loadGltf: failed to load stump asset\n";
             }
 
             const auto [fbWidth, fbHeight] = window.framebufferSize();
             engine::gfx::HdrFramebuffer hdrFbo(fbWidth, fbHeight);
 
-            const engine::gfx::Mesh quad = engine::gfx::Mesh::createQuad();
-
-            // Clamp, not repeat: a single fixed-scale calibration image,
-            // not a tiled material -- repeat would blend its left/right
-            // edges together at the u=0/1 seam under bilinear filtering.
-            std::optional<engine::gfx::Texture> testPattern = engine::gfx::Texture::createFromExr(
-                ASSET_ROOT_DIR "/textures/test_pattern.exr", GL_CLAMP_TO_EDGE);
-
             std::optional<engine::gfx::ShaderProgram> sceneShader =
-                engine::gfx::ShaderProgram::loadFromFiles(ASSET_ROOT_DIR "/shaders/quad.vert",
-                                                           ASSET_ROOT_DIR "/shaders/quad.frag");
+                engine::gfx::ShaderProgram::loadFromFiles(ASSET_ROOT_DIR "/shaders/pbr.vert",
+                                                           ASSET_ROOT_DIR "/shaders/pbr.frag");
             std::optional<engine::gfx::OcioDisplayTransform> ocioTransform =
                 engine::gfx::OcioDisplayTransform::create();
 
-            if (!sceneShader || !ocioTransform || !testPattern) {
-                std::cerr << "main: shader compile/link or EXR texture load failed, aborting "
-                             "startup\n";
+            if (!sceneShader || !ocioTransform || !stumpModel) {
+                std::cerr << "main: shader compile/link or model load failed, aborting startup\n";
                 exitCode = EXIT_FAILURE;
             } else {
                 const engine::gfx::PostProcessPass postProcess;
@@ -163,23 +130,18 @@ int main() {
                 engine::debug::GpuTimer geomTimer;
                 engine::debug::GpuTimer postTimer;
 
-                // One-time texture-unit assignment: uAlbedo samples from
-                // GL_TEXTURE0. Explicit even though unit 0 is GL's
+                // One-time texture-unit assignment: uBaseColor samples
+                // from GL_TEXTURE0. Explicit even though unit 0 is GL's
                 // implicit default for an unset sampler uniform — relying
-                // on that default silently breaks the moment either
-                // shader gains a second sampler. OcioDisplayTransform sets
-                // its own uHdrColor uniform the same way at construction.
+                // on that default silently breaks the moment the shader
+                // gains a second sampler. OcioDisplayTransform sets its
+                // own uHdrColor uniform the same way at construction.
                 sceneShader->use();
-                GL_CALL(glUniform1i(sceneShader->uniformLocation("uAlbedo"), 0));
-
-                // Exposure left at neutral EV=0 (not seeded from
-                // camera.exposure()): the test pattern's 0.0/0.18/1.0
-                // values are calibration constants, not scene-referred
-                // radiance — a real f/2.8 exposure would crush them to
-                // near-black and defeat Stage G's known-value checks.
-                // exposure()/ev100() are still exercised via the startup
-                // log; a real consumer arrives once scene-referred content
-                // exists (Phase 2+).
+                GL_CALL(glUniform1i(sceneShader->uniformLocation("uBaseColor"), 0));
+                const int uModelLoc = sceneShader->uniformLocation("uModel");
+                const int uViewLoc = sceneShader->uniformLocation("uView");
+                const int uProjectionLoc = sceneShader->uniformLocation("uProjection");
+                const int uNormalMatrixLoc = sceneShader->uniformLocation("uNormalMatrix");
 
                 window.setResizeCallback(
                     [&hdrFbo](int width, int height) { hdrFbo.resize(width, height); });
@@ -205,10 +167,9 @@ int main() {
                     }
                 });
 
-                // poll -> bind HDR FBO -> clear -> draw quad -> post-process
+                // poll -> bind HDR FBO -> clear -> draw scene -> post-process
                 // blit (exposure + OCIO display transform) to the default
                 // framebuffer -> swap.
-                std::optional<engine::gfx::OcioDisplayTransform::Lut> lastLoggedLut;
                 // task_info() is a real syscall; the HUD is read by human
                 // eyes, not per-frame logic, so re-sampling RAM 4x/sec
                 // instead of every frame drops one source of frame-time
@@ -221,31 +182,46 @@ int main() {
                     hud.beginFrame();
                     frameStats.tick();
 
+                    const auto [winWidth, winHeight] = window.framebufferSize();
+                    const float aspect =
+                        static_cast<float>(winWidth) / static_cast<float>(winHeight);
+                    const glm::mat4 view = camera.viewMatrix();
+                    const glm::mat4 projection = camera.projectionMatrix(aspect);
+
                     geomTimer.begin();
                     hdrFbo.bind();
                     glClearColor(0.0F, 0.0F, 0.0F, 1.0F);
                     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
+                    // Scoped to just this scene draw: the post-process
+                    // pass below presents a fullscreen triangle to the
+                    // default framebuffer at a fixed NDC z, so leaving
+                    // depth test on for it would make correctness depend
+                    // on whatever the driver leaves in that buffer's
+                    // depth contents across frames, not on anything this
+                    // code controls.
+                    glEnable(GL_DEPTH_TEST);
                     sceneShader->use();
-                    testPattern->bind(0);
-                    quad.draw();
+                    GL_CALL(glUniformMatrix4fv(uViewLoc, 1, GL_FALSE, &view[0][0]));
+                    GL_CALL(glUniformMatrix4fv(uProjectionLoc, 1, GL_FALSE, &projection[0][0]));
+                    for (const engine::scene::MeshInstance& instance : stumpModel->instances) {
+                        GL_CALL(glUniformMatrix4fv(uModelLoc, 1, GL_FALSE,
+                                                    &instance.transform[0][0]));
+                        const glm::mat3 normalMatrix =
+                            glm::inverseTranspose(glm::mat3(instance.transform));
+                        GL_CALL(glUniformMatrix3fv(uNormalMatrixLoc, 1, GL_FALSE,
+                                                    &normalMatrix[0][0]));
+                        instance.material.baseColorTexture.bind(0);
+                        instance.mesh.draw();
+                    }
+                    glDisable(GL_DEPTH_TEST);
                     geomTimer.end();
 
                     postTimer.begin();
                     ocioTransform->bind();
-                    const auto [winWidth, winHeight] = window.framebufferSize();
                     postProcess.draw(hdrFbo.colorTexture(), ocioTransform->activeShader(),
                                       {winWidth, winHeight});
                     postTimer.end();
-
-                    // Stage G verification: logs once at startup and again
-                    // on every LUT toggle (see logColorCheck above) —
-                    // covers both the numeric-check and
-                    // differs-minutely-on-toggle checklist items.
-                    if (lastLoggedLut != ocioTransform->activeLut()) {
-                        logColorCheck(winWidth, winHeight, ocioTransform->activeLut());
-                        lastLoggedLut = ocioTransform->activeLut();
-                    }
 
                     const auto now = std::chrono::steady_clock::now();
                     if (now - lastRamSample >= std::chrono::milliseconds(250)) {
@@ -254,7 +230,7 @@ int main() {
                     }
 
                     hud.draw(gpuInfo, frameStats, geomTimer.millisecondsElapsed(),
-                             postTimer.millisecondsElapsed(), quad.triangleCount(),
+                             postTimer.millisecondsElapsed(), totalTriangles,
                              static_cast<long long>(winWidth) * winHeight, ramBytes,
                              engine::debug::gpuAllocatedBytes());
                     hud.render();
