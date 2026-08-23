@@ -23,6 +23,7 @@
 #include "engine/gfx/texture.h"
 #include "engine/platform/window.h"
 #include "engine/scene/camera.h"
+#include "engine/scene/gltf_loader.h"
 
 namespace {
 
@@ -113,13 +114,37 @@ int main() {
                       << " deg ev100=" << camera.ev100() << " exposure=" << camera.exposure()
                       << '\n';
 
+            // Verification-only, matching the camera log above: measures
+            // parse/decode cost in isolation before Step 9 wires this
+            // model into the actual draw loop (replacing the quad below).
+            const auto loadStart = std::chrono::steady_clock::now();
+            std::optional<engine::scene::LoadedModel> stumpModel = engine::scene::loadGltf(
+                ASSET_ROOT_DIR "/geometry/broken_stump_rkswd_raw/Broken_Stump_rkswd_Raw.gltf");
+            const double loadMs = std::chrono::duration<double, std::milli>(
+                                       std::chrono::steady_clock::now() - loadStart)
+                                       .count();
+            if (stumpModel) {
+                int totalTriangles = 0;
+                for (const engine::scene::MeshInstance& instance : stumpModel->instances) {
+                    totalTriangles += instance.mesh.triangleCount();
+                }
+                std::cout << "loadGltf: " << stumpModel->instances.size() << " instance(s), "
+                          << totalTriangles << " triangles, " << loadMs << " ms\n"
+                          << std::flush;
+            } else {
+                std::cerr << "loadGltf: failed to load stump asset\n";
+            }
+
             const auto [fbWidth, fbHeight] = window.framebufferSize();
             engine::gfx::HdrFramebuffer hdrFbo(fbWidth, fbHeight);
 
             const engine::gfx::Mesh quad = engine::gfx::Mesh::createQuad();
 
-            std::optional<engine::gfx::Texture> testPattern =
-                engine::gfx::Texture::createFromExr(ASSET_ROOT_DIR "/textures/test_pattern.exr");
+            // Clamp, not repeat: a single fixed-scale calibration image,
+            // not a tiled material -- repeat would blend its left/right
+            // edges together at the u=0/1 seam under bilinear filtering.
+            std::optional<engine::gfx::Texture> testPattern = engine::gfx::Texture::createFromExr(
+                ASSET_ROOT_DIR "/textures/test_pattern.exr", GL_CLAMP_TO_EDGE);
 
             std::optional<engine::gfx::ShaderProgram> sceneShader =
                 engine::gfx::ShaderProgram::loadFromFiles(ASSET_ROOT_DIR "/shaders/quad.vert",
