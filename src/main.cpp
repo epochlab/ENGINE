@@ -59,6 +59,11 @@ glm::vec3 falseColorForId(int id) {
             std::fmod((f * 0.1231234F) + 0.25F, 1.0F)};
 }
 
+const char* lutName(engine::gfx::OcioDisplayTransform::Lut lut) {
+    using Lut = engine::gfx::OcioDisplayTransform::Lut;
+    return lut == Lut::SRGB ? "sRGB" : lut == Lut::Rec709 ? "Rec709" : "Raw";
+}
+
 }  // namespace
 
 int main() {
@@ -206,10 +211,8 @@ int main() {
                         userLut = userLut == Lut::SRGB     ? Lut::Rec709
                                   : userLut == Lut::Rec709 ? Lut::Raw
                                                             : Lut::SRGB;
-                        const char* name = userLut == Lut::SRGB     ? "sRGB"
-                                           : userLut == Lut::Rec709 ? "Rec709"
-                                                                     : "Raw";
-                        std::cout << "OcioDisplayTransform: active LUT = " << name << '\n';
+                        std::cout << "OcioDisplayTransform: active LUT = " << lutName(userLut)
+                                   << '\n';
                     } else if (key == GLFW_KEY_R) {
                         channelView = channelView == 1 ? 0 : 1;
                     } else if (key == GLFW_KEY_G) {
@@ -305,7 +308,8 @@ int main() {
                     hud.draw(gpuInfo, frameStats, geomTimer.millisecondsElapsed(),
                              postTimer.millisecondsElapsed(), totalTriangles,
                              static_cast<long long>(winWidth) * winHeight, ramBytes,
-                             engine::debug::gpuAllocatedBytes(), aov, channelView);
+                             engine::debug::gpuAllocatedBytes(), aov, channelView,
+                             lutName(ocioTransform->activeLut()));
                     hud.render();
 
                     window.swapBuffers();

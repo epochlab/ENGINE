@@ -32,10 +32,11 @@ public:
     // frame's counts, used to derive Mtri/s and Mpix/s. aov is mutated in
     // place by the AOV combo box; channelView (R/G/B isolation, set by a
     // keyboard shortcut) is drawn as a colored letter in the top-right
-    // corner, independent of the panel.
+    // corner, independent of the panel. lutName is the display transform's
+    // currently active LUT ("sRGB"/"Rec709"/"Raw"), display-only.
     void draw(const GpuInfo& gpuInfo, const FrameStats& frameStats, float geomMs, float postMs,
               int trianglesDrawn, long long pixelsDrawn, std::size_t ramBytes,
-              std::size_t gpuBytes, int& aov, int channelView) const;
+              std::size_t gpuBytes, int& aov, int channelView, const char* lutName) const;
 
     // ImGui::Render + backend draw-data submit. Call after the
     // post-process blit, before window.swapBuffers().
