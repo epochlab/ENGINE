@@ -4,6 +4,16 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Single-config generators (Makefiles/Ninja) default to an unoptimized
+# build if CMAKE_BUILD_TYPE is never set -- silently ~40x slower for
+# CPU-bound work (measured: a 5M-triangle glTF load went from ~1.1s
+# Release to 47s+ and still running, unoptimized). Multi-config
+# generators (Xcode) ignore this and use CMAKE_CONFIGURATION_TYPES
+# instead, hence the guard.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+
 find_package(OpenGL REQUIRED)
 find_package(glfw3 3.5 REQUIRED)
 find_package(GLEW REQUIRED)
