@@ -60,8 +60,8 @@ void HudOverlay::beginFrame() const {
 
 void HudOverlay::draw(const GpuInfo& gpuInfo, const FrameStats& frameStats, float geomMs,
                        float postMs, int trianglesDrawn, long long pixelsDrawn,
-                       std::size_t ramBytes, std::size_t gpuBytes, int& aov,
-                       int channelView) const {
+                       std::size_t ramBytes, std::size_t gpuBytes, int& aov, int channelView,
+                       const char* lutName) const {
     ImGui::SetNextWindowPos(ImVec2(8, 8), ImGuiCond_Always);
     constexpr ImGuiWindowFlags flags =
         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
@@ -86,6 +86,7 @@ void HudOverlay::draw(const GpuInfo& gpuInfo, const FrameStats& frameStats, floa
     ImGui::Text("%.1f Mtri/s  %.1f Mpix/s", static_cast<float>(trianglesDrawn) * fps / 1.0e6F,
                 static_cast<float>(pixelsDrawn) * fps / 1.0e6F);
     ImGui::Text("Cap  vsync");
+    ImGui::Text("LUT  %s", lutName);
     ImGui::Separator();
 
     ImGui::TextColored(kCyan, "AOV");
