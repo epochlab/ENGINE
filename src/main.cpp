@@ -1,7 +1,10 @@
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <optional>
+#include <utility>
 
 // GLEW before GLFW — see gl_debug.cpp for why.
 #include <GL/glew.h>
@@ -28,6 +31,32 @@ namespace {
 
 void glfwErrorCallback(int error, const char* description) {
     std::cerr << "GLFW error " << error << ": " << description << '\n';
+}
+
+// Transforms a local-space AABB's 8 corners by `transform` and returns the
+// resulting world-space AABB -- for the World position debug AOV.
+std::pair<glm::vec3, glm::vec3> worldSpaceBounds(const glm::vec3& localMin,
+                                                  const glm::vec3& localMax,
+                                                  const glm::mat4& transform) {
+    glm::vec3 worldMin(std::numeric_limits<float>::max());
+    glm::vec3 worldMax(std::numeric_limits<float>::lowest());
+    for (int i = 0; i < 8; ++i) {
+        const glm::vec3 corner((i & 1) != 0 ? localMax.x : localMin.x,
+                                (i & 2) != 0 ? localMax.y : localMin.y,
+                                (i & 4) != 0 ? localMax.z : localMin.z);
+        const glm::vec3 worldCorner = glm::vec3(transform * glm::vec4(corner, 1.0F));
+        worldMin = glm::min(worldMin, worldCorner);
+        worldMax = glm::max(worldMax, worldCorner);
+    }
+    return {worldMin, worldMax};
+}
+
+// Deterministic per-index false color for the Object/Material ID debug
+// AOV (golden-ratio fractional hash -- cheap, well-spread across ids).
+glm::vec3 falseColorForId(int id) {
+    const auto f = static_cast<float>(id);
+    return {std::fmod(f * 0.6180339887F, 1.0F), std::fmod((f * 0.3247179572F) + 0.5F, 1.0F),
+            std::fmod((f * 0.1231234F) + 0.25F, 1.0F)};
 }
 
 }  // namespace
@@ -122,40 +151,71 @@ int main() {
                 engine::debug::GpuTimer geomTimer;
                 engine::debug::GpuTimer postTimer;
 
-                // One-time texture-unit assignment: uBaseColor samples
-                // from GL_TEXTURE0. Explicit even though unit 0 is GL's
-                // implicit default for an unset sampler uniform — relying
-                // on that default silently breaks the moment the shader
-                // gains a second sampler. OcioDisplayTransform sets its
-                // own uHdrColor uniform the same way at construction.
+                // One-time texture-unit assignment: uBaseColor/uRoughness/
+                // uAo sample from GL_TEXTURE0/1/2. Explicit even though
+                // unit 0 is GL's implicit default for an unset sampler
+                // uniform — relying on that default silently breaks the
+                // moment the shader gains a second sampler.
+                // OcioDisplayTransform sets its own uHdrColor uniform the
+                // same way at construction.
                 sceneShader->use();
                 GL_CALL(glUniform1i(sceneShader->uniformLocation("uBaseColor"), 0));
+                GL_CALL(glUniform1i(sceneShader->uniformLocation("uRoughness"), 1));
+                GL_CALL(glUniform1i(sceneShader->uniformLocation("uAo"), 2));
                 const int uModelLoc = sceneShader->uniformLocation("uModel");
                 const int uViewLoc = sceneShader->uniformLocation("uView");
                 const int uProjectionLoc = sceneShader->uniformLocation("uProjection");
                 const int uNormalMatrixLoc = sceneShader->uniformLocation("uNormalMatrix");
+                const int uMetallicFactorLoc = sceneShader->uniformLocation("uMetallicFactor");
+                const int uBoundsMinLoc = sceneShader->uniformLocation("uBoundsMin");
+                const int uBoundsMaxLoc = sceneShader->uniformLocation("uBoundsMax");
+                const int uObjectIdColorLoc = sceneShader->uniformLocation("uObjectIdColor");
+                const int uAovLoc = sceneShader->uniformLocation("uAov");
+                const int uChannelViewLoc = sceneShader->uniformLocation("uChannelView");
 
                 window.setResizeCallback(
                     [&hdrFbo](int width, int height) { hdrFbo.resize(width, height); });
 
-                // Debug-only: 'L' cycles the active viewer LUT
-                // (sRGB -> Rec709 -> Raw -> sRGB -> ...), Raw being a
-                // genuine no-display-encode passthrough for direct
-                // encoded-vs-unencoded comparison. No general input-mapping
-                // system introduced for this one key — Phase 3's WASD/QE/R
-                // debug camera is expected to be the second consumer of
-                // Window::setKeyCallback.
-                window.setKeyCallback([&ocioTransform](int key, int action) {
-                    if (key == GLFW_KEY_L && action == GLFW_PRESS) {
-                        using Lut = engine::gfx::OcioDisplayTransform::Lut;
-                        const Lut current = ocioTransform->activeLut();
-                        const Lut next = current == Lut::SRGB     ? Lut::Rec709
-                                          : current == Lut::Rec709 ? Lut::Raw
-                                                                    : Lut::SRGB;
-                        ocioTransform->setActiveLut(next);
-                        const char* name =
-                            next == Lut::SRGB ? "sRGB" : next == Lut::Rec709 ? "Rec709" : "Raw";
+                // aov selects which debug buffer pbr.frag outputs (see its
+                // uAov comment for the index order); channelView isolates
+                // one R/G/B channel of whatever aov currently shows.
+                // userLut is the LUT 'L' cycles through -- kept separate
+                // from OcioDisplayTransform's active LUT because non-Beauty
+                // AOVs force Raw (see the LUT-select comment in the render
+                // loop below) and must not clobber the user's actual choice.
+                int aov = 0;
+                int channelView = 0;
+                auto userLut = engine::gfx::OcioDisplayTransform::Lut::SRGB;
+
+                // Debug-only: 'L' cycles the viewer LUT (sRGB -> Rec709 ->
+                // Raw -> sRGB -> ...), Raw being a genuine no-display-encode
+                // passthrough for direct encoded-vs-unencoded comparison.
+                // R/G/B toggle isolating that channel of the active AOV
+                // (pressing the active one again turns it back off). No
+                // general input-mapping system for these few keys — Phase
+                // 3's WASD/QE/R debug camera is expected to be the next
+                // consumer of Window::setKeyCallback, which only holds one
+                // callback at a time, so all keys are handled in this one
+                // lambda.
+                window.setKeyCallback([&userLut, &channelView](int key, int action) {
+                    if (action != GLFW_PRESS) {
+                        return;
+                    }
+                    using Lut = engine::gfx::OcioDisplayTransform::Lut;
+                    if (key == GLFW_KEY_L) {
+                        userLut = userLut == Lut::SRGB     ? Lut::Rec709
+                                  : userLut == Lut::Rec709 ? Lut::Raw
+                                                            : Lut::SRGB;
+                        const char* name = userLut == Lut::SRGB     ? "sRGB"
+                                           : userLut == Lut::Rec709 ? "Rec709"
+                                                                     : "Raw";
                         std::cout << "OcioDisplayTransform: active LUT = " << name << '\n';
+                    } else if (key == GLFW_KEY_R) {
+                        channelView = channelView == 1 ? 0 : 1;
+                    } else if (key == GLFW_KEY_G) {
+                        channelView = channelView == 2 ? 0 : 2;
+                    } else if (key == GLFW_KEY_B) {
+                        channelView = channelView == 3 ? 0 : 3;
                     }
                 });
 
@@ -196,6 +256,9 @@ int main() {
                     sceneShader->use();
                     GL_CALL(glUniformMatrix4fv(uViewLoc, 1, GL_FALSE, &view[0][0]));
                     GL_CALL(glUniformMatrix4fv(uProjectionLoc, 1, GL_FALSE, &projection[0][0]));
+                    GL_CALL(glUniform1i(uAovLoc, aov));
+                    GL_CALL(glUniform1i(uChannelViewLoc, channelView));
+                    int instanceId = 0;
                     for (const engine::scene::MeshInstance& instance : stumpModel->instances) {
                         GL_CALL(glUniformMatrix4fv(uModelLoc, 1, GL_FALSE,
                                                     &instance.transform[0][0]));
@@ -203,13 +266,31 @@ int main() {
                             glm::inverseTranspose(glm::mat3(instance.transform));
                         GL_CALL(glUniformMatrix3fv(uNormalMatrixLoc, 1, GL_FALSE,
                                                     &normalMatrix[0][0]));
+                        GL_CALL(glUniform1f(uMetallicFactorLoc, instance.material.metallicFactor));
+                        const auto [worldMin, worldMax] = worldSpaceBounds(
+                            instance.mesh.boundsMin(), instance.mesh.boundsMax(),
+                            instance.transform);
+                        GL_CALL(glUniform3fv(uBoundsMinLoc, 1, &worldMin[0]));
+                        GL_CALL(glUniform3fv(uBoundsMaxLoc, 1, &worldMax[0]));
+                        const glm::vec3 objectIdColor = falseColorForId(instanceId);
+                        GL_CALL(glUniform3fv(uObjectIdColorLoc, 1, &objectIdColor[0]));
                         instance.material.baseColorTexture.bind(0);
+                        instance.material.roughnessTexture.bind(1);
+                        instance.material.aoTexture.bind(2);
                         instance.mesh.draw();
+                        ++instanceId;
                     }
                     glDisable(GL_DEPTH_TEST);
                     geomTimer.end();
 
                     postTimer.begin();
+                    // Debug AOVs (aov != 0) are already-displayable [0,1]
+                    // values, not scene-referred radiance -- force the Raw
+                    // passthrough so the sRGB/Rec709 display curve doesn't
+                    // distort them, restoring the user's chosen LUT for
+                    // Beauty.
+                    ocioTransform->setActiveLut(
+                        aov == 0 ? userLut : engine::gfx::OcioDisplayTransform::Lut::Raw);
                     ocioTransform->bind();
                     postProcess.draw(hdrFbo.colorTexture(), ocioTransform->activeShader(),
                                       {winWidth, winHeight});
@@ -224,7 +305,7 @@ int main() {
                     hud.draw(gpuInfo, frameStats, geomTimer.millisecondsElapsed(),
                              postTimer.millisecondsElapsed(), totalTriangles,
                              static_cast<long long>(winWidth) * winHeight, ramBytes,
-                             engine::debug::gpuAllocatedBytes());
+                             engine::debug::gpuAllocatedBytes(), aov, channelView);
                     hud.render();
 
                     window.swapBuffers();
