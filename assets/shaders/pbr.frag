@@ -86,7 +86,9 @@ void main() {
         // Beauty (0): Lambertian diffuse + Schlick-Fresnel specular
         // against one fixed test light. No microfacet D/G terms
         // (importance sampling is Phase 5), no punctual-light system
-        // (Phase 4), no AO/ambient term (Phase 4).
+        // (Phase 4). AO is multiplied in as a blanket occlusion term --
+        // not physically exact with no ambient/indirect term to occlude,
+        // but a common approximation for grounding contact shadows.
         vec3 n = shadingNormal;
         vec3 v = normalize(uCameraPos - vWorldPos);
         vec3 l = normalize(uLightDir);
@@ -109,7 +111,7 @@ void main() {
         // shininess<=0 (roughness at its 1.0 ceiling), which some
         // drivers evaluate to NaN.
         vec3 specular = fresnel * pow(max(ndotH, 1e-4), shininess);
-        color = (diffuse + specular) * uLightColor * ndotL;
+        color = (diffuse + specular) * uLightColor * ndotL * texture(uAo, vUv).r;
     }
 
     if (uChannelView == 1) {
