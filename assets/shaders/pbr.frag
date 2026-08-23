@@ -10,9 +10,8 @@ uniform sampler2D uBaseColor;
 out vec4 fragColor;
 
 void main() {
-    // First increment: unlit base color only, to visually verify
-    // mesh/UV/texture correctness before layering in normal mapping
-    // and lighting.
+    // Unlit: outputs the base color texture directly, independent of
+    // lighting/normal mapping.
     vec3 baseColor = texture(uBaseColor, vUv).rgb;
     fragColor = vec4(baseColor, 1.0);
 }

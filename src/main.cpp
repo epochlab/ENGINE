@@ -17,11 +17,9 @@
 #include "engine/debug/system_info.h"
 #include "engine/gfx/gl_debug.h"
 #include "engine/gfx/hdr_framebuffer.h"
-#include "engine/gfx/mesh.h"
 #include "engine/gfx/ocio_display_transform.h"
 #include "engine/gfx/post_process_pass.h"
 #include "engine/gfx/shader_program.h"
-#include "engine/gfx/texture.h"
 #include "engine/platform/window.h"
 #include "engine/scene/camera.h"
 #include "engine/scene/gltf_loader.h"
@@ -61,18 +59,11 @@ int main() {
                       << reinterpret_cast<const char*>(glewGetErrorString(glewStatus)) << '\n';
             exitCode = EXIT_FAILURE;
         } else {
-            // Re-enabled (was 0 for raw-FPS measurement against the
-            // trivial placeholder scene): with real heavy content and no
-            // vsync throttling, the CPU submits draw calls far faster
-            // than the GPU can complete a 5M-triangle frame, with no
-            // backpressure -- risks unbounded GPU queue growth. Uncapped
-            // measurement can still be done deliberately/short-lived when
-            // actually needed, not left on by default once real content
-            // exists.
+            // With heavy scene content, an uncapped CPU submits draw calls
+            // faster than the GPU can drain them, growing the driver's
+            // command queue unboundedly. Keep vsync on; disable it only
+            // for a deliberate, short-lived uncapped-FPS measurement.
             glfwSwapInterval(1);
-            // GL_DEPTH_TEST is deliberately not enabled globally here --
-            // see its scoped enable/disable around the scene draw in the
-            // render loop below for why.
 
             std::cout << "GL_KHR_debug available: " << std::boolalpha
                       << engine::gfx::khrDebugAvailable() << '\n';
@@ -95,9 +86,10 @@ int main() {
                       << " deg ev100=" << camera.ev100() << " exposure=" << camera.exposure()
                       << '\n';
 
+            // tier1 LOD (36.5k triangles): fast iteration for shader work.
             const auto loadStart = std::chrono::steady_clock::now();
             std::optional<engine::scene::LoadedModel> stumpModel = engine::scene::loadGltf(
-                ASSET_ROOT_DIR "/geometry/broken_stump_rkswd_raw/Broken_Stump_rkswd_Raw.gltf");
+                ASSET_ROOT_DIR "/geometry/broken_stump_rkswd_raw/rkswd_tier_1.gltf");
             const double loadMs = std::chrono::duration<double, std::milli>(
                                        std::chrono::steady_clock::now() - loadStart)
                                        .count();
