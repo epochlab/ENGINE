@@ -13,6 +13,11 @@ namespace engine::gfx {
 Mesh::Mesh(const std::vector<Vertex>& vertices, const std::vector<unsigned int>& indices)
     : indexCount_(static_cast<int>(indices.size())),
       byteSize_(vertices.size() * sizeof(Vertex) + indices.size() * sizeof(unsigned int)) {
+    for (const Vertex& v : vertices) {
+        boundsMin_ = glm::min(boundsMin_, v.position);
+        boundsMax_ = glm::max(boundsMax_, v.position);
+    }
+
     engine::debug::trackGpuAlloc(byteSize_);
     GL_CALL(glGenVertexArrays(1, &vao_));
     GL_CALL(glGenBuffers(1, &vbo_));
@@ -36,6 +41,12 @@ Mesh::Mesh(const std::vector<Vertex>& vertices, const std::vector<unsigned int>&
     GL_CALL(glEnableVertexAttribArray(1));
     GL_CALL(glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex),
                                    reinterpret_cast<const void*>(offsetof(Vertex, uv))));
+    GL_CALL(glEnableVertexAttribArray(2));
+    GL_CALL(glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex),
+                                   reinterpret_cast<const void*>(offsetof(Vertex, normal))));
+    GL_CALL(glEnableVertexAttribArray(3));
+    GL_CALL(glVertexAttribPointer(3, 4, GL_FLOAT, GL_FALSE, sizeof(Vertex),
+                                   reinterpret_cast<const void*>(offsetof(Vertex, tangent))));
 
     // GL_ELEMENT_ARRAY_BUFFER's binding is VAO state, so it must survive
     // the VAO unbind below; GL_ARRAY_BUFFER's binding isn't VAO state but
@@ -62,7 +73,9 @@ Mesh::Mesh(Mesh&& other) noexcept
       vbo_(std::exchange(other.vbo_, 0)),
       ebo_(std::exchange(other.ebo_, 0)),
       indexCount_(std::exchange(other.indexCount_, 0)),
-      byteSize_(std::exchange(other.byteSize_, 0)) {}
+      byteSize_(std::exchange(other.byteSize_, 0)),
+      boundsMin_(other.boundsMin_),
+      boundsMax_(other.boundsMax_) {}
 
 Mesh& Mesh::operator=(Mesh&& other) noexcept {
     if (this != &other) {
@@ -81,19 +94,10 @@ Mesh& Mesh::operator=(Mesh&& other) noexcept {
         ebo_ = std::exchange(other.ebo_, 0);
         indexCount_ = std::exchange(other.indexCount_, 0);
         byteSize_ = std::exchange(other.byteSize_, 0);
+        boundsMin_ = other.boundsMin_;
+        boundsMax_ = other.boundsMax_;
     }
     return *this;
-}
-
-Mesh Mesh::createQuad() {
-    const std::vector<Vertex> vertices = {
-        {{-0.5F, -0.5F, 0.0F}, {0.0F, 0.0F}},  // bottom-left
-        {{0.5F, -0.5F, 0.0F}, {1.0F, 0.0F}},   // bottom-right
-        {{0.5F, 0.5F, 0.0F}, {1.0F, 1.0F}},    // top-right
-        {{-0.5F, 0.5F, 0.0F}, {0.0F, 1.0F}},   // top-left
-    };
-    const std::vector<unsigned int> indices = {0, 1, 2, 0, 2, 3};  // CCW
-    return Mesh(vertices, indices);
 }
 
 // Not wrapped in GL_CALL: runs every frame (see gl_debug.h's rationale).

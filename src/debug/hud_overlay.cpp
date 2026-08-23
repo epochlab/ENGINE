@@ -60,7 +60,8 @@ void HudOverlay::beginFrame() const {
 
 void HudOverlay::draw(const GpuInfo& gpuInfo, const FrameStats& frameStats, float geomMs,
                        float postMs, int trianglesDrawn, long long pixelsDrawn,
-                       std::size_t ramBytes, std::size_t gpuBytes) const {
+                       std::size_t ramBytes, std::size_t gpuBytes, int& aov, int channelView,
+                       const char* lutName) const {
     ImGui::SetNextWindowPos(ImVec2(8, 8), ImGuiCond_Always);
     constexpr ImGuiWindowFlags flags =
         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
@@ -85,6 +86,16 @@ void HudOverlay::draw(const GpuInfo& gpuInfo, const FrameStats& frameStats, floa
     ImGui::Text("%.1f Mtri/s  %.1f Mpix/s", static_cast<float>(trianglesDrawn) * fps / 1.0e6F,
                 static_cast<float>(pixelsDrawn) * fps / 1.0e6F);
     ImGui::Text("Cap  vsync");
+    ImGui::Text("LUT  %s", lutName);
+    ImGui::Separator();
+
+    ImGui::TextColored(kCyan, "AOV");
+    // Order must match pbr.frag's uAov branches.
+    static const char* kAovNames[] = {"Beauty",  "Albedo",  "Normal",   "GeomNormal",
+                                       "Roughness", "UV",      "WorldPos", "Tangent",
+                                       "Metallic",  "ObjectID", "AO"};
+    ImGui::SetNextItemWidth(120.0F);
+    ImGui::Combo("##aov", &aov, kAovNames, IM_ARRAYSIZE(kAovNames));
     ImGui::Separator();
 
     ImGui::TextColored(kCyan, "Memory");
@@ -93,6 +104,19 @@ void HudOverlay::draw(const GpuInfo& gpuInfo, const FrameStats& frameStats, floa
                 static_cast<double>(gpuBytes) / (1024.0 * 1024.0));
 
     ImGui::End();
+
+    // Active R/G/B channel isolation, top-right corner -- foreground draw
+    // list, independent of the ##hud window above.
+    if (channelView != 0) {
+        const char* label = channelView == 1 ? "R" : channelView == 2 ? "G" : "B";
+        const ImU32 color = channelView == 1   ? IM_COL32(255, 70, 70, 255)
+                             : channelView == 2 ? IM_COL32(70, 255, 70, 255)
+                                                 : IM_COL32(70, 70, 255, 255);
+        const ImVec2 displaySize = ImGui::GetIO().DisplaySize;
+        const ImVec2 textSize = ImGui::CalcTextSize(label);
+        const ImVec2 pos(displaySize.x - textSize.x - 16.0F, 8.0F);
+        ImGui::GetForegroundDrawList()->AddText(pos, color, label);
+    }
 }
 
 void HudOverlay::render() const {
