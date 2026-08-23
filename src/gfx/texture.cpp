@@ -42,7 +42,8 @@ Texture& Texture::operator=(Texture&& other) noexcept {
     return *this;
 }
 
-Texture Texture::createFromFloatPixels(int width, int height, const float* rgba) {
+Texture Texture::createFromFloatPixels(int width, int height, const float* rgba,
+                                        unsigned int wrapMode) {
     unsigned int id = 0;
     GL_CALL(glGenTextures(1, &id));
     GL_CALL(glBindTexture(GL_TEXTURE_2D, id));
@@ -52,10 +53,8 @@ Texture Texture::createFromFloatPixels(int width, int height, const float* rgba)
     GL_CALL(glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, rgba));
     GL_CALL(glGenerateMipmap(GL_TEXTURE_2D));
 
-    // Repeat + trilinear: general-purpose material texture (tiled UVs,
-    // viewed at arbitrary scale), not a single-scale display-test image.
-    GL_CALL(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT));
-    GL_CALL(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT));
+    GL_CALL(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, static_cast<GLint>(wrapMode)));
+    GL_CALL(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, static_cast<GLint>(wrapMode)));
     GL_CALL(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR));
     GL_CALL(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR));
 
@@ -67,7 +66,7 @@ Texture Texture::createFromFloatPixels(int width, int height, const float* rgba)
     return Texture(id, byteSize);
 }
 
-std::optional<Texture> Texture::createFromExr(const std::string& path) {
+std::optional<Texture> Texture::createFromExr(const std::string& path, unsigned int wrapMode) {
     try {
         Imf::RgbaInputFile file(path.c_str());
         const auto& dw = file.dataWindow();
@@ -119,7 +118,7 @@ std::optional<Texture> Texture::createFromExr(const std::string& path) {
             }
         }
 
-        return createFromFloatPixels(width, height, floatPixels.data());
+        return createFromFloatPixels(width, height, floatPixels.data(), wrapMode);
     } catch (const std::exception& e) {
         std::cerr << "Texture::createFromExr: failed to load " << path << ": " << e.what()
                    << '\n';
