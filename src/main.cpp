@@ -11,6 +11,7 @@
 #include <GLFW/glfw3.h>
 
 #include <glm/glm.hpp>
+#include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_inverse.hpp>
 
 #include "engine/debug/frame_stats.h"
@@ -156,25 +157,39 @@ int main() {
                 engine::debug::GpuTimer geomTimer;
                 engine::debug::GpuTimer postTimer;
 
-                // One-time texture-unit assignment: uBaseColor/uRoughness/
-                // uAo sample from GL_TEXTURE0/1/2. Explicit even though
-                // unit 0 is GL's implicit default for an unset sampler
-                // uniform — relying on that default silently breaks the
-                // moment the shader gains a second sampler.
+                // One-time texture-unit assignment: uBaseColor/uNormal/
+                // uRoughness/uBump/uSpecular/uAo sample from
+                // GL_TEXTURE0-5. Explicit even though unit 0 is GL's
+                // implicit default for an unset sampler uniform — relying
+                // on that default silently breaks the moment the shader
+                // gains a second sampler.
                 // OcioDisplayTransform sets its own uHdrColor uniform the
                 // same way at construction.
                 sceneShader->use();
                 GL_CALL(glUniform1i(sceneShader->uniformLocation("uBaseColor"), 0));
                 GL_CALL(glUniform1i(sceneShader->uniformLocation("uRoughness"), 1));
                 GL_CALL(glUniform1i(sceneShader->uniformLocation("uAo"), 2));
+                GL_CALL(glUniform1i(sceneShader->uniformLocation("uNormal"), 3));
+                GL_CALL(glUniform1i(sceneShader->uniformLocation("uBump"), 4));
+                GL_CALL(glUniform1i(sceneShader->uniformLocation("uSpecular"), 5));
+                // One fixed test light -- no punctual-light system until
+                // Phase 4. Direction points toward the light; color is
+                // pi so a directly-lit Lambertian surface's brightness
+                // matches its albedo (cancels the shader's /pi).
+                GL_CALL(glUniform3f(sceneShader->uniformLocation("uLightDir"), 0.4F, 0.8F, 0.6F));
+                const glm::vec3 lightColor(glm::pi<float>());
+                GL_CALL(glUniform3fv(sceneShader->uniformLocation("uLightColor"), 1,
+                                     &lightColor[0]));
                 const int uModelLoc = sceneShader->uniformLocation("uModel");
                 const int uViewLoc = sceneShader->uniformLocation("uView");
                 const int uProjectionLoc = sceneShader->uniformLocation("uProjection");
                 const int uNormalMatrixLoc = sceneShader->uniformLocation("uNormalMatrix");
                 const int uMetallicFactorLoc = sceneShader->uniformLocation("uMetallicFactor");
+                const int uRoughnessFactorLoc = sceneShader->uniformLocation("uRoughnessFactor");
                 const int uBoundsMinLoc = sceneShader->uniformLocation("uBoundsMin");
                 const int uBoundsMaxLoc = sceneShader->uniformLocation("uBoundsMax");
                 const int uObjectIdColorLoc = sceneShader->uniformLocation("uObjectIdColor");
+                const int uCameraPosLoc = sceneShader->uniformLocation("uCameraPos");
                 const int uAovLoc = sceneShader->uniformLocation("uAov");
                 const int uChannelViewLoc = sceneShader->uniformLocation("uChannelView");
 
@@ -259,6 +274,8 @@ int main() {
                     sceneShader->use();
                     GL_CALL(glUniformMatrix4fv(uViewLoc, 1, GL_FALSE, &view[0][0]));
                     GL_CALL(glUniformMatrix4fv(uProjectionLoc, 1, GL_FALSE, &projection[0][0]));
+                    const glm::vec3 cameraPos = camera.position();
+                    GL_CALL(glUniform3fv(uCameraPosLoc, 1, &cameraPos[0]));
                     GL_CALL(glUniform1i(uAovLoc, aov));
                     GL_CALL(glUniform1i(uChannelViewLoc, channelView));
                     int instanceId = 0;
@@ -270,6 +287,8 @@ int main() {
                         GL_CALL(glUniformMatrix3fv(uNormalMatrixLoc, 1, GL_FALSE,
                                                     &normalMatrix[0][0]));
                         GL_CALL(glUniform1f(uMetallicFactorLoc, instance.material.metallicFactor));
+                        GL_CALL(
+                            glUniform1f(uRoughnessFactorLoc, instance.material.roughnessFactor));
                         const auto [worldMin, worldMax] = worldSpaceBounds(
                             instance.mesh.boundsMin(), instance.mesh.boundsMax(),
                             instance.transform);
@@ -280,6 +299,9 @@ int main() {
                         instance.material.baseColorTexture.bind(0);
                         instance.material.roughnessTexture.bind(1);
                         instance.material.aoTexture.bind(2);
+                        instance.material.normalTexture.bind(3);
+                        instance.material.bumpTexture.bind(4);
+                        instance.material.specularTexture.bind(5);
                         instance.mesh.draw();
                         ++instanceId;
                     }
