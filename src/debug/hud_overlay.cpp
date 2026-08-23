@@ -105,9 +105,8 @@ void HudOverlay::draw(const GpuInfo& gpuInfo, const FrameStats& frameStats, floa
 
     ImGui::End();
 
-    // Active R/G/B channel isolation, top-right corner (KODAK's convention)
-    // instead of a panel line -- foreground draw list, independent of the
-    // ##hud window above.
+    // Active R/G/B channel isolation, top-right corner -- foreground draw
+    // list, independent of the ##hud window above.
     if (channelView != 0) {
         const char* label = channelView == 1 ? "R" : channelView == 2 ? "G" : "B";
         const ImU32 color = channelView == 1   ? IM_COL32(255, 70, 70, 255)

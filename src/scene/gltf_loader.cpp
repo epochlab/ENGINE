@@ -3,7 +3,6 @@
 #include <cgltf.h>
 
 #include <charconv>
-#include <cstdlib>
 #include <iostream>
 #include <optional>
 #include <string>
