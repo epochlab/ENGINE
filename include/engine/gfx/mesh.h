@@ -27,15 +27,6 @@ public:
     Mesh(Mesh&& other) noexcept;
     Mesh& operator=(Mesh&& other) noexcept;
 
-    // Unit quad (1x1, centered at the origin, z=0), CCW winding, XY plane.
-    // Deliberately smaller than the [-1,1] clip-space range: this stage's
-    // quad is drawn with no MVP transform, so its authored extents are
-    // its NDC footprint. Sized to leave the framebuffer's cleared
-    // background visible around it, so the render checkpoint verifies
-    // bounded polygon geometry rather than an indistinguishable
-    // full-screen fill.
-    static Mesh createQuad();
-
     void draw() const;
 
     [[nodiscard]] int triangleCount() const { return indexCount_ / 3; }

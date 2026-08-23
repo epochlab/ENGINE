@@ -84,7 +84,7 @@ void HudOverlay::draw(const GpuInfo& gpuInfo, const FrameStats& frameStats, floa
     const float fps = frameStats.fps();
     ImGui::Text("%.1f Mtri/s  %.1f Mpix/s", static_cast<float>(trianglesDrawn) * fps / 1.0e6F,
                 static_cast<float>(pixelsDrawn) * fps / 1.0e6F);
-    ImGui::Text("Cap  none");
+    ImGui::Text("Cap  vsync");
     ImGui::Separator();
 
     ImGui::TextColored(kCyan, "Memory");
