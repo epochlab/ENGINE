@@ -54,8 +54,8 @@ Nine build phases carry this pipeline from a bare camera to a spectral path trac
 |---|---|---|
 | 0 | Foundation | OpenGL renderer, camera, Euclidean space, OCIO, OpenEXR linear pipeline, exposure, tone-mapping |
 | 1 | Debug HUD & system feedback | GPU/system readout, frame-timing HUD, memory HUD |
-| 2 | Geometry, textures & basic material | glTF mesh loading, UV texture mapping, linear EXR textures, tangent-space normal mapping, basic metallic-roughness PBR shading |
-| 3 | Scene controls | Scene/viewport stats, camera & lens readout, debug camera controls (WASD/QE/R fly + LMB-drag orbit around a depth-sampled pivot), camera framing overlays, AOV selector, live histogram |
+| 2 | Geometry, textures & basic material | glTF mesh loading, UV texture mapping, linear EXR textures, tangent-space normal mapping, basic metallic-roughness PBR shading, basic AOV debug dropdown (no histogram) |
+| 3 | Scene controls | Scene/viewport stats, camera & lens readout, debug camera controls (WASD/QE/R fly + LMB-drag orbit around a depth-sampled pivot), camera framing overlays, live histogram on the Phase 2 AOV selector |
 | 4 | Direct lighting & acceleration | BVH, punctual direct lighting, prefiltered IBL (irradiance map, prefiltered specular mip chain, split-sum BRDF LUT), screen-space AO, analytic energy conservation — no secondary rays |
 | 5 | Materials & recursive transport | BSDF/PBR, BRDF importance sampling, Fresnel, recursive tracing, Russian roulette, throughput accumulation, radiance estimator |
 | 6 | Real-time integration | Adaptive sampling, progressive accumulation, backend migration (OpenGL → Vulkan/CUDA-OptiX) |
@@ -81,13 +81,13 @@ Phases 0–6 deliberately contain no global illumination — they establish a co
 | Camera & lens readout | Live position/rotation, filmback size, focal length, near/far clip mirrored from the Phase 0 camera state | Inspect and tune camera/lens parameters without recompiling | 3 |
 | Debug camera controls | WASD strafes/moves the Phase 0 camera in the view plane, QE moves it vertically, R resets to a default pose; LMB drag tumbles the camera in orbit around a pivot set by an LMB click's depth-sampled hit point at screen centre | Interactive navigation while debugging, without hand-editing camera parameters between runs; orbit adds inspection of a specific point without manual pivot bookkeeping | 3 |
 | Camera framing overlays | Aspect-ratio letterbox mask, centre crosshair, 3×3 rule-of-thirds grid — drawn over the viewport, not baked into the framebuffer | Composition/framing aids while lining up a shot; overlay-only so they never contaminate the AOV buffers being debugged | 3 |
-| AOV selector | Dropdown switching the displayed buffer across the full AOV set (§3) | Isolates one signal at a time for debugging; availability is phase-gated per §3 | 3 |
+| AOV selector | Dropdown switching the displayed buffer across the full AOV set (§3), plus R/G/B channel-isolation hotkeys | Isolates one signal at a time for debugging; availability is phase-gated per §3 | 2 |
 | Live histogram | Per-channel (R/G/B) histogram of the currently selected AOV, updated every frame | Catches exposure/clipping and colour-space bugs (e.g. an sRGB texture read as linear) that a single still frame can hide | 3 |
 | glTF mesh loading | Indexed triangle meshes, interleaved vertex buffers (position/normal/UV/tangent), uploaded once to GPU-resident buffers | Standard interchange format for scene geometry; interleaving keeps vertex fetch cache-coherent and avoids per-frame re-upload | 2 |
 | UV texture mapping | Per-vertex UV, bilinear/trilinear sampled against mipmapped textures | Surface detail without paying for it in geometry | 2 |
 | Linear EXR textures | All texture maps stored as linear-light OpenEXR; GPU-uploaded as compressed HDR (BC6H where supported) or half-float, with full mip chains | Keeps texture data in the same linear space as the framebuffer/lighting math, with VRAM and texture-cache footprint bounded from the start | 2 |
-| Tangent-space normal mapping | Per-vertex tangent/bitangent (glTF-supplied, or MikkTSpace-generated when absent); normal map packed to two channels, Z reconstructed in-shader | Surface micro-detail without extra geometry; two-channel packing halves normal-map memory | 2 |
-| Basic metallic-roughness PBR | glTF metallic-roughness maps (base colour, metallic, roughness) shaded with a fixed Lambertian + Schlick-Fresnel specular term — no importance sampling | Validates geometry/texture/material data end-to-end against real assets before the full BSDF stack lands in Phase 5 | 2 |
+| Tangent-space normal mapping | Per-vertex tangent (glTF-supplied only — fails clearly if absent, no MikkTSpace generation yet); 3-channel normal map blended with a bump-map-derived detail normal (UV-space central-difference height gradient) | Surface micro-detail without extra geometry; the bump blend adds fine detail beyond the base normal map's resolution | 2 |
+| Basic metallic-roughness PBR | Base colour/metallic/roughness (glTF slots) plus bump and specular maps (project-specific, beyond glTF's standard channels); Lambertian diffuse + Schlick-Fresnel specular (F0 = mix(specular, base colour, metallic)) against one fixed test light — no importance sampling; the authored AO map is multiplied in as a blanket occlusion term | Validates geometry/texture/material data end-to-end against real assets before the full BSDF stack lands in Phase 5 | 2 |
 | BVH acceleration | Bounding volume hierarchy over scene primitives (SAH-built) | Makes ray-scene intersection sub-linear; required before recursion is affordable | 4 |
 | Punctual direct lighting | Direct analytic evaluation of point/directional lights — no visibility rays, no NEE | Physically-scaled direct lighting before the visibility-ray stack (area lights, shadows, NEE) exists | 4 |
 | IBL (prefiltered) | Irradiance map (diffuse) + prefiltered specular mip chain + split-sum BRDF LUT, sampled directly at shading time, no runtime importance sampling | Real-time-affordable image-based lighting without per-frame Monte Carlo integration | 4 |
@@ -115,7 +115,7 @@ Phases 0–6 deliberately contain no global illumination — they establish a co
 
 ## 3. AOV reference
 
-Arbitrary output variables exposed via the Phase 3 AOV selector, beyond the composited beauty pass. Availability is phase-gated — an AOV appears only once the phase producing its underlying data lands. One deliberate exception: AO (screen-space) at Phase 4 is a real-time approximation, explicitly superseded — not merely joined — by AO (ray-traced) once visibility rays exist at Phase 7; see the AO rows below.
+Arbitrary output variables exposed via the AOV selector (§2, Phase 2), beyond the composited beauty pass. Availability is phase-gated — an AOV appears only once the phase producing its underlying data lands. AO has three independent sources, not a single supersession chain: AO (baked), from an authored texture, lands earliest at Phase 2 and stays; AO (screen-space) at Phase 4 is a real-time approximation, explicitly superseded — not merely joined — by AO (ray-traced) once visibility rays exist at Phase 7; see the AO rows below.
 
 | AOV | Category | Mechanism | Role / why it matters | Phase |
 |---|---|---|---|---|
@@ -130,10 +130,11 @@ Arbitrary output variables exposed via the Phase 3 AOV selector, beyond the comp
 | Normals (shading) | Material | Interpolated, normal-mapped surface normal | The normal actually used in shading, isolated from lighting | 2 |
 | Geometric normal | Material | Interpolated normal before normal-map perturbation | Separates a bad normal map from a bad base mesh | 2 |
 | Albedo / base colour | Material | glTF base-colour texture sample | Isolates texture data from lighting | 2 |
-| Metallic | Material | glTF metallic-roughness texture, metallic channel | Debug material authoring independent of shading | 2 |
-| Roughness | Material | glTF metallic-roughness texture, roughness channel | Debug material authoring independent of shading | 2 |
-| Tangent | Material | Per-vertex tangent basis (glTF-supplied or MikkTSpace-generated) | Debugs the tangent-space basis used for normal mapping directly | 2 |
+| Metallic | Material | Metallic factor (scalar only — no metallic texture in this asset set) | Debug material authoring independent of shading | 2 |
+| Roughness | Material | Roughness texture (project-specific slot, not glTF's combined metallicRoughness channel) × roughness factor | Debug material authoring independent of shading | 2 |
+| Tangent | Material | Per-vertex tangent basis (glTF-supplied only, no MikkTSpace generation yet) | Debugs the tangent-space basis used for normal mapping directly | 2 |
 | Object ID / Material ID | Material | Flat per-object or per-material index, false-coloured | Isolation masks for compositing/debugging | 2 |
+| AO (baked) | Material | Authored ambient-occlusion texture sample | Debug baked AO independent of the screen-space/ray-traced approximations; also multiplied into Beauty as a blanket occlusion term (not physically exact — no ambient/indirect term exists yet to modulate) | 2 |
 | Direct diffuse | Lighting | NEE-sampled direct lighting, diffuse term only | Isolates direct diffuse from specular and indirect | 7 |
 | Direct specular | Lighting | NEE-sampled direct lighting, specular term only | Isolates direct specular contribution | 7 |
 | Shadow / occlusion mask | Lighting | Per-light visibility-ray result | Debug shadow correctness independent of shading | 7 |
