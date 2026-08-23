@@ -26,6 +26,7 @@
 #include "engine/gfx/shader_program.h"
 #include "engine/platform/window.h"
 #include "engine/scene/camera.h"
+#include "engine/scene/frustum.h"
 #include "engine/scene/gltf_loader.h"
 
 namespace {
@@ -257,6 +258,7 @@ int main() {
                         static_cast<float>(winWidth) / static_cast<float>(winHeight);
                     const glm::mat4 view = camera.viewMatrix();
                     const glm::mat4 projection = camera.projectionMatrix(aspect);
+                    const glm::mat4 viewProjection = projection * view;
 
                     geomTimer.begin();
                     hdrFbo.bind();
@@ -280,6 +282,14 @@ int main() {
                     GL_CALL(glUniform1i(uChannelViewLoc, channelView));
                     int instanceId = 0;
                     for (const engine::scene::MeshInstance& instance : stumpModel->instances) {
+                        const auto [worldMin, worldMax] = worldSpaceBounds(
+                            instance.mesh.boundsMin(), instance.mesh.boundsMax(),
+                            instance.transform);
+                        if (!engine::scene::frustumIntersectsAabb(viewProjection, worldMin,
+                                                                   worldMax)) {
+                            ++instanceId;
+                            continue;
+                        }
                         GL_CALL(glUniformMatrix4fv(uModelLoc, 1, GL_FALSE,
                                                     &instance.transform[0][0]));
                         const glm::mat3 normalMatrix =
@@ -289,9 +299,6 @@ int main() {
                         GL_CALL(glUniform1f(uMetallicFactorLoc, instance.material.metallicFactor));
                         GL_CALL(
                             glUniform1f(uRoughnessFactorLoc, instance.material.roughnessFactor));
-                        const auto [worldMin, worldMax] = worldSpaceBounds(
-                            instance.mesh.boundsMin(), instance.mesh.boundsMax(),
-                            instance.transform);
                         GL_CALL(glUniform3fv(uBoundsMinLoc, 1, &worldMin[0]));
                         GL_CALL(glUniform3fv(uBoundsMaxLoc, 1, &worldMax[0]));
                         const glm::vec3 objectIdColor = falseColorForId(instanceId);
