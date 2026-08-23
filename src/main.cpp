@@ -5,6 +5,7 @@
 #include <limits>
 #include <optional>
 #include <utility>
+#include <vector>
 
 // GLEW before GLFW — see gl_debug.cpp for why.
 #include <GL/glew.h>
@@ -36,7 +37,8 @@ void glfwErrorCallback(int error, const char* description) {
 }
 
 // Transforms a local-space AABB's 8 corners by `transform` and returns the
-// resulting world-space AABB -- for the World position debug AOV.
+// resulting world-space AABB -- for frustum culling and the World position
+// debug AOV.
 std::pair<glm::vec3, glm::vec3> worldSpaceBounds(const glm::vec3& localMin,
                                                   const glm::vec3& localMax,
                                                   const glm::mat4& transform) {
@@ -158,14 +160,12 @@ int main() {
                 engine::debug::GpuTimer geomTimer;
                 engine::debug::GpuTimer postTimer;
 
-                // One-time texture-unit assignment: uBaseColor/uNormal/
-                // uRoughness/uBump/uSpecular/uAo sample from
-                // GL_TEXTURE0-5. Explicit even though unit 0 is GL's
-                // implicit default for an unset sampler uniform — relying
-                // on that default silently breaks the moment the shader
-                // gains a second sampler.
-                // OcioDisplayTransform sets its own uHdrColor uniform the
-                // same way at construction.
+                // One-time texture-unit assignment (units 0-5, see below).
+                // Explicit even though unit 0 is GL's implicit default for
+                // an unset sampler uniform — relying on that default
+                // silently breaks the moment the shader gains a second
+                // sampler. OcioDisplayTransform sets its own uHdrColor
+                // uniform the same way at construction.
                 sceneShader->use();
                 GL_CALL(glUniform1i(sceneShader->uniformLocation("uBaseColor"), 0));
                 GL_CALL(glUniform1i(sceneShader->uniformLocation("uRoughness"), 1));
@@ -185,6 +185,7 @@ int main() {
                 const int uViewLoc = sceneShader->uniformLocation("uView");
                 const int uProjectionLoc = sceneShader->uniformLocation("uProjection");
                 const int uNormalMatrixLoc = sceneShader->uniformLocation("uNormalMatrix");
+                const int uBaseColorFactorLoc = sceneShader->uniformLocation("uBaseColorFactor");
                 const int uMetallicFactorLoc = sceneShader->uniformLocation("uMetallicFactor");
                 const int uRoughnessFactorLoc = sceneShader->uniformLocation("uRoughnessFactor");
                 const int uBoundsMinLoc = sceneShader->uniformLocation("uBoundsMin");
@@ -196,6 +197,16 @@ int main() {
 
                 window.setResizeCallback(
                     [&hdrFbo](int width, int height) { hdrFbo.resize(width, height); });
+
+                // Instance transforms and mesh bounds are fixed after load
+                // (mesh.h: "not updated if the mesh is ever mutated... it
+                // isn't, today") -- computed once here, not per frame.
+                std::vector<std::pair<glm::vec3, glm::vec3>> instanceWorldBounds;
+                instanceWorldBounds.reserve(stumpModel->instances.size());
+                for (const engine::scene::MeshInstance& instance : stumpModel->instances) {
+                    instanceWorldBounds.push_back(worldSpaceBounds(
+                        instance.mesh.boundsMin(), instance.mesh.boundsMax(), instance.transform));
+                }
 
                 // aov selects which debug buffer pbr.frag outputs (see its
                 // uAov comment for the index order); channelView isolates
@@ -282,9 +293,7 @@ int main() {
                     GL_CALL(glUniform1i(uChannelViewLoc, channelView));
                     int instanceId = 0;
                     for (const engine::scene::MeshInstance& instance : stumpModel->instances) {
-                        const auto [worldMin, worldMax] = worldSpaceBounds(
-                            instance.mesh.boundsMin(), instance.mesh.boundsMax(),
-                            instance.transform);
+                        const auto& [worldMin, worldMax] = instanceWorldBounds[instanceId];
                         if (!engine::scene::frustumIntersectsAabb(viewProjection, worldMin,
                                                                    worldMax)) {
                             ++instanceId;
@@ -296,6 +305,9 @@ int main() {
                             glm::inverseTranspose(glm::mat3(instance.transform));
                         GL_CALL(glUniformMatrix3fv(uNormalMatrixLoc, 1, GL_FALSE,
                                                     &normalMatrix[0][0]));
+                        const glm::vec3 baseColorFactor(instance.material.baseColorFactor);
+                        GL_CALL(
+                            glUniform3fv(uBaseColorFactorLoc, 1, &baseColorFactor[0]));
                         GL_CALL(glUniform1f(uMetallicFactorLoc, instance.material.metallicFactor));
                         GL_CALL(
                             glUniform1f(uRoughnessFactorLoc, instance.material.roughnessFactor));
