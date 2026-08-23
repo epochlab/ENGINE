@@ -81,8 +81,7 @@ void HdrFramebuffer::createAttachments(int width, int height) {
     GL_CALL(glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
                                     colorTexture_, 0));
 
-    // 24-bit fixed-point, not 32F: depth test isn't even enabled this
-    // stage (one quad, nothing to sort) and depth is never sampled back
+    // 24-bit fixed-point, not 32F: depth is never sampled back
     // (renderbuffer, not texture, per the design note above) — 24-bit is
     // the universal baseline; swapping to 32F later is a one-line change
     // if a real precision need appears.

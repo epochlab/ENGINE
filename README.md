@@ -28,7 +28,7 @@ cmake --build build
 This produces two targets:
 
 - `build/engine` — the render engine
-- `build/gen_test_pattern` — EXR calibration-pattern generator (`tools/gen_test_pattern.cpp`)
+- `build/test_pattern` — EXR calibration-pattern generator (`tools/test_pattern.cpp`)
 
 ### Run
 
