@@ -100,19 +100,6 @@ Mesh& Mesh::operator=(Mesh&& other) noexcept {
     return *this;
 }
 
-Mesh Mesh::createQuad() {
-    constexpr glm::vec3 kFlatNormal{0.0F, 0.0F, 1.0F};
-    constexpr glm::vec4 kFlatTangent{1.0F, 0.0F, 0.0F, 1.0F};
-    const std::vector<Vertex> vertices = {
-        {{-0.5F, -0.5F, 0.0F}, {0.0F, 0.0F}, kFlatNormal, kFlatTangent},  // bottom-left
-        {{0.5F, -0.5F, 0.0F}, {1.0F, 0.0F}, kFlatNormal, kFlatTangent},   // bottom-right
-        {{0.5F, 0.5F, 0.0F}, {1.0F, 1.0F}, kFlatNormal, kFlatTangent},    // top-right
-        {{-0.5F, 0.5F, 0.0F}, {0.0F, 1.0F}, kFlatNormal, kFlatTangent},   // top-left
-    };
-    const std::vector<unsigned int> indices = {0, 1, 2, 0, 2, 3};  // CCW
-    return Mesh(vertices, indices);
-}
-
 // Not wrapped in GL_CALL: runs every frame (see gl_debug.h's rationale).
 void Mesh::draw() const {
     glBindVertexArray(vao_);
