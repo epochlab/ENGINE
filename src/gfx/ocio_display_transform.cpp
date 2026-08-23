@@ -147,7 +147,7 @@ std::optional<OcioDisplayTransform> OcioDisplayTransform::create() {
     }
 
     // One-time texture-unit assignment, matching main.cpp's existing
-    // explicit-uniform convention for uAlbedo/uHdrColor.
+    // explicit-uniform convention for uBaseColor/uHdrColor.
     rawShader->use();
     GL_CALL(glUniform1i(rawShader->uniformLocation("uHdrColor"), 0));
     srgbShader->use();
