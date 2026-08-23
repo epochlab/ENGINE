@@ -11,6 +11,7 @@ uniform sampler2D uRoughness;
 uniform sampler2D uBump;
 uniform sampler2D uSpecular;
 uniform sampler2D uAo;
+uniform vec3 uBaseColorFactor;  // glTF baseColorFactor.rgb (alpha unused, opaque-only renderer)
 uniform float uMetallicFactor;
 uniform float uRoughnessFactor;
 uniform vec3 uBoundsMin;  // world-space instance AABB, for the World position AOV
@@ -54,7 +55,7 @@ void main() {
     vec3 bitangent = cross(geoNormal, tangent) * vWorldTangent.w;
     vec3 shadingNormal = normalize(mat3(tangent, bitangent, geoNormal) * combinedTs);
 
-    vec3 baseColor = texture(uBaseColor, vUv).rgb;
+    vec3 baseColor = texture(uBaseColor, vUv).rgb * uBaseColorFactor;
     // 0.045 floor avoids a near-zero alpha driving the specular exponent
     // to infinity (common UE4/Frostbite minimum-roughness clamp).
     float roughness = clamp(texture(uRoughness, vUv).r * uRoughnessFactor, 0.045, 1.0);
