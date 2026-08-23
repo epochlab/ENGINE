@@ -29,10 +29,13 @@ public:
 
     // Builds the panel from already-collected values. Call after
     // beginFrame(), before render(). trianglesDrawn/pixelsDrawn are this
-    // frame's counts, used to derive Mtri/s and Mpix/s.
+    // frame's counts, used to derive Mtri/s and Mpix/s. aov is mutated in
+    // place by the AOV combo box; channelView (R/G/B isolation, set by a
+    // keyboard shortcut) is drawn as a colored letter in the top-right
+    // corner, independent of the panel.
     void draw(const GpuInfo& gpuInfo, const FrameStats& frameStats, float geomMs, float postMs,
               int trianglesDrawn, long long pixelsDrawn, std::size_t ramBytes,
-              std::size_t gpuBytes) const;
+              std::size_t gpuBytes, int& aov, int channelView) const;
 
     // ImGui::Render + backend draw-data submit. Call after the
     // post-process blit, before window.swapBuffers().
