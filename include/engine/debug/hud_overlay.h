@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 
 #include "engine/debug/scene_stats.h"
 
@@ -34,6 +35,8 @@ struct HudFrameData {
     float postMs;
     std::size_t ramBytes;
     std::size_t gpuBytes;
+    std::size_t systemAvailableBytes;
+    std::uint64_t systemTotalBytes;
     int channelView;
     const char* lutName;
     SceneStats sceneStats;

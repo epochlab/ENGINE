@@ -300,6 +300,7 @@ void HudOverlay::draw(const HudFrameData& frame, int& aov, float& focalLengthMm,
     ImGui::TextColored(kCyan, "GPU");
     ImGui::Text("%s", frame.gpuInfo.renderer.c_str());
     ImGui::Text("%s", frame.gpuInfo.version.c_str());
+    ImGui::Text("%d Hz", frame.gpuInfo.refreshRateHz);
     ImGui::Separator();
 
     ImGui::TextColored(kCyan, "Frame");
@@ -322,6 +323,9 @@ void HudOverlay::draw(const HudFrameData& frame, int& aov, float& focalLengthMm,
     ImGui::TextColored(kCyan, "Memory");
     ImGui::Text("RAM  %.1f MB", static_cast<double>(frame.ramBytes) / (1024.0 * 1024.0));
     ImGui::Text("GPU alloc  %.1f MB", static_cast<double>(frame.gpuBytes) / (1024.0 * 1024.0));
+    ImGui::Text("System  %.1f / %.1f GB free",
+                static_cast<double>(frame.systemAvailableBytes) / (1024.0 * 1024.0 * 1024.0),
+                static_cast<double>(frame.systemTotalBytes) / (1024.0 * 1024.0 * 1024.0));
     ImGui::Separator();
 
     ImGui::TextColored(kCyan, "Viewport");
