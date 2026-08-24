@@ -9,6 +9,6 @@
     "aperture": 2.8,
     "shutterSeconds": 0.008,
     "iso": 100.0,
-    "flySpeedMetersPerSecond": 3.0,
+    "flySpeedMetersPerSecond": 1.0,
     "orbitSensitivityDegPerPixel": 0.25
 }
