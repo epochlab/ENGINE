@@ -1,18 +1,13 @@
 #include "engine/gfx/texture.h"
 
 #include <cstddef>
-#include <exception>
-#include <iostream>
 #include <utility>
-#include <vector>
 
 #include <GL/glew.h>
 
-#include <OpenEXR/ImfArray.h>
-#include <OpenEXR/ImfRgbaFile.h>
-
 #include "engine/debug/memory_tracker.h"
 #include "engine/gfx/gl_debug.h"
+#include "engine/gfx/hdr_image.h"
 
 namespace engine::gfx {
 
@@ -67,60 +62,11 @@ Texture Texture::createFromFloatPixels(int width, int height, const float* rgba,
 }
 
 std::optional<Texture> Texture::createFromExr(const std::string& path, unsigned int wrapMode) {
-    try {
-        Imf::RgbaInputFile file(path.c_str());
-        const auto& dw = file.dataWindow();
-        if (dw.isEmpty()) {
-            std::cerr << "Texture::createFromExr: empty data window in " << path << '\n';
-            return std::nullopt;
-        }
-
-        const int width = dw.max.x - dw.min.x + 1;
-        const int height = dw.max.y - dw.min.y + 1;
-
-        // Official RgbaInputFile read idiom (OpenEXR's own
-        // rgbaInterfaceExamples.cpp): the base-pointer offset by dw.min
-        // handles a non-zero data-window origin, though none of this
-        // project's EXR files currently have one.
-        Imf::Array2D<Imf::Rgba> pixels;
-        pixels.resizeErase(height, width);
-        file.setFrameBuffer(&pixels[0][0] - dw.min.x - dw.min.y * width, 1, width);
-        file.readPixels(dw.min.y, dw.max.y);
-
-        // One-time load, not a hot path: a plain float conversion loop is
-        // enough — no half-accepting overload added to
-        // createFromFloatPixels for a call site used exactly once.
-        //
-        // No row flip: EXR scanline 0 is the top of the image, and
-        // glTexImage2D's row 0 of the uploaded buffer becomes texture
-        // v=0 -- matching glTF's v=0-at-top UV convention.
-        std::vector<float> floatPixels(static_cast<std::size_t>(width) *
-                                        static_cast<std::size_t>(height) * 4);
-        for (int y = 0; y < height; ++y) {
-            for (int x = 0; x < width; ++x) {
-                const Imf::Rgba& texel = pixels[y][x];
-                const std::size_t idx =
-                    (static_cast<std::size_t>(y) * static_cast<std::size_t>(width) +
-                     static_cast<std::size_t>(x)) *
-                    4;
-                floatPixels[idx + 0] = static_cast<float>(texel.r);
-                floatPixels[idx + 1] = static_cast<float>(texel.g);
-                floatPixels[idx + 2] = static_cast<float>(texel.b);
-                // 1.0 for a source file missing alpha — RgbaInputFile's
-                // own documented default fill for a missing A channel.
-                // G/B default to 0 (A still defaults to 1.0 above) for
-                // a single-channel (R-only) source, e.g. this project's
-                // Roughness/Bump/AO maps.
-                floatPixels[idx + 3] = static_cast<float>(texel.a);
-            }
-        }
-
-        return createFromFloatPixels(width, height, floatPixels.data(), wrapMode);
-    } catch (const std::exception& e) {
-        std::cerr << "Texture::createFromExr: failed to load " << path << ": " << e.what()
-                   << '\n';
+    const std::optional<HdrImage> image = loadExr(path);
+    if (!image.has_value()) {
         return std::nullopt;
     }
+    return createFromFloatPixels(image->width, image->height, image->rgba.data(), wrapMode);
 }
 
 // Not wrapped in GL_CALL: runs every frame.
