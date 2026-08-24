@@ -5,7 +5,8 @@
 namespace engine::debug {
 
 // One aggregate counter, not a per-object registry: the HUD only needs
-// the running total ("meshes + FBO, tracked"), not a breakdown.
+// the running total (meshes, FBOs, and the histogram's downsample
+// target/PBOs), not a breakdown.
 void trackGpuAlloc(std::size_t bytes);
 void trackGpuFree(std::size_t bytes);
 [[nodiscard]] std::size_t gpuAllocatedBytes();

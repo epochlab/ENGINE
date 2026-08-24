@@ -45,18 +45,43 @@ public:
 
     // Invoked on GLFW's key event (GLFW_PRESS/GLFW_RELEASE/GLFW_REPEAT).
     // Scancode/mods aren't forwarded — no consumer needs them yet. First
-    // consumer is Stage F's debug LUT-toggle key ('L'); Phase 3's
-    // WASD/QE/R debug camera is expected to be the second.
+    // consumer was Stage F's debug LUT-toggle key ('L'); Phase 3's 'R'
+    // camera-reset and channel-isolation hotkeys share this same single
+    // slot. WASD/QE turned out to need continuous per-frame state, not
+    // an edge-triggered event, so they use isKeyDown() below instead —
+    // this slot never needed to become multi-consumer.
     using KeyCallback = std::function<void(int key, int action)>;
     void setKeyCallback(KeyCallback callback);
+
+    // Polled key state (glfwGetKey), for continuous movement (WASD/QE)
+    // where an edge-triggered callback would only fire once per press.
+    [[nodiscard]] bool isKeyDown(int key) const;
+
+    // Invoked on GLFW's mouse-button event. Single slot, like
+    // KeyCallback — Phase 3's LMB-drag orbit is this window's only
+    // consumer so far.
+    using MouseButtonCallback = std::function<void(int button, int action)>;
+    void setMouseButtonCallback(MouseButtonCallback callback);
+
+    // Polled cursor position in screen coordinates (glfwGetCursorPos).
+    // Orbit only needs a once-per-frame delta between consecutive polls,
+    // so a callback (like resize/key) isn't needed here.
+    [[nodiscard]] std::pair<double, double> cursorPosition() const;
+
+    // Hides and locks the cursor to the window (GLFW_CURSOR_DISABLED)
+    // while true, e.g. during an LMB-drag orbit; restores the normal
+    // cursor when false.
+    void setCursorLocked(bool locked);
 
 private:
     static void framebufferSizeCallback(GLFWwindow* window, int width, int height);
     static void keyCallback(GLFWwindow* window, int key, int scancode, int action, int mods);
+    static void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods);
 
     GLFWwindow* window_ = nullptr;
     ResizeCallback resizeCallback_;
     KeyCallback keyCallback_;
+    MouseButtonCallback mouseButtonCallback_;
 };
 
 }  // namespace engine::platform
