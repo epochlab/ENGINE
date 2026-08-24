@@ -1,3 +1,4 @@
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -72,6 +73,41 @@ glm::vec3 falseColorForId(int id) {
 const char* lutName(engine::gfx::OcioDisplayTransform::Lut lut) {
     using Lut = engine::gfx::OcioDisplayTransform::Lut;
     return lut == Lut::SRGB ? "sRGB" : lut == Lut::Rec709 ? "Rec709" : "Raw";
+}
+
+// Static Gabor kernel weights: 4 orientations (0/45/90/135deg) x 5x5
+// taps, precomputed once here rather than in the shader -- these never
+// change at runtime, so re-deriving sin/cos/exp per-fragment on the GPU
+// would be pure redundant work. Consumed by edge_filter.frag's Gabor
+// branch; tap order (dy outer, dx inner, both -2..2) must match its
+// sampling loop.
+std::array<float, 100> buildGaborKernel() {
+    constexpr float kSigma = 1.4F;
+    constexpr float kLambda = 4.0F;
+    constexpr float kGamma = 0.5F;
+    constexpr std::array<float, 4> kOrientationsDeg = {0.0F, 45.0F, 90.0F, 135.0F};
+
+    std::array<float, 100> kernel{};
+    for (int o = 0; o < 4; ++o) {
+        const float theta = glm::radians(kOrientationsDeg[static_cast<std::size_t>(o)]);
+        int tapIndex = 0;
+        for (int dy = -2; dy <= 2; ++dy) {
+            for (int dx = -2; dx <= 2; ++dx) {
+                const auto x = static_cast<float>(dx);
+                const auto y = static_cast<float>(dy);
+                const float xp = (x * std::cos(theta)) + (y * std::sin(theta));
+                const float yp = (-x * std::sin(theta)) + (y * std::cos(theta));
+                const float envelope = std::exp(
+                    -((xp * xp) + (kGamma * kGamma * yp * yp)) / (2.0F * kSigma * kSigma));
+                // Odd/quadrature carrier (sin, not cos) -- edge-sensitive,
+                // not bar/ridge-sensitive.
+                const float carrier = std::sin(2.0F * glm::pi<float>() * xp / kLambda);
+                kernel[static_cast<std::size_t>((o * 25) + tapIndex)] = envelope * carrier;
+                ++tapIndex;
+            }
+        }
+    }
+    return kernel;
 }
 
 }  // namespace
@@ -184,10 +220,14 @@ int main() {
                 std::optional<engine::gfx::ShaderProgram> sceneShader =
                     engine::gfx::ShaderProgram::loadFromFiles(ASSET_ROOT_DIR "/shaders/pbr.vert",
                                                                ASSET_ROOT_DIR "/shaders/pbr.frag");
+                std::optional<engine::gfx::ShaderProgram> edgeFilterShader =
+                    engine::gfx::ShaderProgram::loadFromFiles(
+                        ASSET_ROOT_DIR "/shaders/fullscreen_triangle.vert",
+                        ASSET_ROOT_DIR "/shaders/edge_filter.frag");
                 std::optional<engine::gfx::OcioDisplayTransform> ocioTransform =
                     engine::gfx::OcioDisplayTransform::create();
 
-                if (!sceneShader || !ocioTransform || !stumpModel) {
+                if (!sceneShader || !edgeFilterShader || !ocioTransform || !stumpModel) {
                     std::cerr
                         << "main: shader compile/link or model load failed, aborting startup\n";
                     exitCode = EXIT_FAILURE;
@@ -223,6 +263,13 @@ int main() {
                                         sceneConfig->lightDirection.z));
                     GL_CALL(glUniform3fv(sceneShader->uniformLocation("uLightColor"), 1,
                                          &sceneConfig->lightColor[0]));
+                    // Depth AOV's linearization near/far -- fixed for the
+                    // whole run, never mutated by the debug camera (see
+                    // profile_config.h).
+                    GL_CALL(glUniform1f(sceneShader->uniformLocation("uNearClip"),
+                                        profileConfig->nearClip));
+                    GL_CALL(glUniform1f(sceneShader->uniformLocation("uFarClip"),
+                                        profileConfig->farClip));
                     const int uModelLoc = sceneShader->uniformLocation("uModel");
                     const int uViewLoc = sceneShader->uniformLocation("uView");
                     const int uProjectionLoc = sceneShader->uniformLocation("uProjection");
@@ -238,6 +285,16 @@ int main() {
                     const int uCameraPosLoc = sceneShader->uniformLocation("uCameraPos");
                     const int uAovLoc = sceneShader->uniformLocation("uAov");
                     const int uChannelViewLoc = sceneShader->uniformLocation("uChannelView");
+
+                    // Sobel/Gabor's second pass (see edge_filter.frag):
+                    // uHdrColor's texture unit and the Gabor kernel weights
+                    // are both fixed for the whole run, set once here.
+                    edgeFilterShader->use();
+                    GL_CALL(glUniform1i(edgeFilterShader->uniformLocation("uHdrColor"), 0));
+                    const std::array<float, 100> gaborKernel = buildGaborKernel();
+                    GL_CALL(glUniform1fv(edgeFilterShader->uniformLocation("uGaborKernel"), 100,
+                                         gaborKernel.data()));
+                    const int uFilterModeLoc = edgeFilterShader->uniformLocation("uFilterMode");
 
                     window.setResizeCallback(
                         [&hdrFbo](int width, int height) { hdrFbo.resize(width, height); });
@@ -467,16 +524,32 @@ int main() {
                         }
 
                         postTimer.begin();
-                        // Debug AOVs (aov != 0) are already-displayable [0,1]
-                        // values, not scene-referred radiance -- force the Raw
-                        // passthrough so the sRGB/Rec709 display curve doesn't
-                        // distort them, restoring the user's chosen LUT for
-                        // Beauty.
+                        // Debug AOVs (aov != 0) are already display-oriented
+                        // (most clamped to [0,1]; unclamped ones like
+                        // Luminance just hard-clip to white past 1, same as
+                        // Beauty already does in Raw mode), not scene-
+                        // referred radiance -- force the Raw passthrough so
+                        // the sRGB/Rec709 display curve doesn't distort them,
+                        // restoring the user's chosen LUT for Beauty. Still
+                        // set even for Sobel/Gabor below, which don't draw
+                        // through ocioTransform at all, so the HUD's
+                        // LUT-name readout stays accurate.
                         ocioTransform->setActiveLut(
                             aov == 0 ? userLut : engine::gfx::OcioDisplayTransform::Lut::Raw);
-                        ocioTransform->bind();
-                        postProcess.draw(hdrFbo.colorTexture(), ocioTransform->activeShader(),
-                                          {winWidth, winHeight});
+                        if (aov == 5 || aov == 6) {
+                            // Sobel/Gabor: hdrFbo's color texture holds the
+                            // Luminance AOV (pbr.frag's aov==4/5/6 branch)
+                            // -- run the edge-filter second pass over it
+                            // instead of the OCIO display transform.
+                            edgeFilterShader->use();
+                            GL_CALL(glUniform1i(uFilterModeLoc, aov == 6 ? 1 : 0));
+                            postProcess.draw(hdrFbo.colorTexture(), *edgeFilterShader,
+                                              {winWidth, winHeight});
+                        } else {
+                            ocioTransform->bind();
+                            postProcess.draw(hdrFbo.colorTexture(), ocioTransform->activeShader(),
+                                              {winWidth, winHeight});
+                        }
                         postTimer.end();
 
                         // After the composited image lands in the default
