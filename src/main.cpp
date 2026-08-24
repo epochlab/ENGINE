@@ -26,16 +26,21 @@
 #include "engine/debug/memory_tracker.h"
 #include "engine/debug/scene_stats.h"
 #include "engine/debug/system_info.h"
+#include "engine/gfx/cubemap_texture.h"
+#include "engine/gfx/env_prefilter_pass.h"
 #include "engine/gfx/gl_debug.h"
 #include "engine/gfx/hdr_framebuffer.h"
+#include "engine/gfx/hdr_image.h"
 #include "engine/gfx/ocio_display_transform.h"
 #include "engine/gfx/post_process_pass.h"
 #include "engine/gfx/shader_program.h"
 #include "engine/platform/window.h"
+#include "engine/scene/bvh.h"
 #include "engine/scene/camera.h"
 #include "engine/scene/debug_camera_controller.h"
 #include "engine/scene/frustum.h"
 #include "engine/scene/gltf_loader.h"
+#include "engine/scene/sh_irradiance.h"
 
 namespace {
 
@@ -224,12 +229,36 @@ int main() {
                     engine::gfx::ShaderProgram::loadFromFiles(
                         ASSET_ROOT_DIR "/shaders/fullscreen_triangle.vert",
                         ASSET_ROOT_DIR "/shaders/edge_filter.frag");
+                // IBL preprocessing shaders (env_prefilter_pass.h) -- one-time
+                // startup use only, never touched again once the prefiltered
+                // cubemap is built below.
+                std::optional<engine::gfx::ShaderProgram> equirectToCubemapShader =
+                    engine::gfx::ShaderProgram::loadFromFiles(
+                        ASSET_ROOT_DIR "/shaders/fullscreen_triangle.vert",
+                        ASSET_ROOT_DIR "/shaders/equirect_to_cubemap.frag");
+                std::optional<engine::gfx::ShaderProgram> prefilterShader =
+                    engine::gfx::ShaderProgram::loadFromFiles(
+                        ASSET_ROOT_DIR "/shaders/fullscreen_triangle.vert",
+                        ASSET_ROOT_DIR "/shaders/prefilter_specular.frag");
+                // Background pass sampling the raw equirect map directly --
+                // see sky.frag; toggled at runtime via the HUD, off by default.
+                std::optional<engine::gfx::ShaderProgram> skyShader =
+                    engine::gfx::ShaderProgram::loadFromFiles(
+                        ASSET_ROOT_DIR "/shaders/fullscreen_triangle.vert",
+                        ASSET_ROOT_DIR "/shaders/sky.frag");
                 std::optional<engine::gfx::OcioDisplayTransform> ocioTransform =
                     engine::gfx::OcioDisplayTransform::create();
+                // Decoded once here (not via Texture::createFromExr) since
+                // both the GPU upload below and projectIrradianceSH9 need the
+                // same CPU pixel data -- see hdr_image.h.
+                std::optional<engine::gfx::HdrImage> environmentImage = engine::gfx::loadExr(
+                    std::string(ASSET_ROOT_DIR) + "/textures/republiqueHDR_2k.exr");
 
-                if (!sceneShader || !edgeFilterShader || !ocioTransform || !stumpModel) {
-                    std::cerr
-                        << "main: shader compile/link or model load failed, aborting startup\n";
+                if (!sceneShader || !edgeFilterShader || !equirectToCubemapShader ||
+                    !prefilterShader || !skyShader || !ocioTransform || !stumpModel ||
+                    !environmentImage) {
+                    std::cerr << "main: shader compile/link, model load, or environment map load "
+                                 "failed, aborting startup\n";
                     exitCode = EXIT_FAILURE;
                 } else {
                     const engine::gfx::PostProcessPass postProcess;
@@ -252,17 +281,111 @@ int main() {
                     GL_CALL(glUniform1i(sceneShader->uniformLocation("uNormal"), 3));
                     GL_CALL(glUniform1i(sceneShader->uniformLocation("uBump"), 4));
                     GL_CALL(glUniform1i(sceneShader->uniformLocation("uSpecular"), 5));
-                    // One fixed test light, sourced from scene.json -- no
-                    // punctual-light system until Phase 4. Direction points
-                    // toward the light; color is pi so a directly-lit
-                    // Lambertian surface's brightness matches its albedo
-                    // (cancels the shader's /pi).
-                    GL_CALL(glUniform3f(sceneShader->uniformLocation("uLightDir"),
-                                        sceneConfig->lightDirection.x,
-                                        sceneConfig->lightDirection.y,
-                                        sceneConfig->lightDirection.z));
-                    GL_CALL(glUniform3fv(sceneShader->uniformLocation("uLightColor"), 1,
-                                         &sceneConfig->lightColor[0]));
+                    // Punctual lights (Phase 4), sourced from scene.json --
+                    // set once here, same as the single fixed light this
+                    // replaces; no runtime light-editing UI exists yet. A
+                    // directional's color of pi cancels the shader's
+                    // Lambertian /pi so a directly-lit surface's brightness
+                    // matches its albedo (unchanged from that convention).
+                    const int lightCount =
+                        static_cast<int>(sceneConfig->lights.size()) < engine::config::kMaxLights
+                            ? static_cast<int>(sceneConfig->lights.size())
+                            : engine::config::kMaxLights;
+                    GL_CALL(glUniform1i(sceneShader->uniformLocation("uLightCount"), lightCount));
+                    for (int i = 0; i < lightCount; ++i) {
+                        const engine::config::Light& light =
+                            sceneConfig->lights[static_cast<std::size_t>(i)];
+                        const std::string index = "[" + std::to_string(i) + "]";
+                        GL_CALL(glUniform1i(
+                            sceneShader->uniformLocation("uLightType" + index),
+                            light.type == engine::config::Light::Type::Directional ? 0 : 1));
+                        GL_CALL(glUniform3fv(
+                            sceneShader->uniformLocation("uLightPositionOrDir" + index), 1,
+                            &light.directionOrPosition[0]));
+                        GL_CALL(glUniform3fv(sceneShader->uniformLocation("uLightColor" + index),
+                                             1, &light.color[0]));
+                        GL_CALL(glUniform1f(sceneShader->uniformLocation("uLightRange" + index),
+                                            light.range));
+                    }
+
+                    // IBL (Phase 4): equirect env map -> prefiltered specular
+                    // cubemap (Karis 2013 split-sum) + SH-9 diffuse irradiance
+                    // (Ramamoorthi & Hanrahan 2001). Both are one-time startup
+                    // preprocessing; texture unit 6 is otherwise unused, so
+                    // the cubemap is bound once here rather than every frame.
+                    GL_CALL(glEnable(GL_TEXTURE_CUBE_MAP_SEAMLESS));
+                    const auto envStart = std::chrono::steady_clock::now();
+                    // GL_REPEAT, not CLAMP_TO_EDGE: this is an
+                    // equirectangular panorama, which needs horizontal
+                    // wraparound at the phi=+/-180deg seam (u=0/u=1) for
+                    // both correct bilinear sampling there and correct
+                    // glGenerateMipmap downsampling across that seam --
+                    // under CLAMP_TO_EDGE the mip chain bakes in a faint
+                    // discontinuity at that column, static in texture
+                    // space but rotated into view at nonzero
+                    // uEnvRotationRadians. createFromFloatPixels applies
+                    // one wrap mode to both axes, so this also repeats
+                    // vertically: a real but sub-texel cost (bilinear
+                    // filtering exactly at the zenith/nadir blends
+                    // across to the opposite pole's row), accepted
+                    // rather than worth a per-axis wrap parameter on the
+                    // shared Texture API for this one caller.
+                    const engine::gfx::Texture environmentTexture =
+                        engine::gfx::Texture::createFromFloatPixels(
+                            environmentImage->width, environmentImage->height,
+                            environmentImage->rgba.data(), GL_REPEAT);
+                    std::cout << "environmentTexture upload: "
+                              << std::chrono::duration<double, std::milli>(
+                                     std::chrono::steady_clock::now() - envStart)
+                                     .count()
+                              << " ms\n"
+                              << std::flush;
+                    const auto prefilterStart = std::chrono::steady_clock::now();
+                    const engine::gfx::PrefilteredEnvironment prefilteredEnv =
+                        engine::gfx::buildPrefilteredEnvironment(
+                            environmentTexture, *equirectToCubemapShader, *prefilterShader);
+                    std::cout << "buildPrefilteredEnvironment: "
+                              << std::chrono::duration<double, std::milli>(
+                                     std::chrono::steady_clock::now() - prefilterStart)
+                                     .count()
+                              << " ms\n"
+                              << std::flush;
+                    sceneShader->use();
+                    GL_CALL(glUniform1i(sceneShader->uniformLocation("uPrefilteredSpecular"), 6));
+                    GL_CALL(glUniform1f(sceneShader->uniformLocation("uPrefilteredSpecularMaxLod"),
+                                        static_cast<float>(prefilteredEnv.specularMipCount - 1)));
+                    prefilteredEnv.specular.bind(6);
+
+                    const auto shStart = std::chrono::steady_clock::now();
+                    const std::array<glm::vec3, 9> shIrradiance =
+                        engine::scene::projectIrradianceSH9(*environmentImage);
+                    GL_CALL(glUniform3fv(sceneShader->uniformLocation("uShIrradiance"), 9,
+                                         &shIrradiance[0][0]));
+                    std::cout << "projectIrradianceSH9: "
+                              << std::chrono::duration<double, std::milli>(
+                                     std::chrono::steady_clock::now() - shStart)
+                                     .count()
+                              << " ms, DC term = (" << shIrradiance[0].r << ", "
+                              << shIrradiance[0].g << ", " << shIrradiance[0].b << ")\n"
+                              << std::flush;
+
+                    // BVH (Phase 4): built once from the loaded scene's
+                    // world-space triangles, Phase 5 infrastructure -- not
+                    // wired into rendering this phase ("no secondary rays"
+                    // holds). Correctness is exercised by
+                    // tools/bvh_validate.cpp, not by anything here; this log
+                    // line is the only thing that observes it this phase.
+                    const auto bvhBuildStart = std::chrono::steady_clock::now();
+                    const engine::scene::Bvh sceneBvh =
+                        engine::scene::Bvh::build(std::move(stumpModel->worldTriangles));
+                    const double bvhBuildMs = std::chrono::duration<double, std::milli>(
+                                                   std::chrono::steady_clock::now() -
+                                                   bvhBuildStart)
+                                                   .count();
+                    std::cout << "Bvh::build: " << sceneBvh.triangleCount() << " triangles, "
+                              << sceneBvh.nodeCount() << " nodes, " << bvhBuildMs << " ms\n"
+                              << std::flush;
+
                     // Depth AOV's linearization near/far -- fixed for the
                     // whole run, never mutated by the debug camera (see
                     // profile_config.h).
@@ -285,6 +408,8 @@ int main() {
                     const int uCameraPosLoc = sceneShader->uniformLocation("uCameraPos");
                     const int uAovLoc = sceneShader->uniformLocation("uAov");
                     const int uChannelViewLoc = sceneShader->uniformLocation("uChannelView");
+                    const int uEnvRotationRadiansLoc =
+                        sceneShader->uniformLocation("uEnvRotationRadians");
 
                     // Sobel/Gabor's second pass (see edge_filter.frag):
                     // uHdrColor's texture unit and the Gabor kernel weights
@@ -295,6 +420,27 @@ int main() {
                     GL_CALL(glUniform1fv(edgeFilterShader->uniformLocation("uGaborKernel"), 100,
                                          gaborKernel.data()));
                     const int uFilterModeLoc = edgeFilterShader->uniformLocation("uFilterMode");
+
+                    // Sky background pass (sky.frag): samples the raw
+                    // equirect map on texture unit 0, same as edgeFilterShader
+                    // above -- the geometry pass below rebinds unit 0 to each
+                    // instance's base colour texture, but that happens after
+                    // the sky is drawn each frame, so there's no conflict.
+                    skyShader->use();
+                    GL_CALL(glUniform1i(skyShader->uniformLocation("uEquirect"), 0));
+                    const int uSkyInvViewProjLoc = skyShader->uniformLocation("uInvViewProj");
+                    const int uSkyCameraPosLoc = skyShader->uniformLocation("uCameraPos");
+                    const int uSkyEnvRotationRadiansLoc =
+                        skyShader->uniformLocation("uEnvRotationRadians");
+                    // Attribute-less VAO for the sky's fullscreen-triangle
+                    // draw (gl_VertexID trick, see fullscreen_triangle.vert)
+                    // -- Apple's core-profile driver requires some VAO bound
+                    // for any draw call even with zero vertex attributes,
+                    // same rationale as PostProcessPass's own VAO. Not
+                    // PostProcessPass itself: that draws into the default
+                    // framebuffer, not the HDR FBO the sky needs.
+                    unsigned int skyVao = 0;
+                    GL_CALL(glGenVertexArrays(1, &skyVao));
 
                     window.setResizeCallback(
                         [&hdrFbo](int width, int height) { hdrFbo.resize(width, height); });
@@ -322,6 +468,17 @@ int main() {
                     int channelView = 0;
                     auto userLut = sceneConfig->initialLut;
                     engine::debug::FramingOverlayState framingState;
+                    // "Sky background" HUD checkbox -- off by default,
+                    // preserving today's black background; only takes
+                    // visible effect for the Beauty AOV (aov == 0), see the
+                    // render loop below.
+                    bool showSky = false;
+                    // HDR environment's Y-axis (world up) rotation, degrees
+                    // [0,359] -- affects sky background, SH diffuse, and
+                    // prefiltered specular together (see pbr.frag/sky.frag's
+                    // uEnvRotationRadians), all rotated at query time rather
+                    // than re-baked.
+                    int envRotationDegrees = 0;
 
                     // Set by the mouse-button callback on an LMB press;
                     // resolved right after this frame's scene draw (not
@@ -433,11 +590,39 @@ int main() {
                         const glm::mat4 view = camera.viewMatrix();
                         const glm::mat4 projection = camera.projectionMatrix(aspect);
                         const glm::mat4 viewProjection = projection * view;
+                        const glm::vec3 cameraPos = camera.position();
 
                         geomTimer.begin();
                         hdrFbo.bind();
                         glClearColor(0.0F, 0.0F, 0.0F, 1.0F);
                         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+                        // Sky background: drawn with depth test/write both
+                        // off, before the depth-tested geometry pass, so
+                        // geometry simply overwrites it wherever it covers a
+                        // pixel -- only takes visible effect for Beauty (aov
+                        // == 0); every other AOV keeps its black background,
+                        // since a sky colour has no valid value in those
+                        // debug buffers (e.g. Alpha's coverage-mask
+                        // convention).
+                        if (showSky && aov == 0) {
+                            // Depth writes explicitly off, not just depth
+                            // test: fullscreen_triangle.vert's fixed
+                            // clip-space z (0.0) would otherwise land in the
+                            // depth buffer ahead of real geometry.
+                            GL_CALL(glDepthMask(GL_FALSE));
+                            const glm::mat4 invViewProj = glm::inverse(viewProjection);
+                            skyShader->use();
+                            GL_CALL(glUniformMatrix4fv(uSkyInvViewProjLoc, 1, GL_FALSE,
+                                                        &invViewProj[0][0]));
+                            GL_CALL(glUniform3fv(uSkyCameraPosLoc, 1, &cameraPos[0]));
+                            GL_CALL(glUniform1f(uSkyEnvRotationRadiansLoc,
+                                                glm::radians(static_cast<float>(envRotationDegrees))));
+                            environmentTexture.bind(0);
+                            GL_CALL(glBindVertexArray(skyVao));
+                            GL_CALL(glDrawArrays(GL_TRIANGLES, 0, 3));
+                            GL_CALL(glDepthMask(GL_TRUE));
+                        }
 
                         // Scoped to just this scene draw: the post-process
                         // pass below presents a fullscreen triangle to the
@@ -451,10 +636,11 @@ int main() {
                         GL_CALL(glUniformMatrix4fv(uViewLoc, 1, GL_FALSE, &view[0][0]));
                         GL_CALL(
                             glUniformMatrix4fv(uProjectionLoc, 1, GL_FALSE, &projection[0][0]));
-                        const glm::vec3 cameraPos = camera.position();
                         GL_CALL(glUniform3fv(uCameraPosLoc, 1, &cameraPos[0]));
                         GL_CALL(glUniform1i(uAovLoc, aov));
                         GL_CALL(glUniform1i(uChannelViewLoc, channelView));
+                        GL_CALL(glUniform1f(uEnvRotationRadiansLoc,
+                                            glm::radians(static_cast<float>(envRotationDegrees))));
 
                         int instancesDrawnThisFrame = 0;
                         int instancesCulledThisFrame = 0;
@@ -601,7 +787,8 @@ int main() {
                         // DebugCameraController is the authoritative owner,
                         // read before draw() and written back after.
                         float focalLengthMm = debugCamera.focalLengthMm();
-                        hud.draw(hudFrameData, aov, focalLengthMm, framingState);
+                        hud.draw(hudFrameData, aov, focalLengthMm, showSky, envRotationDegrees,
+                                 framingState);
                         debugCamera.setFocalLengthMm(focalLengthMm);
                         hud.render();
 
