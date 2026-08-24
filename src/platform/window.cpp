@@ -26,6 +26,7 @@ Window::Window(int width, int height, const std::string& title) {
     glfwSetWindowUserPointer(window_, this);
     glfwSetFramebufferSizeCallback(window_, &Window::framebufferSizeCallback);
     glfwSetKeyCallback(window_, &Window::keyCallback);
+    glfwSetMouseButtonCallback(window_, &Window::mouseButtonCallback);
 }
 
 Window::~Window() {
@@ -37,7 +38,8 @@ Window::~Window() {
 Window::Window(Window&& other) noexcept
     : window_(std::exchange(other.window_, nullptr)),
       resizeCallback_(std::move(other.resizeCallback_)),
-      keyCallback_(std::move(other.keyCallback_)) {
+      keyCallback_(std::move(other.keyCallback_)),
+      mouseButtonCallback_(std::move(other.mouseButtonCallback_)) {
     if (window_ != nullptr) {
         glfwSetWindowUserPointer(window_, this);
     }
@@ -51,6 +53,7 @@ Window& Window::operator=(Window&& other) noexcept {
         window_ = std::exchange(other.window_, nullptr);
         resizeCallback_ = std::move(other.resizeCallback_);
         keyCallback_ = std::move(other.keyCallback_);
+        mouseButtonCallback_ = std::move(other.mouseButtonCallback_);
         if (window_ != nullptr) {
             glfwSetWindowUserPointer(window_, this);
         }
@@ -97,6 +100,32 @@ void Window::keyCallback(GLFWwindow* window, int key, int /*scancode*/, int acti
     auto* self = static_cast<Window*>(glfwGetWindowUserPointer(window));
     if (self != nullptr && self->keyCallback_) {
         self->keyCallback_(key, action);
+    }
+}
+
+bool Window::isKeyDown(int key) const {
+    return glfwGetKey(window_, key) == GLFW_PRESS;
+}
+
+void Window::setMouseButtonCallback(MouseButtonCallback callback) {
+    mouseButtonCallback_ = std::move(callback);
+}
+
+std::pair<double, double> Window::cursorPosition() const {
+    double x = 0.0;
+    double y = 0.0;
+    glfwGetCursorPos(window_, &x, &y);
+    return {x, y};
+}
+
+void Window::setCursorLocked(bool locked) {
+    glfwSetInputMode(window_, GLFW_CURSOR, locked ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL);
+}
+
+void Window::mouseButtonCallback(GLFWwindow* window, int button, int action, int /*mods*/) {
+    auto* self = static_cast<Window*>(glfwGetWindowUserPointer(window));
+    if (self != nullptr && self->mouseButtonCallback_) {
+        self->mouseButtonCallback_(button, action);
     }
 }
 
