@@ -45,6 +45,10 @@ Camera::Camera(const glm::vec3& position, float yawDegrees, float pitchDegrees, 
       shutterSeconds_(shutterSeconds),
       iso_(iso) {}
 
+glm::vec3 Camera::forward() const {
+    return forwardFromEuler(yawRadians_, pitchRadians_);
+}
+
 float Camera::verticalFovRadians() const {
     return 2.0F * std::atan(filmBack_.heightMm / (2.0F * focalLengthMm_));
 }

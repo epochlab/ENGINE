@@ -131,4 +131,12 @@ void HdrFramebuffer::bind() const {
     glViewport(0, 0, width_, height_);
 }
 
+float HdrFramebuffer::sampleDepth(int x, int y) const {
+    GL_CALL(glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo_));
+    float depth = 1.0F;
+    GL_CALL(glReadPixels(x, y, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &depth));
+    GL_CALL(glBindFramebuffer(GL_READ_FRAMEBUFFER, 0));
+    return depth;
+}
+
 }  // namespace engine::gfx

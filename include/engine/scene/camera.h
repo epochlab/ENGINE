@@ -5,8 +5,9 @@
 namespace engine::scene {
 
 // A camera's pose, lens, and exposure, immutable once constructed. No
-// input handling lives here — Phase 3's debug camera decides how pose
-// gets mutated frame-to-frame (WASD/QE/R).
+// input handling lives here — engine::scene::DebugCameraController owns
+// pose mutation frame-to-frame (WASD/QE/R/orbit) and builds a fresh
+// Camera each frame via its snapshot() method.
 //
 // Convention: right-handed, +Y up, -Z forward in view space. At yaw=0,
 // pitch=0 the camera looks down world -Z with +Y up and +X right — this
@@ -41,6 +42,12 @@ public:
            float shutterSeconds, float iso);
 
     [[nodiscard]] glm::vec3 position() const { return position_; }
+
+    // Unit-length view direction derived from yaw/pitch — the same
+    // quantity viewMatrix() computes internally, exposed for callers
+    // (fly movement, orbit-pivot fallback) that need it independent of
+    // the view matrix.
+    [[nodiscard]] glm::vec3 forward() const;
     [[nodiscard]] FilmBack filmBack() const { return filmBack_; }
     [[nodiscard]] float focalLengthMm() const { return focalLengthMm_; }
     [[nodiscard]] float nearClip() const { return nearClip_; }
