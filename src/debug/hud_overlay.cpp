@@ -340,6 +340,23 @@ void HudOverlay::draw(const HudFrameData& frame, int& aov, float& focalLengthMm,
     ImGui::Text("Points  %lld", frame.sceneStats.pointsTotal);
     ImGui::Separator();
 
+    if (frame.histogram.hasData()) {
+        drawHistogramPanel(frame.histogram.bins());
+        ImGui::Separator();
+    }
+
+    ImGui::TextColored(kCyan, "AOV");
+    // Order matches the README's §3 AOV reference table, and must match
+    // pbr.frag's uAov branches.
+    static const char* kAovNames[] = {"Beauty",   "Alpha",     "Depth",    "HSV",
+                                       "Luminance", "Sobel",    "Gabor",    "WorldPos",
+                                       "UV",        "Normal",   "GeomNormal", "Albedo",
+                                       "Metallic",  "Roughness", "Tangent", "ObjectID",
+                                       "AO",        "Fresnel",  "IBL"};
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+    ImGui::Combo("##aov", &aov, kAovNames, IM_ARRAYSIZE(kAovNames));
+    ImGui::Separator();
+
     ImGui::TextColored(kCyan, "Camera");
     const glm::vec3 camPos = frame.camera.position();
     ImGui::Text("pos  x %.2f  y %.2f  z %.2f", camPos.x, camPos.y, camPos.z);
@@ -358,28 +375,14 @@ void HudOverlay::draw(const HudFrameData& frame, int& aov, float& focalLengthMm,
     ImGui::SliderFloat("##focalLength", &focalLengthMm, 10.0F, 300.0F, "Focal Length  %.0f mm");
     ImGui::Separator();
 
-    ImGui::TextColored(kCyan, "AOV");
-    // Order matches the README's §3 AOV reference table, and must match
-    // pbr.frag's uAov branches.
-    static const char* kAovNames[] = {"Beauty",   "Alpha",     "Depth",    "HSV",
-                                       "Luminance", "Sobel",    "Gabor",    "WorldPos",
-                                       "UV",        "Normal",   "GeomNormal", "Albedo",
-                                       "Metallic",  "Roughness", "Tangent", "ObjectID",
-                                       "AO",        "Fresnel",  "IBL"};
-    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
-    ImGui::Combo("##aov", &aov, kAovNames, IM_ARRAYSIZE(kAovNames));
+    ImGui::TextColored(kCyan, "HDRI");
     // Only visibly affects the Beauty AOV (main.cpp's render loop gates
     // the actual sky draw on aov==0) -- left interactive regardless of
     // the active AOV rather than grayed out, simplest for a checkbox
     // whose effect is just "no-op elsewhere".
-    ImGui::Checkbox("Sky background", &showSky);
+    ImGui::Checkbox("Show/Hide Background", &showSky);
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
-    ImGui::SliderInt("##envRotation", &envRotationDegrees, 0, 359, "HDR rotation  %d deg");
-
-    if (frame.histogram.hasData()) {
-        ImGui::Separator();
-        drawHistogramPanel(frame.histogram.bins());
-    }
+    ImGui::SliderInt("##envRotation", &envRotationDegrees, 0, 359, "Y-Axis  %d deg");
 
     ImGui::End();
 

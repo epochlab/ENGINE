@@ -468,10 +468,10 @@ int main() {
                     int channelView = 0;
                     auto userLut = sceneConfig->initialLut;
                     engine::debug::FramingOverlayState framingState;
-                    // "Sky background" HUD checkbox -- off by default,
-                    // preserving today's black background; only takes
-                    // visible effect for the Beauty AOV (aov == 0), see the
-                    // render loop below.
+                    // "Show/Hide Background" HDRI-section checkbox -- off by
+                    // default, preserving today's black background; only
+                    // takes visible effect for the Beauty AOV (aov == 0), see
+                    // the render loop below.
                     bool showSky = false;
                     // HDR environment's Y-axis (world up) rotation, degrees
                     // [0,359] -- affects sky background, SH diffuse, and
