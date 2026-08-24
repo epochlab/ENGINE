@@ -355,10 +355,13 @@ void HudOverlay::draw(const HudFrameData& frame, int& aov, float& focalLengthMm,
     ImGui::Separator();
 
     ImGui::TextColored(kCyan, "AOV");
-    // Order must match pbr.frag's uAov branches.
-    static const char* kAovNames[] = {"Beauty",  "Albedo",  "Normal",   "GeomNormal",
-                                       "Roughness", "UV",      "WorldPos", "Tangent",
-                                       "Metallic",  "ObjectID", "AO"};
+    // Order matches the README's §3 AOV reference table, and must match
+    // pbr.frag's uAov branches.
+    static const char* kAovNames[] = {"Beauty",   "Alpha",     "Depth",    "HSV",
+                                       "Luminance", "Sobel",    "Gabor",    "WorldPos",
+                                       "UV",        "Normal",   "GeomNormal", "Albedo",
+                                       "Metallic",  "Roughness", "Tangent", "ObjectID",
+                                       "AO"};
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
     ImGui::Combo("##aov", &aov, kAovNames, IM_ARRAYSIZE(kAovNames));
 
