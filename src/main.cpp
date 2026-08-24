@@ -397,6 +397,10 @@ int main() {
                     // instead of every frame drops one source of frame-time
                     // jitter for free.
                     std::size_t ramBytes = engine::debug::residentSetBytes();
+                    std::size_t systemAvailableBytes = engine::debug::availableSystemBytes();
+                    // Fixed for the machine, unlike the other two -- queried
+                    // once here rather than resampled alongside them.
+                    const std::uint64_t systemTotalBytes = engine::debug::totalSystemBytes();
                     std::chrono::steady_clock::time_point lastRamSample =
                         std::chrono::steady_clock::now();
                     std::chrono::steady_clock::time_point lastFrameTime =
@@ -560,6 +564,7 @@ int main() {
                         const auto now = std::chrono::steady_clock::now();
                         if (now - lastRamSample >= std::chrono::milliseconds(250)) {
                             ramBytes = engine::debug::residentSetBytes();
+                            systemAvailableBytes = engine::debug::availableSystemBytes();
                             lastRamSample = now;
                         }
 
@@ -580,6 +585,8 @@ int main() {
                             postTimer.millisecondsElapsed(),
                             ramBytes,
                             engine::debug::gpuAllocatedBytes(),
+                            systemAvailableBytes,
+                            systemTotalBytes,
                             channelView,
                             lutName(ocioTransform->activeLut()),
                             sceneStats,
