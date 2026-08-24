@@ -287,8 +287,8 @@ void HudOverlay::beginFrame() const {
     ImGui::NewFrame();
 }
 
-void HudOverlay::draw(const HudFrameData& frame, int& aov, float& focalLengthMm,
-                       const FramingOverlayState& framing) const {
+void HudOverlay::draw(const HudFrameData& frame, int& aov, float& focalLengthMm, bool& showSky,
+                       int& envRotationDegrees, const FramingOverlayState& framing) const {
     ImGui::SetNextWindowPos(ImVec2(8, 8), ImGuiCond_Always);
     constexpr ImGuiWindowFlags flags =
         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
@@ -365,9 +365,16 @@ void HudOverlay::draw(const HudFrameData& frame, int& aov, float& focalLengthMm,
                                        "Luminance", "Sobel",    "Gabor",    "WorldPos",
                                        "UV",        "Normal",   "GeomNormal", "Albedo",
                                        "Metallic",  "Roughness", "Tangent", "ObjectID",
-                                       "AO"};
+                                       "AO",        "Fresnel",  "IBL"};
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
     ImGui::Combo("##aov", &aov, kAovNames, IM_ARRAYSIZE(kAovNames));
+    // Only visibly affects the Beauty AOV (main.cpp's render loop gates
+    // the actual sky draw on aov==0) -- left interactive regardless of
+    // the active AOV rather than grayed out, simplest for a checkbox
+    // whose effect is just "no-op elsewhere".
+    ImGui::Checkbox("Sky background", &showSky);
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+    ImGui::SliderInt("##envRotation", &envRotationDegrees, 0, 359, "HDR rotation  %d deg");
 
     if (frame.histogram.hasData()) {
         ImGui::Separator();

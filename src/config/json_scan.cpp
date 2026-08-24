@@ -156,4 +156,44 @@ std::string_view findObjectBody(std::string_view text, std::string_view key) {
     return {};
 }
 
+std::vector<std::string_view> findObjectArrayBodies(std::string_view text, std::string_view key) {
+    const std::size_t keyEnd = findKeyEnd(text, key);
+    if (keyEnd == std::string_view::npos) {
+        return {};
+    }
+    const std::size_t valueStart = findValueStart(text, keyEnd);
+    if (valueStart == std::string_view::npos || valueStart >= text.size() ||
+        text[valueStart] != '[') {
+        return {};
+    }
+
+    std::vector<std::string_view> bodies;
+    // Depth over braces only (not the enclosing brackets) -- an object's
+    // start/end is tracked the same way findObjectBody tracks one, just
+    // repeated for each element found before the array's closing ']'.
+    int braceDepth = 0;
+    std::size_t objectStart = 0;
+    for (std::size_t pos = valueStart + 1; pos < text.size(); ++pos) {
+        const char c = text[pos];
+        if (c == ']' && braceDepth == 0) {
+            return bodies;
+        }
+        if (c == '{') {
+            if (braceDepth == 0) {
+                objectStart = pos;
+            }
+            ++braceDepth;
+        } else if (c == '}') {
+            --braceDepth;
+            if (braceDepth == 0) {
+                bodies.push_back(text.substr(objectStart + 1, pos - objectStart - 1));
+            }
+        }
+    }
+    // Unterminated array (no closing ']' found) -- return whatever
+    // complete objects were parsed rather than nothing, matching
+    // findObjectBody's tolerance of malformed trailing input.
+    return bodies;
+}
+
 }  // namespace engine::config::json

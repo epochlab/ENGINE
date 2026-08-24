@@ -67,11 +67,14 @@ public:
 
     // Builds the panel from already-collected values. Call after
     // beginFrame(), before render(). aov is mutated in place by the AOV
-    // combo box; focalLengthMm by the Lens section's slider. The
-    // crosshair overlay is drawn over the full viewport (foreground draw
-    // list), independent of the ##hud panel, gated on framing.crosshair.
-    void draw(const HudFrameData& frame, int& aov, float& focalLengthMm,
-              const FramingOverlayState& framing) const;
+    // combo box; focalLengthMm by the Lens section's slider; showSky by
+    // the "Sky background" checkbox (only takes visible effect for the
+    // Beauty AOV -- see main.cpp's render loop); envRotationDegrees
+    // ([0,359]) by the HDR rotation slider. The crosshair overlay is
+    // drawn over the full viewport (foreground draw list), independent
+    // of the ##hud panel, gated on framing.crosshair.
+    void draw(const HudFrameData& frame, int& aov, float& focalLengthMm, bool& showSky,
+              int& envRotationDegrees, const FramingOverlayState& framing) const;
 
     // ImGui::Render + backend draw-data submit. Call after the
     // post-process blit, before window.swapBuffers().

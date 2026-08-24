@@ -56,7 +56,7 @@ Nine build phases carry this pipeline from a bare camera to a spectral path trac
 | 1 | Debug HUD & system feedback | GPU/system readout, frame-timing HUD, memory HUD |
 | 2 | Geometry, textures & basic material | glTF mesh loading, UV texture mapping, linear EXR textures, tangent-space normal mapping, basic metallic-roughness PBR shading, basic AOV debug dropdown (no histogram) |
 | 3 | Scene controls | Scene/viewport stats, camera & lens readout, debug camera controls (WASD/QE/R fly + LMB-drag orbit around a depth-sampled pivot), camera framing overlays, live histogram on the Phase 2 AOV selector |
-| 4 | Direct lighting & acceleration | BVH, punctual direct lighting, prefiltered IBL (irradiance map, prefiltered specular mip chain, split-sum BRDF LUT), screen-space AO, analytic energy conservation — no secondary rays |
+| 4 | Direct lighting & acceleration | BVH, punctual direct lighting (analytic Cook-Torrance GGX), prefiltered IBL (SH-9 diffuse irradiance, prefiltered specular mip chain, analytic split-sum BRDF approximation — no baked LUT), multi-scatter energy compensation, analytic energy conservation — no secondary rays |
 | 5 | Materials & recursive transport | BSDF/PBR, BRDF importance sampling, Fresnel, recursive tracing, Russian roulette, throughput accumulation, radiance estimator |
 | 6 | Real-time integration | Adaptive sampling, progressive accumulation, backend migration (OpenGL → Vulkan/CUDA-OptiX) |
 | 7 | Global illumination | Unbiased Monte Carlo GI, MIS, caustics, area lights, shadows, next-event estimation, importance-sampled IBL |
@@ -89,10 +89,10 @@ Phases 0–6 deliberately contain no global illumination — they establish a co
 | Tangent-space normal mapping | Per-vertex tangent (glTF-supplied only — fails clearly if absent, no MikkTSpace generation yet); 3-channel normal map blended with a bump-map-derived detail normal (UV-space central-difference height gradient) | Surface micro-detail without extra geometry; the bump blend adds fine detail beyond the base normal map's resolution | 2 |
 | Basic metallic-roughness PBR | Base colour/metallic/roughness (glTF slots) plus bump and specular maps (project-specific, beyond glTF's standard channels); Lambertian diffuse + Schlick-Fresnel specular (F0 = mix(specular, base colour, metallic)) against one fixed test light — no importance sampling; the authored AO map is multiplied in as a blanket occlusion term | Validates geometry/texture/material data end-to-end against real assets before the full BSDF stack lands in Phase 5 | 2 |
 | BVH acceleration | Bounding volume hierarchy over scene primitives (SAH-built) | Makes ray-scene intersection sub-linear; required before recursion is affordable | 4 |
-| Punctual direct lighting | Direct analytic evaluation of point/directional lights — no visibility rays, no NEE | Physically-scaled direct lighting before the visibility-ray stack (area lights, shadows, NEE) exists | 4 |
-| IBL (prefiltered) | Irradiance map (diffuse) + prefiltered specular mip chain + split-sum BRDF LUT, sampled directly at shading time, no runtime importance sampling | Real-time-affordable image-based lighting without per-frame Monte Carlo integration | 4 |
-| Screen-space AO | Depth-reconstructed hemisphere kernel, separable blur | Real-time-affordable occlusion approximation before visibility rays exist | 4 |
-| Energy conservation | Furnace test / normalisation checks on every BSDF | A surface must never reflect more energy than it received — checked as soon as direct lighting first exercises a material, before recursive/GI complexity could mask a non-conserving BRDF | 4 |
+| Punctual direct lighting | Direct analytic evaluation of point/directional lights (Cook-Torrance GGX: normal distribution, Smith height-correlated visibility, Schlick Fresnel) — no visibility rays, no NEE. Shares its BRDF with IBL specular below, so direct and ambient specular stay consistent | Physically-scaled direct lighting before the visibility-ray stack (area lights, shadows, NEE) exists | 4 |
+| IBL (prefiltered) | SH-9 diffuse irradiance (Ramamoorthi & Hanrahan 2001, no texture) + GGX-prefiltered specular mip chain (Karis 2013) + analytic split-sum BRDF approximation (Lazarov 2013 polynomial fit — no baked LUT texture/bake pass), sampled directly at shading time, no runtime importance sampling | Real-time-affordable image-based lighting without per-frame Monte Carlo integration | 4 |
+| Multi-scatter energy compensation | Multiplicative compensation factor (Turquin 2019) reusing the split-sum DFG (scale, bias) output — no extra texture/pass — applied to both punctual and IBL specular | Single-scatter split-sum/analytic GGX loses energy at high roughness (visibly darkens rough conductors); compensates without a second multi-scatter BRDF model | 4 |
+| Energy conservation | Furnace test (`tools/furnace_test.cpp`): Monte Carlo hemisphere integration of the full BRDF under uniform incident radiance, swept over roughness/metallic | A surface must never reflect more energy than it received — checked as soon as direct lighting first exercises a material, before recursive/GI complexity could mask a non-conserving BRDF | 4 |
 | Area lights | Emissive geometry sampled by solid angle | Physically grounded light sources instead of point/directional hacks | 7 |
 | Shadows / soft shadows | Visibility rays to sampled light points; softness from light area and sample count | Direct lighting must be occluded correctly once secondary/visibility rays exist | 7 |
 | Next-event estimation | Explicit light sampling at each shading point, rather than relying on a bounce to find it | Removes most of the variance from direct lighting | 7 |
@@ -115,7 +115,7 @@ Phases 0–6 deliberately contain no global illumination — they establish a co
 
 ## 3. AOV reference
 
-Arbitrary output variables exposed via the AOV selector (§2, Phase 2), beyond the composited beauty pass. Availability is phase-gated — an AOV appears only once the phase producing its underlying data lands. AO has three independent sources, not a single supersession chain: AO (baked), from an authored texture, lands earliest at Phase 2 and stays; AO (screen-space) at Phase 4 is a real-time approximation, explicitly superseded — not merely joined — by AO (ray-traced) once visibility rays exist at Phase 7; see the AO rows below.
+Arbitrary output variables exposed via the AOV selector (§2, Phase 2), beyond the composited beauty pass. Availability is phase-gated — an AOV appears only once the phase producing its underlying data lands. AO has two independent sources, not a single supersession chain: AO (baked), from an authored texture, lands earliest at Phase 2 and stays — it also becomes the modulating term for Phase 4's ambient/IBL contribution, its first physically meaningful role now that an ambient term exists to occlude — and is explicitly superseded, not merely joined, by AO (ray-traced) once visibility rays exist at Phase 7 (no screen-space AO stage exists in this pipeline: a baked AO pass already covers the real-time case). See the AO rows below.
 
 | AOV | Category | Mechanism | Role / why it matters | Phase |
 |---|---|---|---|---|
@@ -139,11 +139,11 @@ Arbitrary output variables exposed via the AOV selector (§2, Phase 2), beyond t
 | Direct diffuse | Lighting | NEE-sampled direct lighting, diffuse term only | Isolates direct diffuse from specular and indirect | 7 |
 | Direct specular | Lighting | NEE-sampled direct lighting, specular term only | Isolates direct specular contribution | 7 |
 | Shadow / occlusion mask | Lighting | Per-light visibility-ray result | Debug shadow correctness independent of shading | 7 |
-| AO (screen-space) | Lighting | Depth-reconstructed hemisphere kernel, separable blur | Real-time compositing/look-dev darkening term; biased, no ray dependency | 4 |
-| AO (ray-traced) | Lighting | Ray-traced, short-range cosine-weighted hemisphere occlusion, light-independent | Ground-truth occlusion once BVH/visibility rays exist; supersedes the Phase 4 screen-space approximation rather than extending it | 7 |
-| Index of refraction (IOR) | Transport | Per-material IOR (dielectric η, or complex η+ik for conductors) evaluated at the hit point | Isolates the raw refractive-index input driving Fresnel/transmission, independent of the reflectance curve it produces; becomes wavelength-dependent once Phase 8's spectral dispersion lands | 4 |
-| Fresnel/reflectance term | Transport | Schlick/full dielectric-conductor Fresnel evaluated at the hit point | Debug grazing-angle reflectance behaviour in isolation | 4 |
-| Bounce-count heatmap | Transport | Path depth at termination, per pixel | Debug Russian roulette/termination behaviour | 4 |
+| IBL / ambient (RGB) | Lighting | SH-9 diffuse irradiance + prefiltered-specular-cubemap contribution, AO-modulated, no direct lights; diffuse albedo is excluded (shown as if white) so this reads as light arriving, not the object's colour under ambient light — specular keeps the real F0, a physical reflectance property rather than albedo | Isolates the Phase 4 ambient term from direct lighting; the visual check that AO's re-scoped role and the SH/prefiltered-cubemap result look physically plausible | 4 |
+| AO (ray-traced) | Lighting | Ray-traced, short-range cosine-weighted hemisphere occlusion, light-independent | Ground-truth occlusion once BVH/visibility rays exist; supersedes the Phase 2 baked AO's ambient-occlusion role rather than extending it | 7 |
+| Index of refraction (IOR) | Transport | Per-material IOR (dielectric η, or complex η+ik for conductors) evaluated at the hit point | Isolates the raw refractive-index input driving Fresnel/transmission, independent of the reflectance curve it produces; becomes wavelength-dependent once Phase 8's spectral dispersion lands | 5 |
+| Fresnel/reflectance term | Transport | Schlick Fresnel evaluated at the hit point's actual view angle | Debug grazing-angle reflectance behaviour in isolation | 4 |
+| Bounce-count heatmap | Transport | Path depth at termination, per pixel | Debug Russian roulette/termination behaviour | 5 |
 | Variance/noise heatmap | Real-time | Per-pixel estimator variance | Shows the adaptive sampler where the image hasn't converged | 6 |
 | Sample-count heatmap | Real-time | Per-pixel accumulated sample count | Shows where the adaptive sampler is spending budget | 6 |
 | Indirect diffuse | Global illumination | Recursive-bounce contribution, diffuse term | Isolates indirect diffuse from direct lighting | 7 |
@@ -159,7 +159,7 @@ Arbitrary output variables exposed via the AOV selector (§2, Phase 2), beyond t
 | HUD GPU timing | Phase 1's per-pass GPU timing uses OpenGL timer query objects; the Phase 6 backend migration to Vulkan/CUDA-OptiX needs an equivalent timestamp mechanism, not yet decided. |
 | Spectral rendering cost | Hero-wavelength sampling multiplies the sample budget — is full spectral rendering reserved for offline validation renders, with an RGB approximation used elsewhere? |
 | Texture/mesh compression | BC6H vs ASTC for compressed linear HDR textures, and whether Draco/meshopt mesh compression is worth the decode cost. |
-| IOR/Fresnel/bounce-count AOV availability | §3 tags Index of refraction, Fresnel/reflectance term, and Bounce-count heatmap at Phase 4, but their underlying BSDF/Fresnel machinery (§2) now lands at Phase 5. Unresolved whether these AOVs should be exposed early — Phase 4's punctual lighting + prefiltered IBL can still evaluate a per-material IOR/Fresnel term and Russian-roulette-free bounce count — or deferred until the real Phase 5 BSDF stack exists. |
+| IOR/Fresnel/bounce-count AOV availability | Resolved: Fresnel/reflectance is exposed at Phase 4 (Schlick Fresnel is already evaluated for both punctual and IBL specular once GGX lands this phase). IOR and Bounce-count heatmap move to Phase 5 — no per-material IOR field exists yet (Phase 4 only has the F0 baked into `uSpecular`/`uBaseColorFactor`), and there is no recursion/bounce count to visualize until Phase 5's recursive tracing. |
 
 ## 5. References
 
@@ -174,6 +174,11 @@ Arbitrary output variables exposed via the AOV selector (§2, Phase 2), beyond t
 - Kulla, C., Conty, A. (2017). Revisiting physically based shading at Imageworks — production spectral rendering.
 - Debevec, P. (1998). Rendering synthetic objects into real scenes — HDR image-based lighting.
 - OpenEXR / Academy Software Foundation technical documentation — linear HDR pipeline, exposure.
-- Karis, B. (2013). Real Shading in Unreal Engine 4 — practical real-time PBR and importance sampling.
+- Karis, B. (2013). Real Shading in Unreal Engine 4 — practical real-time PBR, split-sum IBL, and importance sampling.
+- Wald, I. (2007). On fast Construction of SAH-based Bounding Volume Hierarchies — the BVH build strategy behind Phase 4's `Bvh` (binned SAH, CPU, one-time, static scene).
+- Ramamoorthi, R., Hanrahan, P. (2001). An Efficient Representation for Irradiance Environment Maps — the SH-9 diffuse IBL projection (`sh_irradiance.h`).
+- Heitz, E. (2014). Understanding the Masking-Shadowing Function in Microfacet-Based BRDFs — the Smith height-correlated visibility term used in Phase 4's Cook-Torrance GGX.
+- Lazarov, D. (2013). Getting More Physically Based Reflectance — the analytic split-sum DFG polynomial approximation used in place of a baked BRDF LUT.
+- Turquin, E. (2019). Practical multiple scattering compensation for microfacet models — the multiplicative energy-compensation factor applied to both punctual and IBL specular.
 - Bitterli, B. et al. (2020). Spatiotemporal reservoir resampling for real-time ray tracing (ReSTIR) — forward reference for the real-time GI open question.
 - Sobel filtering — edge-detection AOV computed from Luminance (§3) — arXiv:2601.16806.

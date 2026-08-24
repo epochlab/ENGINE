@@ -3,6 +3,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <glm/glm.hpp>
 
@@ -10,8 +11,8 @@
 // known set of flat-ish config fields (scene.json/profile.json) — not a
 // general JSON parser, same "just enough" philosophy as
 // gltf_loader.cpp's extrasTextureIndex helper. Handles top-level and
-// one-level-nested numbers/strings/vec3 arrays; no arrays-of-objects, no
-// arbitrary nesting depth.
+// one-level-nested numbers/strings/vec3 arrays, and one flat array of
+// objects (findObjectArrayBodies); no arbitrary nesting depth.
 namespace engine::config::json {
 
 [[nodiscard]] std::optional<std::string> readFile(const std::string& path);
@@ -30,5 +31,12 @@ namespace engine::config::json {
 // filmBack/light) so a nested field name can't collide with a top-level
 // one of the same name. Returns an empty view if not found.
 [[nodiscard]] std::string_view findObjectBody(std::string_view text, std::string_view key);
+
+// Locates "key": [ {...}, {...}, ... ] and returns each top-level
+// object's body (same substring convention as findObjectBody, one per
+// array element, in order). Returns an empty vector if the key is
+// missing or its value isn't an array.
+[[nodiscard]] std::vector<std::string_view> findObjectArrayBodies(std::string_view text,
+                                                                    std::string_view key);
 
 }  // namespace engine::config::json

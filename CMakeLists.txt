@@ -49,14 +49,19 @@ add_executable(engine
     src/gfx/shader_program.cpp
     src/gfx/mesh.cpp
     src/gfx/texture.cpp
+    src/gfx/hdr_image.cpp
+    src/gfx/cubemap_texture.cpp
+    src/gfx/env_prefilter_pass.cpp
     src/gfx/hdr_framebuffer.cpp
     src/gfx/post_process_pass.cpp
     src/gfx/ocio_display_transform.cpp
+    src/scene/bvh.cpp
     src/scene/camera.cpp
     src/scene/cgltf_impl.cpp
     src/scene/debug_camera_controller.cpp
     src/scene/frustum.cpp
     src/scene/gltf_loader.cpp
+    src/scene/sh_irradiance.cpp
     src/config/json_scan.cpp
     src/config/profile_config.cpp
     src/config/scene_config.cpp
@@ -85,3 +90,16 @@ target_link_libraries(test_pattern PRIVATE OpenEXR::OpenEXR Imath::Imath)
 add_executable(downsample tools/downsample.cpp)
 target_compile_options(downsample PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(downsample PRIVATE OpenEXR::OpenEXR Imath::Imath)
+
+# Headless correctness checks (Phase 4) -- no test framework exists in
+# this repo yet, so these follow test_pattern/downsample's standalone-CLI
+# convention: non-zero exit on failure.
+add_executable(bvh_validate tools/bvh_validate.cpp src/scene/bvh.cpp)
+target_include_directories(bvh_validate PRIVATE include)
+target_compile_options(bvh_validate PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(bvh_validate PRIVATE glm::glm)
+
+add_executable(furnace_test tools/furnace_test.cpp src/scene/sh_irradiance.cpp)
+target_include_directories(furnace_test PRIVATE include)
+target_compile_options(furnace_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(furnace_test PRIVATE glm::glm)

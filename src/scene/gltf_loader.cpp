@@ -3,6 +3,7 @@
 #include <cgltf.h>
 
 #include <charconv>
+#include <cstddef>
 #include <iostream>
 #include <optional>
 #include <string>
@@ -86,12 +87,28 @@ glm::mat4 localNodeTransform(const cgltf_node* node) {
     return glm::make_mat4(local);
 }
 
+// Appends this primitive's triangles to outWorldTriangles, each vertex
+// baked to world space by transform -- the BVH (bvh.h) operates on
+// world-space triangles, not the model-space data Mesh uploads to the GPU.
+void appendWorldTriangles(const std::vector<engine::gfx::Vertex>& vertices,
+                           const std::vector<unsigned int>& indices, const glm::mat4& transform,
+                           std::vector<Triangle>& outWorldTriangles) {
+    for (std::size_t i = 0; i + 2 < indices.size(); i += 3) {
+        const auto toWorld = [&](unsigned int index) {
+            return glm::vec3(transform * glm::vec4(vertices[index].position, 1.0F));
+        };
+        outWorldTriangles.push_back(
+            Triangle{toWorld(indices[i]), toWorld(indices[i + 1]), toWorld(indices[i + 2])});
+    }
+}
+
 // Builds one MeshInstance's Vertex/index arrays and Material from a
 // single triangle primitive. Fails clearly (nullopt) rather than
 // substituting a placeholder for a primitive this loader doesn't
 // support (non-triangle mode, missing attributes/material/textures).
 std::optional<MeshInstance> loadPrimitive(const cgltf_data* data, const cgltf_primitive& prim,
-                                           const glm::mat4& transform, const std::string& dir) {
+                                           const glm::mat4& transform, const std::string& dir,
+                                           std::vector<Triangle>& outWorldTriangles) {
     if (prim.type != cgltf_primitive_type_triangles) {
         std::cerr << "loadGltf: skipping non-triangle primitive\n";
         return std::nullopt;
@@ -171,6 +188,8 @@ std::optional<MeshInstance> loadPrimitive(const cgltf_data* data, const cgltf_pr
         std::move(*ao),
     };
 
+    appendWorldTriangles(vertices, indices, transform, outWorldTriangles);
+
     return MeshInstance{
         engine::gfx::Mesh(vertices, indices),
         std::move(material),
@@ -180,7 +199,7 @@ std::optional<MeshInstance> loadPrimitive(const cgltf_data* data, const cgltf_pr
 
 bool walkNodes(const cgltf_data* data, cgltf_node* const* nodes, cgltf_size count,
                const glm::mat4& parentTransform, const std::string& dir,
-               std::vector<MeshInstance>& instances) {
+               std::vector<MeshInstance>& instances, std::vector<Triangle>& worldTriangles) {
     for (cgltf_size ni = 0; ni < count; ++ni) {
         const cgltf_node* node = nodes[ni];
         const glm::mat4 world = parentTransform * localNodeTransform(node);
@@ -188,7 +207,7 @@ bool walkNodes(const cgltf_data* data, cgltf_node* const* nodes, cgltf_size coun
         if (node->mesh != nullptr) {
             for (cgltf_size pi = 0; pi < node->mesh->primitives_count; ++pi) {
                 std::optional<MeshInstance> instance =
-                    loadPrimitive(data, node->mesh->primitives[pi], world, dir);
+                    loadPrimitive(data, node->mesh->primitives[pi], world, dir, worldTriangles);
                 if (!instance.has_value()) {
                     return false;
                 }
@@ -196,7 +215,8 @@ bool walkNodes(const cgltf_data* data, cgltf_node* const* nodes, cgltf_size coun
             }
         }
 
-        if (!walkNodes(data, node->children, node->children_count, world, dir, instances)) {
+        if (!walkNodes(data, node->children, node->children_count, world, dir, instances,
+                       worldTriangles)) {
             return false;
         }
     }
@@ -228,7 +248,7 @@ std::optional<LoadedModel> loadGltf(const std::string& path) {
     const std::string dir = dirOf(path);
     const bool ok = data->scene != nullptr &&
                     walkNodes(data, data->scene->nodes, data->scene->nodes_count, glm::mat4(1.0F),
-                              dir, model.instances);
+                              dir, model.instances, model.worldTriangles);
 
     cgltf_free(data);
 
