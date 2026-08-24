@@ -125,6 +125,7 @@ Arbitrary output variables exposed via the AOV selector (§2, Phase 2), beyond t
 | HSV | Utility | Colour-space transform of the beauty pass | Isolates hue/saturation shifts a pure RGB view can hide | 1 |
 | Luminance | Utility | Photometric luminance (Rec. 709/2020 channel weights) of the beauty pass | Isolates perceived brightness from colour — catches exposure/contrast issues a per-channel RGB view can hide | 1 |
 | Sobel / edge | Utility | 3×3 Sobel gradient kernel (Gx/Gy magnitude) applied to the Luminance AOV | Cheap edge/gradient signal, computed once as an AOV rather than duplicated per-consumer; backs the agent retina's Tier 2 fidelity level (`agent.md` §3) | 1 |
+| Gabor | Utility | 4-orientation Gabor kernel bank (0/45/90/135°) applied to the Luminance AOV, max response across orientations | Directional edge/texture response Sobel's isotropic magnitude can't distinguish | 1 |
 | World position (P) | Utility | Ray-hit world-space coordinate | Debugging geometry/UV placement independent of shading | 2 |
 | UV coordinates | Utility | Per-vertex UV interpolated at the hit point | Visualizes the texture-space mapping directly — catches a bad unwrap by eye | 2 |
 | Normals (shading) | Material | Interpolated, normal-mapped surface normal | The normal actually used in shading, isolated from lighting | 2 |
