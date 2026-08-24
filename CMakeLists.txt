@@ -54,12 +54,17 @@ add_executable(engine
     src/gfx/ocio_display_transform.cpp
     src/scene/camera.cpp
     src/scene/cgltf_impl.cpp
+    src/scene/debug_camera_controller.cpp
     src/scene/frustum.cpp
     src/scene/gltf_loader.cpp
+    src/config/json_scan.cpp
+    src/config/profile_config.cpp
+    src/config/scene_config.cpp
     src/debug/system_info.cpp
     src/debug/frame_stats.cpp
     src/debug/gpu_timer.cpp
     src/debug/memory_tracker.cpp
+    src/debug/histogram.cpp
     src/debug/hud_overlay.cpp
     ${IMGUI_SOURCES})
 target_include_directories(engine PRIVATE include ${IMGUI_DIR} ${IMGUI_DIR}/backends ${CGLTF_DIR})
