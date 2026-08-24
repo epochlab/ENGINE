@@ -6,9 +6,10 @@ namespace engine::gfx {
 
 // Owns one FBO with a GL_RGBA16F color texture attachment and a depth
 // renderbuffer attachment, move-only. Depth is a renderbuffer, not a
-// sampled texture: nothing in Phase 0 reads depth back (Phase 3's AOV
-// selector is the first plausible consumer) — a renderbuffer is the
-// simplest thing that satisfies the actual need.
+// sampled texture — it's read back once per orbit-click via sampleDepth()
+// (glReadPixels works against a bound renderbuffer attachment exactly
+// like a texture one), not every frame, so a renderbuffer remains the
+// simplest attachment that satisfies the actual need.
 class HdrFramebuffer {
 public:
     // width/height are framebuffer-pixel dimensions (e.g. from
@@ -29,6 +30,10 @@ public:
     void bind() const;
 
     [[nodiscard]] unsigned int colorTexture() const { return colorTexture_; }
+
+    // Reads back the depth value at (x, y) in framebuffer pixels — for
+    // the debug orbit camera's click-to-pick pivot, not a per-frame call.
+    [[nodiscard]] float sampleDepth(int x, int y) const;
 
 private:
     void createAttachments(int width, int height);

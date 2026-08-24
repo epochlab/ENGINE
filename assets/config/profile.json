@@ -1,0 +1,14 @@
+{
+    "position": [0.0, 0.0, 3.0],
+    "yawDegrees": 0.0,
+    "pitchDegrees": 0.0,
+    "filmBack": { "widthMm": 36.0, "heightMm": 24.0 },
+    "focalLengthMm": 70.0,
+    "nearClip": 0.1,
+    "farClip": 100.0,
+    "aperture": 2.8,
+    "shutterSeconds": 0.008,
+    "iso": 100.0,
+    "flySpeedMetersPerSecond": 3.0,
+    "orbitSensitivityDegPerPixel": 0.25
+}
