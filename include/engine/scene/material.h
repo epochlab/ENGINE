@@ -6,10 +6,7 @@
 
 namespace engine::scene {
 
-// Metallic-roughness material, extended with Bump/Specular/AO -- the
-// raw texture set this project's assets ship, beyond glTF's own
-// pbrMetallicRoughness slots (see gltf_loader.cpp for how the latter
-// two are read out of the material's `extras`).
+// Metallic-roughness material, extended with Bump/Specular/AO -- the raw texture set this project's assets ship, beyond glTF's own pbrMetallicRoughness slots (see gltf_loader.cpp for how the latter two are read out of the material's `extras`).
 struct Material {
     glm::vec4 baseColorFactor;
     float metallicFactor;

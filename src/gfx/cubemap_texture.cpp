@@ -80,8 +80,7 @@ void CubemapTexture::attachFaceForWrite(unsigned int fbo, int face, int mip) con
     GL_CALL(glViewport(0, 0, size, size));
 }
 
-// Not wrapped in GL_CALL: mirrors Texture::bind, called every frame once
-// pbr.frag samples the prefiltered specular cubemap.
+// Not wrapped in GL_CALL: mirrors Texture::bind, called every frame once pbr.frag samples the prefiltered specular cubemap.
 void CubemapTexture::bind(unsigned int unit) const {
     glActiveTexture(GL_TEXTURE0 + unit);
     glBindTexture(GL_TEXTURE_CUBE_MAP, id_);

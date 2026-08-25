@@ -11,23 +11,16 @@ namespace {
 
 constexpr int kBinCount = 12;
 constexpr int kMaxLeafTriangles = 4;
-// Hard cap on leaf size regardless of what the SAH cost model says --
-// bounds worst-case traversal cost for pathological inputs (e.g. many
-// triangles sharing centroids) where binning can't find a useful split.
+// Hard cap on leaf size regardless of what the SAH cost model says -- bounds worst-case traversal cost for pathological inputs (e.g. many triangles sharing centroids) where binning can't find a useful split.
 constexpr int kHardMaxLeafTriangles = 16;
 constexpr float kTraversalCost = 1.0F;
 constexpr float kIntersectionCost = 1.0F;
-// Hard cap on recursion depth. A locally SAH-optimal split can still be
-// heavily lopsided (e.g. peeling off a handful of spatially distant
-// outlier triangles from a large remaining cluster, repeatedly) --
-// geometrically valid, but on real mesh data this measurably produces a
-// near-linear-chain tree whose *total* build cost (each level still
-// scanning an O(n)-sized remaining range) is quadratic, not the O(n log
-// n) a balanced split assumes. Capping depth forces a leaf once it's
-// reached, bounding worst-case build cost to O(n * kMaxDepth); it also
-// keeps tree depth safely under Bvh::intersect's fixed 64-slot traversal
-// stack.
+// Hard cap on recursion depth. A locally SAH-optimal split can still be heavily lopsided (e.g. peeling off a handful of spatially distant outlier triangles from a large remaining cluster, repeatedly) -- geometrically valid, but on real mesh data this measurably produces a near-linear-chain tree whose *total* build cost (each level still scanning an O(n)-sized remaining range) is quadratic, not the O(n log n) a balanced split assumes. Capping depth forces a leaf once it's reached, bounding worst-case build cost to O(n * kMaxDepth); it also keeps tree depth safely under Bvh::intersect's fixed 64-slot traversal stack.
 constexpr int kMaxDepth = 40;
+// Bvh::intersect's fixed traversal-stack size (see its own declaration) -- named here, not just there, so the static_assert below has one thing to check rather than a bare literal repeated in a comment.
+constexpr int kTraversalStackSize = 64;
+static_assert(kMaxDepth < kTraversalStackSize,
+              "kMaxDepth must stay under Bvh::intersect's traversal stack size");
 
 struct Aabb {
     glm::vec3 min{std::numeric_limits<float>::max()};
@@ -58,13 +51,7 @@ Aabb triangleBounds(const Triangle& t) {
     return b;
 }
 
-// Moller-Trumbore ray-triangle intersection. No backface culling (det
-// may be negative). Known edge case, accepted rather than solved: a ray
-// exactly parallel to an axis with its origin exactly on that axis's
-// bounding plane can produce a 0*inf NaN in the slab test below --
-// vanishingly unlikely for the random/synthetic rays this BVH is
-// exercised with (tools/bvh_validate.cpp), not worth the extra
-// robust-traversal machinery this phase.
+// Moller-Trumbore ray-triangle intersection. No backface culling (det may be negative). Known edge case, accepted rather than solved: a ray exactly parallel to an axis with its origin exactly on that axis's bounding plane can produce a 0*inf NaN in the slab test below -- vanishingly unlikely for the random/synthetic rays this BVH is exercised with (tools/bvh_validate.cpp), not worth the extra robust-traversal machinery this phase.
 bool intersectTriangle(const Ray& ray, const Triangle& tri, float& outT) {
     constexpr float kEpsilon = 1e-8F;
     const glm::vec3 edge1 = tri.v1 - tri.v0;
@@ -93,6 +80,7 @@ bool intersectTriangle(const Ray& ray, const Triangle& tri, float& outT) {
     return true;
 }
 
+// Carries the same 0*inf NaN hazard intersectTriangle documents above: a ray exactly parallel to an axis with its origin exactly on that axis's bounding plane. Same accepted-risk reasoning applies here -- vanishingly unlikely for this BVH's exercised inputs, not worth robust-traversal machinery this phase.
 bool intersectAabb(const Ray& ray, const glm::vec3& invDir, const glm::vec3& boundsMin,
                     const glm::vec3& boundsMax, float& outTNear) {
     const glm::vec3 t0 = (boundsMin - ray.origin) * invDir;
@@ -106,9 +94,7 @@ bool intersectAabb(const Ray& ray, const glm::vec3& invDir, const glm::vec3& bou
     return tNear <= tFar;
 }
 
-// Mutable state threaded through the recursive build -- kept out of Bvh
-// itself so Bvh::build's signature/members stay purely about the
-// finished tree.
+// Mutable state threaded through the recursive build -- kept out of Bvh itself so Bvh::build's signature/members stay purely about the finished tree.
 struct BuildContext {
     const std::vector<Triangle>* triangles;
     std::vector<Aabb> triBounds;
@@ -133,10 +119,7 @@ Aabb centroidRangeBounds(const BuildContext& ctx, int start, int end) {
     return b;
 }
 
-// Median split on the largest-extent axis: always produces a valid
-// start < mid < end partition regardless of how degenerate the
-// centroid distribution is, guaranteeing the recursion terminates.
-// Used as a fallback when binned SAH can't find a beneficial split.
+// Median split on the largest-extent axis: always produces a valid start < mid < end partition regardless of how degenerate the centroid distribution is, guaranteeing the recursion terminates. Used as a fallback when binned SAH can't find a beneficial split.
 int medianSplit(BuildContext& ctx, int start, int end) {
     const Aabb centroidBounds = centroidRangeBounds(ctx, start, end);
     const glm::vec3 extent = centroidBounds.max - centroidBounds.min;
@@ -245,9 +228,7 @@ int buildRecursive(BuildContext& ctx, int start, int end, int depth) {
             });
         mid = static_cast<int>(middleIt - prims->begin());
         if (mid == start || mid == end) {
-            // All centroids landed on one side of the chosen bin boundary
-            // (can happen with heavily clustered data) -- fall back to a
-            // guaranteed-valid split rather than recursing on the same range.
+            // All centroids landed on one side of the chosen bin boundary (can happen with heavily clustered data) -- fall back to a guaranteed-valid split rather than recursing on the same range.
             mid = medianSplit(ctx, start, end);
         }
     } else {
@@ -284,7 +265,7 @@ Bvh Bvh::build(std::vector<Triangle> triangles) {
     }
     ctx.primIndices = &bvh.primIndices_;
     ctx.nodes = &bvh.nodes_;
-    bvh.nodes_.reserve(static_cast<std::size_t>(2 * triCount));
+    bvh.nodes_.reserve(static_cast<std::size_t>(triCount) * 2);
 
     buildRecursive(ctx, 0, triCount, 0);
     return bvh;
@@ -296,10 +277,8 @@ std::optional<Hit> Bvh::intersect(const Ray& ray) const {
     }
     const glm::vec3 invDir(1.0F / ray.dir.x, 1.0F / ray.dir.y, 1.0F / ray.dir.z);
 
-    // Fixed-size traversal stack: with a leaf threshold of
-    // kMaxLeafTriangles, tree depth stays well within this bound for
-    // any triangle count this engine loads scenes at.
-    std::array<int, 64> stack{};
+    // Fixed-size traversal stack: with a leaf threshold of kMaxLeafTriangles, tree depth stays well within this bound for any triangle count this engine loads scenes at.
+    std::array<int, kTraversalStackSize> stack{};
     int stackSize = 0;
     stack[stackSize++] = 0;
 
@@ -320,7 +299,9 @@ std::optional<Hit> Bvh::intersect(const Ray& ray) const {
 
         if (node.isLeaf()) {
             for (int i = 0; i < node.triangleCount; ++i) {
-                const int triIdx = primIndices_[static_cast<std::size_t>(node.firstTriangle + i)];
+                const int triIdx =
+                    primIndices_[static_cast<std::size_t>(node.firstTriangle) +
+                                 static_cast<std::size_t>(i)];
                 float t = 0.0F;
                 if (intersectTriangle(localRay, triangles_[static_cast<std::size_t>(triIdx)], t)) {
                     localRay.tMax = t;
