@@ -48,9 +48,7 @@ Mesh::Mesh(const std::vector<Vertex>& vertices, const std::vector<unsigned int>&
     GL_CALL(glVertexAttribPointer(3, 4, GL_FLOAT, GL_FALSE, sizeof(Vertex),
                                    reinterpret_cast<const void*>(offsetof(Vertex, tangent))));
 
-    // GL_ELEMENT_ARRAY_BUFFER's binding is VAO state, so it must survive
-    // the VAO unbind below; GL_ARRAY_BUFFER's binding isn't VAO state but
-    // is unbound too for symmetry.
+    // GL_ELEMENT_ARRAY_BUFFER's binding is VAO state, so it must survive the VAO unbind below; GL_ARRAY_BUFFER's binding isn't VAO state but is unbound too for symmetry.
     GL_CALL(glBindVertexArray(0));
     GL_CALL(glBindBuffer(GL_ARRAY_BUFFER, 0));
 }

@@ -49,8 +49,7 @@ void DebugCameraController::applyFlyInput(const engine::platform::Window& window
         return;
     }
 
-    // right is horizontal even when forward is pitched up/down:
-    // cross((fx,fy,fz), (0,1,0)) = (-fz, 0, fx), no y component.
+    // right is horizontal even when forward is pitched up/down: cross((fx,fy,fz), (0,1,0)) = (-fz, 0, fx), no y component.
     const glm::vec3 forward = snapshot().forward();
     const glm::vec3 right = glm::normalize(glm::cross(forward, kWorldUp));
     const float distance = flySpeedMetersPerSecond_ * dtSeconds;
@@ -91,24 +90,22 @@ void DebugCameraController::applyOrbitDelta(float dxPixels, float dyPixels) {
     offset = glm::vec3(glm::rotate(glm::mat4(1.0F), glm::radians(yawDeltaDegrees), kWorldUp) *
                         glm::vec4(offset, 0.0F));
 
-    // Pole-avoidance guard: skip the pitch rotation if it would push the
-    // offset within ~8 degrees of straight up/down, where yaw becomes
-    // degenerate (matches KODAK's orbit convention).
-    const float pitchDeltaDegrees = -dyPixels * orbitSensitivityDegPerPixel_;
-    const glm::vec3 right = glm::normalize(glm::cross(kWorldUp, offset));
-    const glm::vec3 candidate = glm::vec3(
-        glm::rotate(glm::mat4(1.0F), glm::radians(pitchDeltaDegrees), right) *
-        glm::vec4(offset, 0.0F));
+    // Outer guard (0.999) only prevents cross(kWorldUp, offset)/normalize from degenerating into a NaN at the exact pole. Acceptance of the rotated result is re-checked below at the original 0.99 tolerance against the candidate, not this pre-rotation offset -- gating on the pre-rotation value alone would let one large dyPixels rotate past the pole in a single step and then permanently reject every subsequent delta, locking pitch input for the rest of the orbit.
     const float offsetLength = glm::length(offset);
-    if (offsetLength > 1e-5F && std::abs(candidate.y / offsetLength) < 0.99F) {
-        offset = candidate;
+    if (offsetLength > 1e-5F && std::abs(offset.y / offsetLength) < 0.999F) {
+        const float pitchDeltaDegrees = -dyPixels * orbitSensitivityDegPerPixel_;
+        const glm::vec3 right = glm::normalize(glm::cross(kWorldUp, offset));
+        const glm::vec3 candidate = glm::vec3(
+            glm::rotate(glm::mat4(1.0F), glm::radians(pitchDeltaDegrees), right) *
+            glm::vec4(offset, 0.0F));
+        if (std::abs(candidate.y / offsetLength) < 0.99F) {
+            offset = candidate;
+        }
     }
 
     position_ = pivot_ + offset;
 
-    // Re-derive yaw/pitch from the new look direction (inverse of
-    // camera.cpp's forwardFromEuler) so resuming WASD fly after orbit is
-    // seamless.
+    // Re-derive yaw/pitch from the new look direction (inverse of camera.cpp's forwardFromEuler) so resuming WASD fly after orbit is seamless.
     const glm::vec3 lookDir = glm::normalize(pivot_ - position_);
     yawDegrees_ = glm::degrees(std::atan2(-lookDir.x, -lookDir.z));
     pitchDegrees_ = glm::clamp(glm::degrees(std::asin(glm::clamp(lookDir.y, -1.0F, 1.0F))),
