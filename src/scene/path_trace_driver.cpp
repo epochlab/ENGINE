@@ -24,11 +24,11 @@ void accumulateInPlace(engine::gfx::HdrImage& runningMean, const engine::gfx::Hd
 
 }  // namespace
 
-PathTraceDriver::PathTraceDriver(const Bvh& bvh,
+PathTraceDriver::PathTraceDriver(const EmbreeAccel& accel,
                                   const std::vector<ShadingTriangle>& shadingTriangles,
                                   const std::vector<MeshInstance>& instances,
                                   const EnvironmentMap& environmentMap)
-    : bvh_(bvh),
+    : accel_(accel),
       shadingTriangles_(shadingTriangles),
       instances_(instances),
       environmentMap_(environmentMap),
@@ -80,7 +80,7 @@ void PathTraceDriver::driverLoop(std::stop_token stopToken) {
         const int passIndex = accumulatedSamples_.load(std::memory_order_relaxed) + 1;
         const auto passStart = std::chrono::steady_clock::now();
         PathTraceResult pass = renderPathTraced(
-            activeRequest->camera, bvh_, shadingTriangles_, instances_, environmentMap_,
+            activeRequest->camera, accel_, shadingTriangles_, instances_, environmentMap_,
             activeRequest->width, activeRequest->height, activeRequest->envRotationRadians,
             activeRequest->showSky, activeRequest->settings, static_cast<std::uint32_t>(passIndex),
             generation_, activeGeneration, threadPool_);

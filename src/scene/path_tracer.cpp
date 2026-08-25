@@ -94,7 +94,7 @@ struct TraceResult {
 // bounce index the radiance-contributing miss lands on (see tracePath).
 enum class PathBucket { Diffuse, SpecularReflection, Refraction };
 
-TraceResult tracePath(const Ray& primaryRay, const Bvh& bvh,
+TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
                        const std::vector<ShadingTriangle>& shadingTriangles,
                        const std::vector<MeshInstance>& instances,
                        const EnvironmentMap& environmentMap, float envRotationRadians,
@@ -167,7 +167,7 @@ TraceResult tracePath(const Ray& primaryRay, const Bvh& bvh,
     bool lastSampleWasTransmission = false;
 
     for (; bounce < settings.maxBounces; ++bounce) {
-        const std::optional<Hit> hit = bvh.intersect(ray);
+        const std::optional<Hit> hit = accel.intersect(ray);
         if (!hit.has_value()) {
             // showSky gates only the primary ray's own miss (the camera seeing the background
             // directly) -- indirect bounces and NEE (below) always sample real environment radiance
@@ -270,7 +270,7 @@ TraceResult tracePath(const Ray& primaryRay, const Bvh& bvh,
                         shadowTerminatorOffset(triangle, hit->u, hit->v) + (geoNormal * kRayEpsilon);
                     const Ray shadowRay{shadowOrigin, lightSample.direction, kRayEpsilon,
                                          std::numeric_limits<float>::max()};
-                    if (!bvh.occluded(shadowRay)) {
+                    if (!accel.occluded(shadowRay)) {
                         const float lightPdf2 = lightSample.pdf * lightSample.pdf;
                         const float bsdfPdf2 = bsdfPdf * bsdfPdf;
                         const float misWeightLight = lightPdf2 / (lightPdf2 + bsdfPdf2);
@@ -367,7 +367,7 @@ engine::gfx::HdrImage makeImage(int width, int height) {
 
 }  // namespace
 
-PathTraceResult renderPathTraced(const Camera& camera, const Bvh& bvh,
+PathTraceResult renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                                   const std::vector<ShadingTriangle>& shadingTriangles,
                                   const std::vector<MeshInstance>& instances,
                                   const EnvironmentMap& environmentMap, int width, int height,
@@ -414,7 +414,7 @@ PathTraceResult renderPathTraced(const Camera& camera, const Bvh& bvh,
                     1.0F -
                     (((static_cast<float>(y) + jitter.y) / static_cast<float>(height)) * 2.0F);
                 const Ray primary = camera.primaryRay(ndcX, ndcY, aspect);
-                const TraceResult trace = tracePath(primary, bvh, shadingTriangles, instances,
+                const TraceResult trace = tracePath(primary, accel, shadingTriangles, instances,
                                                      environmentMap, envRotationRadians, showSky,
                                                      settings, sampler);
                 colorAccum += trace.radiance;

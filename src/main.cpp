@@ -34,9 +34,9 @@
 #include "engine/gfx/shader_program.h"
 #include "engine/gfx/texture.h"
 #include "engine/platform/window.h"
-#include "engine/scene/bvh.h"
 #include "engine/scene/camera.h"
 #include "engine/scene/debug_camera_controller.h"
+#include "engine/scene/embree_accel.h"
 #include "engine/scene/environment_map.h"
 #include "engine/scene/false_color.h"
 #include "engine/scene/gltf_loader.h"
@@ -103,16 +103,16 @@ struct PathTraceTriggerState {
 };
 
 // Everything the render loop touches every frame, plus the one-time-computed state (cached uniform
-// locations, BVH) that must stay alive for the run's duration. A pure aggregate (no user-declared
-// constructors) so initializeApp can return it by value via designated initializers -- each RAII
-// member's own move constructor (already verified elsewhere to correctly transfer GL handles/tracked
-// byte counts) handles the actual transfer.
+// locations, Embree scene) that must stay alive for the run's duration. A pure aggregate (no
+// user-declared constructors) so initializeApp can return it by value via designated initializers --
+// each RAII member's own move constructor (already verified elsewhere to correctly transfer GL
+// handles/tracked byte counts) handles the actual transfer.
 struct AppResources {
     engine::gfx::ShaderProgram edgeFilterShader;
     engine::gfx::ShaderProgram hsvDisplayShader;
     engine::gfx::OcioDisplayTransform ocioTransform;
-    engine::scene::Bvh sceneBvh;               // path tracer scene intersection
-    // stumpModel.shadingTriangles indexes sceneBvh's triangles 1:1, no separate field needed.
+    engine::scene::EmbreeAccel sceneAccel;     // path tracer scene intersection
+    // stumpModel.shadingTriangles indexes sceneAccel's triangles 1:1, no separate field needed.
     engine::scene::EnvironmentMap environmentMap;
     engine::scene::LoadedModel stumpModel;
     int totalTriangles;
@@ -218,7 +218,7 @@ int setupHsvDisplayShader(const engine::gfx::ShaderProgram& hsvDisplayShader) {
 }
 
 // All one-time startup work: camera/model/shader/environment loading (nullopt on any failure --
-// matches the shader/model/OCIO all-or-nothing gate this replaces), BVH build, and cached
+// matches the shader/model/OCIO all-or-nothing gate this replaces), Embree scene build, and cached
 // uniform-location lookups for the shared edge-filter/HSV shaders. Doesn't wire input callbacks --
 // those capture a stable AppResources& and must be set up by the caller only after this returns (see
 // main()), since a callback capturing a reference into an AppResources that's still about to be moved
@@ -285,14 +285,19 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
 
     engine::scene::EnvironmentMap environmentMap(std::move(*environmentImage));
 
-    const auto bvhBuildStart = std::chrono::steady_clock::now();
-    engine::scene::Bvh sceneBvh = engine::scene::Bvh::build(std::move(stumpModel->worldTriangles));
-    const double bvhBuildMs =
+    const auto accelBuildStart = std::chrono::steady_clock::now();
+    std::optional<engine::scene::EmbreeAccel> sceneAccel =
+        engine::scene::EmbreeAccel::build(std::move(stumpModel->worldTriangles));
+    if (!sceneAccel) {
+        std::cerr << "main: Embree scene build failed, aborting startup\n";
+        return std::nullopt;
+    }
+    const double accelBuildMs =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
-                                                    bvhBuildStart)
+                                                    accelBuildStart)
             .count();
-    std::cout << "Bvh::build: " << sceneBvh.triangleCount() << " triangles, "
-              << sceneBvh.nodeCount() << " nodes, " << bvhBuildMs << " ms\n"
+    std::cout << "EmbreeAccel::build: " << sceneAccel->triangleCount() << " triangles, "
+              << accelBuildMs << " ms\n"
               << std::flush;
 
     const int uFilterModeLoc = setupEdgeFilterShader(shaders->edgeFilterShader);
@@ -302,7 +307,7 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         .edgeFilterShader = std::move(shaders->edgeFilterShader),
         .hsvDisplayShader = std::move(shaders->hsvDisplayShader),
         .ocioTransform = std::move(shaders->ocioTransform),
-        .sceneBvh = std::move(sceneBvh),
+        .sceneAccel = std::move(*sceneAccel),
         .environmentMap = std::move(environmentMap),
         .stumpModel = std::move(*stumpModel),
         .totalTriangles = totalTriangles,
@@ -333,7 +338,7 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
                                                                 sceneConfig.maxBounces,
                                                                 sceneConfig.russianRouletteStartBounce},
         // Constructed in main() right after initializeApp() returns -- see path_trace_driver.h's
-        // constructor precondition (its reference members must bind to sceneBvh/environmentMap/
+        // constructor precondition (its reference members must bind to sceneAccel/environmentMap/
         // stumpModel at their final, permanent address, which this designated-initializer
         // expression, still local-variable-based and one AppResources move away from that address,
         // cannot yet guarantee).
@@ -805,13 +810,13 @@ int main() {
                     exitCode = EXIT_FAILURE;
                 } else {
                     // Constructed here, not as part of AppResources's designated-initializer list:
-                    // app (this std::optional<AppResources> local) is where sceneBvh/environmentMap/
+                    // app (this std::optional<AppResources> local) is where sceneAccel/environmentMap/
                     // stumpModel first reach their final, permanent address (initializeApp's own
                     // return-type conversion to std::optional<AppResources> move-constructs once en
                     // route), so this is the first point at which PathTraceDriver's reference members
                     // can safely bind to them -- see path_trace_driver.h's constructor comment.
                     app->pathTraceDriver = std::make_unique<engine::scene::PathTraceDriver>(
-                        app->sceneBvh, app->stumpModel.shadingTriangles, app->stumpModel.instances,
+                        app->sceneAccel, app->stumpModel.shadingTriangles, app->stumpModel.instances,
                         app->environmentMap);
 
                     wireCallbacks(window, *app);

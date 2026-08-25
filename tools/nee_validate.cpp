@@ -4,7 +4,7 @@
 // evaluateBsdf/pdfBsdf, and the BSDF-sampled path's environment hit via sampleBsdf + EnvironmentMap::
 // pdf, MIS-weighted by the power heuristic -- without needing scene geometry/a BVH/GPU resources
 // (Material/MeshInstance require a live GL context to construct, which this headless CLI tool
-// deliberately avoids, same as bvh_validate.cpp/bsdf_validate.cpp/furnace_test.cpp).
+// deliberately avoids, same as embree_validate.cpp/bsdf_validate.cpp/furnace_test.cpp).
 //
 // Reference: a flat, unoccluded surface under a uniform-radiance (L0=1) environment has an exactly
 // computable outgoing radiance, Lo(wo) = integral over the hemisphere of evaluateBsdf(wo,wi)*cos(wi)

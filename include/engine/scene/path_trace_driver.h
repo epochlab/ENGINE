@@ -7,8 +7,8 @@
 #include <thread>
 #include <vector>
 
-#include "engine/scene/bvh.h"
 #include "engine/scene/camera.h"
+#include "engine/scene/embree_accel.h"
 #include "engine/scene/environment_map.h"
 #include "engine/scene/gltf_loader.h"
 #include "engine/scene/path_tracer.h"
@@ -45,17 +45,17 @@ public:
         PathTraceSettings settings;  // samplesPerPixel is "samples per pass", see path_tracer.h
     };
 
-    // bvh/shadingTriangles/instances/environmentMap must already be at their final, permanent
-    // address and must outlive the driver (Bvh has no refit/update API -- the scene is static this
-    // phase) -- held by reference, not copied per-request. Do not construct this as part of the same
-    // aggregate-initialization expression that also constructs those referenced objects (e.g.
-    // AppResources's designated-initializer list): a bare identifier there would still name the
+    // accel/shadingTriangles/instances/environmentMap must already be at their final, permanent
+    // address and must outlive the driver (EmbreeAccel has no refit/update API -- the scene is
+    // static this phase) -- held by reference, not copied per-request. Do not construct this as part
+    // of the same aggregate-initialization expression that also constructs those referenced objects
+    // (e.g. AppResources's designated-initializer list): a bare identifier there would still name the
     // pre-move local, and AppResources's return-type conversion to std::optional<AppResources>
     // move-constructs once more regardless -- either way a reference captured that early would
     // dangle. Construct this only after the referenced object is confirmed at its final address
     // (main.cpp emplaces AppResources::pathTraceDriver, itself a std::optional, right after
     // initializeApp() returns).
-    PathTraceDriver(const Bvh& bvh, const std::vector<ShadingTriangle>& shadingTriangles,
+    PathTraceDriver(const EmbreeAccel& accel, const std::vector<ShadingTriangle>& shadingTriangles,
                      const std::vector<MeshInstance>& instances,
                      const EnvironmentMap& environmentMap);
     ~PathTraceDriver();
@@ -83,7 +83,7 @@ public:
 private:
     void driverLoop(std::stop_token stopToken);
 
-    const Bvh& bvh_;
+    const EmbreeAccel& accel_;
     const std::vector<ShadingTriangle>& shadingTriangles_;
     const std::vector<MeshInstance>& instances_;
     const EnvironmentMap& environmentMap_;
@@ -115,7 +115,7 @@ private:
 
     // Declared last: constructed last (starts driverLoop only once every member above exists),
     // destroyed first (std::jthread's destructor requests a stop and joins before any member above
-    // -- or, per the constructor's own precondition, the objects bvh_/shadingTriangles_/instances_/
+    // -- or, per the constructor's own precondition, the objects accel_/shadingTriangles_/instances_/
     // environmentMap_ reference -- could be invalidated by outer teardown).
     std::jthread thread_;
 };

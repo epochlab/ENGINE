@@ -1,6 +1,6 @@
 # Physically based path tracer
 
-*A CPU, unidirectional Monte Carlo path tracer with real-time progressive display: BVH-accelerated, stochastic BSDF sampling combined with environment-map NEE via MIS, converging interactively behind a thin OpenGL display/HUD layer.*
+*A CPU, unidirectional Monte Carlo path tracer with real-time progressive display: Embree-accelerated, stochastic BSDF sampling combined with environment-map NEE via MIS, converging interactively behind a thin OpenGL display/HUD layer.*
 
 ## Build
 
@@ -9,8 +9,10 @@ C++20, built with CMake. Currently developed against macOS only.
 ### Prerequisites
 
 ```
-brew install cmake glfw glew glm imath openexr opencolorio
+brew install cmake glfw glew glm imath openexr opencolorio embree
 ```
+
+Homebrew's `embree` formula pulls in `tbb` automatically (Embree's own internal parallelism dependency) — no separate install step needed for it.
 
 Dear ImGui is vendored as a git submodule (`third_party/imgui`) — initialise it before configuring:
 
@@ -34,7 +36,7 @@ This produces six targets:
 - `build/engine` — the path tracer
 - `build/test_pattern` — EXR calibration-pattern generator (`tools/test_pattern.cpp`)
 - `build/downsample` — EXR downsampling tool (`tools/downsample.cpp`)
-- `build/bvh_validate` — headless BVH correctness check (`tools/bvh_validate.cpp`)
+- `build/embree_validate` — headless Embree ray-scene intersection correctness check (`tools/embree_validate.cpp`)
 - `build/bsdf_validate` — headless BSDF pdf-normalization and furnace-test check (`tools/bsdf_validate.cpp`)
 - `build/nee_validate` — headless NEE/MIS unbiasedness check against a brute-force reference (`tools/nee_validate.cpp`)
 
@@ -50,11 +52,11 @@ This produces six targets:
 
 ## 1. Pipeline
 
-glTF geometry/materials load once at startup into a CPU-resident scene: per-vertex shading data (`ShadingTriangle`) and world-space triangles feed a binned-SAH `Bvh`; materials keep only CPU `HdrImage` textures, sampled per-ray. An equirectangular HDR environment map loads alongside it, with its own luminance-based importance-sampling CDF for NEE.
+glTF geometry/materials load once at startup into a CPU-resident scene: per-vertex shading data (`ShadingTriangle`) and world-space triangles feed an Intel Embree scene (`EmbreeAccel`); materials keep only CPU `HdrImage` textures, sampled per-ray. An equirectangular HDR environment map loads alongside it, with its own luminance-based importance-sampling CDF for NEE.
 
 Every frame, on any camera/scene-state change, `PathTraceDriver` hands a fresh request to a background thread pool (one worker per hardware core, row-parallel, dynamic scheduling), which restarts progressive accumulation:
 
-- Camera ray generation (pinhole) → BVH intersection
+- Camera ray generation (pinhole) → Embree ray-scene intersection (`rtcIntersect1`/`rtcOccluded1`)
 - BSDF evaluation/sampling (Heitz 2018 GGX VNDF specular, cosine-weighted diffuse, exact dielectric Fresnel + Snell transmission with TIR, Schlick conductor Fresnel) → next-event estimation against the environment map, MIS-combined with BSDF sampling (power heuristic, Veach 1997)
 - Recursive bounce loop with Russian roulette, Chiang/Li/Burley 2019 shadow-terminator-corrected secondary-ray origins
 - Radiance + a full G-buffer/transport-component AOV set accumulated per pass, published as a snapshot the render thread reads lock-free
@@ -65,7 +67,7 @@ The render thread blits whichever AOV is selected through OCIO's display transfo
 
 | Feature | Mechanism | Role / why it matters |
 |---|---|---|
-| Camera / lens | Position/yaw/pitch, film-back + focal length → derived vertical FOV; pinhole primary rays derived directly from this basis | Geometric ground truth the BVH/BSDF math is measured against |
+| Camera / lens | Position/yaw/pitch, film-back + focal length → derived vertical FOV; pinhole primary rays derived directly from this basis | Geometric ground truth the ray-intersection/BSDF math is measured against |
 | Photographic exposure | EV100 from aperture/shutter/ISO (Filament/Frostbite calibration) | Physically meaningful brightness control, independent of arbitrary scene scaling |
 | OpenEXR linear pipeline | `HdrImage`/`loadExr`; all shading/compositing in linear light, OCIO display-encodes only at the final blit | Precondition for correct PBR colour math |
 | Tone-mapping / display transform | OCIO Display/View API (sRGB, Rec.709, Raw), cycled at runtime ('L') | Compresses unbounded HDR radiance into a displayable range without clipping |
@@ -77,9 +79,9 @@ The render thread blits whichever AOV is selected through OCIO's display transfo
 | Camera framing overlays | Letterbox mask, centre crosshair ('K'), 3×3 rule-of-thirds grid, drawn over the viewport | Composition aids that never contaminate the AOV buffers being debugged |
 | AOV selector | Dropdown across the full AOV set (§3), plus R/G/B channel-isolation hotkeys | Isolates one signal at a time for debugging |
 | Live histogram | Per-channel (R/G/B) histogram of the currently displayed image | Catches exposure/clipping and colour-space bugs a single still frame can hide |
-| glTF loading | cgltf; per-primitive vertices baked to world-space triangles/shading data at load time, materials' textures decoded once to `HdrImage` | Standard interchange format; nothing GPU-resident is needed once the CPU BVH/shading data exists |
+| glTF loading | cgltf; per-primitive vertices baked to world-space triangles/shading data at load time, materials' textures decoded once to `HdrImage` | Standard interchange format; nothing GPU-resident is needed once the CPU Embree scene/shading data exists |
 | Tangent-space normal mapping | Per-vertex tangent (glTF-supplied only), Gram-Schmidt re-orthogonalized per-ray | Surface micro-detail without extra geometry |
-| BVH acceleration | Binned-SAH, CPU, built once at load (Wald 2007) | Sub-linear ray-scene intersection, required before recursion is affordable |
+| Ray acceleration | Intel Embree (SIMD BVH build/traversal), CPU, built once at load | Sub-linear ray-scene intersection, required before recursion is affordable |
 | Stochastic BSDF | Lambertian diffuse, GGX microfacet specular, smooth (delta) dielectric transmission via Snell + TIR; three-lobe stochastic selection, one-sample mixture estimator | Materials respond to light with real physical behaviour, including glass |
 | Environment lighting | Equirect HDR map, BSDF-sampled misses + luminance-importance-sampled NEE, MIS-combined | The scene's sole light source — image-based, no punctual/area lights |
 | Russian roulette | Survival probability clamped from running throughput from `russianRouletteStartBounce`, reweighted by `1/p` | Keeps recursion finite without biasing the estimator |
@@ -126,7 +128,7 @@ Unimplemented, in dependency order — each item lands on top of a feature-compl
 3. **Multi-scattering microfacet energy compensation** — The specular lobe is single-scatter GGX only (Heitz, Hanika, d'Eon, Dachsbacher 2016, §5); at high roughness this loses energy compared to a real rough conductor/dielectric, visible as an over-dark specular response. A compensation term or explicit multi-bounce microfacet simulation closes the gap without changing the transport algorithm.
 4. **Spectral upgrade** — Spectral light transport (per-wavelength radiance instead of RGB), hero-wavelength sampling (Wilkie et al. 2014) to keep the sample budget from exploding, spectral materials, spectral dispersion (Cauchy/Sellmeier index of refraction). Likely reserved for offline validation renders given the sample-budget cost, with the current RGB path kept for interactive use.
 5. **Motion blur** — Stochastic sampling of camera/object transforms in time (Cook, Porter, Carpenter 1984, §5), one sample time per path rather than a single frozen instant. Orthogonal to the wavelength axis but sequenced before real-time integration since a per-pixel convergence estimate needs to account for the extra temporal dimension it adds to the integrand.
-6. **Real-time integration** — Adaptive per-pixel sample budget driven by a variance/convergence estimate (today every pass traces every pixel at a fixed `samplesPerPixel`; progressive accumulation already delivers "real-time, converges over time" without it, so this is a refinement, not a gap); texture minification filtering (MIP-mapping, Williams 1983, §5 — textures are currently point/bilinear-sampled per ray with no pre-filtering, so a grazing-angle or distant surface can alias); a GPU compute backend (Vulkan/CUDA-OptiX) for BVH traversal/BSDF evaluation to raise the achievable sample budget, which would also need a non-OpenGL-timer-query GPU timing mechanism and revisit whether GPU-resident/compressed textures are worth reintroducing.
+6. **Real-time integration** — Adaptive per-pixel sample budget driven by a variance/convergence estimate (today every pass traces every pixel at a fixed `samplesPerPixel`; progressive accumulation already delivers "real-time, converges over time" without it, so this is a refinement, not a gap); texture minification filtering (MIP-mapping, Williams 1983, §5 — textures are currently point/bilinear-sampled per ray with no pre-filtering, so a grazing-angle or distant surface can alias); a GPU ray-tracing backend (Embree's own SYCL/GPU path, or CUDA-OptiX) for scene traversal/BSDF evaluation to raise the achievable sample budget beyond what CPU Embree delivers, which would also need a non-OpenGL-timer-query GPU timing mechanism and revisit whether GPU-resident/compressed textures are worth reintroducing.
 7. **Denoising** — A reconstruction filter (edge-aware spatial/temporal, or a learned kernel-predicting network, Zwicker et al. 2015, §5) to reach a clean image at a fraction of the fully-converged sample count. Sequenced last: it's a variance-reduction layer on top of a correct, unbiased estimator, not a substitute for one — denoising an incorrect image just produces a smooth incorrect image.
 8. **Production-scale scene/asset pipeline** — Out-of-core geometry streaming and a real multi-object/instanced scene graph (today: one configured glTF asset and one HDRI, loaded whole into memory at startup, with no scene graph beyond that single file's own node hierarchy) needed before scenes larger than a single asset are practical; deterministic distributed rendering across machines for feature-length throughput. Broader material coverage — layered BSDFs, hair/fur, cloth — belongs here too, alongside whatever transport (items 1–3 above) those material types need to look correct.
 
@@ -142,7 +144,7 @@ Unimplemented, in dependency order — each item lands on top of a feature-compl
 - Debevec, P. (1998). Rendering synthetic objects into real scenes — HDR image-based lighting.
 - Wilkie, A. et al. (2014). Hero wavelength spectral sampling. Computer Graphics Forum — the sample-budget-bounding scheme named in §4's spectral-upgrade roadmap item, not yet implemented.
 - OpenEXR / Academy Software Foundation technical documentation — linear HDR pipeline, exposure.
-- Wald, I. (2007). On fast Construction of SAH-based Bounding Volume Hierarchies — the binned-SAH `Bvh` build strategy (CPU, one-time, static scene).
+- Wald, I., Woop, S., Benthin, C., Johnson, G.S., Ernst, M. (2014). Embree: A Kernel Framework for Efficient CPU Ray Tracing. ACM ToG (SIGGRAPH) — the CPU ray-scene intersection kernel library (`EmbreeAccel`) backing BVH build/traversal, replacing an earlier hand-rolled binned-SAH implementation.
 - Heitz, E. (2014). Understanding the Masking-Shadowing Function in Microfacet-Based BRDFs — the Smith height-correlated visibility term (`bsdf.cpp`'s `smithG1`/`smithG2`).
 - Christensen, P.H., Jarosz, W. (2016). The Path to Path-Traced Movies. Foundations and Trends in Computer Graphics and Vision — production path-tracing grounding.
 - Heitz, E. (2018). Sampling the GGX Distribution of Visible Normals. JCGT 7(4) — the VNDF importance-sampling routine the specular lobe uses.

@@ -2,7 +2,7 @@
 
 #include <glm/glm.hpp>
 
-#include "engine/scene/bvh.h"
+#include "engine/scene/ray_types.h"
 
 namespace engine::scene {
 

@@ -18,7 +18,7 @@ namespace engine::scene {
 
 namespace {
 
-// Raw glTF-read vertex, one per accessor entry -- an intermediate the BVH-triangle/shading-triangle builders below consume; not retained past loadPrimitive.
+// Raw glTF-read vertex, one per accessor entry -- an intermediate the world-triangle/shading-triangle builders below consume; not retained past loadPrimitive.
 struct Vertex {
     glm::vec3 position;
     glm::vec2 uv;
@@ -90,7 +90,7 @@ glm::mat4 localNodeTransform(const cgltf_node* node) {
     return glm::make_mat4(local);
 }
 
-// Appends this primitive's triangles to outWorldTriangles, each vertex baked to world space by transform -- the BVH (bvh.h) operates on world-space triangles, not the model-space Vertex data read from the accessors.
+// Appends this primitive's triangles to outWorldTriangles, each vertex baked to world space by transform -- EmbreeAccel (embree_accel.h) operates on world-space triangles, not the model-space Vertex data read from the accessors.
 void appendWorldTriangles(const std::vector<Vertex>& vertices,
                            const std::vector<unsigned int>& indices, const glm::mat4& transform,
                            std::vector<Triangle>& outWorldTriangles) {
