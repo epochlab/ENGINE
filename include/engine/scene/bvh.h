@@ -25,18 +25,10 @@ struct Hit {
     int triangleIndex;  // index into the Triangle list passed to Bvh::build
 };
 
-// Binned-SAH-built bounding volume hierarchy over a static triangle soup
-// (Wald 2007, "On fast Construction of SAH-based Bounding Volume
-// Hierarchies"), built once at scene load. No refit/update API -- the
-// scene is static this phase. This is Phase 4 infrastructure for Phase
-// 5's recursive tracing; it is not wired into the rasterized rendering
-// path yet ("no secondary rays" holds this phase). Correctness is
-// exercised by tools/bvh_validate.cpp, not by any rendering behavior.
+// Binned-SAH-built bounding volume hierarchy over a static triangle soup (Wald 2007, "On fast Construction of SAH-based Bounding Volume Hierarchies"), built once at scene load. No refit/update API -- the scene is static this phase. This is Phase 4 infrastructure for Phase 5's recursive tracing; it is not wired into the rasterized rendering path yet ("no secondary rays" holds this phase). Correctness is exercised by tools/bvh_validate.cpp, not by any rendering behavior.
 class Bvh {
 public:
-    // Public so the free-function builder in bvh.cpp (binned-SAH, not a
-    // Bvh member -- kept out-of-class to stay readable) can construct
-    // nodes directly; also useful later for a BVH-visualization AOV.
+    // Public so the free-function builder in bvh.cpp (binned-SAH, not a Bvh member -- kept out-of-class to stay readable) can construct nodes directly; also useful later for a BVH-visualization AOV.
     struct Node {
         glm::vec3 boundsMin{0.0F};
         glm::vec3 boundsMax{0.0F};
@@ -62,8 +54,7 @@ private:
     std::vector<Node> nodes_;          // nodes_[0] is the root
 };
 
-// Brute-force reference intersection (O(n) triangle scan), used only to
-// cross-validate Bvh::intersect -- see tools/bvh_validate.cpp.
+// Brute-force reference intersection (O(n) triangle scan), used only to cross-validate Bvh::intersect -- see tools/bvh_validate.cpp.
 [[nodiscard]] std::optional<Hit> bruteForceIntersect(const std::vector<Triangle>& triangles,
                                                        const Ray& ray);
 

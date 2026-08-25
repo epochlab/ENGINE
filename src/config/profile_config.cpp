@@ -35,6 +35,13 @@ std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
         std::cerr << "loadProfileConfig: " << path << " is missing one or more required fields\n";
         return std::nullopt;
     }
+    // These feed Camera::verticalFovRadians()/ev100() as denominators or bases of a physically meaningful quantity -- a zero/negative value would silently produce inf/NaN there instead of failing at this asset-load boundary.
+    if (*filmBackHeightMm <= 0.0 || *focalLengthMm <= 0.0 || *aperture <= 0.0 ||
+        *shutterSeconds <= 0.0 || *iso <= 0.0) {
+        std::cerr << "loadProfileConfig: " << path
+                   << " has a non-positive filmBack/focalLengthMm/aperture/shutterSeconds/iso\n";
+        return std::nullopt;
+    }
 
     return ProfileConfig{
         *position,

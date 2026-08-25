@@ -28,11 +28,7 @@ float sobel(vec2 texel) {
     return length(vec2(gx, gy));
 }
 
-// 4-orientation Gabor bank (0/45/90/135 degrees), max |response| across
-// orientations. Each of the 25 neighborhood texels is fetched once and
-// reused across all 4 orientations -- uGaborKernel's weights already
-// bake in the per-orientation envelope*carrier, computed once on the
-// CPU (main.cpp) rather than re-derived per-fragment.
+// 4-orientation Gabor bank (0/45/90/135 degrees), max |response| across orientations. Each of the 25 neighborhood texels is fetched once and reused across all 4 orientations -- uGaborKernel's weights already bake in the per-orientation envelope*carrier, computed once on the CPU (main.cpp) rather than re-derived per-fragment.
 float gabor(vec2 texel) {
     float response[4] = float[4](0.0, 0.0, 0.0, 0.0);
     int tapIndex = 0;

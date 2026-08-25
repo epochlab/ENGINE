@@ -9,9 +9,7 @@ namespace {
 
 constexpr float kPi = 3.14159265F;
 
-// Real SH basis functions, order 0-2 (9 total), evaluated at unit
-// direction n. Constants from Ramamoorthi & Hanrahan 2001 / Robin
-// Green's "Spherical Harmonic Lighting: The Gritty Details".
+// Real SH basis functions, order 0-2 (9 total), evaluated at unit direction n. Constants from Ramamoorthi & Hanrahan 2001 / Robin Green's "Spherical Harmonic Lighting: The Gritty Details".
 std::array<float, 9> shBasis9(const glm::vec3& n) {
     return {
         0.282095F,
@@ -26,10 +24,7 @@ std::array<float, 9> shBasis9(const glm::vec3& n) {
     };
 }
 
-// Per-band clamped-cosine transfer-function coefficients (band 0, 1, 2)
-// -- the same A_l constants the paper convolves the radiance signal
-// with to turn it into irradiance. Indexed by SH coefficient, not band,
-// so it can be applied in the same loop as shBasis9's output.
+// Per-band clamped-cosine transfer-function coefficients (band 0, 1, 2) -- the same A_l constants the paper convolves the radiance signal with to turn it into irradiance. Indexed by SH coefficient, not band, so it can be applied in the same loop as shBasis9's output.
 constexpr std::array<float, 9> kCosineLobeA = {
     kPi,
     2.0F * kPi / 3.0F,
@@ -55,8 +50,7 @@ std::array<glm::vec3, 9> projectIrradianceSH9(const engine::gfx::HdrImage& equir
         const float theta = v * kPi;
         const float sinTheta = std::sin(theta);
         const float cosTheta = std::cos(theta);
-        // Equirect quadrature weight: solid angle per texel, sin(theta)
-        // accounting for the pole convergence of the lat/long grid.
+        // Equirect quadrature weight: solid angle per texel, sin(theta) accounting for the pole convergence of the lat/long grid.
         const float solidAngle = sinTheta * dTheta * dPhi;
         if (solidAngle <= 0.0F) {
             continue;  // exact poles (py at a boundary): zero-measure, skip
@@ -81,8 +75,7 @@ std::array<glm::vec3, 9> projectIrradianceSH9(const engine::gfx::HdrImage& equir
         }
     }
 
-    // Fold the cosine-lobe convolution in now, so evaluateIrradianceSH9
-    // is a plain dot product with no separate convolution step.
+    // Fold the cosine-lobe convolution in now, so evaluateIrradianceSH9 is a plain dot product with no separate convolution step.
     for (int i = 0; i < 9; ++i) {
         coeffs[i] *= kCosineLobeA[i];
     }
@@ -95,9 +88,7 @@ glm::vec3 evaluateIrradianceSH9(const glm::vec3& n, const std::array<glm::vec3, 
     for (int i = 0; i < 9; ++i) {
         result += coeffs[i] * basis[i];
     }
-    // A strongly peaked source (e.g. a visible sun disk) can produce a
-    // small negative lobe after cosine convolution -- clamp rather than
-    // pursue full de-ringing (Sloan windowing), out of scope for Phase 4.
+    // A strongly peaked source (e.g. a visible sun disk) can produce a small negative lobe after cosine convolution -- clamp rather than pursue full de-ringing (Sloan windowing), out of scope for Phase 4.
     return glm::max(result, glm::vec3(0.0F));
 }
 

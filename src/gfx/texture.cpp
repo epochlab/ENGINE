@@ -43,8 +43,7 @@ Texture Texture::createFromFloatPixels(int width, int height, const float* rgba,
     GL_CALL(glGenTextures(1, &id));
     GL_CALL(glBindTexture(GL_TEXTURE_2D, id));
 
-    // GL_UNPACK_ALIGNMENT untouched: RGBA float rows are always a
-    // multiple of the default 4-byte alignment.
+    // GL_UNPACK_ALIGNMENT untouched: RGBA float rows are always a multiple of the default 4-byte alignment.
     GL_CALL(glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, rgba));
     GL_CALL(glGenerateMipmap(GL_TEXTURE_2D));
 

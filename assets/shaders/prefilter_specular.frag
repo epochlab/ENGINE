@@ -1,14 +1,6 @@
 #version 410 core
 
-// GGX-importance-sampled specular prefilter, one mip level of one
-// cubemap face per draw (Karis 2013, "Real Shading in Unreal Engine 4",
-// split-sum specular prefilter). uEnvCubemap is the sharp base cubemap
-// (mip 0, built by equirect_to_cubemap.frag); this shader is never used
-// for mip 0 itself (env_prefilter_pass.cpp copies the base directly —
-// roughness 0 is a delta BRDF, prefiltering it would just reproduce the
-// source with extra cost). The standard split-sum simplification
-// V = R = N is used throughout, matching pbr.frag's IBL specular sample
-// direction at shading time.
+// GGX-importance-sampled specular prefilter, one mip level of one cubemap face per draw (Karis 2013, "Real Shading in Unreal Engine 4", split-sum specular prefilter). uEnvCubemap is the sharp base cubemap (mip 0, built by equirect_to_cubemap.frag); this shader is never used for mip 0 itself (env_prefilter_pass.cpp copies the base directly — roughness 0 is a delta BRDF, prefiltering it would just reproduce the source with extra cost). The standard split-sum simplification V = R = N is used throughout, matching pbr.frag's IBL specular sample direction at shading time.
 
 in vec2 vUv;
 
@@ -37,8 +29,7 @@ vec2 hammersley(uint i, uint n) {
     return vec2(float(i) / float(n), radicalInverseVdc(i));
 }
 
-// Maps a low-discrepancy 2D sample to a half-vector distributed
-// proportionally to the GGX NDF around n.
+// Maps a low-discrepancy 2D sample to a half-vector distributed proportionally to the GGX NDF around n.
 vec3 importanceSampleGGX(vec2 xi, vec3 n, float roughness) {
     float alpha = roughness * roughness;
     float phi = 2.0 * kPi * xi.x;
@@ -66,10 +57,7 @@ void main() {
         vec3 l = normalize((2.0 * dot(v, h) * h) - v);
         float ndotL = max(dot(n, l), 0.0);
         if (ndotL > 0.0) {
-            // Explicit LOD 0: uEnvCubemap is this same cubemap object
-            // mid-bake (higher mips not yet written when this draw
-            // targets an early mip) -- automatic derivative-based LOD
-            // selection could sample a not-yet-populated level.
+            // Explicit LOD 0: uEnvCubemap is this same cubemap object mid-bake (higher mips not yet written when this draw targets an early mip) -- automatic derivative-based LOD selection could sample a not-yet-populated level.
             prefiltered += textureLod(uEnvCubemap, l, 0.0).rgb * ndotL;
             totalWeight += ndotL;
         }

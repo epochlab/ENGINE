@@ -20,10 +20,7 @@ std::optional<HdrImage> loadExr(const std::string& path) {
         const int width = dw.max.x - dw.min.x + 1;
         const int height = dw.max.y - dw.min.y + 1;
 
-        // Official RgbaInputFile read idiom (OpenEXR's own
-        // rgbaInterfaceExamples.cpp): the base-pointer offset by dw.min
-        // handles a non-zero data-window origin, though none of this
-        // project's EXR files currently have one.
+        // Official RgbaInputFile read idiom (OpenEXR's own rgbaInterfaceExamples.cpp): the base-pointer offset by dw.min handles a non-zero data-window origin, though none of this project's EXR files currently have one.
         Imf::Array2D<Imf::Rgba> pixels;
         pixels.resizeErase(height, width);
         file.setFrameBuffer(&pixels[0][0] - dw.min.x - dw.min.y * width, 1, width);

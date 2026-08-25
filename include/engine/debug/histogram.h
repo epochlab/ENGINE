@@ -6,12 +6,7 @@
 
 namespace engine::debug {
 
-// Per-channel (R/G/B) histogram of the currently displayed frame,
-// captured every 4th frame via an async GPU->CPU readback — matches
-// epochlab/KODAK's approach exactly: downsample the composited frame
-// into a small fixed FBO, double-buffer the PBO readback so the render
-// thread never stalls waiting on it, and bin whichever buffer was
-// written a full capture interval ago each time.
+// Per-channel (R/G/B) histogram of the currently displayed frame, captured every 4th frame via an async GPU->CPU readback: downsample the composited frame into a small fixed FBO, double-buffer the PBO readback so the render thread never stalls waiting on it, and bin whichever buffer was written a full capture interval ago each time.
 class Histogram {
 public:
     static constexpr int kWidth = 256;
@@ -27,18 +22,14 @@ public:
     Histogram(Histogram&& other) noexcept;
     Histogram& operator=(Histogram&& other) noexcept;
 
-    // Call once per frame, after the final composited image has been
-    // written to the default framebuffer (PostProcessPass::draw) and
-    // before the HUD is rendered on top of it. windowWidth/Height are
-    // framebuffer pixels.
+    // Call once per frame, after the final composited image has been written to the default framebuffer (PostProcessPass::draw) and before the HUD is rendered on top of it. windowWidth/Height are framebuffer pixels.
     void update(int windowWidth, int windowHeight);
 
     [[nodiscard]] const std::array<std::array<std::uint32_t, kBins>, 3>& bins() const {
         return bins_;
     }
 
-    // False until the first full capture+bin cycle has completed —
-    // callers should skip drawing until then.
+    // False until the first full capture+bin cycle has completed — callers should skip drawing until then.
     [[nodiscard]] bool hasData() const { return hasData_; }
 
 private:

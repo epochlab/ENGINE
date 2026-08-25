@@ -12,8 +12,7 @@
 
 namespace {
 
-// Box filter: each output texel averages the source block it covers.
-// One-shot asset-prep tool, not a hot path -- clarity over throughput.
+// Box filter: each output texel averages the source block it covers. One-shot asset-prep tool, not a hot path -- clarity over throughput.
 std::vector<Imf::Rgba> boxDownsample(const Imf::Array2D<Imf::Rgba>& src, int srcWidth,
                                       int srcHeight, int dstWidth, int dstHeight) {
     std::vector<Imf::Rgba> out(static_cast<std::size_t>(dstWidth) *
@@ -53,11 +52,7 @@ std::string sizeLabel(int px) {
     return std::to_string(px) + "px";
 }
 
-// Sibling directory named "<source-dir>_<label, lowercased>/", so each
-// resolution's full texture set stays together and the source is
-// untouched. Within that directory, the filename keeps the source name
-// but with its "_<n>K_" resolution token replaced by the new label (or
-// appended before the extension, if no such token is found).
+// Sibling directory named "<source-dir>_<label, lowercased>/", so each resolution's full texture set stays together and the source is untouched. Within that directory, the filename keeps the source name but with its "_<n>K_" resolution token replaced by the new label (or appended before the extension, if no such token is found).
 std::filesystem::path outputPathFor(const std::filesystem::path& inputPath,
                                      const std::string& label) {
     static const std::regex kResolutionToken(R"(_[0-9]+[Kk]_)");
@@ -94,11 +89,7 @@ int main(int argc, char** argv) {
     }
 
     try {
-        // Single-channel (R-only) sources -- Roughness/Bump/AO in this
-        // project's assets -- read with G/B as 0 (RgbaInputFile's own
-        // documented default for a missing channel), so their greyscale
-        // value survives the box filter in R only. Consumers already
-        // expect this: same convention Texture::createFromExr relies on.
+        // Single-channel (R-only) sources -- Roughness/Bump/AO in this project's assets -- read with G/B as 0 (RgbaInputFile's own documented default for a missing channel), so their greyscale value survives the box filter in R only. Consumers already expect this: same convention Texture::createFromExr relies on.
         Imf::RgbaInputFile file(inputPath.c_str());
         const auto& dw = file.dataWindow();
         if (dw.isEmpty()) {
