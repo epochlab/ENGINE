@@ -252,10 +252,14 @@ std::optional<BsdfSample> sampleBsdf(const BsdfParams& params, const glm::vec3& 
     }
     const float cosThetaT = std::sqrt(1.0F - sin2ThetaT);
     const glm::vec3 wt(-eta * wo.x, -eta * wo.y, -cosThetaT);
-    // Flux-conserving: omits the 1/eta^2 radiance-compression factor (Veach 1997 sec. 5.2) -- its
-    // sign under reverse camera-to-light transport isn't verified from memory here; documented
-    // future upgrade, kept out to avoid an unverified-direction energy bug.
-    const glm::vec3 throughput = params.baseColor * (lobes.transmitPhysicalValue / lobes.transmit);
+    // Non-symmetric radiance-compression factor for camera-originated (Veach 1997 sec. 5.2, PBRT's
+    // SpecularTransmission::Sample_f under TransportMode::Radiance) transport: eta^2 = (etaI/etaT)^2,
+    // the squared ratio of the medium the ray is leaving to the medium it's entering. Self-consistent
+    // under round trips -- entering (eta=1/ior) times exiting (eta=ior/1) squared multiplies to 1, so
+    // a ray that enters and exits the same surface loses no net energy (tools/bsdf_validate.cpp's
+    // furnace test).
+    const glm::vec3 throughput =
+        params.baseColor * (lobes.transmitPhysicalValue / lobes.transmit) * (eta * eta);
     return BsdfSample{glm::vec3(wt.x, wt.y, wt.z * sign), throughput, LobeType::SpecularTransmission,
                        throughput};
 }
