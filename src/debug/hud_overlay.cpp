@@ -325,6 +325,29 @@ void drawHdriSection(bool& showSky, int& envRotationDegrees) {
     ImGui::Checkbox("Show/Hide Background", &showSky);
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
     ImGui::SliderInt("##envRotation", &envRotationDegrees, 0, 359, "Y-Axis  %d deg");
+    ImGui::Separator();
+}
+
+// Blocking, on-demand render (Phase 5) -- Enable swaps the viewport from rasterized to the last
+// path-traced result (main.cpp's presentFrame); Render re-traces at the current camera pose.
+void drawPathTracedSection(const HudFrameData& frame, bool& pathTracedMode, int& pathTracedAov,
+                            bool& renderRequested) {
+    ImGui::TextColored(kCyan, "Path Traced");
+    ImGui::Checkbox("Enable", &pathTracedMode);
+    if (pathTracedMode) {
+        static const char* kPathAovNames[] = {"Beauty", "IOR", "Bounce Count"};
+        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+        ImGui::Combo("##pathTracedAov", &pathTracedAov, kPathAovNames, IM_ARRAYSIZE(kPathAovNames));
+        renderRequested = ImGui::Button("Render", ImVec2(ImGui::GetContentRegionAvail().x, 0.0F));
+        if (frame.pathTraced.hasResult) {
+            ImGui::Text("%.2f s  %d spp  avg bounce %.1f", frame.pathTraced.lastRenderSeconds,
+                        frame.pathTraced.samplesPerPixel, frame.pathTraced.avgBounceDepth);
+        } else {
+            ImGui::TextDisabled("no render yet");
+        }
+    } else {
+        renderRequested = false;
+    }
 }
 
 // Active R/G/B channel isolation, top-right corner -- foreground draw list, independent of the ##hud window.
@@ -397,7 +420,8 @@ void HudOverlay::beginFrame() const {
 }
 
 void HudOverlay::draw(const HudFrameData& frame, int& aov, float& focalLengthMm, bool& showSky,
-                       int& envRotationDegrees, const FramingOverlayState& framing) const {
+                       int& envRotationDegrees, const FramingOverlayState& framing,
+                       bool& pathTracedMode, int& pathTracedAov, bool& renderRequested) const {
     ImGui::SetNextWindowPos(ImVec2(8, 8), ImGuiCond_Always);
     constexpr ImGuiWindowFlags flags =
         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
@@ -420,6 +444,7 @@ void HudOverlay::draw(const HudFrameData& frame, int& aov, float& focalLengthMm,
     drawCameraSection(frame);
     drawLensSection(focalLengthMm);
     drawHdriSection(showSky, envRotationDegrees);
+    drawPathTracedSection(frame, pathTracedMode, pathTracedAov, renderRequested);
 
     ImGui::End();
 

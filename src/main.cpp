@@ -41,6 +41,7 @@
 #include "engine/scene/environment_map.h"
 #include "engine/scene/frustum.h"
 #include "engine/scene/gltf_loader.h"
+#include "engine/scene/path_tracer.h"
 #include "engine/scene/sh_irradiance.h"
 
 namespace {
@@ -163,6 +164,16 @@ struct AppResources {
     engine::debug::FramingOverlayState framingState;
     bool showSky;
     int envRotationDegrees;
+
+    // Phase 5: on-demand path-traced view, orthogonal to aov's rasterizer-driven set. Re-traced only
+    // when the HUD's Render button is pressed (see updateHud), not per frame -- see path_tracer.h.
+    bool pathTracedMode;
+    int pathTracedAov;  // 0=Beauty 1=IOR 2=BounceCount, matches HudOverlay's kPathAovNames
+    engine::scene::PathTraceSettings pathTraceSettings;
+    engine::debug::PathTracedStatus pathTracedStatus;
+    std::optional<engine::scene::PathTraceResult> pathTraceResult;
+    std::optional<engine::gfx::Texture> pathTraceDisplayTexture;
+    int pathTraceDisplayedAov;  // which AOV pathTraceDisplayTexture currently holds, -1 = none yet
 
     // Orbit-pick and RAM-sampling state carried frame to frame.
     bool orbitPickRequested;
@@ -517,6 +528,15 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         .showSky = false,
         // HDR environment's Y-axis (world up) rotation, degrees [0,359] -- affects sky background, SH diffuse, and prefiltered specular together (see pbr.frag/sky.frag's uEnvRotationRadians), all rotated at query time rather than re-baked.
         .envRotationDegrees = 0,
+        .pathTracedMode = false,
+        .pathTracedAov = 0,
+        .pathTraceSettings = engine::scene::PathTraceSettings{sceneConfig.samplesPerPixel,
+                                                                sceneConfig.maxBounces,
+                                                                sceneConfig.russianRouletteStartBounce},
+        .pathTracedStatus = engine::debug::PathTracedStatus{},
+        .pathTraceResult = std::nullopt,
+        .pathTraceDisplayTexture = std::nullopt,
+        .pathTraceDisplayedAov = -1,
         .orbitPickRequested = false,
         .lastCursorX = 0.0,
         .lastCursorY = 0.0,
@@ -678,8 +698,39 @@ void resolveOrbitPick(engine::platform::Window& window, AppResources& app,
     app.lastCursorY = cursorY;
 }
 
-// Debug AOVs (aov != 0) are already display-oriented (most clamped to [0,1]; unclamped ones like Luminance just hard-clip to white past 1, same as Beauty already does in Raw mode), not scene-referred radiance -- force the Raw passthrough so the sRGB/Rec709 display curve doesn't distort them, restoring the user's chosen LUT for Beauty. Still set even for Sobel/Gabor below, which don't draw through ocioTransform at all, so the HUD's LUT-name readout stays accurate.
+// Rebuilds pathTraceDisplayTexture only when the cached result or the selected AOV actually
+// changed -- recreating a GL texture (alloc + upload + mipmap) every frame just to redisplay the
+// same static image would violate this codebase's no-allocation-after-init convention for no
+// reason (path-traced output only changes on an explicit Render, see runPathTrace).
+void ensurePathTraceDisplayTexture(AppResources& app) {
+    if (app.pathTraceDisplayTexture.has_value() && app.pathTraceDisplayedAov == app.pathTracedAov) {
+        return;
+    }
+    const engine::gfx::HdrImage& image = app.pathTracedAov == 0   ? app.pathTraceResult->beauty
+                                          : app.pathTracedAov == 1 ? app.pathTraceResult->iorAov
+                                                                    : app.pathTraceResult->bounceHeatmap;
+    app.pathTraceDisplayTexture = engine::gfx::Texture::createFromFloatPixels(
+        image.width, image.height, image.rgba.data(), GL_CLAMP_TO_EDGE);
+    app.pathTraceDisplayedAov = app.pathTracedAov;
+}
+
+// In path-traced mode, blits the cached display texture through the same OCIO/post-process path as
+// the rasterizer -- Beauty (pathTracedAov==0) uses the user's LUT, IOR/BounceCount force Raw (same
+// reasoning as the rasterizer's debug AOVs below: not scene-referred radiance, a display curve would
+// distort them).
 void presentFrame(AppResources& app, int winWidth, int winHeight) {
+    if (app.pathTracedMode && app.pathTracedStatus.hasResult) {
+        ensurePathTraceDisplayTexture(app);
+        app.ocioTransform.setActiveLut(app.pathTracedAov == 0
+                                            ? app.userLut
+                                            : engine::gfx::OcioDisplayTransform::Lut::Raw);
+        app.ocioTransform.bind();
+        app.postProcess.draw(app.pathTraceDisplayTexture->id(), app.ocioTransform.activeShader(),
+                              {winWidth, winHeight});
+        return;
+    }
+
+    // Debug AOVs (aov != 0) are already display-oriented (most clamped to [0,1]; unclamped ones like Luminance just hard-clip to white past 1, same as Beauty already does in Raw mode), not scene-referred radiance -- force the Raw passthrough so the sRGB/Rec709 display curve doesn't distort them, restoring the user's chosen LUT for Beauty. Still set even for Sobel/Gabor below, which don't draw through ocioTransform at all, so the HUD's LUT-name readout stays accurate.
     app.ocioTransform.setActiveLut(app.aov == 0 ? app.userLut
                                                  : engine::gfx::OcioDisplayTransform::Lut::Raw);
     if (app.aov == 5 || app.aov == 6) {
@@ -693,6 +744,34 @@ void presentFrame(AppResources& app, int winWidth, int winHeight) {
         app.postProcess.draw(app.hdrFbo.colorTexture(), app.ocioTransform.activeShader(),
                               {winWidth, winHeight});
     }
+}
+
+// Blocking: builds AppResources' cached PathTraceResult + display Texture at the current camera
+// pose/window size, replacing whatever was there before. Only called on the HUD's Render button
+// press (updateHud), never per frame -- see path_tracer.h's on-demand design.
+void runPathTrace(AppResources& app, const engine::scene::Camera& camera, int winWidth,
+                   int winHeight) {
+    const auto start = std::chrono::steady_clock::now();
+    engine::scene::PathTraceResult result = engine::scene::renderPathTraced(
+        camera, app.sceneBvh, app.stumpModel.shadingTriangles, app.stumpModel.instances,
+        app.environmentMap, winWidth, winHeight,
+        glm::radians(static_cast<float>(app.envRotationDegrees)), app.pathTraceSettings, 1U);
+    const double seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+
+    double bounceSum = 0.0;
+    for (std::size_t i = 0; i < result.bounceHeatmap.rgba.size(); i += 4) {
+        bounceSum += result.bounceHeatmap.rgba[i];  // R channel; bounceHeatmap is single-channel broadcast to RGB
+    }
+    const auto pixelCount =
+        static_cast<double>(result.bounceHeatmap.width) * result.bounceHeatmap.height;
+
+    app.pathTraceResult = std::move(result);
+    app.pathTraceDisplayTexture = std::nullopt;  // rebuilt lazily in presentFrame from the new result
+    app.pathTraceDisplayedAov = -1;
+    app.pathTracedStatus = engine::debug::PathTracedStatus{
+        true, seconds, app.pathTraceSettings.samplesPerPixel,
+        static_cast<float>(bounceSum / std::max(1.0, pixelCount))};
 }
 
 void updateHud(AppResources& app, const engine::scene::Camera& camera,
@@ -724,13 +803,19 @@ void updateHud(AppResources& app, const engine::scene::Camera& camera,
         app.debugCamera.pitchDegrees(),
         app.debugCamera.isOrbiting(),
         app.histogram,
+        app.pathTracedStatus,
     };
     // Round-tripped through a local so the HUD's Lens slider can bind a plain float&, same as aov -- DebugCameraController is the authoritative owner, read before draw() and written back after.
     float focalLengthMm = app.debugCamera.focalLengthMm();
+    bool renderRequested = false;
     app.hud.draw(hudFrameData, app.aov, focalLengthMm, app.showSky, app.envRotationDegrees,
-                 app.framingState);
+                 app.framingState, app.pathTracedMode, app.pathTracedAov, renderRequested);
     app.debugCamera.setFocalLengthMm(focalLengthMm);
     app.hud.render();
+
+    if (renderRequested) {
+        runPathTrace(app, camera, winWidth, winHeight);
+    }
 }
 
 // One frame: poll -> bind HDR FBO -> clear -> draw scene -> post-process blit (exposure + OCIO display transform) to the default framebuffer -> swap.

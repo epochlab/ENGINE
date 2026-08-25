@@ -22,6 +22,10 @@ public:
 
     void bind(unsigned int unit) const;
 
+    // Raw GL texture id, for callers that need it directly (e.g. PostProcessPass::draw's
+    // unsigned-int parameter) rather than through bind()'s implicit active-unit state.
+    [[nodiscard]] unsigned int id() const { return id_; }
+
 private:
     Texture(unsigned int id, std::size_t byteSize);
 
