@@ -27,7 +27,7 @@ Histogram::Histogram() {
 
     const auto pboBytes = static_cast<std::size_t>(kWidth) * static_cast<std::size_t>(kHeight) * 3;
     GL_CALL(glGenBuffers(2, pbos_));
-    for (unsigned int pbo : pbos_) {
+    for (const unsigned int pbo : pbos_) {
         GL_CALL(glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo));
         GL_CALL(glBufferData(GL_PIXEL_PACK_BUFFER, static_cast<GLsizeiptr>(pboBytes), nullptr,
                               GL_STREAM_READ));
@@ -94,22 +94,18 @@ void Histogram::update(int windowWidth, int windowHeight) {
         return;
     }
 
-    // Downsample the just-composited default framebuffer into the fixed
-    // small FBO.
+    // Downsample the just-composited default framebuffer into the fixed small FBO.
     GL_CALL(glBindFramebuffer(GL_READ_FRAMEBUFFER, 0));
     GL_CALL(glBindFramebuffer(GL_DRAW_FRAMEBUFFER, downsampleFbo_));
     GL_CALL(glBlitFramebuffer(0, 0, windowWidth, windowHeight, 0, 0, kWidth, kHeight,
                               GL_COLOR_BUFFER_BIT, GL_LINEAR));
 
-    // Kick off this capture's async readback into the current PBO --
-    // non-blocking, since the target is a bound PBO, not client memory.
+    // Kick off this capture's async readback into the current PBO -- non-blocking, since the target is a bound PBO, not client memory.
     GL_CALL(glBindFramebuffer(GL_READ_FRAMEBUFFER, downsampleFbo_));
     GL_CALL(glBindBuffer(GL_PIXEL_PACK_BUFFER, pbos_[currentPbo_]));
     GL_CALL(glReadPixels(0, 0, kWidth, kHeight, GL_RGB, GL_UNSIGNED_BYTE, nullptr));
 
-    // Bin the *other* PBO's contents -- written a full capture interval
-    // ago, so its transfer has long since completed and mapping it here
-    // never stalls on this frame's GPU work.
+    // Bin the *other* PBO's contents -- written a full capture interval ago, so its transfer has long since completed and mapping it here never stalls on this frame's GPU work.
     const int readyPbo = 1 - currentPbo_;
     if (pboWritten_[readyPbo]) {
         GL_CALL(glBindBuffer(GL_PIXEL_PACK_BUFFER, pbos_[readyPbo]));

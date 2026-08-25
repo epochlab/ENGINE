@@ -9,11 +9,7 @@
 
 namespace engine::config {
 
-// Everything engine::scene::DebugCameraController needs to construct its
-// initial (and reset-to) pose, lens/exposure params, and interactive
-// tuning constants — externalized so these can be edited without
-// recompiling. See assets/config/profile.json for the checked-in
-// defaults.
+// Everything engine::scene::DebugCameraController needs to construct its initial (and reset-to) pose, lens/exposure params, and interactive tuning constants — externalized so these can be edited without recompiling. See assets/config/profile.json for the checked-in defaults.
 struct ProfileConfig {
     glm::vec3 position;
     float yawDegrees;
@@ -29,10 +25,7 @@ struct ProfileConfig {
     float orbitSensitivityDegPerPixel;
 };
 
-// Reads and parses path. Returns nullopt and logs to stderr if the file
-// is missing, unreadable, or any required field can't be found/parsed —
-// this is user-editable input, not an internal invariant, so failure is
-// expected to happen and is surfaced rather than defaulted around.
+// Reads and parses path. Returns nullopt and logs to stderr if the file is missing, unreadable, or any required field can't be found/parsed — this is user-editable input, not an internal invariant, so failure is expected to happen and is surfaced rather than defaulted around.
 [[nodiscard]] std::optional<ProfileConfig> loadProfileConfig(const std::string& path);
 
 }  // namespace engine::config

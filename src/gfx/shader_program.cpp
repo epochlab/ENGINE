@@ -15,7 +15,7 @@ namespace engine::gfx {
 namespace {
 
 std::optional<std::string> readFile(const std::string& path) {
-    std::ifstream file(path);
+    const std::ifstream file(path);
     if (!file) {
         std::cerr << "ShaderProgram: failed to open " << path << '\n';
         return std::nullopt;
@@ -37,10 +37,7 @@ std::optional<unsigned int> compileStage(GLenum stage, const std::string& source
     if (compiled == GL_FALSE) {
         GLint logLength = 0;
         glGetShaderiv(shader, GL_INFO_LOG_LENGTH, &logLength);
-        // std::string::data() is always a valid, non-null, null-terminated
-        // pointer (even for an empty string), unlike std::vector<char>'s
-        // data() when logLength is 0 — a driver returning an empty log is
-        // otherwise a null-pointer stream insertion.
+        // std::string::data() is always a valid, non-null, null-terminated pointer (even for an empty string), unlike std::vector<char>'s data() when logLength is 0 — a driver returning an empty log is otherwise a null-pointer stream insertion.
         std::string log(static_cast<std::size_t>(logLength), '\0');
         glGetShaderInfoLog(shader, logLength, nullptr, log.data());
         std::cerr << "ShaderProgram: shader compile failed:\n" << log << '\n';
@@ -71,8 +68,7 @@ std::optional<ShaderProgram> ShaderProgram::loadFromSource(const std::string& ve
     GL_CALL(glAttachShader(program, *fragShader));
     GL_CALL(glLinkProgram(program));
 
-    // Shaders are refcounted once attached; safe to delete regardless of
-    // link outcome.
+    // Shaders are refcounted once attached; safe to delete regardless of link outcome.
     glDeleteShader(*vertShader);
     glDeleteShader(*fragShader);
 
@@ -125,14 +121,18 @@ ShaderProgram& ShaderProgram::operator=(ShaderProgram&& other) noexcept {
     return *this;
 }
 
-// Not wrapped in GL_CALL: runs every frame (scene shader and display
-// shader are both bound once per frame each).
+// Not wrapped in GL_CALL: runs every frame (scene shader and display shader are both bound once per frame each).
 void ShaderProgram::use() const {
     glUseProgram(program_);
 }
 
 int ShaderProgram::uniformLocation(const std::string& name) const {
-    return glGetUniformLocation(program_, name.c_str());
+    const int location = glGetUniformLocation(program_, name.c_str());
+    if (location == -1) {
+        std::cerr << "ShaderProgram: uniform '" << name << "' not found (program "
+                   << program_ << ")\n";
+    }
+    return location;
 }
 
 }  // namespace engine::gfx
