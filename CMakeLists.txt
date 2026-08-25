@@ -85,6 +85,7 @@ add_executable(engine
     src/scene/environment_map.cpp
     src/scene/frustum.cpp
     src/scene/gltf_loader.cpp
+    src/scene/path_tracer.cpp
     src/scene/sampler.cpp
     src/scene/sh_irradiance.cpp
     src/scene/shading_scene.cpp

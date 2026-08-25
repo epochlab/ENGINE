@@ -2,6 +2,8 @@
 
 #include <glm/glm.hpp>
 
+#include "engine/scene/bvh.h"
+
 namespace engine::scene {
 
 // A camera's pose, lens, and exposure, immutable once constructed. No input handling lives here — engine::scene::DebugCameraController owns pose mutation frame-to-frame (WASD/QE/R/orbit) and builds a fresh Camera each frame via its snapshot() method.
@@ -40,6 +42,11 @@ public:
 
     [[nodiscard]] glm::mat4 viewMatrix() const;
     [[nodiscard]] glm::mat4 projectionMatrix(float aspect) const;
+
+    // Pinhole primary ray for a point in normalized device coordinates (ndcX/ndcY in [-1,1], +Y up)
+    // -- same right/up basis viewMatrix() derives, so a path-traced and rasterized view agree pixel
+    // for pixel. tMin/tMax are nearClip()/farClip(), matching the rasterizer's own clip range.
+    [[nodiscard]] Ray primaryRay(float ndcX, float ndcY, float aspect) const;
 
     // Standard photographic exposure value at ISO 100 (log2 scale): log2(aperture^2 / shutterSeconds * (100/iso)).
     [[nodiscard]] float ev100() const;
