@@ -322,6 +322,45 @@ std::optional<Hit> Bvh::intersect(const Ray& ray) const {
     return best;
 }
 
+bool Bvh::occluded(const Ray& ray) const {
+    if (nodes_.empty()) {
+        return false;
+    }
+    const glm::vec3 invDir(1.0F / ray.dir.x, 1.0F / ray.dir.y, 1.0F / ray.dir.z);
+
+    std::array<int, kTraversalStackSize> stack{};
+    int stackSize = 0;
+    stack[stackSize++] = 0;
+
+    while (stackSize > 0) {
+        const int nodeIndex = stack[--stackSize];
+        const Node& node = nodes_[static_cast<std::size_t>(nodeIndex)];
+
+        float tNear = 0.0F;
+        if (!intersectAabb(ray, invDir, node.boundsMin, node.boundsMax, tNear)) {
+            continue;
+        }
+
+        if (node.isLeaf()) {
+            for (int i = 0; i < node.triangleCount; ++i) {
+                const int triIdx =
+                    primIndices_[static_cast<std::size_t>(node.firstTriangle) +
+                                 static_cast<std::size_t>(i)];
+                float t = 0.0F;
+                float u = 0.0F;
+                float v = 0.0F;
+                if (intersectTriangle(ray, triangles_[static_cast<std::size_t>(triIdx)], t, u, v)) {
+                    return true;  // any-hit: first triangle found disqualifies, no closest-hit bookkeeping needed
+                }
+            }
+        } else {
+            stack[stackSize++] = node.leftChild;
+            stack[stackSize++] = node.rightChild;
+        }
+    }
+    return false;
+}
+
 std::optional<Hit> bruteForceIntersect(const std::vector<Triangle>& triangles, const Ray& ray) {
     Ray localRay = ray;
     std::optional<Hit> best;
