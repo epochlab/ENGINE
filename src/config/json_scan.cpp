@@ -12,8 +12,16 @@ bool isJsonWhitespace(char c) {
     return c == ' ' || c == '\t' || c == '\n' || c == '\r';
 }
 
-// Finds "key" as a quoted JSON key anywhere in text, returning the
-// position right after the closing quote, or npos.
+// Advances past a JSON string literal starting at text[pos] (which must be the opening '"'), skipping escaped characters, so brace/bracket scanning elsewhere doesn't misread a '{'/'}' that's legally embedded inside a string value. Returns the index just past the closing quote, or text.size() if the string is unterminated.
+std::size_t skipStringLiteral(std::string_view text, std::size_t pos) {
+    ++pos;  // past the opening quote
+    while (pos < text.size() && text[pos] != '"') {
+        pos += (text[pos] == '\\' && pos + 1 < text.size()) ? 2 : 1;
+    }
+    return pos < text.size() ? pos + 1 : text.size();
+}
+
+// Finds "key" as a quoted JSON key anywhere in text, returning the position right after the closing quote, or npos.
 std::size_t findKeyEnd(std::string_view text, std::string_view key) {
     const std::string needle = "\"" + std::string(key) + "\"";
     const std::size_t pos = text.find(needle);
@@ -23,11 +31,7 @@ std::size_t findKeyEnd(std::string_view text, std::string_view key) {
     return pos + needle.size();
 }
 
-// Given the position right after a key's closing quote, requires the
-// next non-whitespace character to be ':' (rejecting malformed input
-// rather than scanning ahead into a neighboring field's colon) and skips
-// whitespace after it too, returning the position of the value's first
-// character, or npos if a ':' isn't there.
+// Given the position right after a key's closing quote, requires the next non-whitespace character to be ':' (rejecting malformed input rather than scanning ahead into a neighboring field's colon) and skips whitespace after it too, returning the position of the value's first character, or npos if a ':' isn't there.
 std::size_t findValueStart(std::string_view text, std::size_t keyEnd) {
     std::size_t pos = keyEnd;
     while (pos < text.size() && isJsonWhitespace(text[pos])) {
@@ -46,7 +50,7 @@ std::size_t findValueStart(std::string_view text, std::size_t keyEnd) {
 }  // namespace
 
 std::optional<std::string> readFile(const std::string& path) {
-    std::ifstream file(path, std::ios::binary);
+    const std::ifstream file(path, std::ios::binary);
     if (!file) {
         return std::nullopt;
     }
@@ -125,6 +129,13 @@ std::optional<glm::vec3> findVec3(std::string_view text, std::string_view key) {
         result[component] = value;
         pos = static_cast<std::size_t>(parseResult.ptr - inner.data());
     }
+    // Reject trailing elements past the 3 required -- e.g. [1,2,3,4] is malformed input for a vec3 field and should fail loudly, not silently truncate.
+    while (pos < inner.size() && isJsonWhitespace(inner[pos])) {
+        ++pos;
+    }
+    if (pos < inner.size()) {
+        return std::nullopt;
+    }
     return result;
 }
 
@@ -138,12 +149,13 @@ std::string_view findObjectBody(std::string_view text, std::string_view key) {
         text[valueStart] != '{') {
         return {};
     }
-    // Tracks nesting depth while scanning for the matching closing brace.
-    // filmBack/light are one level deep with no further nested objects
-    // today, but depth-tracking costs nothing and avoids a subtle bug if
-    // that ever changes.
+    // Tracks nesting depth while scanning for the matching closing brace. filmBack is one level deep with no further nested objects today, but depth-tracking costs nothing and avoids a subtle bug if that ever changes.
     int depth = 0;
     for (std::size_t pos = valueStart; pos < text.size(); ++pos) {
+        if (text[pos] == '"') {
+            pos = skipStringLiteral(text, pos) - 1;
+            continue;
+        }
         if (text[pos] == '{') {
             ++depth;
         } else if (text[pos] == '}') {
