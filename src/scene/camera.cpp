@@ -56,6 +56,17 @@ glm::mat4 Camera::projectionMatrix(float aspect) const {
     return glm::perspective(verticalFovRadians(), aspect, nearClip_, farClip_);
 }
 
+Ray Camera::primaryRay(float ndcX, float ndcY, float aspect) const {
+    const glm::vec3 fwd = forwardFromEuler(yawRadians_, pitchRadians_);
+    const glm::vec3 right = glm::normalize(glm::cross(fwd, kWorldUp));
+    const glm::vec3 up = glm::cross(right, fwd);
+    const float halfHeight = std::tan(verticalFovRadians() * 0.5F);
+    const float halfWidth = halfHeight * aspect;
+    const glm::vec3 dir =
+        glm::normalize(fwd + (ndcX * halfWidth * right) + (ndcY * halfHeight * up));
+    return Ray{position_, dir, nearClip_, farClip_};
+}
+
 float Camera::ev100() const {
     return std::log2((aperture_ * aperture_) / shutterSeconds_ * (100.0F / iso_));
 }
