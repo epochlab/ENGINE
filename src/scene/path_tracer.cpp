@@ -18,37 +18,33 @@ namespace {
 constexpr float kRayEpsilon = 1e-4F;
 
 glm::vec3 resolveBaseColor(const Material& material, glm::vec2 uv) {
-    const glm::vec4 sample = engine::gfx::sampleBilinear(material.baseColorTexture.cpu, uv);
+    const glm::vec4 sample = engine::gfx::sampleBilinear(material.baseColorTexture, uv);
     return glm::vec3(sample) * glm::vec3(material.baseColorFactor);
 }
 
 float resolveRoughness(const Material& material, glm::vec2 uv) {
-    const float sample = engine::gfx::sampleBilinear(material.roughnessTexture.cpu, uv).r;
-    // 0.045 floor matches pbr.frag's own minimum-roughness clamp (UE4/Frostbite convention).
+    const float sample = engine::gfx::sampleBilinear(material.roughnessTexture, uv).r;
+    // 0.045 floor (UE4/Frostbite convention) avoids a near-zero-roughness GGX singularity.
     return std::clamp(sample * material.roughnessFactor, 0.045F, 1.0F);
 }
 
-// Tangent-space normal map only -- pbr.frag additionally blends a bump-derived detail normal
-// (central-difference height gradient); omitted here as a deliberate scope simplification, not a
-// correctness concern (it only adds fine surface micro-detail on top of this).
 BsdfParams resolveBsdfParams(const Material& material, glm::vec2 uv) {
     const glm::vec3 baseColor = resolveBaseColor(material, uv);
     const float roughness = resolveRoughness(material, uv);
-    const glm::vec3 specular = glm::vec3(engine::gfx::sampleBilinear(material.specularTexture.cpu, uv));
+    const glm::vec3 specular = glm::vec3(engine::gfx::sampleBilinear(material.specularTexture, uv));
     const glm::vec3 f0 = glm::mix(specular, baseColor, material.metallicFactor);
     return BsdfParams{baseColor, material.metallicFactor, roughness, f0, material.ior,
                        material.transmissionFactor};
 }
 
-// Gram-Schmidt re-orthogonalized tangent frame, normal-mapped -- same construction as pbr.frag's
-// computeShadingInputs, ported to CPU.
+// Gram-Schmidt re-orthogonalized tangent frame, normal-mapped.
 ShadingFrame buildShadingFrame(const ShadingVertex& shading, const Material& material) {
     const glm::vec3 normal = glm::normalize(shading.normal);
     glm::vec3 tangent = glm::vec3(shading.tangent);
     tangent = glm::normalize(tangent - (glm::dot(tangent, normal) * normal));
     const glm::vec3 bitangent = glm::cross(normal, tangent) * shading.tangent.w;
 
-    const glm::vec4 normalSample = engine::gfx::sampleBilinear(material.normalTexture.cpu, shading.uv);
+    const glm::vec4 normalSample = engine::gfx::sampleBilinear(material.normalTexture, shading.uv);
     const glm::vec3 tangentSpaceNormal = glm::normalize((glm::vec3(normalSample) * 2.0F) - 1.0F);
     const glm::vec3 mappedNormal = glm::normalize(
         (tangentSpaceNormal.x * tangent) + (tangentSpaceNormal.y * bitangent) +
@@ -174,10 +170,8 @@ TraceResult tracePath(const Ray& primaryRay, const Bvh& bvh,
         const std::optional<Hit> hit = bvh.intersect(ray);
         if (!hit.has_value()) {
             // showSky gates only the primary ray's own miss (the camera seeing the background
-            // directly) -- matches the rasterizer's drawSky, which likewise only skips the sky
-            // *draw*, never the IBL/ambient lighting term. Indirect bounces and NEE (below) always
-            // sample real environment radiance regardless of showSky, so hiding the background
-            // doesn't unlight the scene.
+            // directly) -- indirect bounces and NEE (below) always sample real environment radiance
+            // regardless of showSky, so hiding the background doesn't unlight the scene.
             if (bounce == 0 && !showSky) {
                 break;
             }
@@ -229,7 +223,7 @@ TraceResult tracePath(const Ray& primaryRay, const Bvh& bvh,
             gObjectIndex = triangle.instanceIndex;
             const float ndotV = std::max(glm::dot(frame.normal, woWorld), 1e-4F);
             gFresnel = fresnelSchlick(ndotV, params.f0).x;  // scalar AOV -- see writeTexel's broadcast convention
-            gAo = engine::gfx::sampleBilinear(material.aoTexture.cpu, shading.uv).r;
+            gAo = engine::gfx::sampleBilinear(material.aoTexture, shading.uv).r;
         }
 
         const glm::vec3 woLocal = frame.toLocal(woWorld);

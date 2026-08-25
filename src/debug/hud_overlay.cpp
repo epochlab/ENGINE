@@ -249,13 +249,7 @@ void drawFrameSection(const HudFrameData& frame) {
                       frame.frameStats.cursor(), nullptr, 0.0F, 33.3F,
                       ImVec2(ImGui::GetContentRegionAvail().x, 40.0F));
     ImGui::Text("min %.2f  max %.2f ms", frame.frameStats.minMs(), frame.frameStats.maxMs());
-    ImGui::Text("GPU  geom %.2f  post %.2f ms", frame.geomMs, frame.postMs);
-    const float fps = frame.frameStats.fps();
-    const auto pixelsDrawn = static_cast<long long>(frame.sceneStats.viewportWidth) *
-                             frame.sceneStats.viewportHeight;
-    ImGui::Text("%.1f Mtri/s  %.1f Mpix/s",
-                static_cast<float>(frame.sceneStats.trianglesDrawn) * fps / 1.0e6F,
-                static_cast<float>(pixelsDrawn) * fps / 1.0e6F);
+    ImGui::Text("GPU  post %.2f ms", frame.postMs);
     ImGui::Text("Cap  vsync");
     ImGui::Text("LUT  %s", frame.lutName);
     if (frame.pathTraced.hasResult) {
@@ -284,16 +278,12 @@ void drawViewportAndSceneSection(const HudFrameData& frame) {
 
     ImGui::TextColored(kCyan, "Scene");
     ImGui::Text("Objects  %d", frame.sceneStats.objectCount);
-    ImGui::Text("Draw calls  %d / %d  (%d culled)", frame.sceneStats.instancesDrawn,
-                frame.sceneStats.objectCount, frame.sceneStats.instancesCulled);
     ImGui::Text("Triangles  %lld", frame.sceneStats.trianglesTotal);
     ImGui::Text("Points  %lld", frame.sceneStats.pointsTotal);
     ImGui::Separator();
 }
 
-// Single AOV selector for both renderers -- names/order come from the shared AovId enum
-// (engine/debug/aov.h), not a locally duplicated array. The path tracer supplies a result for
-// whichever AOVs it has computed; anything else falls back to the rasterizer's pbr.frag branches.
+// Names/order come from the shared AovId enum (engine/debug/aov.h), not a locally duplicated array.
 void drawAovSection(int& aov) {
     ImGui::TextColored(kCyan, "AOV");
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);

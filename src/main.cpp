@@ -16,7 +16,6 @@
 
 #include <glm/glm.hpp>
 #include <glm/gtc/constants.hpp>
-#include <glm/gtc/matrix_inverse.hpp>
 
 #include "engine/config/profile_config.h"
 #include "engine/config/scene_config.h"
@@ -28,47 +27,26 @@
 #include "engine/debug/memory_tracker.h"
 #include "engine/debug/scene_stats.h"
 #include "engine/debug/system_info.h"
-#include "engine/gfx/cubemap_texture.h"
-#include "engine/gfx/env_prefilter_pass.h"
 #include "engine/gfx/gl_debug.h"
-#include "engine/gfx/hdr_framebuffer.h"
 #include "engine/gfx/hdr_image.h"
 #include "engine/gfx/ocio_display_transform.h"
 #include "engine/gfx/post_process_pass.h"
 #include "engine/gfx/shader_program.h"
+#include "engine/gfx/texture.h"
 #include "engine/platform/window.h"
 #include "engine/scene/bvh.h"
 #include "engine/scene/camera.h"
 #include "engine/scene/debug_camera_controller.h"
 #include "engine/scene/environment_map.h"
 #include "engine/scene/false_color.h"
-#include "engine/scene/frustum.h"
 #include "engine/scene/gltf_loader.h"
 #include "engine/scene/path_trace_driver.h"
 #include "engine/scene/path_tracer.h"
-#include "engine/scene/sh_irradiance.h"
 
 namespace {
 
 void glfwErrorCallback(int error, const char* description) {
     std::cerr << "GLFW error " << error << ": " << description << '\n';
-}
-
-// Transforms a local-space AABB's 8 corners by `transform` and returns the resulting world-space AABB -- for frustum culling and the World position debug AOV.
-std::pair<glm::vec3, glm::vec3> worldSpaceBounds(const glm::vec3& localMin,
-                                                  const glm::vec3& localMax,
-                                                  const glm::mat4& transform) {
-    glm::vec3 worldMin(std::numeric_limits<float>::max());
-    glm::vec3 worldMax(std::numeric_limits<float>::lowest());
-    for (int i = 0; i < 8; ++i) {
-        const glm::vec3 corner((i & 1) != 0 ? localMax.x : localMin.x,
-                                (i & 2) != 0 ? localMax.y : localMin.y,
-                                (i & 4) != 0 ? localMax.z : localMin.z);
-        const glm::vec3 worldCorner = glm::vec3(transform * glm::vec4(corner, 1.0F));
-        worldMin = glm::min(worldMin, worldCorner);
-        worldMax = glm::max(worldMax, worldCorner);
-    }
-    return {worldMin, worldMax};
 }
 
 const char* lutName(engine::gfx::OcioDisplayTransform::Lut lut) {
@@ -124,55 +102,32 @@ struct PathTraceTriggerState {
     bool operator==(const PathTraceTriggerState&) const = default;
 };
 
-// Everything the render loop touches every frame, plus the GPU resources and one-time-computed state (cached uniform locations, IBL bake, BVH) that must stay alive for the run's duration. A pure aggregate (no user-declared constructors) so initializeApp can return it by value via designated initializers -- each RAII member's own move constructor (already verified elsewhere to correctly transfer GL handles/tracked byte counts) handles the actual transfer.
+// Everything the render loop touches every frame, plus the one-time-computed state (cached uniform
+// locations, BVH) that must stay alive for the run's duration. A pure aggregate (no user-declared
+// constructors) so initializeApp can return it by value via designated initializers -- each RAII
+// member's own move constructor (already verified elsewhere to correctly transfer GL handles/tracked
+// byte counts) handles the actual transfer.
 struct AppResources {
-    engine::gfx::HdrFramebuffer hdrFbo;
-    engine::gfx::ShaderProgram sceneShader;
     engine::gfx::ShaderProgram edgeFilterShader;
     engine::gfx::ShaderProgram hsvDisplayShader;
-    engine::gfx::ShaderProgram skyShader;
     engine::gfx::OcioDisplayTransform ocioTransform;
-    engine::gfx::Texture environmentTexture;
-    engine::gfx::PrefilteredEnvironment prefilteredEnv;
     engine::scene::Bvh sceneBvh;               // path tracer scene intersection
     // stumpModel.shadingTriangles indexes sceneBvh's triangles 1:1, no separate field needed.
     engine::scene::EnvironmentMap environmentMap;
     engine::scene::LoadedModel stumpModel;
-    std::vector<std::pair<glm::vec3, glm::vec3>> instanceWorldBounds;
     int totalTriangles;
     int totalPoints;
 
     engine::gfx::PostProcessPass postProcess;
     engine::debug::HudOverlay hud;
     engine::debug::FrameStats frameStats;
-    engine::debug::GpuTimer geomTimer;
     engine::debug::GpuTimer postTimer;
     engine::debug::Histogram histogram;
     engine::scene::DebugCameraController debugCamera;
     engine::debug::GpuInfo gpuInfo;
 
-    // No RAII wrapper (see main()'s cleanup) -- matches the single attribute-less VAO this project already hand-manages this way.
-    unsigned int skyVao;
-
-    int uModelLoc;
-    int uViewLoc;
-    int uProjectionLoc;
-    int uNormalMatrixLoc;
-    int uBaseColorFactorLoc;
-    int uMetallicFactorLoc;
-    int uRoughnessFactorLoc;
-    int uBoundsMinLoc;
-    int uBoundsMaxLoc;
-    int uObjectIdColorLoc;
-    int uCameraPosLoc;
-    int uAovLoc;
-    int uChannelViewLoc;
-    int uEnvRotationRadiansLoc;
     int uFilterModeLoc;
     int uHsvChannelViewLoc;
-    int uSkyInvViewProjLoc;
-    int uSkyCameraPosLoc;
-    int uSkyEnvRotationRadiansLoc;
 
     // HUD-editable UI/run state.
     int aov;
@@ -182,12 +137,12 @@ struct AppResources {
     bool showSky;
     int envRotationDegrees;
 
-    // Async path-traced view, selected via the same `aov` field as the rasterizer (engine::debug::
-    // AovId, shared HUD dropdown). pathTraceDriver runs continuously on its own background thread
-    // once constructed (main() constructs it after initializeApp() returns -- see
-    // path_trace_driver.h's constructor precondition on reference stability); requestTrace() is
-    // called only from renderFrame's requestPathTraceIfTriggerChanged, whenever lastPathTraceTrigger
-    // detects the camera/scene state renderPathTraced depends on has changed -- no manual trigger.
+    // Async path-traced view, selected via the `aov` field (engine::debug::AovId, the HUD's AOV
+    // dropdown). pathTraceDriver runs continuously on its own background thread once constructed
+    // (main() constructs it after initializeApp() returns -- see path_trace_driver.h's constructor
+    // precondition on reference stability); requestTrace() is called only from renderFrame's
+    // requestPathTraceIfTriggerChanged, whenever lastPathTraceTrigger detects the camera/scene state
+    // renderPathTraced depends on has changed -- no manual trigger.
     //
     // unique_ptr, not a by-value optional: PathTraceDriver holds reference members and an owned
     // std::jthread/std::mutex, so it's neither copyable nor movable -- a by-value optional<T> member
@@ -218,154 +173,30 @@ struct AppResources {
 };
 
 struct RequiredShaders {
-    engine::gfx::ShaderProgram sceneShader;
     engine::gfx::ShaderProgram edgeFilterShader;
     engine::gfx::ShaderProgram hsvDisplayShader;
-    engine::gfx::ShaderProgram equirectToCubemapShader;
-    engine::gfx::ShaderProgram prefilterShader;
-    engine::gfx::ShaderProgram skyShader;
     engine::gfx::OcioDisplayTransform ocioTransform;
 };
 
 // All shader/OCIO loading in one place so initializeApp has one all-or-nothing check, matching how it already treats model/environment loading as a single startup gate.
 std::optional<RequiredShaders> loadShaders() {
-    std::optional<engine::gfx::ShaderProgram> sceneShader = engine::gfx::ShaderProgram::loadFromFiles(
-        ASSET_ROOT_DIR "/shaders/pbr.vert", ASSET_ROOT_DIR "/shaders/pbr.frag");
+    // HSV/Sobel/Gabor AOV display passes -- see hsv_display.frag/edge_filter.frag; both run over the
+    // path tracer's Beauty image via the shared fullscreen-triangle post-process pass.
     std::optional<engine::gfx::ShaderProgram> edgeFilterShader =
         engine::gfx::ShaderProgram::loadFromFiles(ASSET_ROOT_DIR "/shaders/fullscreen_triangle.vert",
                                                    ASSET_ROOT_DIR "/shaders/edge_filter.frag");
-    // HSV AOV display pass -- see hsv_display.frag; runs over whichever Beauty source (rasterizer or
-    // path tracer) is currently active, since pbr.frag's own HSV branch only covers the rasterizer.
     std::optional<engine::gfx::ShaderProgram> hsvDisplayShader = engine::gfx::ShaderProgram::loadFromFiles(
         ASSET_ROOT_DIR "/shaders/fullscreen_triangle.vert", ASSET_ROOT_DIR "/shaders/hsv_display.frag");
-    // IBL preprocessing shaders (env_prefilter_pass.h) -- one-time startup use only, never touched again once the prefiltered cubemap is built.
-    std::optional<engine::gfx::ShaderProgram> equirectToCubemapShader =
-        engine::gfx::ShaderProgram::loadFromFiles(
-            ASSET_ROOT_DIR "/shaders/fullscreen_triangle.vert",
-            ASSET_ROOT_DIR "/shaders/equirect_to_cubemap.frag");
-    std::optional<engine::gfx::ShaderProgram> prefilterShader = engine::gfx::ShaderProgram::loadFromFiles(
-        ASSET_ROOT_DIR "/shaders/fullscreen_triangle.vert",
-        ASSET_ROOT_DIR "/shaders/prefilter_specular.frag");
-    // Background pass sampling the raw equirect map directly -- see sky.frag; toggled at runtime via the HUD, off by default.
-    std::optional<engine::gfx::ShaderProgram> skyShader = engine::gfx::ShaderProgram::loadFromFiles(
-        ASSET_ROOT_DIR "/shaders/fullscreen_triangle.vert", ASSET_ROOT_DIR "/shaders/sky.frag");
     std::optional<engine::gfx::OcioDisplayTransform> ocioTransform =
         engine::gfx::OcioDisplayTransform::create();
 
-    if (!sceneShader || !edgeFilterShader || !hsvDisplayShader || !equirectToCubemapShader ||
-        !prefilterShader || !skyShader || !ocioTransform) {
+    if (!edgeFilterShader || !hsvDisplayShader || !ocioTransform) {
         return std::nullopt;
     }
     return RequiredShaders{
-        std::move(*sceneShader),  std::move(*edgeFilterShader), std::move(*hsvDisplayShader),
-        std::move(*equirectToCubemapShader), std::move(*prefilterShader),
-        std::move(*skyShader),    std::move(*ocioTransform),
-    };
-}
-
-// Punctual lights (Phase 4), sourced from scene.json -- set once here, same as the single fixed light this replaces; no runtime light-editing UI exists yet. A directional's color of pi cancels the shader's Lambertian /pi so a directly-lit surface's brightness matches its albedo (unchanged from that convention).
-void uploadLights(const engine::gfx::ShaderProgram& sceneShader,
-                   const std::vector<engine::config::Light>& lights) {
-    const int lightCount = static_cast<int>(lights.size()) < engine::config::kMaxLights
-                                ? static_cast<int>(lights.size())
-                                : engine::config::kMaxLights;
-    GL_CALL(glUniform1i(sceneShader.uniformLocation("uLightCount"), lightCount));
-    for (int i = 0; i < lightCount; ++i) {
-        const engine::config::Light& light = lights[static_cast<std::size_t>(i)];
-        const std::string index = "[" + std::to_string(i) + "]";
-        GL_CALL(glUniform1i(sceneShader.uniformLocation("uLightType" + index),
-                            light.type == engine::config::Light::Type::Directional ? 0 : 1));
-        GL_CALL(glUniform3fv(sceneShader.uniformLocation("uLightPositionOrDir" + index), 1,
-                             &light.directionOrPosition[0]));
-        GL_CALL(glUniform3fv(sceneShader.uniformLocation("uLightColor" + index), 1,
-                             &light.color[0]));
-        GL_CALL(glUniform1f(sceneShader.uniformLocation("uLightRange" + index), light.range));
-    }
-}
-
-struct IblResult {
-    engine::gfx::Texture environmentTexture;
-    engine::gfx::PrefilteredEnvironment prefilteredEnv;
-};
-
-// IBL (Phase 4): equirect env map -> prefiltered specular cubemap (Karis 2013 split-sum) + SH-9 diffuse irradiance (Ramamoorthi & Hanrahan 2001). Both are one-time startup preprocessing; texture unit 6 is otherwise unused, so the cubemap is bound once here rather than every frame.
-IblResult buildAndUploadIbl(const engine::gfx::HdrImage& environmentImage,
-                            const engine::gfx::ShaderProgram& sceneShader,
-                            const engine::gfx::ShaderProgram& equirectToCubemapShader,
-                            const engine::gfx::ShaderProgram& prefilterShader) {
-    GL_CALL(glEnable(GL_TEXTURE_CUBE_MAP_SEAMLESS));
-    const auto envStart = std::chrono::steady_clock::now();
-    // GL_REPEAT, not CLAMP_TO_EDGE: this is an equirectangular panorama, which needs horizontal wraparound at the phi=+/-180deg seam (u=0/u=1) for both correct bilinear sampling there and correct glGenerateMipmap downsampling across that seam -- under CLAMP_TO_EDGE the mip chain bakes in a faint discontinuity at that column, static in texture space but rotated into view at nonzero uEnvRotationRadians. createFromFloatPixels applies one wrap mode to both axes, so this also repeats vertically: a real but sub-texel cost (bilinear filtering exactly at the zenith/nadir blends across to the opposite pole's row), accepted rather than worth a per-axis wrap parameter on the shared Texture API for this one caller.
-    engine::gfx::Texture environmentTexture = engine::gfx::Texture::createFromFloatPixels(
-        environmentImage.width, environmentImage.height, environmentImage.rgba.data(), GL_REPEAT);
-    std::cout << "environmentTexture upload: "
-              << std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
-                                                             envStart)
-                     .count()
-              << " ms\n"
-              << std::flush;
-    const auto prefilterStart = std::chrono::steady_clock::now();
-    engine::gfx::PrefilteredEnvironment prefilteredEnv = engine::gfx::buildPrefilteredEnvironment(
-        environmentTexture, equirectToCubemapShader, prefilterShader);
-    std::cout << "buildPrefilteredEnvironment: "
-              << std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
-                                                             prefilterStart)
-                     .count()
-              << " ms\n"
-              << std::flush;
-    sceneShader.use();
-    GL_CALL(glUniform1i(sceneShader.uniformLocation("uPrefilteredSpecular"), 6));
-    GL_CALL(glUniform1f(sceneShader.uniformLocation("uPrefilteredSpecularMaxLod"),
-                        static_cast<float>(prefilteredEnv.specularMipCount - 1)));
-    prefilteredEnv.specular.bind(6);
-
-    const auto shStart = std::chrono::steady_clock::now();
-    const std::array<glm::vec3, 9> shIrradiance = engine::scene::projectIrradianceSH9(environmentImage);
-    GL_CALL(glUniform3fv(sceneShader.uniformLocation("uShIrradiance"), 9, &shIrradiance[0][0]));
-    std::cout << "projectIrradianceSH9: "
-              << std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
-                                                             shStart)
-                     .count()
-              << " ms, DC term = (" << shIrradiance[0].r << ", " << shIrradiance[0].g << ", "
-              << shIrradiance[0].b << ")\n"
-              << std::flush;
-
-    return IblResult{std::move(environmentTexture), std::move(prefilteredEnv)};
-}
-
-struct SceneUniformLocations {
-    int uModelLoc;
-    int uViewLoc;
-    int uProjectionLoc;
-    int uNormalMatrixLoc;
-    int uBaseColorFactorLoc;
-    int uMetallicFactorLoc;
-    int uRoughnessFactorLoc;
-    int uBoundsMinLoc;
-    int uBoundsMaxLoc;
-    int uObjectIdColorLoc;
-    int uCameraPosLoc;
-    int uAovLoc;
-    int uChannelViewLoc;
-    int uEnvRotationRadiansLoc;
-};
-
-SceneUniformLocations cacheSceneUniformLocations(const engine::gfx::ShaderProgram& sceneShader) {
-    return SceneUniformLocations{
-        sceneShader.uniformLocation("uModel"),
-        sceneShader.uniformLocation("uView"),
-        sceneShader.uniformLocation("uProjection"),
-        sceneShader.uniformLocation("uNormalMatrix"),
-        sceneShader.uniformLocation("uBaseColorFactor"),
-        sceneShader.uniformLocation("uMetallicFactor"),
-        sceneShader.uniformLocation("uRoughnessFactor"),
-        sceneShader.uniformLocation("uBoundsMin"),
-        sceneShader.uniformLocation("uBoundsMax"),
-        sceneShader.uniformLocation("uObjectIdColor"),
-        sceneShader.uniformLocation("uCameraPos"),
-        sceneShader.uniformLocation("uAov"),
-        sceneShader.uniformLocation("uChannelView"),
-        sceneShader.uniformLocation("uEnvRotationRadians"),
+        std::move(*edgeFilterShader),
+        std::move(*hsvDisplayShader),
+        std::move(*ocioTransform),
     };
 }
 
@@ -386,43 +217,12 @@ int setupHsvDisplayShader(const engine::gfx::ShaderProgram& hsvDisplayShader) {
     return hsvDisplayShader.uniformLocation("uChannelView");
 }
 
-struct SkyUniformLocations {
-    int uInvViewProjLoc;
-    int uCameraPosLoc;
-    int uEnvRotationRadiansLoc;
-};
-
-// Sky background pass (sky.frag): samples the raw equirect map on texture unit 0, same as edgeFilterShader -- the geometry pass rebinds unit 0 to each instance's base colour texture every frame, but that happens after the sky is drawn each frame, so there's no conflict.
-SkyUniformLocations setupSkyShader(const engine::gfx::ShaderProgram& skyShader) {
-    skyShader.use();
-    GL_CALL(glUniform1i(skyShader.uniformLocation("uEquirect"), 0));
-    return SkyUniformLocations{
-        skyShader.uniformLocation("uInvViewProj"),
-        skyShader.uniformLocation("uCameraPos"),
-        skyShader.uniformLocation("uEnvRotationRadians"),
-    };
-}
-
-// Attribute-less VAO for the sky's fullscreen-triangle draw (gl_VertexID trick, see fullscreen_triangle.vert) -- Apple's core-profile driver requires some VAO bound for any draw call even with zero vertex attributes, same rationale as PostProcessPass's own VAO. Not PostProcessPass itself: that draws into the default framebuffer, not the HDR FBO the sky needs.
-unsigned int createSkyVao() {
-    unsigned int skyVao = 0;
-    GL_CALL(glGenVertexArrays(1, &skyVao));
-    return skyVao;
-}
-
-// Instance transforms and mesh bounds are fixed after load (mesh.h: "not updated if the mesh is ever mutated... it isn't, today") -- computed once here, not per frame.
-std::vector<std::pair<glm::vec3, glm::vec3>> computeInstanceWorldBounds(
-    const std::vector<engine::scene::MeshInstance>& instances) {
-    std::vector<std::pair<glm::vec3, glm::vec3>> bounds;
-    bounds.reserve(instances.size());
-    for (const engine::scene::MeshInstance& instance : instances) {
-        bounds.push_back(
-            worldSpaceBounds(instance.mesh.boundsMin(), instance.mesh.boundsMax(), instance.transform));
-    }
-    return bounds;
-}
-
-// All one-time startup work: camera/model/framebuffer/shader/environment loading (nullopt on any failure -- matches the shader/model/OCIO all-or-nothing gate this replaces), one-time uniform assignment, IBL preprocessing, BVH build, and cached uniform-location lookups. Doesn't wire input callbacks -- those capture a stable AppResources& and must be set up by the caller only after this returns (see main()), since a callback capturing a reference into an AppResources that's still about to be moved into its final std::optional storage would dangle.
+// All one-time startup work: camera/model/shader/environment loading (nullopt on any failure --
+// matches the shader/model/OCIO all-or-nothing gate this replaces), BVH build, and cached
+// uniform-location lookups for the shared edge-filter/HSV shaders. Doesn't wire input callbacks --
+// those capture a stable AppResources& and must be set up by the caller only after this returns (see
+// main()), since a callback capturing a reference into an AppResources that's still about to be moved
+// into its final std::optional storage would dangle.
 std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sceneConfig,
                                            const engine::config::ProfileConfig& profileConfig,
                                            engine::platform::Window& window) {
@@ -432,7 +232,7 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
               << engine::debug::gpuTimerQueryAvailable() << '\n';
     const engine::debug::GpuInfo gpuInfo = engine::debug::queryGpuInfo();
 
-    // exposure()/ev100() are logged but not render-path-consumed yet: no scene-referred exposure multiply exists, only OCIO's display-encode step (Phase 4+ real lighting is the natural point to seed it from here).
+    // exposure()/ev100() are logged but not render-path-consumed yet: no scene-referred exposure multiply exists, only OCIO's display-encode step.
     engine::scene::DebugCameraController debugCamera(
         profileConfig.position, profileConfig.yawDegrees, profileConfig.pitchDegrees,
         profileConfig.filmBack, profileConfig.focalLengthMm, profileConfig.nearClip,
@@ -457,21 +257,17 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
             .count();
     int totalTriangles = 0;
     if (stumpModel) {
-        for (const engine::scene::MeshInstance& instance : stumpModel->instances) {
-            totalTriangles += instance.mesh.triangleCount();
-        }
+        totalTriangles = static_cast<int>(stumpModel->worldTriangles.size());
         std::cout << "loadGltf: " << stumpModel->instances.size() << " instance(s), "
                   << totalTriangles << " triangles, " << loadMs << " ms\n"
                   << std::flush;
     }
-    // "Points": total vertex-index count, i.e. 3 per triangle, not the unique vertex buffer size -- always exactly 3x triangles for this triangle-only renderer, so it's derived rather than tracked separately.
+    // "Points": total vertex-index count, i.e. 3 per triangle -- derived rather than tracked separately.
     const int totalPoints = totalTriangles * 3;
 
-    const auto [fbWidth, fbHeight] = window.framebufferSize();
-    engine::gfx::HdrFramebuffer hdrFbo(fbWidth, fbHeight);
-
     std::optional<RequiredShaders> shaders = loadShaders();
-    // Decoded once here (not via Texture::createFromExr) since both the GPU upload below and projectIrradianceSH9 need the same CPU pixel data -- see hdr_image.h.
+    // Decoded once here (not via a texture-upload helper) since projectIrradianceSH9-era GPU upload
+    // no longer exists -- the path tracer is the only consumer, sampling this CPU HdrImage directly.
     std::optional<engine::gfx::HdrImage> environmentImage =
         engine::gfx::loadExr(std::string(ASSET_ROOT_DIR) + "/textures/republiqueHDR_2k.exr");
 
@@ -484,23 +280,10 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
     engine::gfx::PostProcessPass postProcess;
     engine::debug::HudOverlay hud(window.nativeHandle());
     engine::debug::FrameStats frameStats;
-    engine::debug::GpuTimer geomTimer;
     engine::debug::GpuTimer postTimer;
     engine::debug::Histogram histogram;
 
-    // One-time texture-unit assignment (units 0-5, see below). Explicit even though unit 0 is GL's implicit default for an unset sampler uniform — relying on that default silently breaks the moment the shader gains a second sampler. OcioDisplayTransform sets its own uHdrColor uniform the same way at construction.
-    shaders->sceneShader.use();
-    GL_CALL(glUniform1i(shaders->sceneShader.uniformLocation("uBaseColor"), 0));
-    GL_CALL(glUniform1i(shaders->sceneShader.uniformLocation("uRoughness"), 1));
-    GL_CALL(glUniform1i(shaders->sceneShader.uniformLocation("uAo"), 2));
-    GL_CALL(glUniform1i(shaders->sceneShader.uniformLocation("uNormal"), 3));
-    GL_CALL(glUniform1i(shaders->sceneShader.uniformLocation("uBump"), 4));
-    GL_CALL(glUniform1i(shaders->sceneShader.uniformLocation("uSpecular"), 5));
-    uploadLights(shaders->sceneShader, sceneConfig.lights);
-
-    IblResult ibl = buildAndUploadIbl(*environmentImage, shaders->sceneShader,
-                                       shaders->equirectToCubemapShader, shaders->prefilterShader);
-    engine::scene::EnvironmentMap environmentMap(std::move(*environmentImage));  // retained for path-traced miss rays
+    engine::scene::EnvironmentMap environmentMap(std::move(*environmentImage));
 
     const auto bvhBuildStart = std::chrono::steady_clock::now();
     engine::scene::Bvh sceneBvh = engine::scene::Bvh::build(std::move(stumpModel->worldTriangles));
@@ -512,68 +295,39 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
               << sceneBvh.nodeCount() << " nodes, " << bvhBuildMs << " ms\n"
               << std::flush;
 
-    // Depth AOV's linearization near/far -- fixed for the whole run, never mutated by the debug camera (see profile_config.h).
-    GL_CALL(glUniform1f(shaders->sceneShader.uniformLocation("uNearClip"), profileConfig.nearClip));
-    GL_CALL(glUniform1f(shaders->sceneShader.uniformLocation("uFarClip"), profileConfig.farClip));
-    const SceneUniformLocations sceneLocs = cacheSceneUniformLocations(shaders->sceneShader);
     const int uFilterModeLoc = setupEdgeFilterShader(shaders->edgeFilterShader);
     const int uHsvChannelViewLoc = setupHsvDisplayShader(shaders->hsvDisplayShader);
-    const SkyUniformLocations skyLocs = setupSkyShader(shaders->skyShader);
-    const unsigned int skyVao = createSkyVao();
-    std::vector<std::pair<glm::vec3, glm::vec3>> instanceWorldBounds =
-        computeInstanceWorldBounds(stumpModel->instances);
 
     return AppResources{
-        .hdrFbo = std::move(hdrFbo),
-        .sceneShader = std::move(shaders->sceneShader),
         .edgeFilterShader = std::move(shaders->edgeFilterShader),
         .hsvDisplayShader = std::move(shaders->hsvDisplayShader),
-        .skyShader = std::move(shaders->skyShader),
         .ocioTransform = std::move(shaders->ocioTransform),
-        .environmentTexture = std::move(ibl.environmentTexture),
-        .prefilteredEnv = std::move(ibl.prefilteredEnv),
         .sceneBvh = std::move(sceneBvh),
         .environmentMap = std::move(environmentMap),
         .stumpModel = std::move(*stumpModel),
-        .instanceWorldBounds = std::move(instanceWorldBounds),
         .totalTriangles = totalTriangles,
         .totalPoints = totalPoints,
         .postProcess = std::move(postProcess),
         .hud = std::move(hud),
         .frameStats = std::move(frameStats),
-        .geomTimer = std::move(geomTimer),
         .postTimer = std::move(postTimer),
         .histogram = std::move(histogram),
         .debugCamera = std::move(debugCamera),
         .gpuInfo = gpuInfo,
-        .skyVao = skyVao,
-        .uModelLoc = sceneLocs.uModelLoc,
-        .uViewLoc = sceneLocs.uViewLoc,
-        .uProjectionLoc = sceneLocs.uProjectionLoc,
-        .uNormalMatrixLoc = sceneLocs.uNormalMatrixLoc,
-        .uBaseColorFactorLoc = sceneLocs.uBaseColorFactorLoc,
-        .uMetallicFactorLoc = sceneLocs.uMetallicFactorLoc,
-        .uRoughnessFactorLoc = sceneLocs.uRoughnessFactorLoc,
-        .uBoundsMinLoc = sceneLocs.uBoundsMinLoc,
-        .uBoundsMaxLoc = sceneLocs.uBoundsMaxLoc,
-        .uObjectIdColorLoc = sceneLocs.uObjectIdColorLoc,
-        .uCameraPosLoc = sceneLocs.uCameraPosLoc,
-        .uAovLoc = sceneLocs.uAovLoc,
-        .uChannelViewLoc = sceneLocs.uChannelViewLoc,
-        .uEnvRotationRadiansLoc = sceneLocs.uEnvRotationRadiansLoc,
         .uFilterModeLoc = uFilterModeLoc,
         .uHsvChannelViewLoc = uHsvChannelViewLoc,
-        .uSkyInvViewProjLoc = skyLocs.uInvViewProjLoc,
-        .uSkyCameraPosLoc = skyLocs.uCameraPosLoc,
-        .uSkyEnvRotationRadiansLoc = skyLocs.uEnvRotationRadiansLoc,
-        // aov selects which debug buffer pbr.frag outputs (see its uAov comment for the index order); channelView isolates one R/G/B channel of whatever aov currently shows. userLut is the LUT 'L' cycles through -- kept separate from OcioDisplayTransform's active LUT because non-Beauty AOVs force Raw (see the LUT-select comment in renderFrame) and must not clobber the user's actual choice. Both aov and userLut start from scene.json rather than a fixed literal.
+        // aov selects which AOV the path tracer's snapshot supplies (see selectPathTracedImage);
+        // channelView isolates one R/G/B channel of whatever aov currently shows. userLut is the LUT
+        // 'L' cycles through -- kept separate from OcioDisplayTransform's active LUT because non-Beauty
+        // AOVs force Raw (see the LUT-select comment in presentFrame) and must not clobber the user's
+        // actual choice. Both aov and userLut start from scene.json rather than a fixed literal.
         .aov = sceneConfig.initialAov,
         .channelView = 0,
         .userLut = sceneConfig.initialLut,
         .framingState = engine::debug::FramingOverlayState{},
-        // "Show/Hide Background" HDRI-section checkbox -- off by default, preserving today's black background; only takes visible effect for the Beauty AOV (aov == 0), see renderFrame.
+        // "Show/Hide Background" HDRI-section checkbox -- off by default; only takes visible effect for the Beauty AOV, see presentFrame.
         .showSky = false,
-        // HDR environment's Y-axis (world up) rotation, degrees [0,359] -- affects sky background, SH diffuse, and prefiltered specular together (see pbr.frag/sky.frag's uEnvRotationRadians), all rotated at query time rather than re-baked.
+        // HDR environment's Y-axis (world up) rotation, degrees [0,359] -- affects both the background and the environment's contribution to lighting (see environment_map.h), rotated at query time rather than re-baked.
         .envRotationDegrees = 0,
         .pathTraceSettings = engine::scene::PathTraceSettings{sceneConfig.samplesPerPixel,
                                                                 sceneConfig.maxBounces,
@@ -606,8 +360,6 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
 //
 // Wired up here, not inside initializeApp: every callback captures a reference into app, which must already be at its final, stable address (main()'s local, unwrapped from the optional initializeApp returned) -- capturing a reference during initializeApp would dangle the moment that AppResources is moved into its optional's storage.
 void wireCallbacks(engine::platform::Window& window, AppResources& app) {
-    window.setResizeCallback([&app](int width, int height) { app.hdrFbo.resize(width, height); });
-
     window.setKeyCallback([&app](int key, int action) {
         if (action != GLFW_PRESS) {
             return;
@@ -661,88 +413,36 @@ engine::scene::Camera updateCamera(engine::platform::Window& window, AppResource
     return app.debugCamera.snapshot();
 }
 
-// Sky background: drawn with depth test/write both off, before the depth-tested geometry pass, so geometry simply overwrites it wherever it covers a pixel -- only takes visible effect for Beauty (aov == 0); every other AOV keeps its black background, since a sky colour has no valid value in those debug buffers (e.g. Alpha's coverage-mask convention).
-void drawSky(AppResources& app, const glm::mat4& viewProjection, const glm::vec3& cameraPos) {
-    if (!app.showSky || app.aov != 0) {
-        return;
-    }
-    // Depth writes explicitly off, not just depth test: fullscreen_triangle.vert's fixed clip-space z (0.0) would otherwise land in the depth buffer ahead of real geometry.
-    GL_CALL(glDepthMask(GL_FALSE));
-    const glm::mat4 invViewProj = glm::inverse(viewProjection);
-    app.skyShader.use();
-    GL_CALL(glUniformMatrix4fv(app.uSkyInvViewProjLoc, 1, GL_FALSE, &invViewProj[0][0]));
-    GL_CALL(glUniform3fv(app.uSkyCameraPosLoc, 1, &cameraPos[0]));
-    GL_CALL(glUniform1f(app.uSkyEnvRotationRadiansLoc,
-                        glm::radians(static_cast<float>(app.envRotationDegrees))));
-    app.environmentTexture.bind(0);
-    GL_CALL(glBindVertexArray(app.skyVao));
-    GL_CALL(glDrawArrays(GL_TRIANGLES, 0, 3));
-    GL_CALL(glDepthMask(GL_TRUE));
+// Reads one RGB texel directly (no bilinear) -- gbuffer AOVs are per-pixel snapshots, not resampled here.
+glm::vec3 sampleTexel(const engine::gfx::HdrImage& image, int x, int y) {
+    const std::size_t idx = ((static_cast<std::size_t>(y) * static_cast<std::size_t>(image.width)) +
+                              static_cast<std::size_t>(x)) *
+                             4;
+    return {image.rgba[idx + 0], image.rgba[idx + 1], image.rgba[idx + 2]};
 }
 
-struct GeometryDrawStats {
-    int instancesDrawn;
-    int instancesCulled;
-    long long trianglesDrawn;
-};
-
-GeometryDrawStats drawSceneGeometry(AppResources& app, const glm::mat4& viewProjection) {
-    GeometryDrawStats stats{0, 0, 0};
-    int instanceId = 0;
-    for (const engine::scene::MeshInstance& instance : app.stumpModel.instances) {
-        const auto& [worldMin, worldMax] =
-            app.instanceWorldBounds[static_cast<std::size_t>(instanceId)];
-        const bool visible =
-            engine::scene::frustumIntersectsAabb(viewProjection, worldMin, worldMax);
-        if (!visible) {
-            ++stats.instancesCulled;
-            ++instanceId;
-            continue;
-        }
-        ++stats.instancesDrawn;
-        stats.trianglesDrawn += instance.mesh.triangleCount();
-
-        GL_CALL(glUniformMatrix4fv(app.uModelLoc, 1, GL_FALSE, &instance.transform[0][0]));
-        const glm::mat3 normalMatrix = glm::inverseTranspose(glm::mat3(instance.transform));
-        GL_CALL(glUniformMatrix3fv(app.uNormalMatrixLoc, 1, GL_FALSE, &normalMatrix[0][0]));
-        const glm::vec3 baseColorFactor(instance.material.baseColorFactor);
-        GL_CALL(glUniform3fv(app.uBaseColorFactorLoc, 1, &baseColorFactor[0]));
-        GL_CALL(glUniform1f(app.uMetallicFactorLoc, instance.material.metallicFactor));
-        GL_CALL(glUniform1f(app.uRoughnessFactorLoc, instance.material.roughnessFactor));
-        GL_CALL(glUniform3fv(app.uBoundsMinLoc, 1, &worldMin[0]));
-        GL_CALL(glUniform3fv(app.uBoundsMaxLoc, 1, &worldMax[0]));
-        const glm::vec3 objectIdColor = engine::scene::falseColorForId(instanceId);
-        GL_CALL(glUniform3fv(app.uObjectIdColorLoc, 1, &objectIdColor[0]));
-        instance.material.baseColorTexture.gpu.bind(0);
-        instance.material.roughnessTexture.gpu.bind(1);
-        instance.material.aoTexture.gpu.bind(2);
-        instance.material.normalTexture.gpu.bind(3);
-        instance.material.bumpTexture.gpu.bind(4);
-        instance.material.specularTexture.gpu.bind(5);
-        instance.mesh.draw();
-        ++instanceId;
-    }
-    return stats;
-}
-
-// Resolved here, not in the mouse callback: this is the first point after this frame's scene draw where hdrFbo's depth buffer holds this frame's contents (the callback fires during pollEvents(), before the draw, which would read last frame's).
+// Orbit pivot picked from the path tracer's own G-buffer (worldPos/alpha at its centre pixel) --
+// sampled at the gbuffer image's own resolution, not the live window size, in case of a resize race.
+// Falls back to a fixed forward-offset pivot when no pass has published yet or the centre pixel missed
+// all geometry.
 void resolveOrbitPick(engine::platform::Window& window, AppResources& app,
-                       const engine::scene::Camera& camera, const glm::mat4& viewProjection,
-                       int winWidth, int winHeight) {
+                       const engine::scene::Camera& camera,
+                       const engine::scene::PathTraceSnapshot& pathTraceSnapshot) {
     if (!app.orbitPickRequested) {
         return;
     }
     app.orbitPickRequested = false;
-    const float depth = app.hdrFbo.sampleDepth(winWidth / 2, winHeight / 2);
-    glm::vec3 pivot(0.0F);
-    if (depth < 0.9999F) {
-        const glm::vec4 clip(0.0F, 0.0F, (2.0F * depth) - 1.0F, 1.0F);
-        glm::vec4 world = glm::inverse(viewProjection) * clip;
-        world /= world.w;
-        pivot = glm::vec3(world);
-    } else {
-        pivot = camera.position() + (3.0F * camera.forward());
+
+    glm::vec3 pivot = camera.position() + (3.0F * camera.forward());
+    if (pathTraceSnapshot.gbuffer) {
+        const engine::gfx::HdrImage& worldPos = pathTraceSnapshot.gbuffer->worldPos;
+        const int cx = worldPos.width / 2;
+        const int cy = worldPos.height / 2;
+        if (sampleTexel(pathTraceSnapshot.gbuffer->alpha, cx, cy).x > 0.5F) {
+            pivot = sampleTexel(worldPos, cx, cy);
+        }
     }
+
     app.debugCamera.beginOrbit(pivot);
     window.setCursorLocked(true);
     const auto [cursorX, cursorY] = window.cursorPosition();
@@ -753,15 +453,13 @@ void resolveOrbitPick(engine::platform::Window& window, AppResources& app,
 // HdrImage's row 0 is documented as the image's top (EXR/glTF convention, hdr_image.h); GL texture
 // v=0 samples the first uploaded row, and fullscreen_triangle.vert's vUv places v=0 at the bottom of
 // the window. Row-reversing here -- only for this fixed-blit display path, never for material or
-// environment HdrImages sampled via mesh UVs / the equirect formula (sky.frag, environment_map.cpp),
-// which already agree with row-0-top by construction -- makes the uploaded buffer's first row the
-// image's bottom row, matching every other texture this same blit displays.
+// environment HdrImages sampled via mesh UVs / the equirect formula (environment_map.cpp), which
+// already agree with row-0-top by construction -- makes the uploaded buffer's first row the image's
+// bottom row, matching every other texture this same blit displays.
 //
-// channelView isolates one R/G/B channel (broadcast to grey), mirroring pbr.frag's
-// applyChannelView -- folded into this same per-pixel copy rather than a separate pass, since the
-// rasterizer's channel view is baked into hdrFbo by pbr.frag before any post-process shader ever
-// runs, but the path-traced display texture bypasses pbr.frag entirely (it's a direct CPU-image
-// upload), so nothing downstream would otherwise apply it.
+// channelView isolates one R/G/B channel (broadcast to grey) -- folded into this same per-pixel copy
+// rather than a separate shader pass, since the path-traced display texture is a direct CPU-image
+// upload with no shader pass of its own to apply it in.
 std::vector<float> flipRowsForDisplay(const engine::gfx::HdrImage& image, int channelView) {
     std::vector<float> flipped(image.rgba.size());
     const std::size_t rowFloats = static_cast<std::size_t>(image.width) * 4;
@@ -793,9 +491,8 @@ struct PathTracedAovSource {
     std::shared_ptr<const void> owner;
 };
 
-// Returns a default (null image) for AOVs the path tracer hasn't computed (yet) or while either half
-// of the snapshot hasn't published its first pass -- callers fall back to the rasterizer's pbr.frag
-// branch instead. Extended as PathTraceGBuffer/PathTraceDynamic grow more buffers.
+// Returns a default (null image) while either half of the snapshot hasn't published its first pass
+// yet -- callers show black instead. Extended as PathTraceGBuffer/PathTraceDynamic grow more buffers.
 PathTracedAovSource selectPathTracedImage(const engine::scene::PathTraceSnapshot& snapshot,
                                            engine::debug::AovId aov) {
     if (!snapshot.gbuffer || !snapshot.dynamic) {
@@ -875,36 +572,40 @@ void ensurePathTraceDisplayTexture(AppResources& app, const std::shared_ptr<cons
         return;
     }
     const std::vector<float> flipped = flipRowsForDisplay(image, channelViewToBake);
-    app.pathTraceDisplayTexture = engine::gfx::Texture::createFromFloatPixels(
-        image.width, image.height, flipped.data(), GL_CLAMP_TO_EDGE);
+    app.pathTraceDisplayTexture =
+        engine::gfx::Texture::createFromFloatPixels(image.width, image.height, flipped.data());
     app.pathTraceDisplayedAov = app.aov;
     app.pathTraceDisplayedChannelView = channelViewToBake;
     app.pathTraceDisplayedOwner = owner;
 }
 
-// Blits the path-traced buffer for the selected AOV, when the path tracer has one, through the same
-// OCIO/post-process path as the rasterizer -- Beauty uses the user's LUT, everything else forces Raw
-// (same reasoning as the rasterizer's debug AOVs below: not scene-referred radiance, a display curve
-// would distort them). Falls back to the rasterizer's own branch for any AOV the path tracer hasn't
-// computed -- this fallback is what lets path-traced AOVs ship incrementally.
-void presentFrame(AppResources& app, int winWidth, int winHeight) {
+// Nothing to show yet (no path-trace pass has published) or the selected AOV has no buffer -- clears
+// the default framebuffer instead of leaving stale contents on screen.
+void clearToBlack(int winWidth, int winHeight) {
+    GL_CALL(glBindFramebuffer(GL_FRAMEBUFFER, 0));
+    GL_CALL(glViewport(0, 0, winWidth, winHeight));
+    GL_CALL(glClearColor(0.0F, 0.0F, 0.0F, 1.0F));
+    GL_CALL(glClear(GL_COLOR_BUFFER_BIT));
+}
+
+// Blits the path-traced buffer for the selected AOV through the shared OCIO/post-process path --
+// Beauty uses the user's LUT, everything else forces Raw (not scene-referred radiance, a display
+// curve would distort them).
+void presentFrame(AppResources& app, const engine::scene::PathTraceSnapshot& pathTraceSnapshot,
+                   int winWidth, int winHeight) {
     const auto aovId = static_cast<engine::debug::AovId>(app.aov);
-    // Held for the rest of this function so the objects behind pathTracedImage/
-    // ensurePathTraceDisplayTexture stay valid even if the driver publishes a newer result mid-frame
-    // -- shared_ptrs, not a raw fetch. gbuffer/dynamic are two separately-published objects (see
-    // PathTraceSnapshot's doc comment); either being null means no pass has completed yet.
-    const engine::scene::PathTraceSnapshot pathTraceSnapshot =
-        app.pathTraceDriver != nullptr ? app.pathTraceDriver->latestResult()
-                                        : engine::scene::PathTraceSnapshot{};
     const bool hasPathTraceResult = pathTraceSnapshot.gbuffer && pathTraceSnapshot.dynamic;
+    if (!hasPathTraceResult) {
+        clearToBlack(winWidth, winHeight);
+        return;
+    }
 
     const bool isPostFilterAov =
         aovId == engine::debug::AovId::HSV || aovId == engine::debug::AovId::Luminance ||
         aovId == engine::debug::AovId::Sobel || aovId == engine::debug::AovId::Gabor;
-    if (hasPathTraceResult && isPostFilterAov) {
+    if (isPostFilterAov) {
         // These are 2D image filters of the beauty image, not independent per-AOV buffers -- always
-        // read path-traced Beauty regardless of which of the four is selected (matches the
-        // rasterizer's own pbr.frag, which likewise always shades Beauty into hdrFbo for aov 3-6).
+        // read path-traced Beauty regardless of which of the four is selected.
         const bool isHsv = aovId == engine::debug::AovId::HSV;
         ensurePathTraceDisplayTexture(app, pathTraceSnapshot.dynamic, pathTraceSnapshot.dynamic->beauty,
                                        isHsv ? 0 : app.channelView);
@@ -926,8 +627,7 @@ void presentFrame(AppResources& app, int winWidth, int winHeight) {
         return;
     }
 
-    const PathTracedAovSource pathTracedSource =
-        hasPathTraceResult ? selectPathTracedImage(pathTraceSnapshot, aovId) : PathTracedAovSource{};
+    const PathTracedAovSource pathTracedSource = selectPathTracedImage(pathTraceSnapshot, aovId);
     if (pathTracedSource.image != nullptr) {
         ensurePathTraceDisplayTexture(app, pathTracedSource.owner, *pathTracedSource.image,
                                        app.channelView);
@@ -940,20 +640,7 @@ void presentFrame(AppResources& app, int winWidth, int winHeight) {
         return;
     }
 
-    // Debug AOVs (aov != 0) are already display-oriented (most clamped to [0,1]; unclamped ones like Luminance just hard-clip to white past 1, same as Beauty already does in Raw mode), not scene-referred radiance -- force the Raw passthrough so the sRGB/Rec709 display curve doesn't distort them, restoring the user's chosen LUT for Beauty. Still set even for Sobel/Gabor below, which don't draw through ocioTransform at all, so the HUD's LUT-name readout stays accurate.
-    app.ocioTransform.setActiveLut(app.aov == 0 ? app.userLut
-                                                 : engine::gfx::OcioDisplayTransform::Lut::Raw);
-    if (app.aov == 5 || app.aov == 6) {
-        // Sobel/Gabor: hdrFbo's color texture holds the Luminance AOV (pbr.frag's aov==4/5/6 branch) -- run the edge-filter second pass over it instead of the OCIO display transform.
-        app.edgeFilterShader.use();
-        GL_CALL(glUniform1i(app.uFilterModeLoc, app.aov == 6 ? 1 : 0));
-        app.postProcess.draw(app.hdrFbo.colorTexture(), app.edgeFilterShader,
-                              {winWidth, winHeight});
-    } else {
-        app.ocioTransform.bind();
-        app.postProcess.draw(app.hdrFbo.colorTexture(), app.ocioTransform.activeShader(),
-                              {winWidth, winHeight});
-    }
+    clearToBlack(winWidth, winHeight);
 }
 
 // Non-blocking: hands a fresh request to the background PathTraceDriver, which restarts progressive
@@ -987,8 +674,7 @@ void requestPathTraceIfTriggerChanged(AppResources& app, const engine::scene::Ca
     app.lastPathTraceTrigger = current;
 }
 
-void updateHud(AppResources& app, const engine::scene::Camera& camera,
-               const GeometryDrawStats& drawStats, int winWidth, int winHeight) {
+void updateHud(AppResources& app, const engine::scene::Camera& camera, int winWidth, int winHeight) {
     const int accumulatedSamples =
         app.pathTraceDriver != nullptr ? app.pathTraceDriver->accumulatedSamples() : 0;
     const engine::debug::PathTracedStatus pathTracedStatus{
@@ -997,10 +683,7 @@ void updateHud(AppResources& app, const engine::scene::Camera& camera,
         accumulatedSamples};
     const engine::debug::SceneStats sceneStats{
         static_cast<int>(app.stumpModel.instances.size()),
-        drawStats.instancesDrawn,
-        drawStats.instancesCulled,
         app.totalTriangles,
-        drawStats.trianglesDrawn,
         app.totalPoints,
         winWidth,
         winHeight,
@@ -1008,7 +691,6 @@ void updateHud(AppResources& app, const engine::scene::Camera& camera,
     const engine::debug::HudFrameData hudFrameData{
         app.gpuInfo,
         app.frameStats,
-        app.geomTimer.millisecondsElapsed(),
         app.postTimer.millisecondsElapsed(),
         app.ramBytes,
         engine::debug::gpuAllocatedBytes(),
@@ -1032,7 +714,8 @@ void updateHud(AppResources& app, const engine::scene::Camera& camera,
     app.hud.render();
 }
 
-// One frame: poll -> bind HDR FBO -> clear -> draw scene -> post-process blit (exposure + OCIO display transform) to the default framebuffer -> swap.
+// One frame: poll -> update camera -> request a fresh path trace if input changed -> orbit-pick from
+// the path tracer's own G-buffer -> post-process blit to the default framebuffer -> swap.
 void renderFrame(engine::platform::Window& window, AppResources& app) {
     window.pollEvents();
     app.hud.beginFrame();
@@ -1044,44 +727,21 @@ void renderFrame(engine::platform::Window& window, AppResources& app) {
 
     const engine::scene::Camera camera = updateCamera(window, app, dtSeconds);
     const auto [winWidth, winHeight] = window.framebufferSize();
-    const float aspect = static_cast<float>(winWidth) / static_cast<float>(winHeight);
-    const glm::mat4 view = camera.viewMatrix();
-    const glm::mat4 projection = camera.projectionMatrix(aspect);
-    const glm::mat4 viewProjection = projection * view;
-    const glm::vec3 cameraPos = camera.position();
 
     requestPathTraceIfTriggerChanged(app, camera, winWidth, winHeight);
 
-    app.geomTimer.begin();
-    app.hdrFbo.bind();
-    glClearColor(0.0F, 0.0F, 0.0F, 1.0F);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    // Held for the rest of this frame so the objects behind it stay valid even if the driver
+    // publishes a newer result mid-frame -- shared_ptrs, not a raw fetch. gbuffer/dynamic are two
+    // separately-published objects (see PathTraceSnapshot's doc comment); either being null means no
+    // pass has completed yet.
+    const engine::scene::PathTraceSnapshot pathTraceSnapshot =
+        app.pathTraceDriver != nullptr ? app.pathTraceDriver->latestResult()
+                                        : engine::scene::PathTraceSnapshot{};
 
-    drawSky(app, viewProjection, cameraPos);
-
-    // Scoped to just this scene draw: the post-process pass below presents a fullscreen triangle to the default framebuffer at a fixed NDC z, so leaving depth test on for it would make correctness depend on whatever the driver leaves in that buffer's depth contents across frames, not on anything this code controls.
-    glEnable(GL_DEPTH_TEST);
-    app.sceneShader.use();
-    GL_CALL(glUniformMatrix4fv(app.uViewLoc, 1, GL_FALSE, &view[0][0]));
-    GL_CALL(glUniformMatrix4fv(app.uProjectionLoc, 1, GL_FALSE, &projection[0][0]));
-    GL_CALL(glUniform3fv(app.uCameraPosLoc, 1, &cameraPos[0]));
-    // app.aov may select an AovId pbr.frag has no branch for (IOR/BounceCount/transport-component
-    // AOVs) -- toRasterAovIndex maps those back to Beauty so the rasterizer still renders something
-    // sane while presentFrame's path-traced fallback (selectPathTracedImage) decides what's shown.
-    GL_CALL(glUniform1i(app.uAovLoc,
-                         engine::debug::toRasterAovIndex(static_cast<engine::debug::AovId>(app.aov))));
-    GL_CALL(glUniform1i(app.uChannelViewLoc, app.channelView));
-    GL_CALL(glUniform1f(app.uEnvRotationRadiansLoc,
-                        glm::radians(static_cast<float>(app.envRotationDegrees))));
-
-    const GeometryDrawStats drawStats = drawSceneGeometry(app, viewProjection);
-    glDisable(GL_DEPTH_TEST);
-    app.geomTimer.end();
-
-    resolveOrbitPick(window, app, camera, viewProjection, winWidth, winHeight);
+    resolveOrbitPick(window, app, camera, pathTraceSnapshot);
 
     app.postTimer.begin();
-    presentFrame(app, winWidth, winHeight);
+    presentFrame(app, pathTraceSnapshot, winWidth, winHeight);
     app.postTimer.end();
 
     // Captured after the composited image lands in the default framebuffer, before the HUD draws on top of it.
@@ -1094,7 +754,7 @@ void renderFrame(engine::platform::Window& window, AppResources& app) {
         app.lastRamSample = now;
     }
 
-    updateHud(app, camera, drawStats, winWidth, winHeight);
+    updateHud(app, camera, winWidth, winHeight);
 
     window.swapBuffers();
 }
@@ -1159,9 +819,6 @@ int main() {
                     while (!window.shouldClose()) {
                         renderFrame(window, *app);
                     }
-
-                    // skyVao has no RAII wrapper (see AppResources) -- free it explicitly at the same scope exit point its lifetime is tied to.
-                    GL_CALL(glDeleteVertexArrays(1, &app->skyVao));
                 }
             }
         }

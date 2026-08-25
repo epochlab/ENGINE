@@ -13,7 +13,7 @@ class OcioDisplayTransform {
 public:
     enum class Lut { Raw, SRGB, Rec709 };
 
-    // Builds all three shaders (see ocio_display_transform.cpp for the verified OCIO construction). Returns nullopt only on a GLSL compile/link failure (ShaderProgram's own recoverable-failure contract). An OCIO::Exception instead means this code is querying OCIO's fixed built-in registry incorrectly — an internal defect — and exits immediately, matching Window/HdrFramebuffer's precedent.
+    // Builds all three shaders (see ocio_display_transform.cpp for the verified OCIO construction). Returns nullopt only on a GLSL compile/link failure (ShaderProgram's own recoverable-failure contract). An OCIO::Exception instead means this code is querying OCIO's fixed built-in registry incorrectly — an internal defect — and exits immediately, matching Window/HudOverlay's precedent.
     [[nodiscard]] static std::optional<OcioDisplayTransform> create();
 
     void setActiveLut(Lut lut) { activeLut_ = lut; }

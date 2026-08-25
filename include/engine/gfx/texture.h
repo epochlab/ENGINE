@@ -16,9 +16,10 @@ public:
     Texture(Texture&& other) noexcept;
     Texture& operator=(Texture&& other) noexcept;
 
-    // Uploads width*height RGBA float texels (row-major, no padding) as GL_RGBA16F — matches HdrFramebuffer's storage format and a linear EXR's native precision without GL_RGBA32F's extra bandwidth. wrapMode is a raw GLenum (GL_REPEAT, GL_CLAMP_TO_EDGE, ...) — no default, so every call site states its own intent explicitly: tiled material textures want repeat, a single fixed-scale image wants clamp (repeat would blend its opposite edges at the u/v seam under bilinear filtering).
-    static Texture createFromFloatPixels(int width, int height, const float* rgba,
-                                          unsigned int wrapMode);
+    // Uploads width*height RGBA float texels (row-major, no padding) as GL_RGBA16F -- a linear EXR's
+    // native precision without GL_RGBA32F's extra bandwidth. Clamped to edge, not repeated: this is a
+    // single fixed-scale image (the path tracer's display texture), not a tiled texture.
+    static Texture createFromFloatPixels(int width, int height, const float* rgba);
 
     void bind(unsigned int unit) const;
 

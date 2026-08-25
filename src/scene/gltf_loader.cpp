@@ -9,7 +9,6 @@
 #include <string>
 #include <vector>
 
-#include <GL/glew.h>
 #include <glm/gtc/matrix_inverse.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
@@ -18,6 +17,14 @@
 namespace engine::scene {
 
 namespace {
+
+// Raw glTF-read vertex, one per accessor entry -- an intermediate the BVH-triangle/shading-triangle builders below consume; not retained past loadPrimitive.
+struct Vertex {
+    glm::vec3 position;
+    glm::vec2 uv;
+    glm::vec3 normal;
+    glm::vec4 tangent;  // .w = bitangent handedness (glTF convention)
+};
 
 std::string dirOf(const std::string& path) {
     const std::size_t pos = path.find_last_of('/');
@@ -56,24 +63,17 @@ std::optional<int> extrasTextureIndex(const char* extrasJson, const std::string&
     return value;
 }
 
-// Decodes the EXR once, uploads to GPU, retains the CPU HdrImage too (MaterialTexture).
-std::optional<MaterialTexture> loadTexture(const cgltf_texture* texture, const std::string& dir) {
+std::optional<engine::gfx::HdrImage> loadTexture(const cgltf_texture* texture,
+                                                  const std::string& dir) {
     if (texture == nullptr || texture->image == nullptr || texture->image->uri == nullptr) {
         return std::nullopt;
     }
-    std::optional<engine::gfx::HdrImage> image =
-        engine::gfx::loadExr(dir + "/" + texture->image->uri);
-    if (!image.has_value()) {
-        return std::nullopt;
-    }
-    // Repeat: a tiled material texture, not a single fixed-scale image.
-    engine::gfx::Texture gpu = engine::gfx::Texture::createFromFloatPixels(
-        image->width, image->height, image->rgba.data(), GL_REPEAT);
-    return MaterialTexture{std::move(gpu), std::move(*image)};
+    return engine::gfx::loadExr(dir + "/" + texture->image->uri);
 }
 
-std::optional<MaterialTexture> loadTextureByIndex(const cgltf_data* data, std::optional<int> index,
-                                                   const std::string& dir) {
+std::optional<engine::gfx::HdrImage> loadTextureByIndex(const cgltf_data* data,
+                                                         std::optional<int> index,
+                                                         const std::string& dir) {
     if (!index.has_value() || *index < 0 ||
         static_cast<cgltf_size>(*index) >= data->textures_count) {
         return std::nullopt;
@@ -90,8 +90,8 @@ glm::mat4 localNodeTransform(const cgltf_node* node) {
     return glm::make_mat4(local);
 }
 
-// Appends this primitive's triangles to outWorldTriangles, each vertex baked to world space by transform -- the BVH (bvh.h) operates on world-space triangles, not the model-space data Mesh uploads to the GPU.
-void appendWorldTriangles(const std::vector<engine::gfx::Vertex>& vertices,
+// Appends this primitive's triangles to outWorldTriangles, each vertex baked to world space by transform -- the BVH (bvh.h) operates on world-space triangles, not the model-space Vertex data read from the accessors.
+void appendWorldTriangles(const std::vector<Vertex>& vertices,
                            const std::vector<unsigned int>& indices, const glm::mat4& transform,
                            std::vector<Triangle>& outWorldTriangles) {
     for (std::size_t i = 0; i + 2 < indices.size(); i += 3) {
@@ -104,13 +104,13 @@ void appendWorldTriangles(const std::vector<engine::gfx::Vertex>& vertices,
 }
 
 // Parallel to appendWorldTriangles: normal via inverse-transpose, tangent via transform directly.
-void appendShadingTriangles(const std::vector<engine::gfx::Vertex>& vertices,
+void appendShadingTriangles(const std::vector<Vertex>& vertices,
                              const std::vector<unsigned int>& indices, const glm::mat4& transform,
                              int instanceIndex, std::vector<ShadingTriangle>& outShadingTriangles) {
     const glm::mat3 linear(transform);
     const glm::mat3 normalMatrix = glm::inverseTranspose(linear);
     const auto toWorldVertex = [&](unsigned int index) {
-        const engine::gfx::Vertex& v = vertices[index];
+        const Vertex& v = vertices[index];
         return ShadingVertex{
             glm::vec3(transform * glm::vec4(v.position, 1.0F)),
             glm::normalize(normalMatrix * v.normal),
@@ -163,10 +163,10 @@ std::optional<RequiredAccessors> findAttributeAccessors(const cgltf_primitive& p
     return acc;
 }
 
-std::vector<engine::gfx::Vertex> readVertices(const RequiredAccessors& acc) {
-    std::vector<engine::gfx::Vertex> vertices(acc.position->count);
+std::vector<Vertex> readVertices(const RequiredAccessors& acc) {
+    std::vector<Vertex> vertices(acc.position->count);
     for (cgltf_size vi = 0; vi < acc.position->count; ++vi) {
-        engine::gfx::Vertex& v = vertices[vi];
+        Vertex& v = vertices[vi];
         cgltf_accessor_read_float(acc.position, vi, &v.position.x, 3);
         cgltf_accessor_read_float(acc.normal, vi, &v.normal.x, 3);
         // No V flip: glTF's v=0-at-top already matches loadExr's row-0-at-top convention.
@@ -202,16 +202,15 @@ std::optional<Material> loadMaterialTextures(const cgltf_data* data, const cgltf
     auto ao = loadTexture(mat.occlusion_texture.texture, dir);
     auto roughness =
         loadTextureByIndex(data, extrasTextureIndex(mat.extras.data, "roughnessTexture"), dir);
-    auto bump = loadTextureByIndex(data, extrasTextureIndex(mat.extras.data, "bumpTexture"), dir);
     auto specular =
         loadTextureByIndex(data, extrasTextureIndex(mat.extras.data, "specularTexture"), dir);
-    if (!baseColor || !normal || !ao || !roughness || !bump || !specular) {
+    if (!baseColor || !normal || !ao || !roughness || !specular) {
         std::cerr << "loadGltf: material '" << (mat.name != nullptr ? mat.name : "<unnamed>")
-                   << "' is missing one or more of the 6 required textures\n";
+                   << "' is missing one or more of the 5 required textures\n";
         return std::nullopt;
     }
 
-    // Defaults match the glTF extension specs (must be hardcoded here, not Material{}.ior -- Texture has no default ctor).
+    // Defaults match the glTF extension specs.
     const float ior = mat.has_ior ? mat.ior.ior : 1.5F;
     const float transmissionFactor =
         mat.has_transmission ? mat.transmission.transmission_factor : 0.0F;
@@ -223,7 +222,6 @@ std::optional<Material> loadMaterialTextures(const cgltf_data* data, const cgltf
         std::move(*baseColor),
         std::move(*normal),
         std::move(*roughness),
-        std::move(*bump),
         std::move(*specular),
         std::move(*ao),
         ior,
@@ -259,13 +257,11 @@ std::optional<MeshInstance> loadPrimitive(const cgltf_data* data, const cgltf_pr
         return std::nullopt;
     }
 
-    std::vector<engine::gfx::Vertex> vertices = readVertices(*acc);
+    std::vector<Vertex> vertices = readVertices(*acc);
     appendWorldTriangles(vertices, *indices, transform, outWorldTriangles);
     appendShadingTriangles(vertices, *indices, transform, instanceIndex, outShadingTriangles);
 
-    engine::gfx::Mesh mesh(vertices, *indices);
     return MeshInstance{
-        std::move(mesh),
         std::move(*material),
         transform,
     };
