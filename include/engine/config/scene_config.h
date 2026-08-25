@@ -31,6 +31,9 @@ struct SceneConfig {
     // Index into hud_overlay.cpp's kAovNames (0 = Beauty).
     int initialAov;
     engine::gfx::OcioDisplayTransform::Lut initialLut;
+    int samplesPerPixel;   // path tracer startup default
+    int maxBounces;        // path tracer startup default
+    int russianRouletteStartBounce;  // 0-based bounce index RR kicks in from
 };
 
 // Reads and parses path. Returns nullopt and logs to stderr if the file is missing, unreadable, or any required field can't be found/parsed — this is user-editable input, not an internal invariant, so failure is expected to happen and is surfaced rather than defaulted around.

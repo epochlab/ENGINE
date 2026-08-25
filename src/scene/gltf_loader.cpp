@@ -10,7 +10,10 @@
 #include <vector>
 
 #include <GL/glew.h>
+#include <glm/gtc/matrix_inverse.hpp>
 #include <glm/gtc/type_ptr.hpp>
+
+#include "engine/gfx/hdr_image.h"
 
 namespace engine::scene {
 
@@ -53,19 +56,24 @@ std::optional<int> extrasTextureIndex(const char* extrasJson, const std::string&
     return value;
 }
 
-// This project's gltf assets ship linear EXR maps, not glTF's usual PNG/JPEG -- every texture slot resolves through the same EXR loader.
-std::optional<engine::gfx::Texture> loadTexture(const cgltf_texture* texture,
-                                                 const std::string& dir) {
+// Decodes the EXR once, uploads to GPU, retains the CPU HdrImage too (MaterialTexture).
+std::optional<MaterialTexture> loadTexture(const cgltf_texture* texture, const std::string& dir) {
     if (texture == nullptr || texture->image == nullptr || texture->image->uri == nullptr) {
         return std::nullopt;
     }
+    std::optional<engine::gfx::HdrImage> image =
+        engine::gfx::loadExr(dir + "/" + texture->image->uri);
+    if (!image.has_value()) {
+        return std::nullopt;
+    }
     // Repeat: a tiled material texture, not a single fixed-scale image.
-    return engine::gfx::Texture::createFromExr(dir + "/" + texture->image->uri, GL_REPEAT);
+    engine::gfx::Texture gpu = engine::gfx::Texture::createFromFloatPixels(
+        image->width, image->height, image->rgba.data(), GL_REPEAT);
+    return MaterialTexture{std::move(gpu), std::move(*image)};
 }
 
-std::optional<engine::gfx::Texture> loadTextureByIndex(const cgltf_data* data,
-                                                        std::optional<int> index,
-                                                        const std::string& dir) {
+std::optional<MaterialTexture> loadTextureByIndex(const cgltf_data* data, std::optional<int> index,
+                                                   const std::string& dir) {
     if (!index.has_value() || *index < 0 ||
         static_cast<cgltf_size>(*index) >= data->textures_count) {
         return std::nullopt;
@@ -92,6 +100,31 @@ void appendWorldTriangles(const std::vector<engine::gfx::Vertex>& vertices,
         };
         outWorldTriangles.push_back(
             Triangle{toWorld(indices[i]), toWorld(indices[i + 1]), toWorld(indices[i + 2])});
+    }
+}
+
+// Parallel to appendWorldTriangles: normal via inverse-transpose, tangent via transform directly.
+void appendShadingTriangles(const std::vector<engine::gfx::Vertex>& vertices,
+                             const std::vector<unsigned int>& indices, const glm::mat4& transform,
+                             int instanceIndex, std::vector<ShadingTriangle>& outShadingTriangles) {
+    const glm::mat3 linear(transform);
+    const glm::mat3 normalMatrix = glm::inverseTranspose(linear);
+    const auto toWorldVertex = [&](unsigned int index) {
+        const engine::gfx::Vertex& v = vertices[index];
+        return ShadingVertex{
+            glm::vec3(transform * glm::vec4(v.position, 1.0F)),
+            glm::normalize(normalMatrix * v.normal),
+            v.uv,
+            glm::vec4(glm::normalize(linear * glm::vec3(v.tangent)), v.tangent.w),
+        };
+    };
+    for (std::size_t i = 0; i + 2 < indices.size(); i += 3) {
+        outShadingTriangles.push_back(ShadingTriangle{
+            toWorldVertex(indices[i]),
+            toWorldVertex(indices[i + 1]),
+            toWorldVertex(indices[i + 2]),
+            instanceIndex,
+        });
     }
 }
 
@@ -136,7 +169,7 @@ std::vector<engine::gfx::Vertex> readVertices(const RequiredAccessors& acc) {
         engine::gfx::Vertex& v = vertices[vi];
         cgltf_accessor_read_float(acc.position, vi, &v.position.x, 3);
         cgltf_accessor_read_float(acc.normal, vi, &v.normal.x, 3);
-        // No V flip: glTF's v=0-at-top already matches how Texture::createFromExr uploads EXR rows (see its own note).
+        // No V flip: glTF's v=0-at-top already matches loadExr's row-0-at-top convention.
         cgltf_accessor_read_float(acc.uv, vi, &v.uv.x, 2);
         cgltf_accessor_read_float(acc.tangent, vi, &v.tangent.x, 4);
     }
@@ -178,6 +211,11 @@ std::optional<Material> loadMaterialTextures(const cgltf_data* data, const cgltf
         return std::nullopt;
     }
 
+    // Defaults match the glTF extension specs (must be hardcoded here, not Material{}.ior -- Texture has no default ctor).
+    const float ior = mat.has_ior ? mat.ior.ior : 1.5F;
+    const float transmissionFactor =
+        mat.has_transmission ? mat.transmission.transmission_factor : 0.0F;
+
     return Material{
         glm::make_vec4(pbr.base_color_factor),
         pbr.metallic_factor,
@@ -188,13 +226,17 @@ std::optional<Material> loadMaterialTextures(const cgltf_data* data, const cgltf
         std::move(*bump),
         std::move(*specular),
         std::move(*ao),
+        ior,
+        transmissionFactor,
     };
 }
 
 // Builds one MeshInstance's Vertex/index arrays and Material from a single triangle primitive. Fails clearly (nullopt) rather than substituting a placeholder for a primitive this loader doesn't support (non-triangle mode, missing attributes/material/textures).
 std::optional<MeshInstance> loadPrimitive(const cgltf_data* data, const cgltf_primitive& prim,
                                            const glm::mat4& transform, const std::string& dir,
-                                           std::vector<Triangle>& outWorldTriangles) {
+                                           int instanceIndex,
+                                           std::vector<Triangle>& outWorldTriangles,
+                                           std::vector<ShadingTriangle>& outShadingTriangles) {
     if (prim.type != cgltf_primitive_type_triangles) {
         std::cerr << "loadGltf: skipping non-triangle primitive\n";
         return std::nullopt;
@@ -219,6 +261,7 @@ std::optional<MeshInstance> loadPrimitive(const cgltf_data* data, const cgltf_pr
 
     std::vector<engine::gfx::Vertex> vertices = readVertices(*acc);
     appendWorldTriangles(vertices, *indices, transform, outWorldTriangles);
+    appendShadingTriangles(vertices, *indices, transform, instanceIndex, outShadingTriangles);
 
     engine::gfx::Mesh mesh(vertices, *indices);
     return MeshInstance{
@@ -234,7 +277,7 @@ constexpr int kMaxNodeDepth = 256;
 bool walkNodes(const cgltf_data* data, cgltf_node* const* nodes, cgltf_size count,
                const glm::mat4& parentTransform, const std::string& dir,
                std::vector<MeshInstance>& instances, std::vector<Triangle>& worldTriangles,
-               int depth = 0) {
+               std::vector<ShadingTriangle>& shadingTriangles, int depth = 0) {
     if (depth >= kMaxNodeDepth) {
         std::cerr << "loadGltf: node hierarchy exceeds max depth " << kMaxNodeDepth
                    << " (cyclic or pathologically nested)\n";
@@ -246,8 +289,10 @@ bool walkNodes(const cgltf_data* data, cgltf_node* const* nodes, cgltf_size coun
 
         if (node->mesh != nullptr) {
             for (cgltf_size pi = 0; pi < node->mesh->primitives_count; ++pi) {
+                const int instanceIndex = static_cast<int>(instances.size());  // index this primitive's MeshInstance will get
                 std::optional<MeshInstance> instance =
-                    loadPrimitive(data, node->mesh->primitives[pi], world, dir, worldTriangles);
+                    loadPrimitive(data, node->mesh->primitives[pi], world, dir, instanceIndex,
+                                  worldTriangles, shadingTriangles);
                 if (!instance.has_value()) {
                     return false;
                 }
@@ -256,7 +301,7 @@ bool walkNodes(const cgltf_data* data, cgltf_node* const* nodes, cgltf_size coun
         }
 
         if (!walkNodes(data, node->children, node->children_count, world, dir, instances,
-                       worldTriangles, depth + 1)) {
+                       worldTriangles, shadingTriangles, depth + 1)) {
             return false;
         }
     }
@@ -288,7 +333,7 @@ std::optional<LoadedModel> loadGltf(const std::string& path) {
     const std::string dir = dirOf(path);
     const bool ok = data->scene != nullptr &&
                     walkNodes(data, data->scene->nodes, data->scene->nodes_count, glm::mat4(1.0F),
-                              dir, model.instances, model.worldTriangles);
+                              dir, model.instances, model.worldTriangles, model.shadingTriangles);
 
     cgltf_free(data);
 

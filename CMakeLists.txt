@@ -81,9 +81,11 @@ add_executable(engine
     src/scene/bvh.cpp
     src/scene/camera.cpp
     src/scene/debug_camera_controller.cpp
+    src/scene/environment_map.cpp
     src/scene/frustum.cpp
     src/scene/gltf_loader.cpp
     src/scene/sh_irradiance.cpp
+    src/scene/shading_scene.cpp
     src/config/json_scan.cpp
     src/config/profile_config.cpp
     src/config/scene_config.cpp

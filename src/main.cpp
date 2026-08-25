@@ -38,6 +38,7 @@
 #include "engine/scene/bvh.h"
 #include "engine/scene/camera.h"
 #include "engine/scene/debug_camera_controller.h"
+#include "engine/scene/environment_map.h"
 #include "engine/scene/frustum.h"
 #include "engine/scene/gltf_loader.h"
 #include "engine/scene/sh_irradiance.h"
@@ -116,6 +117,9 @@ struct AppResources {
     engine::gfx::OcioDisplayTransform ocioTransform;
     engine::gfx::Texture environmentTexture;
     engine::gfx::PrefilteredEnvironment prefilteredEnv;
+    engine::scene::Bvh sceneBvh;               // path tracer scene intersection
+    // stumpModel.shadingTriangles indexes sceneBvh's triangles 1:1, no separate field needed.
+    engine::scene::EnvironmentMap environmentMap;
     engine::scene::LoadedModel stumpModel;
     std::vector<std::pair<glm::vec3, glm::vec3>> instanceWorldBounds;
     int totalTriangles;
@@ -441,11 +445,10 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
 
     IblResult ibl = buildAndUploadIbl(*environmentImage, shaders->sceneShader,
                                        shaders->equirectToCubemapShader, shaders->prefilterShader);
+    engine::scene::EnvironmentMap environmentMap(std::move(*environmentImage));  // retained for path-traced miss rays
 
-    // BVH (Phase 4): built once from the loaded scene's world-space triangles, Phase 5 infrastructure -- not wired into rendering this phase ("no secondary rays" holds). Correctness is exercised by tools/bvh_validate.cpp, not by anything here; this log line is the only thing that observes it this phase.
     const auto bvhBuildStart = std::chrono::steady_clock::now();
-    const engine::scene::Bvh sceneBvh =
-        engine::scene::Bvh::build(std::move(stumpModel->worldTriangles));
+    engine::scene::Bvh sceneBvh = engine::scene::Bvh::build(std::move(stumpModel->worldTriangles));
     const double bvhBuildMs =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
                                                     bvhBuildStart)
@@ -472,6 +475,8 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         .ocioTransform = std::move(shaders->ocioTransform),
         .environmentTexture = std::move(ibl.environmentTexture),
         .prefilteredEnv = std::move(ibl.prefilteredEnv),
+        .sceneBvh = std::move(sceneBvh),
+        .environmentMap = std::move(environmentMap),
         .stumpModel = std::move(*stumpModel),
         .instanceWorldBounds = std::move(instanceWorldBounds),
         .totalTriangles = totalTriangles,
@@ -636,12 +641,12 @@ GeometryDrawStats drawSceneGeometry(AppResources& app, const glm::mat4& viewProj
         GL_CALL(glUniform3fv(app.uBoundsMaxLoc, 1, &worldMax[0]));
         const glm::vec3 objectIdColor = falseColorForId(instanceId);
         GL_CALL(glUniform3fv(app.uObjectIdColorLoc, 1, &objectIdColor[0]));
-        instance.material.baseColorTexture.bind(0);
-        instance.material.roughnessTexture.bind(1);
-        instance.material.aoTexture.bind(2);
-        instance.material.normalTexture.bind(3);
-        instance.material.bumpTexture.bind(4);
-        instance.material.specularTexture.bind(5);
+        instance.material.baseColorTexture.gpu.bind(0);
+        instance.material.roughnessTexture.gpu.bind(1);
+        instance.material.aoTexture.gpu.bind(2);
+        instance.material.normalTexture.gpu.bind(3);
+        instance.material.bumpTexture.gpu.bind(4);
+        instance.material.specularTexture.gpu.bind(5);
         instance.mesh.draw();
         ++instanceId;
     }

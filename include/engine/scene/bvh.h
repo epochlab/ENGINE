@@ -23,6 +23,8 @@ struct Triangle {
 struct Hit {
     float t;
     int triangleIndex;  // index into the Triangle list passed to Bvh::build
+    float u;  // barycentric weight on v1 (Moller-Trumbore convention, w=1-u-v on v0)
+    float v;  // barycentric weight on v2
 };
 
 // Binned-SAH-built bounding volume hierarchy over a static triangle soup (Wald 2007, "On fast Construction of SAH-based Bounding Volume Hierarchies"), built once at scene load. No refit/update API -- the scene is static this phase. This is Phase 4 infrastructure for Phase 5's recursive tracing; it is not wired into the rasterized rendering path yet ("no secondary rays" holds this phase). Correctness is exercised by tools/bvh_validate.cpp, not by any rendering behavior.
