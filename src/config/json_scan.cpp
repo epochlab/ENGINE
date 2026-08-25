@@ -50,7 +50,7 @@ std::size_t findValueStart(std::string_view text, std::size_t keyEnd) {
 }  // namespace
 
 std::optional<std::string> readFile(const std::string& path) {
-    std::ifstream file(path, std::ios::binary);
+    const std::ifstream file(path, std::ios::binary);
     if (!file) {
         return std::nullopt;
     }

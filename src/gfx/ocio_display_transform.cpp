@@ -26,7 +26,7 @@ constexpr const char* kSceneColorSpace = "Linear Rec.709 (sRGB)";
 constexpr const char* kView = "Un-tone-mapped";
 
 std::optional<std::string> readFile(const std::string& path) {
-    std::ifstream file(path);
+    const std::ifstream file(path);
     if (!file) {
         std::cerr << "OcioDisplayTransform: failed to open " << path << '\n';
         return std::nullopt;
@@ -71,10 +71,10 @@ std::string buildRawFragmentSource() {
 // OCIO::Exception here means our own config/display/view/style names are wrong — an internal defect, not recoverable input — so it exits immediately like Window/HudOverlay do for unrecoverable configuration errors, rather than threading optional through callers.
 std::string buildOcioFragmentSource(const char* display, const char* functionName) {
     try {
-        OCIO::ConstConfigRcPtr config = OCIO::Config::CreateFromBuiltinConfig(kBuiltinConfigName);
-        OCIO::ConstProcessorRcPtr processor = config->getProcessor(
+        const OCIO::ConstConfigRcPtr config = OCIO::Config::CreateFromBuiltinConfig(kBuiltinConfigName);
+        const OCIO::ConstProcessorRcPtr processor = config->getProcessor(
             kSceneColorSpace, display, kView, OCIO::TRANSFORM_DIR_FORWARD);
-        OCIO::ConstGPUProcessorRcPtr gpuProcessor = processor->getDefaultGPUProcessor();
+        const OCIO::ConstGPUProcessorRcPtr gpuProcessor = processor->getDefaultGPUProcessor();
 
         OCIO::GpuShaderDescRcPtr shaderDesc = OCIO::GpuShaderDesc::CreateShaderDesc();
         shaderDesc->setLanguage(OCIO::GPU_LANGUAGE_GLSL_4_0);

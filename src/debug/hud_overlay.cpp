@@ -100,7 +100,7 @@ void drawGrayscaleHistogram(ImDrawList* drawList, ImVec2 origin, float histogram
     std::array<float, 256> heights{};
     if (nearBinary) {
         std::uint32_t peak = 1;
-        for (std::uint32_t count : bins[0]) {
+        for (const std::uint32_t count : bins[0]) {
             peak = std::max(peak, count);
         }
         for (int bin = 0; bin < 256; ++bin) {

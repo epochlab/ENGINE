@@ -27,7 +27,7 @@ Histogram::Histogram() {
 
     const auto pboBytes = static_cast<std::size_t>(kWidth) * static_cast<std::size_t>(kHeight) * 3;
     GL_CALL(glGenBuffers(2, pbos_));
-    for (unsigned int pbo : pbos_) {
+    for (const unsigned int pbo : pbos_) {
         GL_CALL(glBindBuffer(GL_PIXEL_PACK_BUFFER, pbo));
         GL_CALL(glBufferData(GL_PIXEL_PACK_BUFFER, static_cast<GLsizeiptr>(pboBytes), nullptr,
                               GL_STREAM_READ));
