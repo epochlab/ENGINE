@@ -2,16 +2,14 @@
 
 in vec2 vUv;
 
-uniform sampler2D uHdrColor;  // rasterizer: pbr.frag's Luminance branch (already r=g=b=L); path tracer: real RGB Beauty
+uniform sampler2D uHdrColor;  // the path tracer's Beauty image (real RGB)
 uniform int uFilterMode;      // 0=Sobel 1=Gabor 2=Luminance passthrough (no neighborhood filter -- see main())
 uniform float uGaborKernel[100];  // 4 orientations x 5x5 taps, see main.cpp's buildGaborKernel
 
 out vec4 fragColor;
 
-// Rec.709 luminance -- same weights as pbr.frag's own luminance() helper. Not just texture(...).r:
-// this filter now runs over either the rasterizer's pre-broadcast Luminance buffer (r=g=b=L already,
-// so the dot product still yields exactly L) or the path tracer's real RGB Beauty buffer (where .r
-// alone would isolate the red channel, not luminance) -- one formula correct for both sources.
+// Rec.709 luminance. Not just texture(...).r: uHdrColor is real RGB, where .r alone would isolate
+// the red channel, not luminance.
 float sampleLuminance(vec2 uv, vec2 texel, vec2 offset) {
     vec3 color = texture(uHdrColor, uv + offset * texel).rgb;
     return dot(color, vec3(0.2126, 0.7152, 0.0722));
@@ -54,10 +52,9 @@ float gabor(vec2 texel) {
 
 void main() {
     vec2 texel = 1.0 / vec2(textureSize(uHdrColor, 0));
-    // Mode 2 (Luminance): the rasterizer's Luminance AOV needs no separate pass (pbr.frag writes it
-    // directly), but the path tracer has no per-AOV Luminance buffer -- reusing this shader's existing
-    // uHdrColor/sampleLuminance plumbing for a plain center-tap read is cheaper than a whole new
-    // ShaderProgram just to broadcast one dot product.
+    // Mode 2 (Luminance): the path tracer has no per-AOV Luminance buffer -- reusing this shader's
+    // existing uHdrColor/sampleLuminance plumbing for a plain center-tap read is cheaper than a whole
+    // new ShaderProgram just to broadcast one dot product.
     float value = uFilterMode == 2   ? sampleLuminance(vUv, texel, vec2(0.0))
                   : uFilterMode == 1 ? gabor(texel)
                                      : sobel(texel);

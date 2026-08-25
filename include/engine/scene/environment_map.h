@@ -8,7 +8,7 @@
 
 namespace engine::scene {
 
-// CPU-resident equirect env map for path-traced miss rays -- the rasterizer's IBL bake discards the raw HdrImage after startup.
+// CPU-resident equirect env map for path-traced miss rays and NEE light sampling.
 class EnvironmentMap {
 public:
     // Builds the 2D piecewise-constant importance-sampling CDFs (marginal over rows, conditional over

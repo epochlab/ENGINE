@@ -34,10 +34,8 @@ struct PathTraceSettings {
 // the first pass of a generation and left untouched on every later pass, since the primary hit is
 // deterministic given an unchanged camera/scene and doesn't benefit from re-averaging.
 //
-// worldPos/normal/geomNormal are stored raw (world-space metres / unit vectors in [-1,1]), not
-// remapped to the rasterizer's [0,1] display convention (pbr.frag's bounds-normalized WorldPos,
-// normal*0.5+0.5) -- a deliberate choice: these are scene-referred values, and the two renderers'
-// versions of "WorldPos"/"Normal" will look different when switching between them, not a bug.
+// worldPos/normal/geomNormal are stored raw (world-space metres / unit vectors in [-1,1]), scene-referred
+// values, not remapped to a [0,1] display range -- display-side remapping, if any, happens downstream.
 //
 // One renderPathTraced() call's raw output -- what a single pass computes. PathTraceDriver splits
 // this into PathTraceGBuffer (published once, on pass 1) and PathTraceDynamic (republished every
@@ -61,7 +59,7 @@ struct PathTraceResult {
     engine::gfx::HdrImage roughness;
     engine::gfx::HdrImage tangent;     // raw [-1,1]
     engine::gfx::HdrImage objectId;    // false-colored mesh instance id, see engine::scene::falseColorForId
-    engine::gfx::HdrImage alpha;       // 1.0 on a primary hit, 0.0 on a primary miss -- a real coverage mask (unlike the rasterizer's always-1, since this renderer isn't opaque-only-by-construction)
+    engine::gfx::HdrImage alpha;       // 1.0 on a primary hit, 0.0 on a primary miss -- a real coverage mask, since this renderer isn't opaque-only-by-construction
     engine::gfx::HdrImage fresnel;     // Schlick term at the primary hit's view angle
     engine::gfx::HdrImage ao;          // baked AO texture sample at the primary hit (not ray-traced AO)
 
@@ -131,8 +129,8 @@ struct PathTraceDynamic {
 // light contribution -- point/directional lights have no hittable geometry.
 //
 // showSky: gates only the primary ray's own miss (the camera seeing the background directly) --
-// indirect bounces and NEE always sample real environment radiance regardless, matching the
-// rasterizer's drawSky (which likewise only skips the sky draw, never IBL/ambient lighting).
+// indirect bounces and NEE always sample real environment radiance regardless, so hiding the
+// background doesn't unlight the scene.
 //
 // generation/requestedGeneration: cooperative cancellation for PathTraceDriver's async use -- each
 // row worker checks generation.load() != requestedGeneration once per row (cheap, same polling idiom

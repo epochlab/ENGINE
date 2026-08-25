@@ -73,12 +73,8 @@ add_executable(engine
     src/platform/window.cpp
     src/gfx/gl_debug.cpp
     src/gfx/shader_program.cpp
-    src/gfx/mesh.cpp
     src/gfx/texture.cpp
     src/gfx/hdr_image.cpp
-    src/gfx/cubemap_texture.cpp
-    src/gfx/env_prefilter_pass.cpp
-    src/gfx/hdr_framebuffer.cpp
     src/gfx/post_process_pass.cpp
     src/gfx/ocio_display_transform.cpp
     src/scene/bsdf.cpp
@@ -86,13 +82,11 @@ add_executable(engine
     src/scene/camera.cpp
     src/scene/debug_camera_controller.cpp
     src/scene/environment_map.cpp
-    src/scene/frustum.cpp
     src/scene/gltf_loader.cpp
     src/scene/path_tracer.cpp
     src/scene/path_trace_driver.cpp
     src/scene/row_thread_pool.cpp
     src/scene/sampler.cpp
-    src/scene/sh_irradiance.cpp
     src/scene/shading_scene.cpp
     src/config/json_scan.cpp
     src/config/profile_config.cpp
@@ -141,14 +135,6 @@ target_compile_options(bvh_validate PRIVATE -Wall -Wextra -Werror -march=native)
 target_link_libraries(bvh_validate PRIVATE glm::glm)
 if(IPO_SUPPORTED)
     set_target_properties(bvh_validate PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
-endif()
-
-add_executable(furnace_test tools/furnace_test.cpp src/scene/sh_irradiance.cpp)
-target_include_directories(furnace_test PRIVATE include)
-target_compile_options(furnace_test PRIVATE -Wall -Wextra -Werror -march=native)
-target_link_libraries(furnace_test PRIVATE glm::glm)
-if(IPO_SUPPORTED)
-    set_target_properties(furnace_test PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
 endif()
 
 add_executable(bsdf_validate tools/bsdf_validate.cpp src/scene/bsdf.cpp src/scene/sampler.cpp)

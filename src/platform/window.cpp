@@ -22,7 +22,6 @@ Window::Window(int width, int height, const std::string& title) {
 
     glfwMakeContextCurrent(window_);
     glfwSetWindowUserPointer(window_, this);
-    glfwSetFramebufferSizeCallback(window_, &Window::framebufferSizeCallback);
     glfwSetKeyCallback(window_, &Window::keyCallback);
     glfwSetMouseButtonCallback(window_, &Window::mouseButtonCallback);
 }
@@ -35,7 +34,6 @@ Window::~Window() {
 
 Window::Window(Window&& other) noexcept
     : window_(std::exchange(other.window_, nullptr)),
-      resizeCallback_(std::move(other.resizeCallback_)),
       keyCallback_(std::move(other.keyCallback_)),
       mouseButtonCallback_(std::move(other.mouseButtonCallback_)) {
     if (window_ != nullptr) {
@@ -49,7 +47,6 @@ Window& Window::operator=(Window&& other) noexcept {
             glfwDestroyWindow(window_);
         }
         window_ = std::exchange(other.window_, nullptr);
-        resizeCallback_ = std::move(other.resizeCallback_);
         keyCallback_ = std::move(other.keyCallback_);
         mouseButtonCallback_ = std::move(other.mouseButtonCallback_);
         if (window_ != nullptr) {
@@ -76,17 +73,6 @@ std::pair<int, int> Window::framebufferSize() const {
     int height = 0;
     glfwGetFramebufferSize(window_, &width, &height);
     return {width, height};
-}
-
-void Window::setResizeCallback(ResizeCallback callback) {
-    resizeCallback_ = std::move(callback);
-}
-
-void Window::framebufferSizeCallback(GLFWwindow* window, int width, int height) {
-    auto* self = static_cast<Window*>(glfwGetWindowUserPointer(window));
-    if (self != nullptr && self->resizeCallback_) {
-        self->resizeCallback_(width, height);
-    }
 }
 
 void Window::setKeyCallback(KeyCallback callback) {
