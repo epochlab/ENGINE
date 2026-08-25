@@ -4,18 +4,12 @@
 #include <string>
 #include <utility>
 
-// Forward-declared rather than #include <GLFW/glfw3.h>: a pointer to an
-// incomplete type is sufficient here, and keeping GLFW out of this public
-// header means consumers that only need shouldClose()/pollEvents()/etc.
-// don't drag GLFW/GL declarations in with them.
+// Forward-declared rather than #include <GLFW/glfw3.h>: a pointer to an incomplete type is sufficient here, and keeping GLFW out of this public header means consumers that only need shouldClose()/pollEvents()/etc. don't drag GLFW/GL declarations in with them.
 struct GLFWwindow;
 
 namespace engine::platform {
 
-// Owns a single GLFWwindow and its OpenGL 4.1 core, forward-compatible
-// context. glfwInit()/glfwSetErrorCallback()/glfwTerminate() bracket every
-// Window's lifetime but are the caller's responsibility (main.cpp) — a
-// Window represents one window, not the GLFW library instance.
+// Owns a single GLFWwindow and its OpenGL 4.1 core, forward-compatible context. glfwInit()/glfwSetErrorCallback()/glfwTerminate() bracket every Window's lifetime but are the caller's responsibility (main.cpp) — a Window represents one window, not the GLFW library instance.
 class Window {
 public:
     Window(int width, int height, const std::string& title);
@@ -30,56 +24,34 @@ public:
     void pollEvents() const;
     void swapBuffers() const;
 
-    // For backends that need the raw GLFW handle (e.g. ImGui's GLFW
-    // backend) — everything else should use the typed accessors above.
+    // For backends that need the raw GLFW handle (e.g. ImGui's GLFW backend) — everything else should use the typed accessors above.
     [[nodiscard]] GLFWwindow* nativeHandle() const noexcept { return window_; }
 
-    // {width, height} in framebuffer pixels (glfwGetFramebufferSize), not
-    // screen points — the two differ by 2x on Retina displays.
+    // {width, height} in framebuffer pixels (glfwGetFramebufferSize), not screen points — the two differ by 2x on Retina displays. Queried fresh each call, not cached from a resize event.
     [[nodiscard]] std::pair<int, int> framebufferSize() const;
 
-    // Invoked on GLFW's framebuffer-resize event. Not consumed by Stage B;
-    // Stage D's HDR framebuffer resize will use it.
-    using ResizeCallback = std::function<void(int, int)>;
-    void setResizeCallback(ResizeCallback callback);
-
-    // Invoked on GLFW's key event (GLFW_PRESS/GLFW_RELEASE/GLFW_REPEAT).
-    // Scancode/mods aren't forwarded — no consumer needs them yet. First
-    // consumer was Stage F's debug LUT-toggle key ('L'); Phase 3's 'R'
-    // camera-reset and channel-isolation hotkeys share this same single
-    // slot. WASD/QE turned out to need continuous per-frame state, not
-    // an edge-triggered event, so they use isKeyDown() below instead —
-    // this slot never needed to become multi-consumer.
+    // Invoked on GLFW's key event (GLFW_PRESS/GLFW_RELEASE/GLFW_REPEAT). Scancode/mods aren't forwarded — no consumer needs them yet. First consumer was Stage F's debug LUT-toggle key ('L'); Phase 3's 'R' camera-reset and channel-isolation hotkeys share this same single slot. WASD/QE turned out to need continuous per-frame state, not an edge-triggered event, so they use isKeyDown() below instead — this slot never needed to become multi-consumer.
     using KeyCallback = std::function<void(int key, int action)>;
     void setKeyCallback(KeyCallback callback);
 
-    // Polled key state (glfwGetKey), for continuous movement (WASD/QE)
-    // where an edge-triggered callback would only fire once per press.
+    // Polled key state (glfwGetKey), for continuous movement (WASD/QE) where an edge-triggered callback would only fire once per press.
     [[nodiscard]] bool isKeyDown(int key) const;
 
-    // Invoked on GLFW's mouse-button event. Single slot, like
-    // KeyCallback — Phase 3's LMB-drag orbit is this window's only
-    // consumer so far.
+    // Invoked on GLFW's mouse-button event. Single slot, like KeyCallback — Phase 3's LMB-drag orbit is this window's only consumer so far.
     using MouseButtonCallback = std::function<void(int button, int action)>;
     void setMouseButtonCallback(MouseButtonCallback callback);
 
-    // Polled cursor position in screen coordinates (glfwGetCursorPos).
-    // Orbit only needs a once-per-frame delta between consecutive polls,
-    // so a callback (like resize/key) isn't needed here.
+    // Polled cursor position in screen coordinates (glfwGetCursorPos). Orbit only needs a once-per-frame delta between consecutive polls, so a callback (like resize/key) isn't needed here.
     [[nodiscard]] std::pair<double, double> cursorPosition() const;
 
-    // Hides and locks the cursor to the window (GLFW_CURSOR_DISABLED)
-    // while true, e.g. during an LMB-drag orbit; restores the normal
-    // cursor when false.
+    // Hides and locks the cursor to the window (GLFW_CURSOR_DISABLED) while true, e.g. during an LMB-drag orbit; restores the normal cursor when false.
     void setCursorLocked(bool locked);
 
 private:
-    static void framebufferSizeCallback(GLFWwindow* window, int width, int height);
     static void keyCallback(GLFWwindow* window, int key, int scancode, int action, int mods);
     static void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods);
 
     GLFWwindow* window_ = nullptr;
-    ResizeCallback resizeCallback_;
     KeyCallback keyCallback_;
     MouseButtonCallback mouseButtonCallback_;
 };

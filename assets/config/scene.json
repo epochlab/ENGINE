@@ -1,11 +1,10 @@
 {
     "gltfPath": "geometry/broken_stump_rkswd_raw/rkswd_tier_1.gltf",
-    "light": {
-        "direction": [0.4, 0.8, 0.6],
-        "color": [3.14159265, 3.14159265, 3.14159265]
-    },
     "windowWidth": 1024,
     "windowHeight": 576,
     "initialAov": 0,
-    "initialLut": "sRGB"
+    "initialLut": "sRGB",
+    "samplesPerPixel": 1,
+    "maxBounces": 2,
+    "russianRouletteStartBounce": 3
 }
