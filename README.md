@@ -29,13 +29,14 @@ cmake -B build
 cmake --build build
 ```
 
-This produces five targets:
+This produces six targets:
 
 - `build/engine` — the render engine
 - `build/test_pattern` — EXR calibration-pattern generator (`tools/test_pattern.cpp`)
 - `build/downsample` — EXR downsampling tool (`tools/downsample.cpp`)
 - `build/bvh_validate` — headless BVH correctness check (`tools/bvh_validate.cpp`)
 - `build/furnace_test` — headless BRDF energy-conservation check (`tools/furnace_test.cpp`)
+- `build/bsdf_validate` — headless BSDF pdf-normalization and furnace-test check (`tools/bsdf_validate.cpp`)
 
 `-Wall -Wextra -Werror` gates every target. If `clang-tidy` is installed, it also runs on every compile of `engine`'s own sources (see `.clang-tidy`); if `cppcheck` is installed, `cmake --build build --target cppcheck` runs it over `src/`. Both are skipped, not required, if not installed.
 
@@ -68,7 +69,7 @@ Nine build phases carry this pipeline from a bare camera to a spectral path trac
 | 2 | Geometry, textures & basic material | glTF mesh loading, UV texture mapping, linear EXR textures, tangent-space normal mapping, basic metallic-roughness PBR shading, basic AOV debug dropdown (no histogram) |
 | 3 | Scene controls | Scene/viewport stats, camera & lens readout, debug camera controls (WASD/QE/R fly + LMB-drag orbit around a depth-sampled pivot), camera framing overlays, live histogram on the Phase 2 AOV selector |
 | 4 | Direct lighting & acceleration | BVH, punctual direct lighting (analytic Cook-Torrance GGX), prefiltered IBL (SH-9 diffuse irradiance, prefiltered specular mip chain, analytic split-sum BRDF approximation — no baked LUT), multi-scatter energy compensation, analytic energy conservation — no secondary rays |
-| 5 | Materials & recursive transport | BSDF/PBR, BRDF importance sampling, Fresnel, recursive tracing, Russian roulette, throughput accumulation, radiance estimator |
+| 5 | Materials & recursive transport | CPU unidirectional path tracer, on demand alongside the rasterizer: stochastic metallic-roughness BSDF (exact dielectric Fresnel + Snell transmission with TIR, Schlick conductor Fresnel, Heitz 2018 GGX VNDF importance sampling, three-lobe stochastic selection), BVH-backed recursive bounce loop, Russian roulette, Chiang/Li/Burley 2019 shadow-terminator correction — no NEE (punctual lights unreachable until Phase 7 adds visibility rays) |
 | 6 | Real-time integration | Adaptive sampling, progressive accumulation, backend migration (OpenGL → Vulkan/CUDA-OptiX) |
 | 7 | Global illumination | Unbiased Monte Carlo GI, MIS, caustics, area lights, shadows, next-event estimation, importance-sampled IBL |
 | 8 | Spectral upgrade | Spectral light transport, wavelength sampling, spectral materials, spectral dispersion |
@@ -108,13 +109,13 @@ Phases 0–6 deliberately contain no global illumination — they establish a co
 | Shadows / soft shadows | Visibility rays to sampled light points; softness from light area and sample count | Direct lighting must be occluded correctly once secondary/visibility rays exist | 7 |
 | Next-event estimation | Explicit light sampling at each shading point, rather than relying on a bounce to find it | Removes most of the variance from direct lighting | 7 |
 | IBL (importance-sampled) | Environment map treated as an area light at infinity, importance-sampled by luminance at runtime | Ground-truth IBL correctness once visibility/secondary rays exist; supersedes the Phase 4 prefiltered approximation rather than extending it | 7 |
-| BSDF / PBR materials | Physically based reflectance models — diffuse, microfacet specular, dielectric/conductor | Materials respond to light with real physical behaviour | 5 |
-| BRDF sampling + importance sampling | Sample directions proportional to the BRDF's contribution (e.g. GGX importance sampling) | Cuts variance sharply versus uniform hemisphere sampling | 5 |
-| Fresnel effects | Fresnel term (Schlick approximation or full dielectric/conductor equations) | Correct reflectance/transmission split from grazing to normal incidence | 5 |
-| Recursive tracing | Path extended bounce to bounce until termination | Mechanism by which transport of arbitrary depth is computed | 5 |
-| Russian roulette termination | Probabilistically terminate low-throughput paths, reweighting survivors | Keeps recursion finite without biasing the estimator | 5 |
-| Path throughput accumulation | Running product of BSDF × cosine / pdf carried along the path | The quantity that turns a traced path into a radiance contribution | 5 |
-| Radiance estimation formulation | Monte Carlo estimator of the rendering equation (Kajiya 1986) | The formal contract every sampling strategy above must satisfy | 5 |
+| BSDF / PBR materials | Stochastic metallic-roughness BSDF — Lambertian diffuse, GGX microfacet specular reflection, smooth (delta) dielectric transmission via Snell's law with total internal reflection; single non-nested dielectric boundary | Materials respond to light with real physical behaviour, including glass | 5 |
+| BRDF sampling + importance sampling | Heitz 2018 GGX VNDF importance sampling for the specular lobe, cosine-weighted for diffuse; combined via a one-sample mixture estimator (both lobes' pdf/value evaluated at whichever direction was drawn) | Cuts variance sharply versus uniform hemisphere sampling | 5 |
+| Fresnel effects | Exact unpolarized dielectric Fresnel (PBRT's `FrDielectric` formula) driven by per-material IOR; Schlick approximation for conductors (unchanged from Phase 4, driven by F0) | Correct reflectance/transmission split from grazing to normal incidence | 5 |
+| Recursive tracing | Iterative bounce loop (not literal function recursion) over `Bvh::intersect`, bounded by `maxBounces` | Mechanism by which transport of arbitrary depth is computed, without an unbounded call stack | 5 |
+| Russian roulette termination | Survival probability clamped from the path's running throughput, starting at `russianRouletteStartBounce`; reweights survivors by `1/p` | Keeps recursion finite without biasing the estimator | 5 |
+| Path throughput accumulation | Running product of BSDF-sample throughput (`f × cosθ / pdf`, or the delta-lobe equivalent for transmission) carried along the path | The quantity that turns a traced path into a radiance contribution | 5 |
+| Radiance estimation formulation | Monte Carlo estimator of the rendering equation (Kajiya 1986); radiance from BSDF-sampled bounces terminating at the environment map only — no NEE, no punctual-light contribution this phase | The formal contract every sampling strategy above must satisfy | 5 |
 | Adaptive sampling | Per-pixel sample count driven by a variance/convergence estimate | Spends the sample budget where the image is still noisy, not uniformly | 6 |
 | Monte Carlo unbiased GI (indirect/multiple scattering) | Recursive tracing continued past the first bounce, no shortcuts | Light bouncing off multiple surfaces before reaching the eye | 7 |
 | Multiple importance sampling (MIS) | Weighted combination of NEE and BSDF-sampling estimators (balance heuristic) | Low variance of both strategies without either one's blind spots | 7 |
@@ -152,9 +153,9 @@ Arbitrary output variables exposed via the AOV selector (§2, Phase 2), beyond t
 | Shadow / occlusion mask | Lighting | Per-light visibility-ray result | Debug shadow correctness independent of shading | 7 |
 | IBL / ambient (RGB) | Lighting | SH-9 diffuse irradiance + prefiltered-specular-cubemap contribution, AO-modulated, no direct lights; diffuse albedo is excluded (shown as if white) so this reads as light arriving, not the object's colour under ambient light — specular keeps the real F0, a physical reflectance property rather than albedo | Isolates the Phase 4 ambient term from direct lighting; the visual check that AO's re-scoped role and the SH/prefiltered-cubemap result look physically plausible | 4 |
 | AO (ray-traced) | Lighting | Ray-traced, short-range cosine-weighted hemisphere occlusion, light-independent | Ground-truth occlusion once BVH/visibility rays exist; supersedes the Phase 2 baked AO's ambient-occlusion role rather than extending it | 7 |
-| Index of refraction (IOR) | Transport | Per-material IOR (dielectric η, or complex η+ik for conductors) evaluated at the hit point | Isolates the raw refractive-index input driving Fresnel/transmission, independent of the reflectance curve it produces; becomes wavelength-dependent once Phase 8's spectral dispersion lands | 5 |
+| Index of refraction (IOR) | Transport | Per-material dielectric IOR (η) at the primary hit, path-traced only; conductors keep Schlick F0 (no complex η+ik spectral data authored in this asset set) | Isolates the raw refractive-index input driving Fresnel/transmission, independent of the reflectance curve it produces; becomes wavelength-dependent once Phase 8's spectral dispersion lands | 5 |
 | Fresnel/reflectance term | Transport | Schlick Fresnel evaluated at the hit point's actual view angle | Debug grazing-angle reflectance behaviour in isolation | 4 |
-| Bounce-count heatmap | Transport | Path depth at termination, per pixel | Debug Russian roulette/termination behaviour | 5 |
+| Bounce-count heatmap | Transport | Mean path depth at termination across samples, per pixel, path-traced only | Debug Russian roulette/termination behaviour | 5 |
 | Variance/noise heatmap | Real-time | Per-pixel estimator variance | Shows the adaptive sampler where the image hasn't converged | 6 |
 | Sample-count heatmap | Real-time | Per-pixel accumulated sample count | Shows where the adaptive sampler is spending budget | 6 |
 | Indirect diffuse | Global illumination | Recursive-bounce contribution, diffuse term | Isolates indirect diffuse from direct lighting | 7 |
@@ -178,7 +179,7 @@ Arbitrary output variables exposed via the AOV selector (§2, Phase 2), beyond t
 - Mikkelsen, M.S. (2008). Simulation of wrinkled surfaces revisited — MikkTSpace tangent space standard.
 - Kajiya, J.T. (1986). The rendering equation. SIGGRAPH.
 - Veach, E. (1997). Robust Monte Carlo Methods for Light Transport Simulation. PhD thesis, Stanford — multiple importance sampling, next-event estimation, bidirectional path tracing.
-- Pharr, M., Jakob, W., Humphreys, G. Physically Based Rendering: From Theory to Implementation (PBRT).
+- Pharr, M., Jakob, W., Humphreys, G. Physically Based Rendering: From Theory to Implementation (PBRT) — also the source of `FrDielectric`, the exact unpolarized dielectric Fresnel formula Phase 5's BSDF uses.
 - Cook, R.L., Torrance, K.E. (1982). A reflectance model for computer graphics. ACM ToG — BRDF and Fresnel foundations.
 - Walter, B. et al. (2007). Microfacet models for refraction through rough surfaces — GGX BSDF.
 - Wilkie, A. et al. (2014). Hero wavelength spectral sampling. Computer Graphics Forum.
@@ -193,3 +194,14 @@ Arbitrary output variables exposed via the AOV selector (§2, Phase 2), beyond t
 - Turquin, E. (2019). Practical multiple scattering compensation for microfacet models — the multiplicative energy-compensation factor applied to both punctual and IBL specular.
 - Bitterli, B. et al. (2020). Spatiotemporal reservoir resampling for real-time ray tracing (ReSTIR) — forward reference for the real-time GI open question.
 - Sobel filtering — edge-detection AOV computed from Luminance (§3) — arXiv:2601.16806.
+- Christensen, P.H., Jarosz, W. (2016). The Path to Path-Traced Movies. Foundations and Trends in Computer Graphics and Vision — production path-tracing grounding for Phase 5.
+- Heitz, E. (2018). Sampling the GGX Distribution of Visible Normals. JCGT 7(4) — the VNDF importance-sampling routine Phase 5's specular lobe uses.
+- Chiang, M.J.-Y., Li, Y., Burley, B. (2019). Taming the Shadow Terminator. JCGT 8(4) — the shading-point correction used for Phase 5's secondary-ray origins.
+- Halton, J.H. (1960). On the efficiency of certain quasi-random sequences of points in evaluating multi-dimensional integrals; Cranley, R., Patterson, T.N.L. (1976). Randomization of number theoretic methods for multiple integration — Phase 5's `Sampler` (radical inverse + per-pixel rotation).
+- O'Neill, M.E. (2014). PCG: A Family of Simple Fast Space-Efficient Statistically Good Algorithms for Random Number Generation — Phase 5's `Sampler` fallback generator beyond its low-discrepancy dimension budget.
+- Arvo, J., Kirk, D. (1990). Particle Transport and Image Synthesis — Russian roulette path termination.
+- Gulbrandsen, O. (2014). Artist Friendly Metallic Fresnel — considered for conductor Fresnel, not implemented (Phase 5 kept Phase 4's Schlick approximation; no authored edge-tint parameter exists in this asset set).
+- Dupuy, J., Benyoub, A. (2023). Sampling Visible GGX Normals with Spherical Caps; Tokuyoshi, Y., Eto, K. (2023). Bounded VNDF Sampling for Smith-GGX Reflections — newer VNDF refinements surveyed, not implemented (Heitz 2018 used instead — better-established, lower risk to reproduce correctly from reference material alone).
+- Heitz, E., Hanika, J., d'Eon, E., Dachsbacher, C. (2016). Multiple-scattering microfacet BSDFs with the Smith model — considered for exact multi-scatter energy conservation, not implemented (Phase 5's path-traced specular lobe is single-scatter only, same as Phase 4's rasterizer).
+- Burley, B. (2020). Practical Hash-based Owen Scrambling. JCGT 9(4) — considered for the sampler (Sobol + Owen scrambling), not implemented (depends on precomputed direction-number tables; randomized Halton used instead).
+- Schüßler, V., Heitz, E., Hanika, J., Dachsbacher, C. (2017). Microfacet-based normal mapping for robust Monte Carlo path tracing — considered for normal-map robustness, not implemented (Phase 5 uses a simpler geometric-normal-consistency rejection: a normal-map-induced light-leak sample is absorbed rather than reconstructed via the full two-facet microsurface model).
