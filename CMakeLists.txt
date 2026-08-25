@@ -78,12 +78,14 @@ add_executable(engine
     src/gfx/hdr_framebuffer.cpp
     src/gfx/post_process_pass.cpp
     src/gfx/ocio_display_transform.cpp
+    src/scene/bsdf.cpp
     src/scene/bvh.cpp
     src/scene/camera.cpp
     src/scene/debug_camera_controller.cpp
     src/scene/environment_map.cpp
     src/scene/frustum.cpp
     src/scene/gltf_loader.cpp
+    src/scene/sampler.cpp
     src/scene/sh_irradiance.cpp
     src/scene/shading_scene.cpp
     src/config/json_scan.cpp
@@ -128,3 +130,8 @@ add_executable(furnace_test tools/furnace_test.cpp src/scene/sh_irradiance.cpp)
 target_include_directories(furnace_test PRIVATE include)
 target_compile_options(furnace_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(furnace_test PRIVATE glm::glm)
+
+add_executable(bsdf_validate tools/bsdf_validate.cpp src/scene/bsdf.cpp src/scene/sampler.cpp)
+target_include_directories(bsdf_validate PRIVATE include)
+target_compile_options(bsdf_validate PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(bsdf_validate PRIVATE glm::glm)
