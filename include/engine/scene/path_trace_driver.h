@@ -16,11 +16,19 @@
 
 namespace engine::scene {
 
+// One consistent published pair from PathTraceDriver: gbuffer is set once (on pass 1 of the current
+// generation) and never rebuilt again; dynamic is republished on every pass as it keeps re-averaging.
+// Both null until the first pass of the app's life completes.
+struct PathTraceSnapshot {
+    std::shared_ptr<const PathTraceGBuffer> gbuffer;
+    std::shared_ptr<const PathTraceDynamic> dynamic;
+};
+
 // Drives renderPathTraced() continuously on a dedicated background thread, off the render/UI
 // thread, running short passes and accumulating them into a running-mean PathTraceResult that
 // converges over time while the requested state (camera/scene) stays unchanged. The render thread
 // only ever calls requestTrace() (a mutex-guarded struct copy + an atomic bump) and latestResult()
-// (a mutex-guarded shared_ptr copy) -- it never blocks on a trace.
+// (two mutex-guarded shared_ptr copies) -- it never blocks on a trace.
 //
 // A request superseded before the driver picks it up is simply never run; a request superseded
 // while a pass is in flight is discarded (renderPathTraced's generation/requestedGeneration
@@ -61,9 +69,10 @@ public:
     // queue.
     void requestTrace(const Request& request);
 
-    // Render-thread-only, call at most once per rendered frame. nullptr until the first pass of the
-    // app's life completes. Cheap (one mutex-guarded shared_ptr copy) -- safe to call every frame.
-    [[nodiscard]] std::shared_ptr<const PathTraceResult> latestResult() const;
+    // Render-thread-only, call at most once per rendered frame. Both fields null until the first pass
+    // of the app's life completes. Cheap (two mutex-guarded shared_ptr copies under one lock, so the
+    // pair is always consistent) -- safe to call every frame.
+    [[nodiscard]] PathTraceSnapshot latestResult() const;
 
     // How many passes have been accumulated into the currently-published result's generation --
     // HUD convergence readout.
@@ -91,8 +100,12 @@ private:
     std::atomic<int> accumulatedSamples_{0};
     std::atomic<double> lastPassSeconds_{0.0};
 
+    // Both published under resultMutex_ together (gbuffer_ only on pass 1, dynamic_ every pass) so
+    // latestResult() always hands back a consistent pair -- see PathTraceSnapshot's doc comment for
+    // why they're split rather than one shared_ptr<const PathTraceResult>.
     mutable std::mutex resultMutex_;
-    std::shared_ptr<const PathTraceResult> result_;
+    std::shared_ptr<const PathTraceGBuffer> gbuffer_;
+    std::shared_ptr<const PathTraceDynamic> dynamic_;
 
     // Persistent row-parallel dispatch for renderPathTraced, reused across every pass -- see
     // RowThreadPool's own doc comment. Declared before thread_ so it's fully constructed (and its

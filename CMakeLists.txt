@@ -133,23 +133,37 @@ target_compile_options(downsample PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(downsample PRIVATE OpenEXR::OpenEXR Imath::Imath)
 
 # Headless correctness checks (Phase 4) -- no test framework exists in this repo yet, so these follow test_pattern/downsample's standalone-CLI convention: non-zero exit on failure.
+# -march=native/IPO mirror the engine target's flags (bsdf.cpp/bvh.cpp are compiled into both) so these
+# tools validate the exact codegen that ships, not a differently-optimized build of the same math.
 add_executable(bvh_validate tools/bvh_validate.cpp src/scene/bvh.cpp)
 target_include_directories(bvh_validate PRIVATE include)
-target_compile_options(bvh_validate PRIVATE -Wall -Wextra -Werror)
+target_compile_options(bvh_validate PRIVATE -Wall -Wextra -Werror -march=native)
 target_link_libraries(bvh_validate PRIVATE glm::glm)
+if(IPO_SUPPORTED)
+    set_target_properties(bvh_validate PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
+endif()
 
 add_executable(furnace_test tools/furnace_test.cpp src/scene/sh_irradiance.cpp)
 target_include_directories(furnace_test PRIVATE include)
-target_compile_options(furnace_test PRIVATE -Wall -Wextra -Werror)
+target_compile_options(furnace_test PRIVATE -Wall -Wextra -Werror -march=native)
 target_link_libraries(furnace_test PRIVATE glm::glm)
+if(IPO_SUPPORTED)
+    set_target_properties(furnace_test PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
+endif()
 
 add_executable(bsdf_validate tools/bsdf_validate.cpp src/scene/bsdf.cpp src/scene/sampler.cpp)
 target_include_directories(bsdf_validate PRIVATE include)
-target_compile_options(bsdf_validate PRIVATE -Wall -Wextra -Werror)
+target_compile_options(bsdf_validate PRIVATE -Wall -Wextra -Werror -march=native)
 target_link_libraries(bsdf_validate PRIVATE glm::glm)
+if(IPO_SUPPORTED)
+    set_target_properties(bsdf_validate PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
+endif()
 
 add_executable(nee_validate tools/nee_validate.cpp src/scene/bsdf.cpp src/scene/sampler.cpp
                src/scene/environment_map.cpp src/gfx/hdr_image.cpp)
 target_include_directories(nee_validate PRIVATE include)
-target_compile_options(nee_validate PRIVATE -Wall -Wextra -Werror)
+target_compile_options(nee_validate PRIVATE -Wall -Wextra -Werror -march=native)
 target_link_libraries(nee_validate PRIVATE glm::glm OpenEXR::OpenEXR Imath::Imath)
+if(IPO_SUPPORTED)
+    set_target_properties(nee_validate PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
+endif()
