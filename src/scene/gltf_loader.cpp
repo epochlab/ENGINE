@@ -257,7 +257,7 @@ std::optional<MeshInstance> loadPrimitive(const cgltf_data* data, const cgltf_pr
         return std::nullopt;
     }
 
-    std::vector<Vertex> vertices = readVertices(*acc);
+    const std::vector<Vertex> vertices = readVertices(*acc);
     appendWorldTriangles(vertices, *indices, transform, outWorldTriangles);
     appendShadingTriangles(vertices, *indices, transform, instanceIndex, outShadingTriangles);
 
@@ -307,7 +307,7 @@ bool walkNodes(const cgltf_data* data, cgltf_node* const* nodes, cgltf_size coun
 }  // namespace
 
 std::optional<LoadedModel> loadGltf(const std::string& path) {
-    cgltf_options options{};
+    const cgltf_options options{};
     cgltf_data* data = nullptr;
 
     if (cgltf_parse_file(&options, path.c_str(), &data) != cgltf_result_success) {

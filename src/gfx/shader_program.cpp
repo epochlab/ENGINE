@@ -15,7 +15,7 @@ namespace engine::gfx {
 namespace {
 
 std::optional<std::string> readFile(const std::string& path) {
-    std::ifstream file(path);
+    const std::ifstream file(path);
     if (!file) {
         std::cerr << "ShaderProgram: failed to open " << path << '\n';
         return std::nullopt;
