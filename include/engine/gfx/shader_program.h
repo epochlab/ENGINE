@@ -5,7 +5,7 @@
 
 namespace engine::gfx {
 
-// Owns one linked GL program object, move-only. Compile/link failure is surfaced via std::optional rather than std::exit: a bad shader during active development is a common, recoverable-at-the-call-site failure, unlike Window's/HdrFramebuffer's internal-configuration failures, which have no meaningful recovery path.
+// Owns one linked GL program object, move-only. Compile/link failure is surfaced via std::optional rather than std::exit: a bad shader during active development is a common, recoverable-at-the-call-site failure, unlike Window's/HudOverlay's internal-configuration failures, which have no meaningful recovery path.
 class ShaderProgram {
 public:
     ~ShaderProgram();

@@ -16,7 +16,7 @@ glm::vec3 rotateAboutY(const glm::vec3& v, float angleRadians) {
     return {(v.x * c) + (v.z * s), v.y, (-v.x * s) + (v.z * c)};
 }
 
-// Same Rec.709 weights as pbr.frag's luminance() / edge_filter.frag's sampleLuminance.
+// Same Rec.709 weights as edge_filter.frag's sampleLuminance.
 float luminanceOf(const engine::gfx::HdrImage& image, int x, int y) {
     const std::size_t idx = ((static_cast<std::size_t>(y) * static_cast<std::size_t>(image.width)) +
                               static_cast<std::size_t>(x)) *

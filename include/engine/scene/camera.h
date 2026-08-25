@@ -27,7 +27,7 @@ public:
 
     [[nodiscard]] glm::vec3 position() const { return position_; }
 
-    // Unit-length view direction derived from yaw/pitch — the same quantity viewMatrix() computes internally, exposed for callers (fly movement, orbit-pivot fallback) that need it independent of the view matrix.
+    // Unit-length view direction derived from yaw/pitch.
     [[nodiscard]] glm::vec3 forward() const;
     [[nodiscard]] FilmBack filmBack() const { return filmBack_; }
     [[nodiscard]] float focalLengthMm() const { return focalLengthMm_; }
@@ -40,12 +40,8 @@ public:
     // Vertical FOV derived from focal length + film back height, not set directly — this is what a real lens/sensor combo actually determines.
     [[nodiscard]] float verticalFovRadians() const;
 
-    [[nodiscard]] glm::mat4 viewMatrix() const;
-    [[nodiscard]] glm::mat4 projectionMatrix(float aspect) const;
-
-    // Pinhole primary ray for a point in normalized device coordinates (ndcX/ndcY in [-1,1], +Y up)
-    // -- same right/up basis viewMatrix() derives, so a path-traced and rasterized view agree pixel
-    // for pixel. tMin/tMax are nearClip()/farClip(), matching the rasterizer's own clip range.
+    // Pinhole primary ray for a point in normalized device coordinates (ndcX/ndcY in [-1,1], +Y up).
+    // tMin/tMax are nearClip()/farClip().
     [[nodiscard]] Ray primaryRay(float ndcX, float ndcY, float aspect) const;
 
     // Standard photographic exposure value at ISO 100 (log2 scale): log2(aperture^2 / shutterSeconds * (100/iso)).

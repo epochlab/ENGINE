@@ -187,4 +187,17 @@
 - verified: `bvh_validate`/`furnace_test`/`bsdf_validate` all pass; visual smoke test in the running app via a temporary auto-trigger hook (reverted before commit) — IOR AOV shows a correct stump silhouette against black with the LUT correctly forced to Raw; Beauty AOV shows a coherent, plausible image
 - docs: README updated (phase table, component reference, AOV reference, references)
 
+## Rasterizer removal — path tracer as sole renderer
+
+Follow-on to the path tracer becoming the continuously-converging primary renderer (NEE/MIS against the environment map, full G-buffer/transport-component AOV set) — the GPU rasterizer it ran alongside as a fallback was by then fully redundant and is removed.
+
+- feat: `presentFrame` shows the path-traced result exclusively, with a black clear until the first pass publishes; no rasterizer fallback branch
+- feat: orbit-pick pivot resolved from the path tracer's own G-buffer (world-space hit position + hit mask at its centre pixel), replacing a GL depth-buffer readback + view/projection unprojection
+- refactor: `Camera::viewMatrix`/`projectionMatrix`, `Window`'s resize callback, and `HdrFramebuffer`'s GL depth/colour attachments removed — nothing traces a raster depth or colour buffer anymore
+- refactor: `Material`'s textures are CPU-only (`HdrImage`); GPU texture upload, `MeshInstance`'s GPU `Mesh`, and the bump-map detail-normal texture (rasterizer-only consumer) are gone
+- refactor: punctual lights (`Light`, `kMaxLights`, `SceneConfig::lights`) removed — the rasterizer was their only consumer; the path tracer has always lit purely from the environment map
+- refactor: `SceneStats` drops draw-call/culled counts (no per-instance culling without a raster draw loop); HUD drops the "Draw calls"/"Mtri/s" readouts and the GPU timer's geometry-pass split
+- chore: deleted `pbr.vert/frag`, `sky.frag`, `equirect_to_cubemap.frag`, `prefilter_specular.frag`; `cubemap_texture`, `env_prefilter_pass`, `mesh`, `hdr_framebuffer`, `sh_irradiance`, `frustum` (header+source); `tools/furnace_test.cpp` and its CMake target (validated `pbr.frag`'s analytic BRDF/SH-IBL, both deleted; `bsdf_validate` already covers the path tracer's own BSDF)
+- docs: README rewritten to describe the shipped CPU path tracer + thin OpenGL display/HUD layer directly, replacing the phase-by-phase dual-renderer build history
+
 **Phase 5 — Materials & recursive transport complete.**

@@ -27,12 +27,8 @@ public:
     // For backends that need the raw GLFW handle (e.g. ImGui's GLFW backend) — everything else should use the typed accessors above.
     [[nodiscard]] GLFWwindow* nativeHandle() const noexcept { return window_; }
 
-    // {width, height} in framebuffer pixels (glfwGetFramebufferSize), not screen points — the two differ by 2x on Retina displays.
+    // {width, height} in framebuffer pixels (glfwGetFramebufferSize), not screen points — the two differ by 2x on Retina displays. Queried fresh each call, not cached from a resize event.
     [[nodiscard]] std::pair<int, int> framebufferSize() const;
-
-    // Invoked on GLFW's framebuffer-resize event. Wired to HdrFramebuffer::resize in main.cpp.
-    using ResizeCallback = std::function<void(int, int)>;
-    void setResizeCallback(ResizeCallback callback);
 
     // Invoked on GLFW's key event (GLFW_PRESS/GLFW_RELEASE/GLFW_REPEAT). Scancode/mods aren't forwarded — no consumer needs them yet. First consumer was Stage F's debug LUT-toggle key ('L'); Phase 3's 'R' camera-reset and channel-isolation hotkeys share this same single slot. WASD/QE turned out to need continuous per-frame state, not an edge-triggered event, so they use isKeyDown() below instead — this slot never needed to become multi-consumer.
     using KeyCallback = std::function<void(int key, int action)>;
@@ -52,12 +48,10 @@ public:
     void setCursorLocked(bool locked);
 
 private:
-    static void framebufferSizeCallback(GLFWwindow* window, int width, int height);
     static void keyCallback(GLFWwindow* window, int key, int scancode, int action, int mods);
     static void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods);
 
     GLFWwindow* window_ = nullptr;
-    ResizeCallback resizeCallback_;
     KeyCallback keyCallback_;
     MouseButtonCallback mouseButtonCallback_;
 };

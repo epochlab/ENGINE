@@ -2,7 +2,7 @@
 
 in vec2 vUv;
 
-uniform sampler2D uHdrColor;  // whichever Beauty source is active: rasterizer's hdrFbo or the path tracer's
+uniform sampler2D uHdrColor;  // the path tracer's Beauty image
 uniform int uChannelView;  // 0=off(HSV) 1=Hue 2=Saturation 3=Value -- applied to the HSV output, not
                             // uHdrColor's RGB (isolating a source RGB channel first would broadcast it
                             // to grey, which always converts to H=0/S=0 -- destroying the very thing
@@ -10,9 +10,6 @@ uniform int uChannelView;  // 0=off(HSV) 1=Hue 2=Saturation 3=Value -- applied t
 
 out vec4 fragColor;
 
-// Same formula as pbr.frag's rgb2hsv -- duplicated rather than shared since GLSL has no #include and
-// this is a single small pure function, not worth a build-system-level shader-sharing mechanism for
-// its own sake.
 vec3 rgb2hsv(vec3 c) {
     vec4 k = vec4(0.0, -1.0 / 3.0, 2.0 / 3.0, -1.0);
     vec4 p = mix(vec4(c.bg, k.wz), vec4(c.gb, k.xy), step(c.b, c.g));

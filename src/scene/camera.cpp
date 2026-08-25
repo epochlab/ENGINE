@@ -2,8 +2,6 @@
 
 #include <cmath>
 
-#include <glm/gtc/matrix_transform.hpp>
-
 namespace engine::scene {
 
 namespace {
@@ -43,17 +41,6 @@ glm::vec3 Camera::forward() const {
 
 float Camera::verticalFovRadians() const {
     return 2.0F * std::atan(filmBack_.heightMm / (2.0F * focalLengthMm_));
-}
-
-glm::mat4 Camera::viewMatrix() const {
-    const glm::vec3 forward = forwardFromEuler(yawRadians_, pitchRadians_);
-    const glm::vec3 right = glm::normalize(glm::cross(forward, kWorldUp));
-    const glm::vec3 up = glm::cross(right, forward);
-    return glm::lookAt(position_, position_ + forward, up);
-}
-
-glm::mat4 Camera::projectionMatrix(float aspect) const {
-    return glm::perspective(verticalFovRadians(), aspect, nearClip_, farClip_);
 }
 
 Ray Camera::primaryRay(float ndcX, float ndcY, float aspect) const {

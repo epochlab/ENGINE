@@ -77,7 +77,7 @@ struct LobeEval {
     float pdf;
 };
 
-// kd = (1-F)(1-metallic)(1-transmissionFactor), fixed at wo.z (not per-wi) -- same NdotV-based energy split pbr.frag's evaluateDirectLighting uses, avoids diffuse+specular jointly exceeding received energy.
+// kd = (1-F)(1-metallic)(1-transmissionFactor), fixed at wo.z (not per-wi) -- NdotV-based energy split avoids diffuse+specular jointly exceeding received energy.
 // pdf must NOT be gated on kd: sampleBsdf still selects this lobe with probability lobes.diffuse
 // (independent of kd, see computeLobeProbabilities), so the pdf side of the MIS mixture must match
 // that selection density regardless of how little/no value the lobe carries -- gating pdf on kd

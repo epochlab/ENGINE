@@ -4,7 +4,7 @@
 
 namespace engine::scene {
 
-// World-space mirror of engine::gfx::Vertex -- Mesh is GPU-only, so this is the path tracer's only source of per-vertex shading data.
+// World-space, baked from the glTF loader's per-vertex data -- the path tracer's only source of per-vertex shading data.
 struct ShadingVertex {
     glm::vec3 position;
     glm::vec3 normal;

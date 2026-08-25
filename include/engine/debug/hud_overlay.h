@@ -36,7 +36,6 @@ struct PathTracedStatus {
 struct HudFrameData {
     const GpuInfo& gpuInfo;
     const FrameStats& frameStats;
-    float geomMs;
     float postMs;
     std::size_t ramBytes;
     std::size_t gpuBytes;
@@ -68,11 +67,9 @@ public:
     void beginFrame() const;
 
     // Builds the panel from already-collected values. Call after beginFrame(), before render(). aov
-    // is mutated in place by the single unified AOV combo box (indices/names from the shared AovId
-    // enum, engine/debug/aov.h -- the path tracer supplies a result for whichever AOVs it has
-    // computed, main.cpp falls back to the rasterizer's pbr.frag branches otherwise); focalLengthMm
-    // by the Lens section's slider; showSky by the HDRI section's "Show/Hide Background" checkbox
-    // (only takes visible effect for the Beauty AOV -- see main.cpp's render loop); envRotationDegrees
+    // is mutated in place by the single AOV combo box (indices/names from AovId, engine/debug/aov.h);
+    // focalLengthMm by the Lens section's slider; showSky by the HDRI section's "Show/Hide Background"
+    // checkbox (only takes visible effect for the Beauty AOV -- see main.cpp's render loop); envRotationDegrees
     // ([0,359]) by the HDRI section's "Y-Axis" slider. The crosshair overlay is drawn over the full
     // viewport (foreground draw list), independent of the ##hud panel, gated on framing.crosshair.
     // The path tracer's convergence readout (frame.pathTraced) is shown in the Frame section --
