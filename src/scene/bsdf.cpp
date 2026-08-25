@@ -126,17 +126,21 @@ struct LobeProbabilities {
 };
 
 // specular = Fresnel reflectance probability (exact dielectric via ior, Schlick via f0 for
-// conductors, blended by metallic). Entering (sign>0): diffuse/transmit split the remainder by
-// transmissionFactor. Exiting (sign<0, already inside): no diffuse substrate, transmit takes
-// everything specular didn't -- reflect internally or exit, no third option.
+// conductors, blended by metallic). "Exiting" (transmissive material, sign<0, already inside): no
+// diffuse substrate, transmit takes everything specular didn't -- reflect internally or exit, no
+// third option. Everything else -- entering (sign>0), or an opaque material's woLocal.z pushed
+// negative by grazing-angle normal mapping -- uses the entering split: diffuse/transmit divide the
+// remainder by transmissionFactor (0 for opaque, so transmit vanishes and this reduces to
+// diffuse+specular regardless of which side of the interpolated normal wo landed on).
 // transmitPhysicalValue != transmit: throughput = physicalValue/transmit, so physicalValue must
 // independently carry the same transmissionFactor/metallic factors transmit's probability used, or
 // they cancel out of the throughput and silently erase their effect on energy (caught by
 // tools/bsdf_validate.cpp's furnace test).
 LobeProbabilities computeLobeProbabilities(const BsdfParams& params, const glm::vec3& wo,
                                             float sign) {
-    const float etaI = sign > 0.0F ? 1.0F : params.ior;
-    const float etaT = sign > 0.0F ? params.ior : 1.0F;
+    const bool exiting = sign < 0.0F && params.transmissionFactor > 0.0F;
+    const float etaI = exiting ? params.ior : 1.0F;
+    const float etaT = exiting ? 1.0F : params.ior;
     const float fresnelAtNormal = fresnelDielectric(wo.z, etaI, etaT);
     const glm::vec3 fresnelConductor = fresnelSchlick(wo.z, params.f0);
     const float conductorLuma = (fresnelConductor.x + fresnelConductor.y + fresnelConductor.z) / 3.0F;
@@ -147,7 +151,7 @@ LobeProbabilities computeLobeProbabilities(const BsdfParams& params, const glm::
     float transmitProb = 0.0F;
     float diffuseKd = 0.0F;
     float transmitPhysicalValue = 0.0F;
-    if (sign > 0.0F) {
+    if (!exiting) {
         diffuseProb = (1.0F - specularProb) * (1.0F - params.transmissionFactor);
         transmitProb = (1.0F - specularProb) * params.transmissionFactor;
         diffuseKd = transmittance * (1.0F - params.transmissionFactor);
