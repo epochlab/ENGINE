@@ -81,6 +81,14 @@ int main() {
                       << ", brute force t=" << bruteHit->t << ")\n";
             ++mismatches;
         }
+
+        const bool bvhOccluded = bvh.occluded(ray);
+        if (bvhOccluded != bruteHit.has_value()) {
+            std::cerr << "bvh_validate: occluded() mismatch at ray " << i << " (bvh "
+                      << (bvhOccluded ? "occluded" : "clear") << ", brute force "
+                      << (bruteHit.has_value() ? "hit" : "miss") << ")\n";
+            ++mismatches;
+        }
     }
 
     if (mismatches > 0) {

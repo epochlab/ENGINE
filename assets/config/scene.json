@@ -5,7 +5,7 @@
     "windowHeight": 576,
     "initialAov": 0,
     "initialLut": "sRGB",
-    "samplesPerPixel": 64,
-    "maxBounces": 8,
+    "samplesPerPixel": 1,
+    "maxBounces": 2,
     "russianRouletteStartBounce": 3
 }

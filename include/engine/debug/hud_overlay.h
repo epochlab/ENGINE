@@ -22,12 +22,14 @@ struct FramingOverlayState {
     bool crosshair = true;
 };
 
-// Read-only status the Path Traced section displays -- populated by main.cpp from the last completed renderPathTraced() call, defaulted (hasResult=false) before the first one.
+// Read-only convergence status the AOV section's path-traced readout displays -- built fresh each
+// frame by main.cpp from PathTraceDriver's live query methods (accumulatedSamples()/
+// lastPassSeconds()), not a snapshot of one completed call: the driver runs continuously in the
+// background, so this reflects "as of this frame", not "as of the last Render click".
 struct PathTracedStatus {
     bool hasResult = false;
-    double lastRenderSeconds = 0.0;
-    int samplesPerPixel = 0;
-    float avgBounceDepth = 0.0F;
+    double lastPassSeconds = 0.0;
+    int accumulatedSamples = 0;
 };
 
 // Everything HudOverlay::draw needs for one frame, bundled to keep its signature from growing indefinitely as sections are added. aov and FramingOverlayState stay as separate mutable out-parameters on draw() itself since ImGui widgets bind directly to them.
@@ -65,10 +67,19 @@ public:
     // Call after window.pollEvents(), before any GL draw calls.
     void beginFrame() const;
 
-    // Builds the panel from already-collected values. Call after beginFrame(), before render(). aov is mutated in place by the AOV combo box; focalLengthMm by the Lens section's slider; showSky by the HDRI section's "Show/Hide Background" checkbox (only takes visible effect for the Beauty AOV -- see main.cpp's render loop); envRotationDegrees ([0,359]) by the HDRI section's "Y-Axis" slider. The crosshair overlay is drawn over the full viewport (foreground draw list), independent of the ##hud panel, gated on framing.crosshair. pathTracedMode/pathTracedAov are mutated by the Path Traced section's checkbox/combo (index: 0=Beauty 1=IOR 2=BounceCount, pure C++/CPU AOVs independent of aov's pbr.frag-driven set); renderRequested is set true for exactly the frame its "Render" button is pressed.
+    // Builds the panel from already-collected values. Call after beginFrame(), before render(). aov
+    // is mutated in place by the single unified AOV combo box (indices/names from the shared AovId
+    // enum, engine/debug/aov.h -- the path tracer supplies a result for whichever AOVs it has
+    // computed, main.cpp falls back to the rasterizer's pbr.frag branches otherwise); focalLengthMm
+    // by the Lens section's slider; showSky by the HDRI section's "Show/Hide Background" checkbox
+    // (only takes visible effect for the Beauty AOV -- see main.cpp's render loop); envRotationDegrees
+    // ([0,359]) by the HDRI section's "Y-Axis" slider. The crosshair overlay is drawn over the full
+    // viewport (foreground draw list), independent of the ##hud panel, gated on framing.crosshair.
+    // The path tracer's convergence readout (frame.pathTraced) is shown in the Frame section --
+    // there's no manual render trigger, PathTraceDriver retraces automatically on any input change
+    // (see main.cpp's requestPathTraceIfTriggerChanged).
     void draw(const HudFrameData& frame, int& aov, float& focalLengthMm, bool& showSky,
-              int& envRotationDegrees, const FramingOverlayState& framing, bool& pathTracedMode,
-              int& pathTracedAov, bool& renderRequested) const;
+              int& envRotationDegrees, const FramingOverlayState& framing) const;
 
     // ImGui::Render + backend draw-data submit. Call after the post-process blit, before window.swapBuffers().
     void render() const;
