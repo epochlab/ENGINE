@@ -20,9 +20,6 @@ public:
     static Texture createFromFloatPixels(int width, int height, const float* rgba,
                                           unsigned int wrapMode);
 
-    // Loads a scanline EXR via OpenEXR's RgbaInputFile, converts half to float, and uploads through createFromFloatPixels (see wrapMode's doc there). OpenEXR's C++ API throws Iex-derived (std::exception-derived) exceptions on I/O failure; failures are caught here and translated to nullopt, mirroring ShaderProgram::loadFromFiles's precedent for recoverable bad external input. A source file missing an alpha channel reads back as 1.0 — RgbaInputFile's own documented default fill, not something this loader adds.
-    static std::optional<Texture> createFromExr(const std::string& path, unsigned int wrapMode);
-
     void bind(unsigned int unit) const;
 
 private:

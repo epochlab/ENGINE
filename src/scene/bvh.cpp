@@ -52,7 +52,8 @@ Aabb triangleBounds(const Triangle& t) {
 }
 
 // Moller-Trumbore ray-triangle intersection. No backface culling (det may be negative). Known edge case, accepted rather than solved: a ray exactly parallel to an axis with its origin exactly on that axis's bounding plane can produce a 0*inf NaN in the slab test below -- vanishingly unlikely for the random/synthetic rays this BVH is exercised with (tools/bvh_validate.cpp), not worth the extra robust-traversal machinery this phase.
-bool intersectTriangle(const Ray& ray, const Triangle& tri, float& outT) {
+bool intersectTriangle(const Ray& ray, const Triangle& tri, float& outT, float& outU,
+                        float& outV) {
     constexpr float kEpsilon = 1e-8F;
     const glm::vec3 edge1 = tri.v1 - tri.v0;
     const glm::vec3 edge2 = tri.v2 - tri.v0;
@@ -77,6 +78,8 @@ bool intersectTriangle(const Ray& ray, const Triangle& tri, float& outT) {
         return false;
     }
     outT = t;
+    outU = u;
+    outV = v;
     return true;
 }
 
@@ -303,9 +306,12 @@ std::optional<Hit> Bvh::intersect(const Ray& ray) const {
                     primIndices_[static_cast<std::size_t>(node.firstTriangle) +
                                  static_cast<std::size_t>(i)];
                 float t = 0.0F;
-                if (intersectTriangle(localRay, triangles_[static_cast<std::size_t>(triIdx)], t)) {
+                float u = 0.0F;
+                float v = 0.0F;
+                if (intersectTriangle(localRay, triangles_[static_cast<std::size_t>(triIdx)], t, u,
+                                       v)) {
                     localRay.tMax = t;
-                    best = Hit{t, triIdx};
+                    best = Hit{t, triIdx, u, v};
                 }
             }
         } else {
@@ -321,9 +327,11 @@ std::optional<Hit> bruteForceIntersect(const std::vector<Triangle>& triangles, c
     std::optional<Hit> best;
     for (int i = 0; i < static_cast<int>(triangles.size()); ++i) {
         float t = 0.0F;
-        if (intersectTriangle(localRay, triangles[static_cast<std::size_t>(i)], t)) {
+        float u = 0.0F;
+        float v = 0.0F;
+        if (intersectTriangle(localRay, triangles[static_cast<std::size_t>(i)], t, u, v)) {
             localRay.tMax = t;
-            best = Hit{t, i};
+            best = Hit{t, i, u, v};
         }
     }
     return best;

@@ -7,7 +7,6 @@
 
 #include "engine/debug/memory_tracker.h"
 #include "engine/gfx/gl_debug.h"
-#include "engine/gfx/hdr_image.h"
 
 namespace engine::gfx {
 
@@ -58,14 +57,6 @@ Texture Texture::createFromFloatPixels(int width, int height, const float* rgba,
         static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 8;
     const std::size_t byteSize = baseSize + baseSize / 3;
     return Texture(id, byteSize);
-}
-
-std::optional<Texture> Texture::createFromExr(const std::string& path, unsigned int wrapMode) {
-    const std::optional<HdrImage> image = loadExr(path);
-    if (!image.has_value()) {
-        return std::nullopt;
-    }
-    return createFromFloatPixels(image->width, image->height, image->rgba.data(), wrapMode);
 }
 
 // Not wrapped in GL_CALL: runs every frame.

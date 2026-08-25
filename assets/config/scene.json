@@ -4,5 +4,8 @@
     "windowWidth": 1024,
     "windowHeight": 576,
     "initialAov": 0,
-    "initialLut": "sRGB"
+    "initialLut": "sRGB",
+    "samplesPerPixel": 64,
+    "maxBounces": 8,
+    "russianRouletteStartBounce": 3
 }
