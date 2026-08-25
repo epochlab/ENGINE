@@ -18,10 +18,7 @@ void checkCompleteness() {
     if (status != GL_FRAMEBUFFER_COMPLETE) {
         std::cerr << "HdrFramebuffer: incomplete, status=0x" << std::hex << status << std::dec
                   << '\n';
-        // Fixed, code-controlled attachment config, not external input —
-        // a real programming defect, matching Window's precedent (log +
-        // std::exit on unrecoverable setup failure; no exceptions
-        // anywhere in this codebase).
+        // Fixed, code-controlled attachment config, not external input — a real programming defect, matching Window's precedent (log + std::exit on unrecoverable setup failure; no exceptions anywhere in this codebase).
         std::exit(EXIT_FAILURE);
     }
 }
@@ -81,10 +78,7 @@ void HdrFramebuffer::createAttachments(int width, int height) {
     GL_CALL(glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
                                     colorTexture_, 0));
 
-    // 24-bit fixed-point, not 32F: depth is never sampled back
-    // (renderbuffer, not texture, per the design note above) — 24-bit is
-    // the universal baseline; swapping to 32F later is a one-line change
-    // if a real precision need appears.
+    // 24-bit fixed-point, not 32F: depth is never sampled back (renderbuffer, not texture, per the design note above) — 24-bit is the universal baseline; swapping to 32F later is a one-line change if a real precision need appears.
     GL_CALL(glGenRenderbuffers(1, &depthRenderbuffer_));
     GL_CALL(glBindRenderbuffer(GL_RENDERBUFFER, depthRenderbuffer_));
     GL_CALL(glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, width, height));
@@ -97,8 +91,7 @@ void HdrFramebuffer::createAttachments(int width, int height) {
     GL_CALL(glBindTexture(GL_TEXTURE_2D, 0));
     GL_CALL(glBindRenderbuffer(GL_RENDERBUFFER, 0));
 
-    // Color: RGBA16F (4 channels * 2 bytes). Depth: GL_DEPTH_COMPONENT24
-    // is driver-allocated at 4 bytes/texel in practice, not the nominal 3.
+    // Color: RGBA16F (4 channels * 2 bytes). Depth: GL_DEPTH_COMPONENT24 is driver-allocated at 4 bytes/texel in practice, not the nominal 3.
     const auto pixels = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
     byteSize_ = pixels * 8 + pixels * 4;
     engine::debug::trackGpuAlloc(byteSize_);

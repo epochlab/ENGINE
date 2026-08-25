@@ -18,6 +18,10 @@ Dear ImGui is vendored as a git submodule (`third_party/imgui`) — initialise i
 git submodule update --init --recursive
 ```
 
+### Assets
+
+`assets/geometry/` and `assets/textures/` hold the runtime glTF/EXR assets `assets/config/scene.json` and `main.cpp` reference (e.g. `assets/geometry/broken_stump_rkswd_raw/rkswd_tier_1.gltf`, `assets/textures/republiqueHDR_2k.exr`). They're gitignored as large/generated binaries, same policy as generated `*.exr` test output — supply them locally at those paths before running; nothing fetches them automatically.
+
 ### Configure & build
 
 ```
@@ -25,10 +29,17 @@ cmake -B build
 cmake --build build
 ```
 
-This produces two targets:
+This produces five targets:
 
 - `build/engine` — the render engine
 - `build/test_pattern` — EXR calibration-pattern generator (`tools/test_pattern.cpp`)
+- `build/downsample` — EXR downsampling tool (`tools/downsample.cpp`)
+- `build/bvh_validate` — headless BVH correctness check (`tools/bvh_validate.cpp`)
+- `build/furnace_test` — headless BRDF energy-conservation check (`tools/furnace_test.cpp`)
+
+`-Wall -Wextra -Werror` gates every target. If `clang-tidy` is installed, it also runs on every compile of `engine`'s own sources (see `.clang-tidy`); if `cppcheck` is installed, `cmake --build build --target cppcheck` runs it over `src/`. Both are skipped, not required, if not installed.
+
+`cmake -B build -DENGINE_SANITIZE=ON` builds with AddressSanitizer + UndefinedBehaviorSanitizer instead (off by default) — worth running after touching the glTF/JSON/EXR loading paths.
 
 ### Run
 
@@ -121,10 +132,10 @@ Arbitrary output variables exposed via the AOV selector (§2, Phase 2), beyond t
 |---|---|---|---|---|
 | Beauty (RGB) | Utility | Final composited radiance, post tone-mapping | The primary output; every other AOV isolates one contributor to it | 0 |
 | Alpha | Utility | Ray/coverage hit test | Compositing over other elements | 0 |
-| Depth (Z) | Utility | Camera-space hit distance | Depth-based compositing/debugging; also the channel `agent.md`'s Retina stage requires | 0 |
+| Depth (Z) | Utility | Camera-space hit distance | Depth-based compositing/debugging | 0 |
 | HSV | Utility | Colour-space transform of the beauty pass | Isolates hue/saturation shifts a pure RGB view can hide | 1 |
 | Luminance | Utility | Photometric luminance (Rec. 709/2020 channel weights) of the beauty pass | Isolates perceived brightness from colour — catches exposure/contrast issues a per-channel RGB view can hide | 1 |
-| Sobel / edge | Utility | 3×3 Sobel gradient kernel (Gx/Gy magnitude) applied to the Luminance AOV | Cheap edge/gradient signal, computed once as an AOV rather than duplicated per-consumer; backs the agent retina's Tier 2 fidelity level (`agent.md` §3) | 1 |
+| Sobel / edge | Utility | 3×3 Sobel gradient kernel (Gx/Gy magnitude) applied to the Luminance AOV | Cheap edge/gradient signal, computed once as an AOV rather than duplicated per-consumer | 1 |
 | Gabor | Utility | 4-orientation Gabor kernel bank (0/45/90/135°) applied to the Luminance AOV, max response across orientations | Directional edge/texture response Sobel's isotropic magnitude can't distinguish | 1 |
 | World position (P) | Utility | Ray-hit world-space coordinate | Debugging geometry/UV placement independent of shading | 2 |
 | UV coordinates | Utility | Per-vertex UV interpolated at the hit point | Visualizes the texture-space mapping directly — catches a bad unwrap by eye | 2 |
