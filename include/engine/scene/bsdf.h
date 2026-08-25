@@ -31,11 +31,28 @@ struct ShadingFrame {
     }
 };
 
+// Which lobe sampleBsdf drew from -- used by path_tracer.cpp to bucket radiance into the AOV
+// transport-component breakdown (Direct/Indirect Diffuse/Specular, Refraction) and to skip NEE's
+// shadow ray at a delta vertex (SpecularTransmission has no continuous pdf, so a light sample can
+// never land on it).
+enum class LobeType { Diffuse, SpecularReflection, SpecularTransmission };
+
 struct BsdfSample {
     glm::vec3 wiLocal;            // sampled direction, local shading frame
     glm::vec3 throughputWeight;   // f(wi)*|cosThetaI| / pdf(wi)
-    bool specular;                 // true for the delta transmission lobe (no continuous pdf)
+    LobeType type;
+    // Same as throughputWeight but with the diffuse lobe's baseColor factor excluded (the lobe's raw
+    // energy weight `kd` in place of `baseColor*kd`) when type == Diffuse; identical to
+    // throughputWeight for every other lobe. Lets path_tracer.cpp's delighted Direct/IndirectDiffuse
+    // AOVs access "light before albedo" without dividing a possibly-zero base color texture back out.
+    glm::vec3 rawThroughputWeight;
 };
+
+// Schlick's approximation of Fresnel reflectance at normal-incidence reflectance f0, evaluated at
+// cosTheta = dot(normal, direction). Shared with path_tracer.cpp's Fresnel G-buffer AOV, which wants
+// the same reflectance term sampleBsdf/evaluateBsdf use internally, evaluated at the view angle
+// rather than the sampled/shading direction.
+[[nodiscard]] glm::vec3 fresnelSchlick(float cosTheta, const glm::vec3& f0);
 
 // Combined pdf of the two continuous lobes (specular reflection + diffuse) at wiLocal; excludes the delta transmission lobe (zero-measure). woLocal.z sign: entering (>0) vs exiting (<0) a dielectric.
 [[nodiscard]] float pdfBsdf(const BsdfParams& params, const glm::vec3& woLocal,
@@ -44,6 +61,12 @@ struct BsdfSample {
 // Combined value of the two continuous lobes at wiLocal -- see pdfBsdf.
 [[nodiscard]] glm::vec3 evaluateBsdf(const BsdfParams& params, const glm::vec3& woLocal,
                                       const glm::vec3& wiLocal);
+
+// The diffuse lobe's value at wiLocal with its baseColor factor excluded (kd/pi instead of
+// baseColor*kd/pi) -- the "light before albedo" quantity path_tracer.cpp's delighted diffuse AOVs
+// need. Zero if wiLocal is below the (sign-corrected) hemisphere, same convention as evaluateBsdf.
+[[nodiscard]] glm::vec3 evaluateDiffuseRaw(const BsdfParams& params, const glm::vec3& woLocal,
+                                            const glm::vec3& wiLocal);
 
 // Stochastically samples one of {rough specular reflection, diffuse, smooth specular transmission}
 // by Fresnel-derived probability, returns the ready-to-multiply throughput weight. Diffuse+specular

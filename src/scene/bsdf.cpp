@@ -28,10 +28,6 @@ float smithG2(float ndotV, float ndotL, float alpha) {
     return 1.0F / (1.0F + smithLambda(ndotV, alpha) + smithLambda(ndotL, alpha));
 }
 
-glm::vec3 fresnelSchlick(float cosTheta, const glm::vec3& f0) {
-    return f0 + ((glm::vec3(1.0F) - f0) * std::pow(std::clamp(1.0F - cosTheta, 0.0F, 1.0F), 5.0F));
-}
-
 // Exact unpolarized dielectric Fresnel reflectance (PBRT's FrDielectric); 1.0 past total internal reflection.
 float fresnelDielectric(float cosThetaI, float etaI, float etaT) {
     cosThetaI = std::clamp(cosThetaI, -1.0F, 1.0F);
@@ -173,6 +169,10 @@ glm::vec3 evaluateContinuousLobes(const BsdfParams& params, const glm::vec3& wo,
 
 }  // namespace
 
+glm::vec3 fresnelSchlick(float cosTheta, const glm::vec3& f0) {
+    return f0 + ((glm::vec3(1.0F) - f0) * std::pow(std::clamp(1.0F - cosTheta, 0.0F, 1.0F), 5.0F));
+}
+
 float pdfBsdf(const BsdfParams& params, const glm::vec3& woLocal, const glm::vec3& wiLocal) {
     const float sign = woLocal.z >= 0.0F ? 1.0F : -1.0F;
     const glm::vec3 wo(woLocal.x, woLocal.y, woLocal.z * sign);
@@ -194,6 +194,18 @@ glm::vec3 evaluateBsdf(const BsdfParams& params, const glm::vec3& woLocal, const
     return evaluateContinuousLobes(params, wo, wi, alpha, lobes, pdf);
 }
 
+glm::vec3 evaluateDiffuseRaw(const BsdfParams& params, const glm::vec3& woLocal,
+                              const glm::vec3& wiLocal) {
+    const float sign = woLocal.z >= 0.0F ? 1.0F : -1.0F;
+    const glm::vec3 wo(woLocal.x, woLocal.y, woLocal.z * sign);
+    const glm::vec3 wi(wiLocal.x, wiLocal.y, wiLocal.z * sign);
+    if (wi.z <= 0.0F) {
+        return glm::vec3(0.0F);
+    }
+    const LobeProbabilities lobes = computeLobeProbabilities(params, wo, sign);
+    return glm::vec3(std::max(lobes.diffuseKd, 0.0F) / kPi);
+}
+
 std::optional<BsdfSample> sampleBsdf(const BsdfParams& params, const glm::vec3& woLocal,
                                       Sampler& sampler) {
     const float sign = woLocal.z >= 0.0F ? 1.0F : -1.0F;
@@ -204,8 +216,9 @@ std::optional<BsdfSample> sampleBsdf(const BsdfParams& params, const glm::vec3& 
     const float lobeU = sampler.next1D();
 
     if (lobeU < lobes.specular + lobes.diffuse) {
+        const bool sampledSpecular = lobeU < lobes.specular;
         glm::vec3 wi;
-        if (lobeU < lobes.specular) {
+        if (sampledSpecular) {
             const glm::vec3 nh = sampleGGXVNDF(wo, alpha, sampler.next2D());
             wi = glm::reflect(-wo, nh);
         } else {
@@ -220,7 +233,11 @@ std::optional<BsdfSample> sampleBsdf(const BsdfParams& params, const glm::vec3& 
             return std::nullopt;
         }
         const glm::vec3 throughput = (f * wi.z) / pdf;
-        return BsdfSample{glm::vec3(wi.x, wi.y, wi.z * sign), throughput, false};
+        const glm::vec3 rawThroughput =
+            sampledSpecular ? throughput : glm::vec3(std::max(lobes.diffuseKd, 0.0F));
+        return BsdfSample{glm::vec3(wi.x, wi.y, wi.z * sign), throughput,
+                           sampledSpecular ? LobeType::SpecularReflection : LobeType::Diffuse,
+                           rawThroughput};
     }
 
     // Smooth specular transmission (delta lobe): Snell's law, TIR already folded into
@@ -239,7 +256,8 @@ std::optional<BsdfSample> sampleBsdf(const BsdfParams& params, const glm::vec3& 
     // sign under reverse camera-to-light transport isn't verified from memory here; documented
     // future upgrade, kept out to avoid an unverified-direction energy bug.
     const glm::vec3 throughput = params.baseColor * (lobes.transmitPhysicalValue / lobes.transmit);
-    return BsdfSample{glm::vec3(wt.x, wt.y, wt.z * sign), throughput, true};
+    return BsdfSample{glm::vec3(wt.x, wt.y, wt.z * sign), throughput, LobeType::SpecularTransmission,
+                       throughput};
 }
 
 }  // namespace engine::scene

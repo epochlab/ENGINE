@@ -47,6 +47,11 @@ public:
 
     [[nodiscard]] std::optional<Hit> intersect(const Ray& ray) const;
 
+    // Any-hit query for shadow rays (NEE): true if anything blocks [ray.tMin, ray.tMax], without
+    // finding the *closest* blocker -- returns on the first triangle hit found, cheaper than
+    // intersect() for this use since occlusion doesn't care which occluder is nearest.
+    [[nodiscard]] bool occluded(const Ray& ray) const;
+
     [[nodiscard]] int nodeCount() const { return static_cast<int>(nodes_.size()); }
     [[nodiscard]] int triangleCount() const { return static_cast<int>(triangles_.size()); }
 

@@ -28,6 +28,9 @@ if(CLANG_TIDY_EXE)
         --extra-arg=-isysroot --extra-arg=${MACOS_SDK_PATH})
 endif()
 
+include(CheckIPOSupported)
+check_ipo_supported(RESULT IPO_SUPPORTED)
+
 find_program(CPPCHECK_EXE NAMES cppcheck)
 if(CPPCHECK_EXE)
     add_custom_target(cppcheck
@@ -86,6 +89,8 @@ add_executable(engine
     src/scene/frustum.cpp
     src/scene/gltf_loader.cpp
     src/scene/path_tracer.cpp
+    src/scene/path_trace_driver.cpp
+    src/scene/row_thread_pool.cpp
     src/scene/sampler.cpp
     src/scene/sh_irradiance.cpp
     src/scene/shading_scene.cpp
@@ -103,12 +108,18 @@ target_include_directories(engine PRIVATE include ${IMGUI_DIR} ${IMGUI_DIR}/back
 target_compile_definitions(engine PRIVATE
     GL_SILENCE_DEPRECATION
     ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets")
-target_compile_options(engine PRIVATE -Wall -Wextra -Werror)
+target_compile_options(engine PRIVATE -Wall -Wextra -Werror -march=native)
 target_link_libraries(engine PRIVATE
     glfw GLEW::GLEW OpenGL::GL glm::glm
     OpenEXR::OpenEXR Imath::Imath OpenColorIO::OpenColorIO)
 if(CLANG_TIDY_EXE)
     set_target_properties(engine PROPERTIES CXX_CLANG_TIDY "${CLANG_TIDY_COMMAND}")
+endif()
+# Free CPU speedup for the path tracer's hot loop (BVH traversal, BSDF eval) -- pure codegen, no
+# behavior/quality change. No-op if the toolchain doesn't support IPO (mirrors the clang-tidy/cppcheck
+# no-op-if-absent pattern above).
+if(IPO_SUPPORTED)
+    set_target_properties(engine PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
 endif()
 
 add_executable(test_pattern tools/test_pattern.cpp)
@@ -136,3 +147,9 @@ add_executable(bsdf_validate tools/bsdf_validate.cpp src/scene/bsdf.cpp src/scen
 target_include_directories(bsdf_validate PRIVATE include)
 target_compile_options(bsdf_validate PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(bsdf_validate PRIVATE glm::glm)
+
+add_executable(nee_validate tools/nee_validate.cpp src/scene/bsdf.cpp src/scene/sampler.cpp
+               src/scene/environment_map.cpp src/gfx/hdr_image.cpp)
+target_include_directories(nee_validate PRIVATE include)
+target_compile_options(nee_validate PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(nee_validate PRIVATE glm::glm OpenEXR::OpenEXR Imath::Imath)
