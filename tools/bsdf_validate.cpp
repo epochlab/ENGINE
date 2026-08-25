@@ -2,7 +2,7 @@
 // specular+diffuse pdf integrates to the expected continuous-lobe probability mass, and runs a
 // furnace test (uniform incident radiance from every direction, including through transmission)
 // via BSDF importance sampling -- must never reflect/transmit more energy than received. Same
-// standalone-CLI convention as bvh_validate.cpp/furnace_test.cpp: no test framework, non-zero exit
+// standalone-CLI convention as embree_validate.cpp/furnace_test.cpp: no test framework, non-zero exit
 // on failure.
 
 #include <array>

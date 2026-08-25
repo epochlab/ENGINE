@@ -6,13 +6,13 @@
 
 #include <glm/glm.hpp>
 
-#include "engine/scene/bvh.h"
 #include "engine/scene/material.h"
+#include "engine/scene/ray_types.h"
 #include "engine/scene/shading_scene.h"
 
 namespace engine::scene {
 
-// One glTF primitive: its material and its baked world-space transform (accumulated from the node hierarchy). Geometry itself lives only in LoadedModel's worldTriangles/shadingTriangles -- instanceIndex resolves a Bvh::Hit back to this instance's material.
+// One glTF primitive: its material and its baked world-space transform (accumulated from the node hierarchy). Geometry itself lives only in LoadedModel's worldTriangles/shadingTriangles -- instanceIndex resolves a Hit back to this instance's material.
 struct MeshInstance {
     Material material;
     glm::mat4 transform;
@@ -20,9 +20,9 @@ struct MeshInstance {
 
 struct LoadedModel {
     std::vector<MeshInstance> instances;
-    // Every triangle across every instance, pre-transformed to world space -- accumulated once here, at the one point during loading where each primitive's vertices/indices and baked world transform are all in scope together. Feeds Bvh::build (bvh.h) in main.cpp.
+    // Every triangle across every instance, pre-transformed to world space -- accumulated once here, at the one point during loading where each primitive's vertices/indices and baked world transform are all in scope together. Feeds EmbreeAccel::build (embree_accel.h) in main.cpp.
     std::vector<Triangle> worldTriangles;
-    // Per-vertex normal/uv/tangent, parallel-indexed with worldTriangles -- Bvh::Hit::triangleIndex resolves directly into this.
+    // Per-vertex normal/uv/tangent, parallel-indexed with worldTriangles -- Hit::triangleIndex resolves directly into this.
     std::vector<ShadingTriangle> shadingTriangles;
 };
 

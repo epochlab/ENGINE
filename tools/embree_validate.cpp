@@ -1,4 +1,8 @@
-// Standalone correctness check for engine::scene::Bvh (bvh.h): builds a BVH over synthetic triangle soup, fires many random rays, and asserts Bvh::intersect agrees with a brute-force O(n) reference on every one. No test framework exists in this repo -- follows test_pattern.cpp's convention of a plain CLI tool with a non-zero exit on failure.
+// Standalone correctness check for engine::scene::EmbreeAccel (embree_accel.h): builds an Embree
+// scene over synthetic triangle soup, fires many random rays, and asserts EmbreeAccel::intersect/
+// occluded agree with bruteForceIntersect (ray_types.h), a deliberately dependency-free O(n)
+// reference. Same standalone-CLI convention as bsdf_validate.cpp/nee_validate.cpp/furnace_test.cpp:
+// no test framework, non-zero exit on failure.
 
 #include <cmath>
 #include <cstdlib>
@@ -9,11 +13,12 @@
 
 #include <glm/glm.hpp>
 
-#include "engine/scene/bvh.h"
+#include "engine/scene/embree_accel.h"
+#include "engine/scene/ray_types.h"
 
 namespace {
 
-using engine::scene::Bvh;
+using engine::scene::EmbreeAccel;
 using engine::scene::Hit;
 using engine::scene::Ray;
 using engine::scene::Triangle;
@@ -22,7 +27,8 @@ constexpr int kTriangleCount = 2000;
 constexpr int kRayCount = 20000;
 constexpr float kTEpsilon = 1e-3F;
 
-// Triangles clustered around random centres -- exercises both ordinary SAH splitting (clusters spread across the scene) and the degenerate/ near-coincident-centroid fallback path (many triangles sharing one cluster).
+// Triangles clustered around random centres -- exercises ordinary BVH splitting (clusters spread
+// across the scene) as well as tightly-packed clusters.
 std::vector<Triangle> makeSyntheticTriangles(std::mt19937& rng) {
     std::uniform_real_distribution<float> centerDist(-50.0F, 50.0F);
     std::uniform_real_distribution<float> offsetDist(-1.0F, 1.0F);
@@ -58,44 +64,48 @@ Ray makeRandomRay(std::mt19937& rng) {
 int main() {
     std::mt19937 rng(12345);
     const std::vector<Triangle> triangles = makeSyntheticTriangles(rng);
-    const Bvh bvh = Bvh::build(triangles);
 
-    std::cout << "bvh_validate: " << triangles.size() << " triangles, " << bvh.nodeCount()
-              << " nodes\n";
+    std::optional<EmbreeAccel> accel = EmbreeAccel::build(triangles);
+    if (!accel) {
+        std::cerr << "embree_validate: EmbreeAccel::build failed\n";
+        return EXIT_FAILURE;
+    }
+
+    std::cout << "embree_validate: " << triangles.size() << " triangles\n";
 
     int mismatches = 0;
     for (int i = 0; i < kRayCount; ++i) {
         const Ray ray = makeRandomRay(rng);
-        const std::optional<Hit> bvhHit = bvh.intersect(ray);
+        const std::optional<Hit> accelHit = accel->intersect(ray);
         const std::optional<Hit> bruteHit = engine::scene::bruteForceIntersect(triangles, ray);
 
-        if (bvhHit.has_value() != bruteHit.has_value()) {
-            std::cerr << "bvh_validate: hit/miss mismatch at ray " << i << " (bvh "
-                      << (bvhHit.has_value() ? "hit" : "miss") << ", brute force "
+        if (accelHit.has_value() != bruteHit.has_value()) {
+            std::cerr << "embree_validate: hit/miss mismatch at ray " << i << " (embree "
+                      << (accelHit.has_value() ? "hit" : "miss") << ", brute force "
                       << (bruteHit.has_value() ? "hit" : "miss") << ")\n";
             ++mismatches;
             continue;
         }
-        if (bvhHit.has_value() && std::fabs(bvhHit->t - bruteHit->t) > kTEpsilon) {
-            std::cerr << "bvh_validate: t mismatch at ray " << i << " (bvh t=" << bvhHit->t
+        if (accelHit.has_value() && std::fabs(accelHit->t - bruteHit->t) > kTEpsilon) {
+            std::cerr << "embree_validate: t mismatch at ray " << i << " (embree t=" << accelHit->t
                       << ", brute force t=" << bruteHit->t << ")\n";
             ++mismatches;
         }
 
-        const bool bvhOccluded = bvh.occluded(ray);
-        if (bvhOccluded != bruteHit.has_value()) {
-            std::cerr << "bvh_validate: occluded() mismatch at ray " << i << " (bvh "
-                      << (bvhOccluded ? "occluded" : "clear") << ", brute force "
+        const bool accelOccluded = accel->occluded(ray);
+        if (accelOccluded != bruteHit.has_value()) {
+            std::cerr << "embree_validate: occluded() mismatch at ray " << i << " (embree "
+                      << (accelOccluded ? "occluded" : "clear") << ", brute force "
                       << (bruteHit.has_value() ? "hit" : "miss") << ")\n";
             ++mismatches;
         }
     }
 
     if (mismatches > 0) {
-        std::cerr << "bvh_validate: FAILED, " << mismatches << " / " << kRayCount
+        std::cerr << "embree_validate: FAILED, " << mismatches << " / " << kRayCount
                   << " rays mismatched\n";
         return EXIT_FAILURE;
     }
-    std::cout << "bvh_validate: PASSED, " << kRayCount << " rays cross-checked\n";
+    std::cout << "embree_validate: PASSED, " << kRayCount << " rays cross-checked\n";
     return EXIT_SUCCESS;
 }
