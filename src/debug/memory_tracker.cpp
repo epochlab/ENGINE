@@ -1,6 +1,7 @@
 #include "engine/debug/memory_tracker.h"
 
 #include <atomic>
+#include <cassert>
 
 #include <mach/mach.h>
 #include <mach/mach_host.h>
@@ -18,6 +19,8 @@ void trackGpuAlloc(std::size_t bytes) {
 }
 
 void trackGpuFree(std::size_t bytes) {
+    // Freeing more than was ever tracked is a programming-invariant violation (a missing/duplicated trackGpuAlloc call), not user input -- assert rather than let the unsigned counter wrap.
+    assert(bytes <= gGpuBytes);
     gGpuBytes -= bytes;
 }
 

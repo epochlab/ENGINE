@@ -1,0 +1,26 @@
+---
+# Enforces this project's static-analysis policy: RAII/pointer discipline (cppcoreguidelines-owning-memory/pro-type-*), the ~60-line "one function, one screen" rule (readability-function-size), and general bug-pattern detection (bugprone-*). Vendored third_party/imgui and cgltf sources are exempted at the build-system level (CMakeLists.txt builds them into a separate `vendored_no_tidy` OBJECT library that never has CXX_CLANG_TIDY set) rather than here, since CMake has no working per-source override of that target-level-only property.
+#
+# Three checks are disabled below as pure false-positive noise for this codebase's conventions, not because the underlying concern is invalid elsewhere: cppcoreguidelines-pro-type-union-access fires on glm's internal union-based vec/mat component access (.x/.y/.z), which is ordinary, well-tested library usage, not a real union-safety hazard; cppcoreguidelines-pro-type-vararg fires on every ImGui::Text/TextColored call, ImGui's whole rendering API being printf-style vararg; and bugprone-exception-escape flags main() itself simply for calling anything that isn't noexcept (std::string/std::vector allocation, etc.) -- true of nearly every C++ program's main(), not a specific defect.
+Checks: >
+  bugprone-*,
+  cppcoreguidelines-owning-memory,
+  cppcoreguidelines-pro-type-const-cast,
+  cppcoreguidelines-pro-type-cstyle-cast,
+  cppcoreguidelines-pro-type-static-cast-downcast,
+  cppcoreguidelines-pro-type-vararg,
+  misc-*,
+  readability-function-size,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-exception-escape,
+  -cppcoreguidelines-pro-type-union-access,
+  -cppcoreguidelines-pro-type-vararg,
+  -misc-non-private-member-variables-in-classes,
+  -misc-include-cleaner
+WarningsAsErrors: ''
+HeaderFilterRegex: '^(?!.*third_party).*(include|src)/.*'
+CheckOptions:
+  - key: readability-function-size.LineThreshold
+    value: '60'
+  - key: readability-function-size.StatementThreshold
+    value: '-1'

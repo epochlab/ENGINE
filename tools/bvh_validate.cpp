@@ -1,8 +1,4 @@
-// Standalone correctness check for engine::scene::Bvh (bvh.h): builds a
-// BVH over synthetic triangle soup, fires many random rays, and asserts
-// Bvh::intersect agrees with a brute-force O(n) reference on every one.
-// No test framework exists in this repo -- follows test_pattern.cpp's
-// convention of a plain CLI tool with a non-zero exit on failure.
+// Standalone correctness check for engine::scene::Bvh (bvh.h): builds a BVH over synthetic triangle soup, fires many random rays, and asserts Bvh::intersect agrees with a brute-force O(n) reference on every one. No test framework exists in this repo -- follows test_pattern.cpp's convention of a plain CLI tool with a non-zero exit on failure.
 
 #include <cmath>
 #include <cstdlib>
@@ -26,10 +22,7 @@ constexpr int kTriangleCount = 2000;
 constexpr int kRayCount = 20000;
 constexpr float kTEpsilon = 1e-3F;
 
-// Triangles clustered around random centres -- exercises both ordinary
-// SAH splitting (clusters spread across the scene) and the degenerate/
-// near-coincident-centroid fallback path (many triangles sharing one
-// cluster).
+// Triangles clustered around random centres -- exercises both ordinary SAH splitting (clusters spread across the scene) and the degenerate/ near-coincident-centroid fallback path (many triangles sharing one cluster).
 std::vector<Triangle> makeSyntheticTriangles(std::mt19937& rng) {
     std::uniform_real_distribution<float> centerDist(-50.0F, 50.0F);
     std::uniform_real_distribution<float> offsetDist(-1.0F, 1.0F);
