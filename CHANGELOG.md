@@ -153,3 +153,38 @@
 - docs: README updated throughout (phase table, component table, AOV table, open questions, references)
 
 **Phase 4 — Direct lighting & acceleration complete.**
+
+## Phase 5 — Materials & recursive transport
+
+### A — Plumbing
+- feat: `ShadingTriangle`/`ShadingVertex` (`shading_scene.h/.cpp`) — per-triangle world-space normal/uv/tangent/position, parallel-indexed to `Bvh`'s triangle list; built in `gltf_loader.cpp` from data `Mesh` would otherwise discard once uploaded to the GPU
+- feat: `Bvh::Hit` gains barycentric u/v (Moller-Trumbore convention, w=1-u-v on v0)
+- feat: `EnvironmentMap` retains the equirect `HdrImage` the rasterizer's IBL bake discards after startup, for path-traced miss-ray lookups; direction-to-UV mapping matches `sky.frag` exactly
+- feat: `MaterialTexture` — every material texture now retained on both GPU (rasterizer) and CPU (`HdrImage`, path tracer's per-sample UV lookups); `HdrImage::sampleBilinear` added
+- feat: `Material::ior`/`transmissionFactor` (`KHR_materials_ior`/`KHR_materials_transmission`)
+- feat: `SceneConfig` gains `samplesPerPixel`/`maxBounces`/`russianRouletteStartBounce`
+- chore: `Texture::createFromExr` removed — dead code once `MaterialTexture` decodes an EXR once and reuses it for both the GPU upload and the CPU copy
+
+### B — Sampler + BSDF core
+- feat: `Sampler` — randomized Halton (radical inverse + per-pixel Cranley-Patterson rotation) for the first 32 dimensions, PCG32 (O'Neill 2014) beyond that
+- feat: stochastic metallic-roughness BSDF (`bsdf.h/.cpp`) — exact dielectric Fresnel (PBRT's `FrDielectric`) + Snell refraction with TIR, Schlick conductor Fresnel, Heitz 2018 GGX VNDF importance sampling, three-way stochastic lobe selection (rough specular reflection / Lambertian diffuse / smooth delta transmission), combined via a one-sample mixture estimator
+- feat: `tools/bsdf_validate.cpp` — pdf-normalization and furnace-test checks, including colored conductors and the transmissive dielectric's exiting/TIR side
+- fix: three real energy-conservation bugs caught during development — diffuse lobe missing its (1-F) factor; transmission's `transmissionFactor` cancelling out of its own throughput ratio; diffuse lobe's pdf incorrectly gated on the same term as its value (starved the MIS mixture denominator specifically for colored, non-white conductors)
+- fix: opaque materials (`transmissionFactor=0`) no longer trigger transmission/TIR logic when grazing-angle normal mapping pushes the local view direction to the "wrong" side of the shading normal
+- note: Sobol+Owen scrambling, Tokuyoshi & Eto 2023's bounded VNDF sampling, and Heitz et al. 2016's stochastic multi-scatter random walk were the original plan but are deliberately not implemented — each depends on precise constants/derivations not safely reproducible from memory alone; the better-established alternatives above are used instead, with the originals kept as documented future upgrades (README §5)
+
+### C — Integrator
+- feat: `Camera::primaryRay` — pinhole ray generation sharing `viewMatrix()`'s forward/right/up basis
+- feat: `renderPathTraced` (`path_tracer.h/.cpp`) — BVH intersect, material/shading resolution (tangent-space normal mapping only, no bump-detail blend), BSDF sampling, geometric-normal-consistency rejection (normal-map light-leak mitigation, in place of Schüßler et al. 2017's full two-facet reconstruction), Russian roulette from `russianRouletteStartBounce`, Chiang/Li/Burley 2019 shadow-terminator-corrected ray origins, environment radiance on a miss; row-parallel `std::thread`, one thread per hardware core, dynamic scheduling via an atomic row counter
+- note: no NEE this phase (Phase 7 scope) — punctual lights have no hittable geometry, so path-traced radiance comes from the environment map only
+
+### D — Engine integration
+- feat: on-demand "Path Traced" HUD section (Enable checkbox, Beauty/IOR/BounceCount AOV combo distinct from the rasterizer's own, Render button, status readout)
+- feat: `presentFrame` blits the cached path-traced result through the existing OCIO/post-process path when active; rasterizer keeps running underneath regardless — deliberate simplification, this is an on-demand feature, not real-time
+- feat: `Texture::id()` public accessor, needed for the path-traced display texture to reuse `PostProcessPass::draw`'s raw-GL-id present path
+
+### E — Verify
+- verified: `bvh_validate`/`furnace_test`/`bsdf_validate` all pass; visual smoke test in the running app via a temporary auto-trigger hook (reverted before commit) — IOR AOV shows a correct stump silhouette against black with the LUT correctly forced to Raw; Beauty AOV shows a coherent, plausible image
+- docs: README updated (phase table, component reference, AOV reference, references)
+
+**Phase 5 — Materials & recursive transport complete.**
