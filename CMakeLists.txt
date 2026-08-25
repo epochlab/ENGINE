@@ -16,6 +16,7 @@ find_package(glm REQUIRED)
 find_package(Imath REQUIRED)
 find_package(OpenEXR REQUIRED)
 find_package(OpenColorIO REQUIRED)
+find_package(embree 4 CONFIG REQUIRED)
 
 # Static-analysis gate: -Wall -Wextra -Werror plus clang-tidy/cppcheck, applied to every build, not just CI. clang-tidy is wired below as a per-compile gate (non-fatal: it surfaces findings every build without turning pre-existing debt into a hard build failure); cppcheck is a separate `cmake --build build --target cppcheck` target. Both are no-ops (not required) if not installed, so a fresh checkout without them still configures and builds.
 find_program(CLANG_TIDY_EXE NAMES clang-tidy)
@@ -78,13 +79,14 @@ add_executable(engine
     src/gfx/post_process_pass.cpp
     src/gfx/ocio_display_transform.cpp
     src/scene/bsdf.cpp
-    src/scene/bvh.cpp
     src/scene/camera.cpp
     src/scene/debug_camera_controller.cpp
+    src/scene/embree_accel.cpp
     src/scene/environment_map.cpp
     src/scene/gltf_loader.cpp
     src/scene/path_tracer.cpp
     src/scene/path_trace_driver.cpp
+    src/scene/ray_types.cpp
     src/scene/row_thread_pool.cpp
     src/scene/sampler.cpp
     src/scene/shading_scene.cpp
@@ -105,11 +107,11 @@ target_compile_definitions(engine PRIVATE
 target_compile_options(engine PRIVATE -Wall -Wextra -Werror -march=native)
 target_link_libraries(engine PRIVATE
     glfw GLEW::GLEW OpenGL::GL glm::glm
-    OpenEXR::OpenEXR Imath::Imath OpenColorIO::OpenColorIO)
+    OpenEXR::OpenEXR Imath::Imath OpenColorIO::OpenColorIO embree)
 if(CLANG_TIDY_EXE)
     set_target_properties(engine PROPERTIES CXX_CLANG_TIDY "${CLANG_TIDY_COMMAND}")
 endif()
-# Free CPU speedup for the path tracer's hot loop (BVH traversal, BSDF eval) -- pure codegen, no
+# Free CPU speedup for the path tracer's hot loop (ray traversal, BSDF eval) -- pure codegen, no
 # behavior/quality change. No-op if the toolchain doesn't support IPO (mirrors the clang-tidy/cppcheck
 # no-op-if-absent pattern above).
 if(IPO_SUPPORTED)
@@ -127,14 +129,14 @@ target_compile_options(downsample PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(downsample PRIVATE OpenEXR::OpenEXR Imath::Imath)
 
 # Headless correctness checks (Phase 4) -- no test framework exists in this repo yet, so these follow test_pattern/downsample's standalone-CLI convention: non-zero exit on failure.
-# -march=native/IPO mirror the engine target's flags (bsdf.cpp/bvh.cpp are compiled into both) so these
+# -march=native/IPO mirror the engine target's flags (bsdf.cpp/embree_accel.cpp/etc. are compiled into both) so these
 # tools validate the exact codegen that ships, not a differently-optimized build of the same math.
-add_executable(bvh_validate tools/bvh_validate.cpp src/scene/bvh.cpp)
-target_include_directories(bvh_validate PRIVATE include)
-target_compile_options(bvh_validate PRIVATE -Wall -Wextra -Werror -march=native)
-target_link_libraries(bvh_validate PRIVATE glm::glm)
+add_executable(embree_validate tools/embree_validate.cpp src/scene/embree_accel.cpp src/scene/ray_types.cpp)
+target_include_directories(embree_validate PRIVATE include)
+target_compile_options(embree_validate PRIVATE -Wall -Wextra -Werror -march=native)
+target_link_libraries(embree_validate PRIVATE glm::glm embree)
 if(IPO_SUPPORTED)
-    set_target_properties(bvh_validate PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
+    set_target_properties(embree_validate PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
 endif()
 
 add_executable(bsdf_validate tools/bsdf_validate.cpp src/scene/bsdf.cpp src/scene/sampler.cpp)

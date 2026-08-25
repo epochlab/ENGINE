@@ -5,8 +5,8 @@
 #include <vector>
 
 #include "engine/gfx/hdr_image.h"
-#include "engine/scene/bvh.h"
 #include "engine/scene/camera.h"
+#include "engine/scene/embree_accel.h"
 #include "engine/scene/environment_map.h"
 #include "engine/scene/gltf_loader.h"
 #include "engine/scene/row_thread_pool.h"
@@ -141,7 +141,7 @@ struct PathTraceDynamic {
 //
 // threadPool: row-parallel dispatch, owned by the caller and reused across calls (PathTraceDriver
 // keeps one alive for its whole lifetime) -- avoids paying OS thread-creation/join cost on every pass.
-[[nodiscard]] PathTraceResult renderPathTraced(const Camera& camera, const Bvh& bvh,
+[[nodiscard]] PathTraceResult renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                                                 const std::vector<ShadingTriangle>& shadingTriangles,
                                                 const std::vector<MeshInstance>& instances,
                                                 const EnvironmentMap& environmentMap, int width,

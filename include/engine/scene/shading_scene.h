@@ -12,7 +12,7 @@ struct ShadingVertex {
     glm::vec4 tangent;  // xyz = tangent, w = bitangent handedness (glTF convention)
 };
 
-// Indexed identically to Bvh's Triangle list -- Bvh::Hit::triangleIndex resolves directly into this.
+// Indexed identically to the world-space Triangle list (ray_types.h) -- Hit::triangleIndex resolves directly into this.
 struct ShadingTriangle {
     ShadingVertex v0;
     ShadingVertex v1;
@@ -20,7 +20,7 @@ struct ShadingTriangle {
     int instanceIndex;  // indexes LoadedModel::instances, owner of this triangle's Material
 };
 
-// Barycentric interpolation (u/v = Bvh::Hit's Moller-Trumbore convention, w=1-u-v on v0); normal/tangent renormalized after blending.
+// Barycentric interpolation (u/v = Hit's Moller-Trumbore convention, w=1-u-v on v0); normal/tangent renormalized after blending.
 [[nodiscard]] ShadingVertex interpolateShading(const ShadingTriangle& tri, float u, float v);
 
 // Chiang/Li/Burley 2019 shadow-terminator fix: per-vertex tangent-plane projection, barycentric-blended, for use as a secondary ray origin.
