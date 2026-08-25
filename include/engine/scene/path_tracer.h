@@ -38,6 +38,13 @@ struct PathTraceSettings {
 // remapped to the rasterizer's [0,1] display convention (pbr.frag's bounds-normalized WorldPos,
 // normal*0.5+0.5) -- a deliberate choice: these are scene-referred values, and the two renderers'
 // versions of "WorldPos"/"Normal" will look different when switching between them, not a bug.
+//
+// One renderPathTraced() call's raw output -- what a single pass computes. PathTraceDriver splits
+// this into PathTraceGBuffer (published once, on pass 1) and PathTraceDynamic (republished every
+// pass) at its publish boundary, since 14 of these 21 fields never change after the first pass; see
+// those two structs' own doc comments. renderPathTraced itself stays unaware of that distinction --
+// it always computes and returns the full 21 fields, same as a synchronous/non-driver caller would
+// want.
 struct PathTraceResult {
     engine::gfx::HdrImage beauty;
     engine::gfx::HdrImage iorAov;          // per-material IOR at the primary hit, -1 = miss
@@ -76,6 +83,41 @@ struct PathTraceResult {
     // as "how much light is arriving," not "light times this object's own texture" -- so they do NOT
     // sum into beauty the way the other three buckets do. Later-bounce surfaces' colors still
     // legitimately tint indirectDiffuse (that's real bounce transport, not this object's own texture).
+    engine::gfx::HdrImage directDiffuse;
+    engine::gfx::HdrImage indirectDiffuse;
+    engine::gfx::HdrImage directSpecular;
+    engine::gfx::HdrImage indirectSpecular;
+    engine::gfx::HdrImage refraction;
+};
+
+// PathTraceResult's 14 primary-hit fields -- deterministic given an unchanged camera/scene, so
+// PathTraceDriver captures these once (pass 1 of a generation) and never rebuilds/republishes them
+// again, instead of paying their copy cost on every pass alongside the 7 fields that actually
+// accumulate (see PathTraceDynamic). Field meanings are identical to PathTraceResult's own doc
+// comments above.
+struct PathTraceGBuffer {
+    engine::gfx::HdrImage iorAov;
+    engine::gfx::HdrImage depth;
+    engine::gfx::HdrImage worldPos;
+    engine::gfx::HdrImage uv;
+    engine::gfx::HdrImage normal;
+    engine::gfx::HdrImage geomNormal;
+    engine::gfx::HdrImage albedo;
+    engine::gfx::HdrImage metallic;
+    engine::gfx::HdrImage roughness;
+    engine::gfx::HdrImage tangent;
+    engine::gfx::HdrImage objectId;
+    engine::gfx::HdrImage alpha;
+    engine::gfx::HdrImage fresnel;
+    engine::gfx::HdrImage ao;
+};
+
+// PathTraceResult's 7 fields that genuinely re-average across passes -- see PathTraceGBuffer's doc
+// comment for why these are split out. Field meanings are identical to PathTraceResult's own doc
+// comments above.
+struct PathTraceDynamic {
+    engine::gfx::HdrImage beauty;
+    engine::gfx::HdrImage bounceHeatmap;
     engine::gfx::HdrImage directDiffuse;
     engine::gfx::HdrImage indirectDiffuse;
     engine::gfx::HdrImage directSpecular;
