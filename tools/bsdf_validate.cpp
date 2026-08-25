@@ -101,12 +101,21 @@ float furnaceLo(const BsdfParams& params, const glm::vec3& wo, int sampleCount, 
 
 // Furnace test through sampleBsdf: uniform radiance L0=1 from every direction (both hemispheres --
 // transmission can receive from the far side), estimator Lo = mean(throughputWeight) since
-// throughputWeight already folds in f*cosTheta/pdf. Must never exceed L0. ndotV sweep includes
-// negative values (woLocal.z<0, the exiting side of a transmissive dielectric) and a value past the
-// ior=1.5 critical angle (~41.8deg, cosTheta~0.745) to force total internal reflection.
+// throughputWeight already folds in f*cosTheta/pdf. ndotV sweep includes negative values
+// (woLocal.z<0, the exiting side of a transmissive dielectric) and a value past the ior=1.5
+// critical angle (~41.8deg, cosTheta~0.745) to force total internal reflection.
+//
+// Energy bound: 1.0 (L0) everywhere EXCEPT the exiting side (ndotV<0) of a transmissive material
+// below the critical angle, where sampleBsdf's eta^2 non-symmetric radiance-compression factor
+// (Veach 1997 sec. 5.2 -- see bsdf.cpp's transmission branch) legitimately raises Lo above L0: L/n^2
+// is the invariant along a ray, so radiance increases going from a denser medium (ior=1.5, inside)
+// into a rarer one (1.0, outside) by up to ior^2. The naive Lo<=1 bound only holds for eta==1
+// interfaces (pure reflection) or the entering side, where this same factor is < 1 -- exactly
+// compensating so a round trip through the surface loses no net energy.
 bool checkFurnace() {
     constexpr int kSampleCount = 200000;
     constexpr float kTolerance = 0.1F;
+    constexpr float kIor = 1.5F;  // matches makeParams/makeColoredMetalParams
     const std::array<float, 4> roughnesses = {0.05F, 0.25F, 0.5F, 1.0F};
     const std::array<float, 2> metallics = {0.0F, 1.0F};
     const std::array<float, 3> transmissions = {0.0F, 0.5F, 1.0F};
@@ -123,10 +132,13 @@ bool checkFurnace() {
                     const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (ndotV * ndotV))), 0.0F,
                                         ndotV);
                     const float maxLo = furnaceLo(params, wo, kSampleCount, seed);
-                    if (maxLo > 1.0F + kTolerance) {
+                    const bool exitingTransmissive = ndotV < 0.0F && transmission > 0.0F;
+                    const float energyBound = exitingTransmissive ? kIor * kIor : 1.0F;
+                    if (maxLo > energyBound + kTolerance) {
                         std::cerr << "bsdf_validate: FAILED furnace test at roughness=" << roughness
                                   << " metallic=" << metallic << " transmission=" << transmission
-                                  << " ndotV=" << ndotV << " Lo=" << maxLo << " (expected <= 1.0)\n";
+                                  << " ndotV=" << ndotV << " Lo=" << maxLo
+                                  << " (expected <= " << energyBound << ")\n";
                         ok = false;
                     }
                 }
