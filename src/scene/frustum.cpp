@@ -7,14 +7,12 @@ namespace engine::scene {
 
 namespace {
 
-// GLM stores matrices column-major (m[col][row]); this reads row i of
-// the mathematical matrix used as clip = m * vec4(pos, 1).
+// GLM stores matrices column-major (m[col][row]); this reads row i of the mathematical matrix used as clip = m * vec4(pos, 1).
 glm::vec4 matrixRow(const glm::mat4& m, int row) {
     return {m[0][row], m[1][row], m[2][row], m[3][row]};
 }
 
-// Plane as (A, B, C, D) with Ax+By+Cz+D >= 0 meaning "inside". Normalized
-// so the sign test below is a true signed distance, not just a sign.
+// Plane as (A, B, C, D) with Ax+By+Cz+D >= 0 meaning "inside". Normalized so the sign test below is a true signed distance, not just a sign.
 glm::vec4 normalizePlane(const glm::vec4& plane) {
     const float length = std::sqrt(plane.x * plane.x + plane.y * plane.y + plane.z * plane.z);
     return plane / length;
@@ -37,9 +35,7 @@ bool frustumIntersectsAabb(const glm::mat4& viewProjection, const glm::vec3& bou
     };
 
     for (const glm::vec4& plane : planes) {
-        // Positive vertex: the AABB corner furthest along the plane
-        // normal. If even that corner is on the negative side, the
-        // whole box is outside this plane.
+        // Positive vertex: the AABB corner furthest along the plane normal. If even that corner is on the negative side, the whole box is outside this plane.
         const glm::vec3 positiveVertex{
             plane.x >= 0.0F ? boundsMax.x : boundsMin.x,
             plane.y >= 0.0F ? boundsMax.y : boundsMin.y,

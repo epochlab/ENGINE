@@ -23,10 +23,7 @@ std::optional<engine::gfx::OcioDisplayTransform::Lut> parseLut(const std::string
     return std::nullopt;
 }
 
-// Directional lights read "direction" (unit vector toward the light,
-// range unused); point lights read "position" and "range". Returns
-// nullopt on any missing/malformed field, matching loadSceneConfig's
-// all-required-fields convention for the rest of the file.
+// Directional lights read "direction" (unit vector toward the light, range unused); point lights read "position" and "range". Returns nullopt on any missing/malformed field, matching loadSceneConfig's all-required-fields convention for the rest of the file.
 std::optional<Light> parseLight(std::string_view body) {
     const std::optional<std::string> typeName = json::findString(body, "type");
     const std::optional<glm::vec3> color = json::findVec3(body, "color");
@@ -75,9 +72,7 @@ std::optional<SceneConfig> loadSceneConfig(const std::string& path) {
         std::cerr << "loadSceneConfig: " << path << " is missing one or more required fields\n";
         return std::nullopt;
     }
-    // An empty (or absent) lights[] is a legitimate IBL-only scene, not a
-    // load failure -- unlike gltfPath/window size/AOV/LUT above, there's
-    // no reasonable "this must be present" invariant for punctual lights.
+    // An empty (or absent) lights[] is a legitimate IBL-only scene, not a load failure -- unlike gltfPath/window size/AOV/LUT above, there's no reasonable "this must be present" invariant for punctual lights.
 
     std::vector<Light> lights;
     lights.reserve(lightBodies.size());

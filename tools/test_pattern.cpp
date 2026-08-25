@@ -20,11 +20,7 @@ struct Rgb {
     float b;
 };
 
-// Column-uniform by design: nothing in this codebase yet reconciles EXR's
-// row-0-top convention with OpenGL's texture-v-origin convention, so a
-// pattern identical across every row is immune to an undetected vertical
-// flip on the read side — a real open question, correctly not solved
-// here.
+// Column-uniform by design: identical across every row, so it stays immune to an undetected vertical flip on the read side regardless of future changes to EXR/OpenGL row-orientation handling.
 Rgb colorForColumn(int x) {
     const int patch = x / kPatchWidth;
     switch (patch) {
@@ -63,8 +59,7 @@ int main() {
     }
 
     try {
-        // WRITE_RGB, not WRITE_RGBA: deliberately omitting alpha so this
-        // file exercises the loader's missing-alpha-defaults-to-1.0 path.
+        // WRITE_RGB, not WRITE_RGBA: deliberately omitting alpha so this file exercises the loader's missing-alpha-defaults-to-1.0 path.
         Imf::RgbaOutputFile file(outputPath.c_str(), kWidth, kHeight, Imf::WRITE_RGB);
         file.setFrameBuffer(pixels.data(), 1, kWidth);
         file.writePixels(kHeight);

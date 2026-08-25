@@ -21,10 +21,7 @@ std::string dirOf(const std::string& path) {
     return pos == std::string::npos ? "." : path.substr(0, pos);
 }
 
-// This project's gltf material `extras` are hand-authored to look like
-// {"roughnessTexture":{"index":2}, ...} (see the gltf fix-up this
-// loader depends on) -- not a general JSON parser, just enough to pull
-// an integer index back out of that exact, self-controlled shape.
+// This project's gltf material `extras` are hand-authored to look like {"roughnessTexture":{"index":2}, ...} (see the gltf fix-up this loader depends on) -- not a general JSON parser, just enough to pull an integer index back out of that exact, self-controlled shape.
 std::optional<int> extrasTextureIndex(const char* extrasJson, const std::string& key) {
     if (extrasJson == nullptr) {
         return std::nullopt;
@@ -46,8 +43,7 @@ std::optional<int> extrasTextureIndex(const char* extrasJson, const std::string&
     while (numPos < text.size() && (text[numPos] == ' ' || text[numPos] == '\t')) {
         ++numPos;
     }
-    // from_chars, not atoi: atoi can't distinguish "parsed 0" from
-    // "failed to parse", and 0 is a valid texture index.
+    // from_chars, not atoi: atoi can't distinguish "parsed 0" from "failed to parse", and 0 is a valid texture index.
     int value = 0;
     const std::from_chars_result result =
         std::from_chars(text.c_str() + numPos, text.c_str() + text.size(), value);
@@ -57,8 +53,7 @@ std::optional<int> extrasTextureIndex(const char* extrasJson, const std::string&
     return value;
 }
 
-// This project's gltf assets ship linear EXR maps, not glTF's usual
-// PNG/JPEG -- every texture slot resolves through the same EXR loader.
+// This project's gltf assets ship linear EXR maps, not glTF's usual PNG/JPEG -- every texture slot resolves through the same EXR loader.
 std::optional<engine::gfx::Texture> loadTexture(const cgltf_texture* texture,
                                                  const std::string& dir) {
     if (texture == nullptr || texture->image == nullptr || texture->image->uri == nullptr) {
@@ -87,9 +82,7 @@ glm::mat4 localNodeTransform(const cgltf_node* node) {
     return glm::make_mat4(local);
 }
 
-// Appends this primitive's triangles to outWorldTriangles, each vertex
-// baked to world space by transform -- the BVH (bvh.h) operates on
-// world-space triangles, not the model-space data Mesh uploads to the GPU.
+// Appends this primitive's triangles to outWorldTriangles, each vertex baked to world space by transform -- the BVH (bvh.h) operates on world-space triangles, not the model-space data Mesh uploads to the GPU.
 void appendWorldTriangles(const std::vector<engine::gfx::Vertex>& vertices,
                            const std::vector<unsigned int>& indices, const glm::mat4& transform,
                            std::vector<Triangle>& outWorldTriangles) {
@@ -102,64 +95,73 @@ void appendWorldTriangles(const std::vector<engine::gfx::Vertex>& vertices,
     }
 }
 
-// Builds one MeshInstance's Vertex/index arrays and Material from a
-// single triangle primitive. Fails clearly (nullopt) rather than
-// substituting a placeholder for a primitive this loader doesn't
-// support (non-triangle mode, missing attributes/material/textures).
-std::optional<MeshInstance> loadPrimitive(const cgltf_data* data, const cgltf_primitive& prim,
-                                           const glm::mat4& transform, const std::string& dir,
-                                           std::vector<Triangle>& outWorldTriangles) {
-    if (prim.type != cgltf_primitive_type_triangles) {
-        std::cerr << "loadGltf: skipping non-triangle primitive\n";
-        return std::nullopt;
-    }
+struct RequiredAccessors {
+    const cgltf_accessor* position;
+    const cgltf_accessor* normal;
+    const cgltf_accessor* uv;
+    const cgltf_accessor* tangent;
+};
 
-    const cgltf_accessor* posAcc = nullptr;
-    const cgltf_accessor* normAcc = nullptr;
-    const cgltf_accessor* uvAcc = nullptr;
-    const cgltf_accessor* tanAcc = nullptr;
+// Locates the position/normal/uv0/tangent accessors this loader requires and rejects (nullopt) a primitive missing any of them, or -- since cgltf_accessor_read_float can't signal failure through its return value for a sparse accessor (their own source: "This is an error case, but we can't communicate the error with existing interface") -- a primitive using a sparse accessor for any of them, which this loader doesn't support.
+std::optional<RequiredAccessors> findAttributeAccessors(const cgltf_primitive& prim) {
+    RequiredAccessors acc{nullptr, nullptr, nullptr, nullptr};
     for (cgltf_size ai = 0; ai < prim.attributes_count; ++ai) {
         const cgltf_attribute& attr = prim.attributes[ai];
         if (attr.type == cgltf_attribute_type_position) {
-            posAcc = attr.data;
+            acc.position = attr.data;
         } else if (attr.type == cgltf_attribute_type_normal) {
-            normAcc = attr.data;
+            acc.normal = attr.data;
         } else if (attr.type == cgltf_attribute_type_texcoord && attr.index == 0) {
-            uvAcc = attr.data;
+            acc.uv = attr.data;
         } else if (attr.type == cgltf_attribute_type_tangent) {
-            tanAcc = attr.data;
+            acc.tangent = attr.data;
         }
     }
-    if (posAcc == nullptr || normAcc == nullptr || uvAcc == nullptr || tanAcc == nullptr) {
+    if (acc.position == nullptr || acc.normal == nullptr || acc.uv == nullptr ||
+        acc.tangent == nullptr) {
         std::cerr << "loadGltf: primitive missing position/normal/uv/tangent\n";
         return std::nullopt;
     }
-    if (prim.indices == nullptr) {
+    if (acc.position->is_sparse || acc.normal->is_sparse || acc.uv->is_sparse ||
+        acc.tangent->is_sparse) {
+        std::cerr << "loadGltf: sparse accessors are not supported\n";
+        return std::nullopt;
+    }
+    return acc;
+}
+
+std::vector<engine::gfx::Vertex> readVertices(const RequiredAccessors& acc) {
+    std::vector<engine::gfx::Vertex> vertices(acc.position->count);
+    for (cgltf_size vi = 0; vi < acc.position->count; ++vi) {
+        engine::gfx::Vertex& v = vertices[vi];
+        cgltf_accessor_read_float(acc.position, vi, &v.position.x, 3);
+        cgltf_accessor_read_float(acc.normal, vi, &v.normal.x, 3);
+        // No V flip: glTF's v=0-at-top already matches how Texture::createFromExr uploads EXR rows (see its own note).
+        cgltf_accessor_read_float(acc.uv, vi, &v.uv.x, 2);
+        cgltf_accessor_read_float(acc.tangent, vi, &v.tangent.x, 4);
+    }
+    return vertices;
+}
+
+// Rejects a missing or sparse index accessor for the same reason findAttributeAccessors rejects sparse vertex attributes -- cgltf can't signal a sparse-index read failure through its return value either.
+std::optional<std::vector<unsigned int>> readIndices(const cgltf_accessor* indicesAcc) {
+    if (indicesAcc == nullptr) {
         std::cerr << "loadGltf: primitive has no index accessor\n";
         return std::nullopt;
     }
-    if (prim.material == nullptr) {
-        std::cerr << "loadGltf: primitive has no material\n";
+    if (indicesAcc->is_sparse) {
+        std::cerr << "loadGltf: sparse accessors are not supported\n";
         return std::nullopt;
     }
-
-    std::vector<engine::gfx::Vertex> vertices(posAcc->count);
-    for (cgltf_size vi = 0; vi < posAcc->count; ++vi) {
-        engine::gfx::Vertex& v = vertices[vi];
-        cgltf_accessor_read_float(posAcc, vi, &v.position.x, 3);
-        cgltf_accessor_read_float(normAcc, vi, &v.normal.x, 3);
-        // No V flip: glTF's v=0-at-top already matches how
-        // Texture::createFromExr uploads EXR rows (see its own note).
-        cgltf_accessor_read_float(uvAcc, vi, &v.uv.x, 2);
-        cgltf_accessor_read_float(tanAcc, vi, &v.tangent.x, 4);
+    std::vector<unsigned int> indices(indicesAcc->count);
+    for (cgltf_size ii = 0; ii < indicesAcc->count; ++ii) {
+        indices[ii] = static_cast<unsigned int>(cgltf_accessor_read_index(indicesAcc, ii));
     }
+    return indices;
+}
 
-    std::vector<unsigned int> indices(prim.indices->count);
-    for (cgltf_size ii = 0; ii < prim.indices->count; ++ii) {
-        indices[ii] = static_cast<unsigned int>(cgltf_accessor_read_index(prim.indices, ii));
-    }
-
-    const cgltf_material& mat = *prim.material;
+std::optional<Material> loadMaterialTextures(const cgltf_data* data, const cgltf_material& mat,
+                                              const std::string& dir) {
     const cgltf_pbr_metallic_roughness& pbr = mat.pbr_metallic_roughness;
 
     auto baseColor = loadTexture(pbr.base_color_texture.texture, dir);
@@ -176,7 +178,7 @@ std::optional<MeshInstance> loadPrimitive(const cgltf_data* data, const cgltf_pr
         return std::nullopt;
     }
 
-    Material material{
+    return Material{
         glm::make_vec4(pbr.base_color_factor),
         pbr.metallic_factor,
         pbr.roughness_factor,
@@ -187,19 +189,57 @@ std::optional<MeshInstance> loadPrimitive(const cgltf_data* data, const cgltf_pr
         std::move(*specular),
         std::move(*ao),
     };
+}
 
-    appendWorldTriangles(vertices, indices, transform, outWorldTriangles);
+// Builds one MeshInstance's Vertex/index arrays and Material from a single triangle primitive. Fails clearly (nullopt) rather than substituting a placeholder for a primitive this loader doesn't support (non-triangle mode, missing attributes/material/textures).
+std::optional<MeshInstance> loadPrimitive(const cgltf_data* data, const cgltf_primitive& prim,
+                                           const glm::mat4& transform, const std::string& dir,
+                                           std::vector<Triangle>& outWorldTriangles) {
+    if (prim.type != cgltf_primitive_type_triangles) {
+        std::cerr << "loadGltf: skipping non-triangle primitive\n";
+        return std::nullopt;
+    }
+    if (prim.material == nullptr) {
+        std::cerr << "loadGltf: primitive has no material\n";
+        return std::nullopt;
+    }
 
+    const std::optional<RequiredAccessors> acc = findAttributeAccessors(prim);
+    if (!acc.has_value()) {
+        return std::nullopt;
+    }
+    const std::optional<std::vector<unsigned int>> indices = readIndices(prim.indices);
+    if (!indices.has_value()) {
+        return std::nullopt;
+    }
+    std::optional<Material> material = loadMaterialTextures(data, *prim.material, dir);
+    if (!material.has_value()) {
+        return std::nullopt;
+    }
+
+    std::vector<engine::gfx::Vertex> vertices = readVertices(*acc);
+    appendWorldTriangles(vertices, *indices, transform, outWorldTriangles);
+
+    engine::gfx::Mesh mesh(vertices, *indices);
     return MeshInstance{
-        engine::gfx::Mesh(vertices, indices),
-        std::move(material),
+        std::move(mesh),
+        std::move(*material),
         transform,
     };
 }
 
+// Hard cap on node-graph recursion depth. glTF's node hierarchy is untrusted external data -- cgltf_validate doesn't check for cycles or pathological nesting depth, so an unbounded recursion here would let a malformed/cyclic file overflow the stack. 256 comfortably covers any legitimate scene hierarchy.
+constexpr int kMaxNodeDepth = 256;
+
 bool walkNodes(const cgltf_data* data, cgltf_node* const* nodes, cgltf_size count,
                const glm::mat4& parentTransform, const std::string& dir,
-               std::vector<MeshInstance>& instances, std::vector<Triangle>& worldTriangles) {
+               std::vector<MeshInstance>& instances, std::vector<Triangle>& worldTriangles,
+               int depth = 0) {
+    if (depth >= kMaxNodeDepth) {
+        std::cerr << "loadGltf: node hierarchy exceeds max depth " << kMaxNodeDepth
+                   << " (cyclic or pathologically nested)\n";
+        return false;
+    }
     for (cgltf_size ni = 0; ni < count; ++ni) {
         const cgltf_node* node = nodes[ni];
         const glm::mat4 world = parentTransform * localNodeTransform(node);
@@ -216,7 +256,7 @@ bool walkNodes(const cgltf_data* data, cgltf_node* const* nodes, cgltf_size coun
         }
 
         if (!walkNodes(data, node->children, node->children_count, world, dir, instances,
-                       worldTriangles)) {
+                       worldTriangles, depth + 1)) {
             return false;
         }
     }

@@ -15,8 +15,7 @@ struct Vertex {
     glm::vec4 tangent;  // .w = bitangent handedness (glTF convention)
 };
 
-// Owns one VAO + VBO + EBO triple (indexed draw), move-only: GL object
-// names are handles that can't be safely duplicated.
+// Owns one VAO + VBO + EBO triple (indexed draw), move-only: GL object names are handles that can't be safely duplicated.
 class Mesh {
 public:
     Mesh(const std::vector<Vertex>& vertices, const std::vector<unsigned int>& indices);
@@ -31,9 +30,7 @@ public:
 
     [[nodiscard]] int triangleCount() const { return indexCount_ / 3; }
 
-    // Model-space AABB, computed once from vertex positions at
-    // construction. For frustum culling; not updated if the mesh is
-    // ever mutated after construction (it isn't, today).
+    // Model-space AABB, computed once from vertex positions at construction. For frustum culling; not updated if the mesh is ever mutated after construction (it isn't, today).
     [[nodiscard]] glm::vec3 boundsMin() const { return boundsMin_; }
     [[nodiscard]] glm::vec3 boundsMax() const { return boundsMax_; }
 

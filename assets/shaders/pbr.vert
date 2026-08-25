@@ -8,9 +8,7 @@ layout(location = 3) in vec4 aTangent;
 uniform mat4 uModel;
 uniform mat4 uView;
 uniform mat4 uProjection;
-// Inverse-transpose of uModel's upper 3x3, corrects for non-uniform
-// scale -- computed once per draw call on the CPU (main.cpp), not
-// per-vertex: it's the same matrix for every vertex in the mesh.
+// Inverse-transpose of uModel's upper 3x3, corrects for non-uniform scale -- computed once per draw call on the CPU (main.cpp), not per-vertex: it's the same matrix for every vertex in the mesh.
 uniform mat3 uNormalMatrix;
 
 out vec2 vUv;
