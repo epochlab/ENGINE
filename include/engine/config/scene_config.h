@@ -20,7 +20,7 @@ struct SceneConfig {
     int initialAov;
     engine::gfx::OcioDisplayTransform::Lut initialLut;
     int samplesPerPixel;   // path tracer startup default
-    int maxBounces;        // path tracer startup default
+    int maxBounces;        // path tracer startup default; secondary/indirect bounces beyond the primary hit, 0 = direct lighting only
     int russianRouletteStartBounce;  // 0-based bounce index RR kicks in from
     int maxSamples;  // accumulated-pass cap for PathTraceDriver; 0 = unbounded
 };
