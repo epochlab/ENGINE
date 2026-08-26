@@ -70,17 +70,19 @@ struct PathTraceResult {
     // contributing event happens after exactly one bounce or more than one, not a separately tracked
     // decision. Refraction is orthogonal to this: any transmission-lobe sample, at bounce 0 or any
     // later bounce, stickily overrides the path's bucket to Refraction from that point on, regardless
-    // of what the bucket was before -- so directSpecular+indirectSpecular+refraction (PHYSICAL,
-    // unmodified) plus the true (albedo-multiplied) diffuse contribution sums to beauty MINUS whatever
-    // radiance the camera ray picked up by missing all geometry on bounce 0 (seeing the environment
-    // directly -- not attributed to any of these five, the same way a "background" AOV is
-    // conventionally kept separate from surface-interaction AOVs in production renderers).
+    // of what the bucket was before. refraction is PHYSICAL/unmodified.
     //
-    // directDiffuse/indirectDiffuse are DELIGHTED, not physical: the primary (bounce-0) surface's own
-    // base color texture is factored out (replaced by the diffuse lobe's raw kd weight) so these read
-    // as "how much light is arriving," not "light times this object's own texture" -- so they do NOT
-    // sum into beauty the way the other three buckets do. Later-bounce surfaces' colors still
-    // legitimately tint indirectDiffuse (that's real bounce transport, not this object's own texture).
+    // directDiffuse/indirectDiffuse and directSpecular/indirectSpecular are all DELIGHTED, not
+    // physical: at bounce 0, each isolates its own lobe's contribution to NEE from the vertex's
+    // combined diffuse+specular BSDF value (evaluateDiffuseRaw / evaluateSpecularOnly, bsdf.h) --
+    // diffuse additionally factors out the primary surface's own base color texture (replaced by the
+    // diffuse lobe's raw kd weight), specular does not need to (the specular lobe isn't texture-
+    // modulated the way baseColor modulates diffuse). Because bounce 0's non-bucketed lobe is dropped
+    // rather than attributed elsewhere, these four buckets plus refraction do NOT sum to beauty (nor
+    // to each other) the way a naive partition would -- each reads as "how much light of this
+    // transport type is arriving," not a literal decomposition of the beauty image. Later-bounce
+    // surfaces' colors still legitimately tint the indirect buckets (that's real bounce transport, not
+    // this object's own texture).
     engine::gfx::HdrImage directDiffuse;
     engine::gfx::HdrImage indirectDiffuse;
     engine::gfx::HdrImage directSpecular;
