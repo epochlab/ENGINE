@@ -38,7 +38,7 @@ struct BsdfSample {
     glm::vec3 wiLocal;            // sampled direction, local shading frame
     glm::vec3 throughputWeight;   // f(wi)*|cosThetaI| / pdf(wi)
     LobeType type;
-    // Same as throughputWeight but with the diffuse lobe's baseColor factor excluded (the lobe's raw energy weight `kd` in place of `baseColor*kd`) when type == Diffuse; identical to throughputWeight for every other lobe. Lets path_tracer.cpp's delighted Direct/IndirectDiffuse AOVs access "light before albedo" without dividing a possibly-zero base color texture back out.
+    // For Diffuse/SpecularReflection, the sampled lobe's OWN pdf-cancelled weight in isolation (its own f, its own pdf -- not evaluateContinuousLobes' mixture pdf), excluding the other lobe's admixture at the same wi: `kd` (no baseColor) for Diffuse, `F*G2/G1` for SpecularReflection (Heitz 2018 VNDF weight identity, no baseColor at metallic=0). Identical to throughputWeight for SpecularTransmission. Lets path_tracer.cpp's delighted Direct/Indirect Diffuse/Specular AOVs access each lobe's own contribution without the other lobe's texture/energy bleeding in.
     glm::vec3 rawThroughputWeight;
 };
 

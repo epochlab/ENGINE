@@ -159,8 +159,8 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
                        Sampler& sampler) {
     glm::vec3 radiance(0.0F);
     glm::vec3 throughput(1.0F);
-    // Mirrors `throughput` exactly except a diffuse-lobe pick at bounce 0 multiplies in sample->rawThroughputWeight (the lobe's kd, no baseColor) instead of the physical throughputWeight -- used only to compute the delighted Direct/IndirectDiffuse AOV bucket writes below, never `radiance` itself. Diverges from `throughput` by exactly one factor (the primary surface's own base color), so deeper-bounce surfaces still legitimately tint it.
-    glm::vec3 diffuseRawThroughput(1.0F);
+    // Mirrors `throughput` exactly except every bounce's lobe pick multiplies in sample->rawThroughputWeight (that lobe's own isolated weight -- kd for Diffuse, F*G2/G1 for SpecularReflection, no admixture from the other lobe) instead of the physical throughputWeight -- used only to compute the delighted Direct/Indirect Diffuse/Specular AOV bucket writes below, never `radiance` itself. Diverges from `throughput` by the cumulative product of every traversed bounce's own-lobe isolation factor (not just bounce 0's).
+    glm::vec3 lobeRawThroughput(1.0F);
     Ray ray = primaryRay;
     float firstHitIor = -1.0F;
     int bounce = 0;
@@ -226,8 +226,9 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
             }
             const glm::vec3 missRadiance = throughput * envRadiance * misWeight;
             radiance += missRadiance;
-            addToBucket(pathBucket == PathBucket::Diffuse ? diffuseRawThroughput * envRadiance * misWeight
-                                                            : missRadiance,
+            const bool isolatedBucket = pathBucket == PathBucket::Diffuse ||
+                                         pathBucket == PathBucket::SpecularReflection;
+            addToBucket(isolatedBucket ? lobeRawThroughput * envRadiance * misWeight : missRadiance,
                         /*isDirect=*/bounce == 1);
             break;
         }
@@ -311,13 +312,13 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
                         radiance += neeContribution;
                         glm::vec3 bucketContribution = neeContribution;
                         if (pathBucket == PathBucket::Diffuse) {
-                            // At bounce 0, this vertex IS the primary surface -- use the raw (no baseColor) diffuse lobe so its own texture never enters the AOV. At deeper bounces this vertex's color is a later surface's, which legitimately tints indirect diffuse -- only diffuseRawThroughput (missing the primary surface's albedo) needs to differ from throughput there.
+                            // At bounce 0, this vertex IS the primary surface -- use the raw (no baseColor) diffuse lobe so its own texture never enters the AOV. At deeper bounces this vertex's own color legitimately tints indirect diffuse, so diffuseLobeRaw switches to the full bsdfValue -- only the lobeRawThroughput multiplier (which keeps stripping each traversed bounce's own-lobe admixture) still differs from throughput here.
                             const glm::vec3 diffuseLobeRaw =
                                 bounce == 0 ? evaluateDiffuseRaw(params, woLocal, wiLocalLight) : bsdfValue;
-                            bucketContribution = diffuseRawThroughput * diffuseLobeRaw * envRadiance *
+                            bucketContribution = lobeRawThroughput * diffuseLobeRaw * envRadiance *
                                                   shadingCos * misWeightLight / lightSample.pdf;
                         } else if (pathBucket == PathBucket::SpecularReflection) {
-                            // Mirrors the Diffuse branch above: isolate bounce 0's own specular lobe so its NEE contribution isn't contaminated by this vertex's diffuse term (evaluateBsdf/bsdfValue is the combined value of both lobes). No albedo-factor swap needed here (see evaluateSpecularOnly) -- throughput is already the right multiplier, unlike diffuseRawThroughput.
+                            // Mirrors the Diffuse branch above: isolate bounce 0's own specular lobe so its NEE contribution isn't contaminated by this vertex's diffuse term (evaluateBsdf/bsdfValue is the combined value of both lobes). No albedo-factor swap needed here (see evaluateSpecularOnly) -- throughput is already the right multiplier, unlike lobeRawThroughput, which may have already diverged from it at a deeper bounce via an earlier diffuse pick along the path.
                             const glm::vec3 specularLobe =
                                 bounce == 0 ? evaluateSpecularOnly(params, woLocal, wiLocalLight) : bsdfValue;
                             bucketContribution = throughput * specularLobe * envRadiance *
@@ -348,7 +349,7 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
         }
 
         throughput *= sample->throughputWeight;
-        diffuseRawThroughput *= sample->rawThroughputWeight;
+        lobeRawThroughput *= sample->rawThroughputWeight;
 
         if (bounce >= settings.russianRouletteStartBounce) {
             const float continueProb = std::clamp(
@@ -358,7 +359,7 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
                 break;
             }
             throughput /= continueProb;
-            diffuseRawThroughput /= continueProb;
+            lobeRawThroughput /= continueProb;
         }
 
         // Chiang/Li/Burley shadow-terminator-corrected origin, nudged off the true triangle plane along the geometric normal (toward wi's side) to avoid self-intersection.
