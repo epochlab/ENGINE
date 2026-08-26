@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cmath>
+
 #include <glm/glm.hpp>
 
 #include "engine/scene/camera.h"
@@ -10,7 +12,7 @@ class Window;
 
 namespace engine::scene {
 
-// Mutable fly/orbit state that produces a fresh, immutable Camera each frame via snapshot() — Camera itself stays immutable by design (see its header); this is the debug camera its doc comment forward-references. Lens parameters (film back, clip planes, exposure triangle) are loaded once from profile.json and never mutated at runtime; pose (position/yaw/pitch), orbit state, and focal length (editable live via the HUD's Lens slider) do change.
+// Mutable fly/orbit state that produces a fresh, immutable Camera each frame via snapshot() — Camera itself stays immutable by design (see its header); this is the debug camera its doc comment forward-references. Film back and clip planes are loaded once from profile.json and never mutated at runtime; pose (position/yaw/pitch), orbit state, focal length, and the exposure triangle (aperture/shutterSeconds/iso, editable live via the HUD's Camera section sliders) do change.
 class DebugCameraController {
 public:
     // position/yawDegrees/pitchDegrees become both the initial pose and the pose resetToDefault() restores; the remaining lens params are passed through unchanged to every snapshot()'d Camera.
@@ -38,9 +40,25 @@ public:
     [[nodiscard]] float yawDegrees() const { return yawDegrees_; }
     [[nodiscard]] float pitchDegrees() const { return pitchDegrees_; }
     [[nodiscard]] float focalLengthMm() const { return focalLengthMm_; }
+    [[nodiscard]] float aperture() const { return aperture_; }
+    [[nodiscard]] float shutterSeconds() const { return shutterSeconds_; }
+    [[nodiscard]] float iso() const { return iso_; }
 
-    // Bound directly to the HUD's Lens slider widget, the same "bind a live variable directly to a widget" convention used elsewhere — except here the live variable lives behind this setter rather than as a bare reference, since it's controller-owned state.
+    // Bound to the HUD's Camera section sliders via setter, not a bare reference (controller-owned state).
     void setFocalLengthMm(float focalLengthMm) { focalLengthMm_ = focalLengthMm; }
+    void setAperture(float aperture) { aperture_ = aperture; }
+    void setShutterSeconds(float shutterSeconds) { shutterSeconds_ = shutterSeconds; }
+    void setIso(float iso) { iso_ = iso; }
+
+    // EV100 delta vs profile.json defaults. Fed to OcioDisplayTransform::setExposureEv() (display-stage
+    // pow(2,ev), not baked into radiance -- scene isn't photometrically calibrated, no retrace needed).
+    [[nodiscard]] float relativeExposureEv() const {
+        const float defaultEv100 = std::log2((defaultAperture_ * defaultAperture_) /
+                                              defaultShutterSeconds_ * (100.0F / defaultIso_));
+        const float currentEv100 =
+            std::log2((aperture_ * aperture_) / shutterSeconds_ * (100.0F / iso_));
+        return defaultEv100 - currentEv100;
+    }
 
 private:
     glm::vec3 position_;
@@ -55,9 +73,13 @@ private:
     const Camera::FilmBack filmBack_;
     const float nearClip_;
     const float farClip_;
-    const float aperture_;
-    const float shutterSeconds_;
-    const float iso_;
+    float aperture_;
+    float shutterSeconds_;
+    float iso_;
+
+    const float defaultAperture_;
+    const float defaultShutterSeconds_;
+    const float defaultIso_;
 
     const float flySpeedMetersPerSecond_;
     const float orbitSensitivityDegPerPixel_;
