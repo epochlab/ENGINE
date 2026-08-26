@@ -581,6 +581,12 @@ PathTracedAovSource selectPathTracedImage(const engine::scene::PathTraceSnapshot
             return {&snapshot.gbuffer->fresnel, snapshot.gbuffer};
         case engine::debug::AovId::AO:
             return {&snapshot.gbuffer->ao, snapshot.gbuffer};
+        case engine::debug::AovId::Shadow:
+            return {&snapshot.gbuffer->shadow, snapshot.gbuffer};
+        case engine::debug::AovId::Wireframe:
+            return {&snapshot.gbuffer->wireframe, snapshot.gbuffer};
+        case engine::debug::AovId::BoundingBox:
+            return {&snapshot.gbuffer->boundingBox, snapshot.gbuffer};
         case engine::debug::AovId::DirectDiffuse:
             return {&snapshot.dynamic->directDiffuse, snapshot.dynamic};
         case engine::debug::AovId::IndirectDiffuse:

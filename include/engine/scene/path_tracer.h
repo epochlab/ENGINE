@@ -39,9 +39,9 @@ struct PathTraceSettings {
 //
 // One renderPathTraced() call's raw output -- what a single pass computes. PathTraceDriver splits
 // this into PathTraceGBuffer (published once, on pass 1) and PathTraceDynamic (republished every
-// pass) at its publish boundary, since 14 of these 21 fields never change after the first pass; see
+// pass) at its publish boundary, since 17 of these 24 fields never change after the first pass; see
 // those two structs' own doc comments. renderPathTraced itself stays unaware of that distinction --
-// it always computes and returns the full 21 fields, same as a synchronous/non-driver caller would
+// it always computes and returns the full 24 fields, same as a synchronous/non-driver caller would
 // want.
 struct PathTraceResult {
     engine::gfx::HdrImage beauty;
@@ -62,6 +62,9 @@ struct PathTraceResult {
     engine::gfx::HdrImage alpha;       // 1.0 on a primary hit, 0.0 on a primary miss -- a real coverage mask, since this renderer isn't opaque-only-by-construction
     engine::gfx::HdrImage fresnel;     // Schlick term at the primary hit's view angle
     engine::gfx::HdrImage ao;          // baked AO texture sample at the primary hit (not ray-traced AO)
+    engine::gfx::HdrImage shadow;      // 1.0 = primary hit is shadowed/occluded from the env light's NEE sample, 0.0 = lit or no primary hit (background)
+    engine::gfx::HdrImage wireframe;   // 1.0 near a hit triangle's edge (barycentric distance), 0.0 elsewhere/no hit
+    engine::gfx::HdrImage boundingBox; // 1.0 near an edge of the scene's wireframe bounding cube -- independent of mesh hit, drawn over background too
 
     // Light-transport component breakdown, replacing a single combined "IBL" term. Averaged the same
     // way beauty is (across samples/passes). A path is bucketed once, by the lobe type sampled at its
@@ -90,7 +93,7 @@ struct PathTraceResult {
     engine::gfx::HdrImage refraction;
 };
 
-// PathTraceResult's 14 primary-hit fields -- deterministic given an unchanged camera/scene, so
+// PathTraceResult's 17 primary-hit fields -- deterministic given an unchanged camera/scene, so
 // PathTraceDriver captures these once (pass 1 of a generation) and never rebuilds/republishes them
 // again, instead of paying their copy cost on every pass alongside the 7 fields that actually
 // accumulate (see PathTraceDynamic). Field meanings are identical to PathTraceResult's own doc
@@ -110,6 +113,9 @@ struct PathTraceGBuffer {
     engine::gfx::HdrImage alpha;
     engine::gfx::HdrImage fresnel;
     engine::gfx::HdrImage ao;
+    engine::gfx::HdrImage shadow;
+    engine::gfx::HdrImage wireframe;
+    engine::gfx::HdrImage boundingBox;
 };
 
 // PathTraceResult's 7 fields that genuinely re-average across passes -- see PathTraceGBuffer's doc
