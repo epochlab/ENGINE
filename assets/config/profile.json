@@ -17,7 +17,7 @@
     "defaultAOV": 0,
     "defaultLUT": "sRGB",
     "samplesPerPixel": 1,
-    "maxBounces": 0,
+    "maxBounces": 1,
     "russianRouletteStartBounce": 3,
     "maxSamples": 32
 }
