@@ -27,8 +27,7 @@ struct Hit {
     float v;  // barycentric weight on v2
 };
 
-// Brute-force reference intersection (O(n) triangle scan) -- the correctness oracle for
-// tools/embree_validate.cpp, deliberately dependency-free and simple enough to trust by inspection.
+// Brute-force reference intersection (O(n) triangle scan) -- the correctness oracle for tools/embree_validate.cpp, deliberately dependency-free and simple enough to trust by inspection.
 [[nodiscard]] std::optional<Hit> bruteForceIntersect(const std::vector<Triangle>& triangles,
                                                        const Ray& ray);
 

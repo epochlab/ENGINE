@@ -77,11 +77,7 @@ struct LobeEval {
     float pdf;
 };
 
-// kd = (1-F)(1-metallic)(1-transmissionFactor), fixed at wo.z (not per-wi) -- NdotV-based energy split avoids diffuse+specular jointly exceeding received energy.
-// pdf must NOT be gated on kd: sampleBsdf still selects this lobe with probability lobes.diffuse
-// (independent of kd, see computeLobeProbabilities), so the pdf side of the MIS mixture must match
-// that selection density regardless of how little/no value the lobe carries -- gating pdf on kd
-// starves the mixture denominator and inflates throughput for metals (kd=0 but diffuseProb>0).
+// kd = (1-F)(1-metallic)(1-transmissionFactor), fixed at wo.z (not per-wi) -- NdotV-based energy split avoids diffuse+specular jointly exceeding received energy. pdf must NOT be gated on kd: sampleBsdf still selects this lobe with probability lobes.diffuse (independent of kd, see computeLobeProbabilities), so the pdf side of the MIS mixture must match that selection density regardless of how little/no value the lobe carries -- gating pdf on kd starves the mixture denominator and inflates throughput for metals (kd=0 but diffuseProb>0).
 LobeEval evaluateDiffuseLobe(const BsdfParams& params, const glm::vec3& wi, float kd) {
     if (wi.z <= 0.0F) {
         return {glm::vec3(0.0F), 0.0F};
@@ -121,17 +117,7 @@ struct LobeProbabilities {
     float transmitPhysicalValue;  // transmission's true (1-F)*t energy fraction -- see below
 };
 
-// specular = Fresnel reflectance probability (exact dielectric via ior, Schlick via f0 for
-// conductors, blended by metallic). "Exiting" (transmissive material, sign<0, already inside): no
-// diffuse substrate, transmit takes everything specular didn't -- reflect internally or exit, no
-// third option. Everything else -- entering (sign>0), or an opaque material's woLocal.z pushed
-// negative by grazing-angle normal mapping -- uses the entering split: diffuse/transmit divide the
-// remainder by transmissionFactor (0 for opaque, so transmit vanishes and this reduces to
-// diffuse+specular regardless of which side of the interpolated normal wo landed on).
-// transmitPhysicalValue != transmit: throughput = physicalValue/transmit, so physicalValue must
-// independently carry the same transmissionFactor/metallic factors transmit's probability used, or
-// they cancel out of the throughput and silently erase their effect on energy (caught by
-// tools/bsdf_validate.cpp's furnace test).
+// specular = Fresnel reflectance probability (exact dielectric via ior, Schlick via f0 for conductors, blended by metallic). "Exiting" (transmissive material, sign<0, already inside): no diffuse substrate, transmit takes everything specular didn't -- reflect internally or exit, no third option. Everything else -- entering (sign>0), or an opaque material's woLocal.z pushed negative by grazing-angle normal mapping -- uses the entering split: diffuse/transmit divide the remainder by transmissionFactor (0 for opaque, so transmit vanishes and this reduces to diffuse+specular regardless of which side of the interpolated normal wo landed on). transmitPhysicalValue != transmit: throughput = physicalValue/transmit, so physicalValue must independently carry the same transmissionFactor/metallic factors transmit's probability used, or they cancel out of the throughput and silently erase their effect on energy (caught by tools/bsdf_validate.cpp's furnace test).
 LobeProbabilities computeLobeProbabilities(const BsdfParams& params, const glm::vec3& wo,
                                             float sign) {
     const bool exiting = sign < 0.0F && params.transmissionFactor > 0.0F;
@@ -250,8 +236,7 @@ std::optional<BsdfSample> sampleBsdf(const BsdfParams& params, const glm::vec3& 
                            rawThroughput};
     }
 
-    // Smooth specular transmission (delta lobe): Snell's law, TIR already folded into
-    // lobes.specular via fresnelDielectric returning 1.0 past the critical angle.
+    // Smooth specular transmission (delta lobe): Snell's law, TIR already folded into lobes.specular via fresnelDielectric returning 1.0 past the critical angle.
     if (lobes.transmit <= 0.0F) {
         return std::nullopt;
     }
@@ -262,12 +247,7 @@ std::optional<BsdfSample> sampleBsdf(const BsdfParams& params, const glm::vec3& 
     }
     const float cosThetaT = std::sqrt(1.0F - sin2ThetaT);
     const glm::vec3 wt(-eta * wo.x, -eta * wo.y, -cosThetaT);
-    // Non-symmetric radiance-compression factor for camera-originated (Veach 1997 sec. 5.2, PBRT's
-    // SpecularTransmission::Sample_f under TransportMode::Radiance) transport: eta^2 = (etaI/etaT)^2,
-    // the squared ratio of the medium the ray is leaving to the medium it's entering. Self-consistent
-    // under round trips -- entering (eta=1/ior) times exiting (eta=ior/1) squared multiplies to 1, so
-    // a ray that enters and exits the same surface loses no net energy (tools/bsdf_validate.cpp's
-    // furnace test).
+    // Non-symmetric radiance-compression factor for camera-originated (Veach 1997 sec. 5.2, PBRT's SpecularTransmission::Sample_f under TransportMode::Radiance) transport: eta^2 = (etaI/etaT)^2, the squared ratio of the medium the ray is leaving to the medium it's entering. Self-consistent under round trips -- entering (eta=1/ior) times exiting (eta=ior/1) squared multiplies to 1, so a ray that enters and exits the same surface loses no net energy (tools/bsdf_validate.cpp's furnace test).
     const glm::vec3 throughput =
         params.baseColor * (lobes.transmitPhysicalValue / lobes.transmit) * (eta * eta);
     return BsdfSample{glm::vec3(wt.x, wt.y, wt.z * sign), throughput, LobeType::SpecularTransmission,
