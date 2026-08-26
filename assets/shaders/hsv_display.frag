@@ -3,10 +3,7 @@
 in vec2 vUv;
 
 uniform sampler2D uHdrColor;  // the path tracer's Beauty image
-uniform int uChannelView;  // 0=off(HSV) 1=Hue 2=Saturation 3=Value -- applied to the HSV output, not
-                            // uHdrColor's RGB (isolating a source RGB channel first would broadcast it
-                            // to grey, which always converts to H=0/S=0 -- destroying the very thing
-                            // this AOV exists to show).
+uniform int uChannelView;  // 0=off(HSV) 1=Hue 2=Saturation 3=Value -- applied to the HSV output, not uHdrColor's RGB (isolating a source RGB channel first would broadcast it to grey, which always converts to H=0/S=0 -- destroying the very thing this AOV exists to show).
 
 out vec4 fragColor;
 

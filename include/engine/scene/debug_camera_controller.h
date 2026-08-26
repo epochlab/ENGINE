@@ -50,8 +50,7 @@ public:
     void setShutterSeconds(float shutterSeconds) { shutterSeconds_ = shutterSeconds; }
     void setIso(float iso) { iso_ = iso; }
 
-    // EV100 delta vs profile.json defaults. Fed to OcioDisplayTransform::setExposureEv() (display-stage
-    // pow(2,ev), not baked into radiance -- scene isn't photometrically calibrated, no retrace needed).
+    // EV100 delta vs profile.json defaults. Fed to OcioDisplayTransform::setExposureEv() (display-stage pow(2,ev), not baked into radiance -- scene isn't photometrically calibrated, no retrace needed).
     [[nodiscard]] float relativeExposureEv() const {
         const float defaultEv100 = std::log2((defaultAperture_ * defaultAperture_) /
                                               defaultShutterSeconds_ * (100.0F / defaultIso_));

@@ -17,7 +17,7 @@ public:
     PostProcessPass(PostProcessPass&& other) noexcept;
     PostProcessPass& operator=(PostProcessPass&& other) noexcept;
 
-    // Binds framebuffer 0, sets the viewport to windowFramebufferSize, binds displayShader + hdrColorTexture (texture unit 0), draws the fullscreen triangle. displayShader/hdrColorTexture are passed in rather than owned: Stage F swaps the active display shader (sRGB/Rec.709) at runtime without this class needing to know.
+    // Binds framebuffer 0, sets the viewport to windowFramebufferSize, binds displayShader + hdrColorTexture (texture unit 0), draws the fullscreen triangle. displayShader/hdrColorTexture are passed in rather than owned: the active display shader (sRGB/Rec.709) can be swapped at runtime without this class needing to know.
     void draw(unsigned int hdrColorTexture, const ShaderProgram& displayShader,
               std::pair<int, int> windowFramebufferSize) const;
 

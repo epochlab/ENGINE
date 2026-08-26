@@ -7,10 +7,7 @@
 
 namespace engine::config {
 
-// The asset to load and where to place it -- everything main.cpp needs that's specific to this
-// scene rather than a session-wide renderer/camera default (those are ProfileConfig). gltfPath/
-// texturePath/materialPath are relative to ASSET_ROOT_DIR, matching this project's existing
-// asset-path convention. See assets/config/scene.json for the checked-in defaults.
+// The asset to load and where to place it -- everything main.cpp needs that's specific to this scene rather than a session-wide renderer/camera default (those are ProfileConfig). gltfPath/texturePath/materialPath are relative to ASSET_ROOT_DIR, matching this project's existing asset-path convention; see assets/config/scene.json for the checked-in defaults.
 struct SceneConfig {
     std::string gltfPath;
     std::string texturePath;  // directory (relative to ASSET_ROOT_DIR) glTF image URIs resolve against, overriding the .gltf's own directory -- lets one config swap texture resolution (2K/4K/8K) across every tier without editing each .gltf
