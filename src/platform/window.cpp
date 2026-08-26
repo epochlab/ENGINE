@@ -12,7 +12,7 @@ Window::Window(int width, int height, const std::string& title) {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
     glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);  // mandatory on macOS
-    // Deliberately NOT setting GLFW_SRGB_CAPABLE: display encoding must happen only in the OCIO shader (Stage F), never via a driver-level sRGB framebuffer conversion. Do not add this hint in a later stage.
+    // Deliberately NOT setting GLFW_SRGB_CAPABLE -- display encoding must happen only in the OCIO shader, never via a driver-level sRGB framebuffer conversion.
 
     window_ = glfwCreateWindow(width, height, title.c_str(), nullptr, nullptr);
     if (window_ == nullptr) {

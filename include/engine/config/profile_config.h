@@ -10,11 +10,7 @@
 
 namespace engine::config {
 
-// Session-wide defaults: engine::scene::DebugCameraController's initial (and reset-to) pose,
-// lens/exposure params, and interactive tuning constants, plus everything else main.cpp needs at
-// startup that isn't specific to one scene/asset (that's SceneConfig) -- window size, the HDRI to
-// load, initial debug-view state, and path-tracer settings. Externalized so these can be edited
-// without recompiling. See assets/config/profile.json for the checked-in defaults.
+// Session-wide defaults: engine::scene::DebugCameraController's initial (and reset-to) pose, lens/exposure params, and interactive tuning constants, plus everything else main.cpp needs at startup that isn't specific to one scene/asset (that's SceneConfig) -- window size, the HDRI to load, initial debug-view state, and path-tracer settings. Externalized so these can be edited without recompiling; see assets/config/profile.json for the checked-in defaults.
 struct ProfileConfig {
     glm::vec3 position;
     float yawDegrees;
