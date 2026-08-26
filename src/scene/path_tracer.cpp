@@ -16,26 +16,17 @@ namespace engine::scene {
 namespace {
 
 constexpr float kRayEpsilon = 1e-4F;
-// Thresholds below which a point counts as "on an edge" for the Wireframe/BoundingBox AOVs -- this
-// path tracer has no ray-differential/screen-space-derivative tracking, so line thickness isn't held
-// constant in screen space (thicker on distant/small triangles, thinner on near/large ones); an
-// accepted simplification for a debug overlay. Two separate constants, not one shared value: they're
-// fractions of unrelated-scale spaces -- a triangle's barycentric extent (~pixels to tens of pixels
-// on screen) versus a single face of the *whole scene's* bounding box (which can span most of the
-// viewport), so the same fraction reads as a hairline on one and a thick bar on the other.
+// Thresholds below which a point counts as "on an edge" for the Wireframe/BoundingBox AOVs -- this path tracer has no ray-differential/screen-space-derivative tracking, so line thickness isn't held constant in screen space (thicker on distant/small triangles, thinner on near/large ones); an accepted simplification for a debug overlay. Two separate constants, not one shared value: they're fractions of unrelated-scale spaces -- a triangle's barycentric extent (~pixels to tens of pixels on screen) versus a single face of the *whole scene's* bounding box (which can span most of the viewport), so the same fraction reads as a hairline on one and a thick bar on the other.
 constexpr float kWireframeThickness = 0.02F;      // fraction of a triangle's barycentric extent
 constexpr float kBoundingBoxThickness = 0.0025F;  // fraction of the hit box face's local extent
 
-// Distance-to-nearest-edge test in a triangle's barycentric coordinates (u, v, w=1-u-v each in
-// [0,1], summing to 1) -- true near any of the triangle's three edges. Feeds the Wireframe AOV.
+// Distance-to-nearest-edge test in a triangle's barycentric coordinates (u, v, w=1-u-v each in [0,1], summing to 1) -- true near any of the triangle's three edges. Feeds the Wireframe AOV.
 bool nearBarycentricEdge(float u, float v) {
     const float w = 1.0F - u - v;
     return std::min({u, v, w}) < kWireframeThickness;
 }
 
-// Ray-vs-AABB slab test (standard technique) that reports true only near one of the box's 12 edges,
-// not its whole solid volume -- feeds the BoundingBox AOV. Independent of tracePath/scene geometry:
-// evaluated straight against the camera ray, so it draws over background pixels too.
+// Ray-vs-AABB slab test (standard technique) that reports true only near one of the box's 12 edges, not its whole solid volume -- feeds the BoundingBox AOV. Independent of tracePath/scene geometry: evaluated straight against the camera ray, so it draws over background pixels too.
 bool nearAabbWireframeEdge(const Ray& ray, const AabbBounds& box) {
     float tNear = ray.tMin;
     float tFar = ray.tMax;
@@ -56,8 +47,7 @@ bool nearAabbWireframeEdge(const Ray& ray, const AabbBounds& box) {
             return false;
         }
     }
-    // enterAxis's local coordinate is locked at whichever face was entered (0 or 1) -- only the
-    // other two axes' distance-to-0-or-1 matters for "is this point near an edge of that face".
+    // enterAxis's local coordinate is locked at whichever face was entered (0 or 1) -- only the other two axes' distance-to-0-or-1 matters for "is this point near an edge of that face".
     const glm::vec3 hitPoint = ray.origin + (ray.dir * tNear);
     const glm::vec3 extent = box.max - box.min;
     const glm::vec3 local = (hitPoint - box.min) / glm::max(extent, glm::vec3(1e-6F));
@@ -105,14 +95,7 @@ ShadingFrame buildShadingFrame(const ShadingVertex& shading, const Material& mat
         (tangentSpaceNormal.x * tangent) + (tangentSpaceNormal.y * bitangent) +
         (tangentSpaceNormal.z * normal));
 
-    // Blinn 1978 bump mapping: perturbs mappedNormal further using the bump texture's height
-    // difference between adjacent texels -- a texture-space (not screen-space) derivative, so no
-    // ray-differential tracking is needed. Applied on top of the normal map (not the base geometric
-    // normal), since this asset ships both: the normal map carries the sculpted macro surface
-    // direction, bump adds a finer wrinkle on top. Deliberately NOT divided by texel size into a
-    // true per-UV-unit derivative: at this asset's 4096px resolution that divisor is ~4096, which
-    // amplifies even tiny neighboring-texel differences into a huge tilt -- settings.bumpStrength
-    // instead scales the raw (small, well-behaved) per-texel height difference directly.
+    // Blinn 1978 bump mapping: perturbs mappedNormal further using the bump texture's height difference between adjacent texels -- a texture-space (not screen-space) derivative, so no ray-differential tracking is needed. Applied on top of the normal map (not the base geometric normal), since this asset ships both: the normal map carries the sculpted macro surface direction, bump adds a finer wrinkle on top. Deliberately NOT divided by texel size into a true per-UV-unit derivative: at this asset's 4096px resolution that divisor is ~4096, which amplifies even tiny neighboring-texel differences into a huge tilt -- settings.bumpStrength instead scales the raw (small, well-behaved) per-texel height difference directly.
     const glm::vec2 texel(1.0F / static_cast<float>(material.bumpTexture.width),
                            1.0F / static_cast<float>(material.bumpTexture.height));
     const float dHdu =
@@ -165,10 +148,7 @@ struct TraceResult {
     glm::vec3 refraction{0.0F};
 };
 
-// Which of the five transport-component AOV buckets a path's contribution belongs to -- set once at
-// bounce 0's lobe, stickily overridden to Refraction the moment any bounce samples a transmission
-// lobe. Direct-vs-indirect for Diffuse/SpecularReflection isn't tracked here; it falls out of which
-// bounce index the radiance-contributing miss lands on (see tracePath).
+// Which of the five transport-component AOV buckets a path's contribution belongs to -- set once at bounce 0's lobe, stickily overridden to Refraction the moment any bounce samples a transmission lobe. Direct-vs-indirect for Diffuse/SpecularReflection isn't tracked here; it falls out of which bounce index the radiance-contributing miss lands on (see tracePath).
 enum class PathBucket { Diffuse, SpecularReflection, Refraction };
 
 TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
@@ -179,11 +159,7 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
                        Sampler& sampler) {
     glm::vec3 radiance(0.0F);
     glm::vec3 throughput(1.0F);
-    // Mirrors `throughput` exactly except a diffuse-lobe pick at bounce 0 multiplies in
-    // sample->rawThroughputWeight (the lobe's kd, no baseColor) instead of the physical
-    // throughputWeight -- used only to compute the delighted Direct/IndirectDiffuse AOV bucket
-    // writes below, never `radiance` itself. Diverges from `throughput` by exactly one factor (the
-    // primary surface's own base color), so deeper-bounce surfaces still legitimately tint it.
+    // Mirrors `throughput` exactly except a diffuse-lobe pick at bounce 0 multiplies in sample->rawThroughputWeight (the lobe's kd, no baseColor) instead of the physical throughputWeight -- used only to compute the delighted Direct/IndirectDiffuse AOV bucket writes below, never `radiance` itself. Diverges from `throughput` by exactly one factor (the primary surface's own base color), so deeper-bounce surfaces still legitimately tint it.
     glm::vec3 diffuseRawThroughput(1.0F);
     Ray ray = primaryRay;
     float firstHitIor = -1.0F;
@@ -194,16 +170,7 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
     glm::vec3 directSpecularAccum(0.0F);
     glm::vec3 indirectSpecularAccum(0.0F);
     glm::vec3 refractionAccum(0.0F);
-    // Routes a radiance contribution into the path's bucket -- a no-op when pathBucket is unset,
-    // i.e. the camera ray missed all geometry on bounce 0 (background seen directly): that
-    // contribution is real (added to `radiance`/beauty by the caller) but isn't attributed to any of
-    // the five transport-component AOVs, the same way a "background" AOV is conventionally kept
-    // separate from surface-interaction AOVs in production renderers.
-    //
-    // isDirect: "exactly one surface vertex between camera and light" -- for a BSDF-sampled miss,
-    // that's bounce==1 (one hit at bounce 0, then straight to the environment); for NEE firing at the
-    // vertex reached at bounce 0 (querying the light directly from the first surface hit, no extra
-    // bounce needed), that's bounce==0. Both describe the same physical path length; see call sites.
+    // Routes a radiance contribution into the path's bucket -- a no-op when pathBucket is unset, i.e. the camera ray missed all geometry on bounce 0 (background seen directly): that contribution is real (added to `radiance`/beauty by the caller) but isn't attributed to any of the five transport-component AOVs, the same way a "background" AOV is conventionally kept separate from surface-interaction AOVs in production renderers. isDirect: "exactly one surface vertex between camera and light" -- for a BSDF-sampled miss, that's bounce==1 (one hit at bounce 0, then straight to the environment); for NEE firing at the vertex reached at bounce 0 (querying the light directly from the first surface hit, no extra bounce needed), that's bounce==0. Both describe the same physical path length; see call sites.
     const auto addToBucket = [&](const glm::vec3& contribution, bool isDirect) {
         if (!pathBucket.has_value()) {
             return;
@@ -220,9 +187,7 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
                 break;
         }
     };
-    // Primary-hit (bounce==0) G-buffer locals, folded into the final TraceResult at the end of this
-    // function -- captured separately from radiance/firstHitIor/bounce since those keep changing for
-    // the rest of the loop after bounce 0, while the G-buffer is a one-shot snapshot.
+    // Primary-hit (bounce==0) G-buffer locals, folded into the final TraceResult at the end of this function -- captured separately from radiance/firstHitIor/bounce since those keep changing for the rest of the loop after bounce 0, while the G-buffer is a one-shot snapshot.
     bool primaryHit = false;
     glm::vec3 gWorldPos(0.0F);
     glm::vec2 gUv(0.0F);
@@ -238,31 +203,21 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
     float gShadow = 0.0F;  // default: no surface hit at all -- not "shadowed", just background
     float gWireframe = 0.0F;
 
-    // MIS state for the *previous* bounce's BSDF sample (the one that produced `ray`) -- used to
-    // reweight this bounce's miss contribution against NEE's light-sampling pdf, so a direction
-    // reachable by both strategies isn't double-counted. Meaningless at bounce==0 (ray is the
-    // primary/camera ray, not a BSDF sample -- its miss is a pure camera-visibility event, not part
-    // of the two-strategy light-transport estimator NEE/MIS balances).
+    // MIS state for the *previous* bounce's BSDF sample (the one that produced `ray`) -- used to reweight this bounce's miss contribution against NEE's light-sampling pdf, so a direction reachable by both strategies isn't double-counted. Meaningless at bounce==0 (ray is the primary/camera ray, not a BSDF sample -- its miss is a pure camera-visibility event, not part of the two-strategy light-transport estimator NEE/MIS balances).
     float lastBsdfPdf = 0.0F;
     bool lastSampleWasTransmission = false;
 
-    // bounce 0 (the primary/camera ray, direct lighting via NEE) always traces regardless of
-    // maxBounces -- maxBounces counts secondary/indirect bounces beyond it, so maxBounces==0 means
-    // direct lighting only, no continuation rays.
+    // bounce 0 (the primary/camera ray, direct lighting via NEE) always traces regardless of maxBounces -- maxBounces counts secondary/indirect bounces beyond it, so maxBounces==0 means direct lighting only, no continuation rays.
     for (; bounce <= settings.maxBounces; ++bounce) {
         const std::optional<Hit> hit = accel.intersect(ray);
         if (!hit.has_value()) {
-            // showSky gates only the primary ray's own miss (the camera seeing the background
-            // directly) -- indirect bounces and NEE (below) always sample real environment radiance
-            // regardless of showSky, so hiding the background doesn't unlight the scene.
+            // showSky gates only the primary ray's own miss (the camera seeing the background directly) -- indirect bounces and NEE (below) always sample real environment radiance regardless of showSky, so hiding the background doesn't unlight the scene.
             if (bounce == 0 && !showSky) {
                 break;
             }
             const glm::vec3 envRadiance =
                 environmentMap.sampleDirection(ray.dir, envRotationRadians) * envExposure;
-            // Power heuristic (Veach 1997): full weight for bounce 0 (camera ray, not part of the
-            // MIS estimator) and after a transmission sample (delta lobe -- NEE has zero density
-            // there, so there's no double-counting risk to correct for).
+            // Power heuristic (Veach 1997): full weight for bounce 0 (camera ray, not part of the MIS estimator) and after a transmission sample (delta lobe -- NEE has zero density there, so there's no double-counting risk to correct for).
             float misWeight = 1.0F;
             if (bounce > 0 && !lastSampleWasTransmission) {
                 const float lightPdf = environmentMap.pdf(ray.dir, envRotationRadians);
@@ -286,8 +241,7 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
         const ShadingFrame frame = buildShadingFrame(shading, material, settings);
         const BsdfParams params = resolveBsdfParams(material, shading.uv, settings);
         const glm::vec3 woWorld = -ray.dir;
-        // Geometric (unmapped) normal -- needed both for the G-buffer snapshot below and for the
-        // normal-map light-leak rejection further down, computed once and reused for both.
+        // Geometric (unmapped) normal -- needed both for the G-buffer snapshot below and for the normal-map light-leak rejection further down, computed once and reused for both.
         const glm::vec3 geoNormal = geometricNormalOf(triangle);
 
         if (bounce == 0) {
@@ -296,9 +250,7 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
             gWorldPos = shading.position;
             gUv = shading.uv;
             gNormal = frame.normal;
-            // Smooth interpolated vertex normal, before normal-mapping -- distinct from `geoNormal`
-            // (the true flat per-triangle plane normal used below for shadow-ray offsetting and
-            // normal-map light-leak rejection, which needs the actual geometry, not this).
+            // Smooth interpolated vertex normal, before normal-mapping -- distinct from `geoNormal` (the true flat per-triangle plane normal used below for shadow-ray offsetting and normal-map light-leak rejection, which needs the actual geometry, not this).
             gGeomNormal = glm::normalize(shading.normal);
             gAlbedo = params.baseColor;
             gMetallic = params.metallic;
@@ -318,9 +270,7 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
             break;
         }
 
-        // Bucket assignment: bounce 0 sets the path's bucket from scratch; any later bounce only
-        // ever overrides it to Refraction (sticky -- once a path passes through a transmission lobe,
-        // its remaining contribution is refraction transport regardless of what it was before).
+        // Bucket assignment: bounce 0 sets the path's bucket from scratch; any later bounce only ever overrides it to Refraction (sticky -- once a path passes through a transmission lobe, its remaining contribution is refraction transport regardless of what it was before).
         if (bounce == 0) {
             pathBucket = sample->type == LobeType::SpecularTransmission ? PathBucket::Refraction
                          : sample->type == LobeType::Diffuse            ? PathBucket::Diffuse
@@ -329,15 +279,7 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
             pathBucket = PathBucket::Refraction;
         }
 
-        // Next-event estimation: sample the environment directly from this vertex (importance
-        // sampled by luminance, see EnvironmentMap::importanceSampleDirection), evaluate the
-        // (combined, delta-transmission-lobe-excluded) BSDF value/pdf toward it, and add the
-        // MIS-weighted contribution if unoccluded. Independent of whichever lobe `sample` above drew
-        // for the continuing bounce -- NEE and the continuing ray are two separate estimators for two
-        // separate directions from the same vertex, only sharing this vertex's params/frame. Firing
-        // unconditionally (no lobe-type check) is deliberate: evaluateBsdf/pdfBsdf already return
-        // ~0 at a near-pure-transmissive vertex (both structurally exclude the delta transmission
-        // lobe), so NEE self-attenuates to negligible cost/contribution there with no special-casing.
+        // Next-event estimation: sample the environment directly from this vertex (importance sampled by luminance, see EnvironmentMap::importanceSampleDirection), evaluate the (combined, delta-transmission-lobe-excluded) BSDF value/pdf toward it, and add the MIS-weighted contribution if unoccluded. Independent of whichever lobe `sample` above drew for the continuing bounce -- NEE and the continuing ray are two separate estimators for two separate directions from the same vertex, only sharing this vertex's params/frame. Firing unconditionally (no lobe-type check) is deliberate: evaluateBsdf/pdfBsdf already return ~0 at a near-pure-transmissive vertex (both structurally exclude the delta transmission lobe), so NEE self-attenuates to negligible cost/contribution there with no special-casing.
         {
             const EnvironmentMap::EnvSample lightSample =
                 environmentMap.importanceSampleDirection(sampler.next2D(), envRotationRadians);
@@ -349,9 +291,7 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
                 const float bsdfPdf = pdfBsdf(params, woLocal, wiLocalLight);
                 if (bsdfPdf > 0.0F &&
                     (bsdfValue.x > 0.0F || bsdfValue.y > 0.0F || bsdfValue.z > 0.0F)) {
-                    // Shadow ray offset toward geoNormal only -- geoCos>0 already established the
-                    // light sample is on that side, unlike the continuing bounce ray below which can
-                    // go either side depending on wi.
+                    // Shadow ray offset toward geoNormal only -- geoCos>0 already established the light sample is on that side, unlike the continuing bounce ray below which can go either side depending on wi.
                     const glm::vec3 shadowOrigin =
                         shadowTerminatorOffset(triangle, hit->u, hit->v) + (geoNormal * kRayEpsilon);
                     const Ray shadowRay{shadowOrigin, lightSample.direction, kRayEpsilon,
@@ -371,21 +311,13 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
                         radiance += neeContribution;
                         glm::vec3 bucketContribution = neeContribution;
                         if (pathBucket == PathBucket::Diffuse) {
-                            // At bounce 0, this vertex IS the primary surface -- use the raw (no
-                            // baseColor) diffuse lobe so its own texture never enters the AOV. At
-                            // deeper bounces this vertex's color is a later surface's, which
-                            // legitimately tints indirect diffuse -- only diffuseRawThroughput (missing
-                            // the primary surface's albedo) needs to differ from throughput there.
+                            // At bounce 0, this vertex IS the primary surface -- use the raw (no baseColor) diffuse lobe so its own texture never enters the AOV. At deeper bounces this vertex's color is a later surface's, which legitimately tints indirect diffuse -- only diffuseRawThroughput (missing the primary surface's albedo) needs to differ from throughput there.
                             const glm::vec3 diffuseLobeRaw =
                                 bounce == 0 ? evaluateDiffuseRaw(params, woLocal, wiLocalLight) : bsdfValue;
                             bucketContribution = diffuseRawThroughput * diffuseLobeRaw * envRadiance *
                                                   shadingCos * misWeightLight / lightSample.pdf;
                         } else if (pathBucket == PathBucket::SpecularReflection) {
-                            // Mirrors the Diffuse branch above: isolate bounce 0's own specular lobe
-                            // so its NEE contribution isn't contaminated by this vertex's diffuse
-                            // term (evaluateBsdf/bsdfValue is the combined value of both lobes). No
-                            // albedo-factor swap needed here (see evaluateSpecularOnly) -- throughput
-                            // is already the right multiplier, unlike diffuseRawThroughput.
+                            // Mirrors the Diffuse branch above: isolate bounce 0's own specular lobe so its NEE contribution isn't contaminated by this vertex's diffuse term (evaluateBsdf/bsdfValue is the combined value of both lobes). No albedo-factor swap needed here (see evaluateSpecularOnly) -- throughput is already the right multiplier, unlike diffuseRawThroughput.
                             const glm::vec3 specularLobe =
                                 bounce == 0 ? evaluateSpecularOnly(params, woLocal, wiLocalLight) : bsdfValue;
                             bucketContribution = throughput * specularLobe * envRadiance *
@@ -406,10 +338,7 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
 
         const glm::vec3 wiWorld = frame.toWorld(sample->wiLocal);
 
-        // Geometric-normal-consistency rejection (normal-map robustness -- simpler stand-in for
-        // Schussler et al. 2017's full two-facet microsurface reconstruction): a reflection/diffuse
-        // sample crossing to the wrong side of the true triangle plane is a normal-map light-leak
-        // artifact, not a physical bounce.
+        // Geometric-normal-consistency rejection (normal-map robustness -- simpler stand-in for Schussler et al. 2017's full two-facet microsurface reconstruction): a reflection/diffuse sample crossing to the wrong side of the true triangle plane is a normal-map light-leak artifact, not a physical bounce.
         if (sample->type != LobeType::SpecularTransmission) {
             const bool woAbove = glm::dot(woWorld, geoNormal) > 0.0F;
             const bool wiAbove = glm::dot(wiWorld, geoNormal) > 0.0F;
@@ -432,8 +361,7 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
             diffuseRawThroughput /= continueProb;
         }
 
-        // Chiang/Li/Burley shadow-terminator-corrected origin, nudged off the true triangle plane
-        // along the geometric normal (toward wi's side) to avoid self-intersection.
+        // Chiang/Li/Burley shadow-terminator-corrected origin, nudged off the true triangle plane along the geometric normal (toward wi's side) to avoid self-intersection.
         const glm::vec3 offsetOrigin =
             shadowTerminatorOffset(triangle, hit->u, hit->v) +
             (geoNormal * kRayEpsilon * (glm::dot(wiWorld, geoNormal) > 0.0F ? 1.0F : -1.0F));
@@ -478,8 +406,7 @@ PathTraceResult renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                                   const PathTraceSettings& settings, std::uint32_t runSeed,
                                   const std::atomic<std::uint64_t>& generation,
                                   std::uint64_t requestedGeneration, RowThreadPool& threadPool) {
-    // 24 fields (beauty/iorAov/bounceHeatmap + 16 G-buffer AOVs + 5 transport-component AOVs) -- see
-    // PathTraceResult's declaration order in path_tracer.h, which this positional init must match.
+    // 24 fields (beauty/iorAov/bounceHeatmap + 16 G-buffer AOVs + 5 transport-component AOVs) -- see PathTraceResult's declaration order in path_tracer.h, which this positional init must match.
     PathTraceResult result{makeImage(width, height), makeImage(width, height),
                             makeImage(width, height), makeImage(width, height),
                             makeImage(width, height), makeImage(width, height),

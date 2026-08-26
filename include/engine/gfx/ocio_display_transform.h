@@ -6,9 +6,7 @@
 
 namespace engine::gfx {
 
-// Owns three display shaders — sRGB LUT, Rec.1886/Rec.709 LUT, and a raw (unencoded) passthrough — compiled once at startup, switched at runtime via the debug 'L' key (cycles sRGB -> Rec709 -> Raw).
-//
-// Holds no OCIO::Const*RcPtr members: Config/Processor/GpuShaderDesc are only needed transiently in create() to generate GLSL text. No custom move semantics needed either — ShaderProgram is already move-only, and the rest are trivial scalars.
+// Owns three display shaders — sRGB LUT, Rec.1886/Rec.709 LUT, and a raw (unencoded) passthrough — compiled once at startup, switched at runtime via the debug 'L' key (cycles sRGB -> Rec709 -> Raw). Holds no OCIO::Const*RcPtr members: Config/Processor/GpuShaderDesc are only needed transiently in create() to generate GLSL text. No custom move semantics needed either — ShaderProgram is already move-only, and the rest are trivial scalars.
 class OcioDisplayTransform {
 public:
     enum class Lut { Raw, SRGB, Rec709 };

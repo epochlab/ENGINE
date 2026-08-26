@@ -5,9 +5,7 @@
 
 namespace engine::config {
 
-// Tunable shading constants that shape how a material's textures get turned into BSDF input --
-// externalized so these can be edited without recompiling. See assets/config/material.json for the
-// checked-in defaults.
+// Tunable shading constants that shape how a material's textures get turned into BSDF input -- externalized so these can be edited without recompiling; see assets/config/material.json for the checked-in defaults.
 struct MaterialConfig {
     float bumpStrength;   // scales the bump texture's raw per-texel height difference; see path_tracer.cpp's buildShadingFrame
     float roughnessMin;   // floor applied to the roughness texture sample, avoids a near-zero-roughness GGX singularity

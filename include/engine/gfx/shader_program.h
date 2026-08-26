@@ -19,13 +19,13 @@ public:
     static std::optional<ShaderProgram> loadFromFiles(const std::string& vertPath,
                                                         const std::string& fragPath);
 
-    // First-class entry point, not just loadFromFiles's implementation detail: Stage F compiles OCIO's runtime-generated GLSL text, which never exists as a file on disk.
+    // First-class entry point, not just loadFromFiles's implementation detail: OCIO's runtime-generated GLSL text never exists as a file on disk, so it must compile from source directly.
     static std::optional<ShaderProgram> loadFromSource(const std::string& vertSrc,
                                                         const std::string& fragSrc);
 
     void use() const;
 
-    // -1 (GL's own sentinel) if name doesn't match an active uniform. Not cached: only a couple of uniforms exist this stage, each looked up once at startup — a cache would solve a cost that doesn't exist yet.
+    // -1 (GL's own sentinel) if name doesn't match an active uniform. Not cached: each uniform is looked up once at startup, so a cache would solve a cost that doesn't exist.
     [[nodiscard]] int uniformLocation(const std::string& name) const;
 
 private:
