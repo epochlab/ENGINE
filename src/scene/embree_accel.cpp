@@ -128,6 +128,13 @@ std::optional<Hit> EmbreeAccel::intersect(const Ray& ray) const {
     return Hit{rayHit.ray.tfar, static_cast<int>(rayHit.hit.primID), rayHit.hit.u, rayHit.hit.v};
 }
 
+AabbBounds EmbreeAccel::sceneBounds() const {
+    RTCBounds bounds{};
+    rtcGetSceneBounds(scene_, &bounds);
+    return AabbBounds{glm::vec3(bounds.lower_x, bounds.lower_y, bounds.lower_z),
+                       glm::vec3(bounds.upper_x, bounds.upper_y, bounds.upper_z)};
+}
+
 bool EmbreeAccel::occluded(const Ray& ray) const {
     RTCRay embreeRay{};
     embreeRay.org_x = ray.origin.x;

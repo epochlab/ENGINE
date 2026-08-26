@@ -31,6 +31,9 @@ enum class AovId : int {
     DirectSpecular,
     IndirectSpecular,
     Refraction,
+    Shadow,
+    Wireframe,
+    BoundingBox,
     Count  // sentinel, == array size, not itself a selectable value
 };
 
@@ -45,6 +48,7 @@ inline constexpr const char* kAovNames[] = {
     "AO",           "Fresnel",        "IOR",             "Bounce Count",
     "Direct Diffuse", "Indirect Diffuse", "Direct Specular",
     "Indirect Specular", "Refraction",
+    "Shadow",       "Wireframe",      "Bounding Box",
 };
 static_assert(sizeof(kAovNames) / sizeof(kAovNames[0]) == static_cast<int>(AovId::Count),
               "kAovNames must stay index-parallel with AovId");

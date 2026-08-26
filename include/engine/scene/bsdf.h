@@ -68,6 +68,14 @@ struct BsdfSample {
 [[nodiscard]] glm::vec3 evaluateDiffuseRaw(const BsdfParams& params, const glm::vec3& woLocal,
                                             const glm::vec3& wiLocal);
 
+// The specular lobe's value at wiLocal alone, excluding the diffuse term evaluateBsdf combines it
+// with -- the DirectSpecular/IndirectSpecular AOV's counterpart to evaluateDiffuseRaw, isolating
+// NEE's own-vertex specular contribution from the mixed diffuse+specular value. Unlike
+// evaluateDiffuseRaw this needs no albedo-factor removal (the specular lobe is already physical, not
+// texture-modulated the way baseColor modulates diffuse).
+[[nodiscard]] glm::vec3 evaluateSpecularOnly(const BsdfParams& params, const glm::vec3& woLocal,
+                                              const glm::vec3& wiLocal);
+
 // Stochastically samples one of {rough specular reflection, diffuse, smooth specular transmission}
 // by Fresnel-derived probability, returns the ready-to-multiply throughput weight. Diffuse+specular
 // combine via the one-sample mixture estimator (both lobes evaluated at whichever wi was drawn, not
