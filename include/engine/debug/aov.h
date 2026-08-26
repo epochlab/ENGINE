@@ -2,8 +2,7 @@
 
 namespace engine::debug {
 
-// Single source of truth for every AOV the HUD can select and the path tracer can produce.
-// AppResources.aov stays a plain int (ImGui::Combo needs int&), cast via static_cast<AovId>(app.aov).
+// Single source of truth for every AOV the HUD can select and the path tracer can produce -- AppResources.aov stays a plain int (ImGui::Combo needs int&), cast via static_cast<AovId>(app.aov).
 enum class AovId : int {
     Beauty = 0,
     Alpha,
@@ -37,9 +36,7 @@ enum class AovId : int {
     Count  // sentinel, == array size, not itself a selectable value
 };
 
-// Display name, index-parallel to AovId -- the single array HudOverlay's combo box binds to.
-// Reordering must keep this parallel with AovId's declaration order; the static_assert below only
-// catches a length mismatch, not a reorder.
+// Display name, index-parallel to AovId -- the single array HudOverlay's combo box binds to. Reordering must keep this parallel with AovId's declaration order; the static_assert below only catches a length mismatch, not a reorder.
 inline constexpr const char* kAovNames[] = {
     "Beauty",       "Alpha",          "Depth",           "HSV",
     "Luminance",    "Sobel",          "Gabor",           "WorldPos",

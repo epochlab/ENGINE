@@ -33,14 +33,14 @@ public:
     // {width, height} in screen points (glfwGetWindowSize), same units as cursorPosition(). Use to scale cursor into framebufferSize()/image pixel space; don't divide cursorPosition() by framebufferSize() directly.
     [[nodiscard]] std::pair<int, int> windowSize() const;
 
-    // Invoked on GLFW's key event (GLFW_PRESS/GLFW_RELEASE/GLFW_REPEAT). Scancode/mods aren't forwarded — no consumer needs them yet. First consumer was Stage F's debug LUT-toggle key ('L'); Phase 3's 'R' camera-reset and channel-isolation hotkeys share this same single slot. WASD/QE turned out to need continuous per-frame state, not an edge-triggered event, so they use isKeyDown() below instead — this slot never needed to become multi-consumer.
+    // Invoked on GLFW's key event (GLFW_PRESS/GLFW_RELEASE/GLFW_REPEAT). Scancode/mods aren't forwarded — no consumer needs them. Single callback slot, shared by every edge-triggered hotkey; WASD/QE need continuous per-frame state instead, so they use isKeyDown() below.
     using KeyCallback = std::function<void(int key, int action)>;
     void setKeyCallback(KeyCallback callback);
 
     // Polled key state (glfwGetKey), for continuous movement (WASD/QE) where an edge-triggered callback would only fire once per press.
     [[nodiscard]] bool isKeyDown(int key) const;
 
-    // Invoked on GLFW's mouse-button event. Single slot, like KeyCallback — Phase 3's LMB-drag orbit is this window's only consumer so far.
+    // Invoked on GLFW's mouse-button event. Single slot, like KeyCallback.
     using MouseButtonCallback = std::function<void(int button, int action)>;
     void setMouseButtonCallback(MouseButtonCallback callback);
 

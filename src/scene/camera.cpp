@@ -8,11 +8,7 @@ namespace {
 
 constexpr glm::vec3 kWorldUp{0.0F, 1.0F, 0.0F};
 
-// Standard right-handed Euler-angle forward vector, parameterized so yaw=0/pitch=0 already points down -Z (this codebase's convention) without the usual -90-degree yaw offset used by e.g. LearnOpenGL's camera derivation.
-//
-// Derivation: rotating the default forward (0,0,-1) about world +Y by yaw using the standard right-handed rotation matrix
-//   Ry(yaw) = [ cos(yaw), 0, sin(yaw); 0, 1, 0; -sin(yaw), 0, cos(yaw) ]
-// gives (-sin(yaw), 0, -cos(yaw)); pitch then tilts that vector toward +Y (looking up, positive pitch) by scaling the horizontal components by cos(pitch) and introducing sin(pitch) vertically. The result is already unit length (cos^2(yaw)cos^2(pitch) + sin^2(yaw)cos^2(pitch) + sin^2(pitch) == 1); normalize() below is float-error defense only.
+// Standard right-handed Euler-angle forward vector, parameterized so yaw=0/pitch=0 already points down -Z (this codebase's convention) without the usual -90-degree yaw offset used by e.g. LearnOpenGL's camera derivation. Derivation: rotating the default forward (0,0,-1) about world +Y by yaw using the standard right-handed rotation matrix Ry(yaw) = [ cos(yaw), 0, sin(yaw); 0, 1, 0; -sin(yaw), 0, cos(yaw) ] gives (-sin(yaw), 0, -cos(yaw)); pitch then tilts that vector toward +Y (looking up, positive pitch) by scaling the horizontal components by cos(pitch) and introducing sin(pitch) vertically. The result is already unit length (cos^2(yaw)cos^2(pitch) + sin^2(yaw)cos^2(pitch) + sin^2(pitch) == 1); normalize() below is float-error defense only.
 glm::vec3 forwardFromEuler(float yawRadians, float pitchRadians) {
     const float cosPitch = std::cos(pitchRadians);
     return glm::normalize(glm::vec3(-std::sin(yawRadians) * cosPitch, std::sin(pitchRadians),

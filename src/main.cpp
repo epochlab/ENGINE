@@ -87,11 +87,7 @@ std::array<float, 100> buildGaborKernel() {
     return kernel;
 }
 
-// Snapshot of every input renderPathTraced's result actually depends on -- compared frame to frame
-// (see requestPathTraceIfTriggerChanged) to decide whether to hand PathTraceDriver a fresh request.
-// envRotationDegrees defaults to the sentinel -1 (never a real value, since the HUD clamps it to
-// [0,359]) specifically so the very first comparison always mismatches, giving the path-traced view
-// a live result from the first rendered frame with no separate startup-trace call needed.
+// Snapshot of every input renderPathTraced's result actually depends on -- compared frame to frame (see requestPathTraceIfTriggerChanged) to decide whether to hand PathTraceDriver a fresh request. envRotationDegrees defaults to the sentinel -1 (never a real value, since the HUD clamps it to [0,359]) specifically so the very first comparison always mismatches, giving the path-traced view a live result from the first rendered frame with no separate startup-trace call needed.
 struct PathTraceTriggerState {
     glm::vec3 cameraPosition{0.0F};
     float cameraYawDegrees = 0.0F;
@@ -106,11 +102,7 @@ struct PathTraceTriggerState {
     bool operator==(const PathTraceTriggerState&) const = default;
 };
 
-// Everything the render loop touches every frame, plus the one-time-computed state (cached uniform
-// locations, Embree scene) that must stay alive for the run's duration. A pure aggregate (no
-// user-declared constructors) so initializeApp can return it by value via designated initializers --
-// each RAII member's own move constructor (already verified elsewhere to correctly transfer GL
-// handles/tracked byte counts) handles the actual transfer.
+// Everything the render loop touches every frame, plus the one-time-computed state (cached uniform locations, Embree scene) that must stay alive for the run's duration. A pure aggregate (no user-declared constructors) so initializeApp can return it by value via designated initializers -- each RAII member's own move constructor (already verified elsewhere to correctly transfer GL handles/tracked byte counts) handles the actual transfer.
 struct AppResources {
     engine::gfx::ShaderProgram edgeFilterShader;
     engine::gfx::ShaderProgram hsvDisplayShader;
@@ -142,28 +134,14 @@ struct AppResources {
     int envRotationDegrees;
     float envExposureStops;  // stops, not a multiplier; requestPathTrace does exp2()
 
-    // Async path-traced view, selected via the `aov` field (engine::debug::AovId, the HUD's AOV
-    // dropdown). pathTraceDriver runs continuously on its own background thread once constructed
-    // (main() constructs it after initializeApp() returns -- see path_trace_driver.h's constructor
-    // precondition on reference stability); requestTrace() is called only from renderFrame's
-    // requestPathTraceIfTriggerChanged, whenever lastPathTraceTrigger detects the camera/scene state
-    // renderPathTraced depends on has changed -- no manual trigger.
-    //
-    // unique_ptr, not a by-value optional: PathTraceDriver holds reference members and an owned
-    // std::jthread/std::mutex, so it's neither copyable nor movable -- a by-value optional<T> member
-    // would make that non-movability propagate to AppResources itself (optional<T>'s move ctor is
-    // only available when T's is), which would break initializeApp's return-by-value/RVO pattern
-    // every other member here relies on. A unique_ptr's own move just transfers ownership of the
-    // pointee's address, never touching PathTraceDriver's reference members, so AppResources stays
-    // movable and PathTraceDriver itself is never relocated in memory once constructed.
+    // Async path-traced view, selected via the `aov` field (engine::debug::AovId, the HUD's AOV dropdown). pathTraceDriver runs continuously on its own background thread once constructed (main() constructs it after initializeApp() returns -- see path_trace_driver.h's constructor precondition on reference stability); requestTrace() is called only from renderFrame's requestPathTraceIfTriggerChanged, whenever lastPathTraceTrigger detects the camera/scene state renderPathTraced depends on has changed -- no manual trigger. unique_ptr, not a by-value optional: PathTraceDriver holds reference members and an owned std::jthread/std::mutex, so it's neither copyable nor movable -- a by-value optional<T> member would make that non-movability propagate to AppResources itself (optional<T>'s move ctor is only available when T's is), which would break initializeApp's return-by-value/RVO pattern every other member here relies on. A unique_ptr's own move just transfers ownership of the pointee's address, never touching PathTraceDriver's reference members, so AppResources stays movable and PathTraceDriver itself is never relocated in memory once constructed.
     engine::scene::PathTraceSettings pathTraceSettings;
     int maxSamples;  // accumulated-pass cap for PathTraceDriver; 0 = unbounded
     std::unique_ptr<engine::scene::PathTraceDriver> pathTraceDriver;
     std::optional<engine::gfx::Texture> pathTraceDisplayTexture;
     int pathTraceDisplayedAov;  // which AovId pathTraceDisplayTexture currently holds, -1 = none yet
     int pathTraceDisplayedChannelView;  // which channelView pathTraceDisplayTexture was isolated for, -1 = none yet
-    // Strong ref (kept alive, not just an identity pointer) to whichever PathTraceSnapshot object
-    // (gbuffer/dynamic) pathTraceDisplayTexture currently reflects -- see ensurePathTraceDisplayTexture.
+    // Strong ref (kept alive, not just an identity pointer) to whichever PathTraceSnapshot object (gbuffer/dynamic) pathTraceDisplayTexture currently reflects -- see ensurePathTraceDisplayTexture.
     std::shared_ptr<const void> pathTraceDisplayedOwner;
     PathTraceTriggerState lastPathTraceTrigger;  // sentinel-initialized, see its own doc comment
 
@@ -186,8 +164,7 @@ struct RequiredShaders {
 
 // All shader/OCIO loading in one place so initializeApp has one all-or-nothing check, matching how it already treats model/environment loading as a single startup gate.
 std::optional<RequiredShaders> loadShaders() {
-    // HSV/Sobel/Gabor AOV display passes -- see hsv_display.frag/edge_filter.frag; both run over the
-    // path tracer's Beauty image via the shared fullscreen-triangle post-process pass.
+    // HSV/Sobel/Gabor AOV display passes -- see hsv_display.frag/edge_filter.frag; both run over the path tracer's Beauty image via the shared fullscreen-triangle post-process pass.
     std::optional<engine::gfx::ShaderProgram> edgeFilterShader =
         engine::gfx::ShaderProgram::loadFromFiles(ASSET_ROOT_DIR "/shaders/fullscreen_triangle.vert",
                                                    ASSET_ROOT_DIR "/shaders/edge_filter.frag");
@@ -215,20 +192,14 @@ int setupEdgeFilterShader(const engine::gfx::ShaderProgram& edgeFilterShader) {
     return edgeFilterShader.uniformLocation("uFilterMode");
 }
 
-// hsv_display.frag's uHdrColor texture unit is fixed for the whole run, same convention as
-// setupEdgeFilterShader above. Returns uChannelView's cached location.
+// hsv_display.frag's uHdrColor texture unit is fixed for the whole run, same convention as setupEdgeFilterShader above. Returns uChannelView's cached location.
 int setupHsvDisplayShader(const engine::gfx::ShaderProgram& hsvDisplayShader) {
     hsvDisplayShader.use();
     GL_CALL(glUniform1i(hsvDisplayShader.uniformLocation("uHdrColor"), 0));
     return hsvDisplayShader.uniformLocation("uChannelView");
 }
 
-// All one-time startup work: camera/model/shader/environment loading (nullopt on any failure --
-// matches the shader/model/OCIO all-or-nothing gate this replaces), Embree scene build, and cached
-// uniform-location lookups for the shared edge-filter/HSV shaders. Doesn't wire input callbacks --
-// those capture a stable AppResources& and must be set up by the caller only after this returns (see
-// main()), since a callback capturing a reference into an AppResources that's still about to be moved
-// into its final std::optional storage would dangle.
+// All one-time startup work: camera/model/shader/environment loading (nullopt on any failure -- matches the shader/model/OCIO all-or-nothing gate this replaces), Embree scene build, and cached uniform-location lookups for the shared edge-filter/HSV shaders. Doesn't wire input callbacks -- those capture a stable AppResources& and must be set up by the caller only after this returns (see main()), since a callback capturing a reference into an AppResources that's still about to be moved into its final std::optional storage would dangle.
 std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sceneConfig,
                                            const engine::config::ProfileConfig& profileConfig,
                                            const engine::config::MaterialConfig& materialConfig,
@@ -280,8 +251,7 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
     const int totalPoints = totalTriangles * 3;
 
     std::optional<RequiredShaders> shaders = loadShaders();
-    // Decoded once here (not via a texture-upload helper) since projectIrradianceSH9-era GPU upload
-    // no longer exists -- the path tracer is the only consumer, sampling this CPU HdrImage directly.
+    // Decoded once here (not via a texture-upload helper): the path tracer is the only consumer, sampling this CPU HdrImage directly, with no GPU upload step in between.
     std::optional<engine::gfx::HdrImage> environmentImage =
         engine::gfx::loadExr(std::string(ASSET_ROOT_DIR) + "/" + profileConfig.hdriPath);
 
@@ -335,11 +305,7 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         .gpuInfo = gpuInfo,
         .uFilterModeLoc = uFilterModeLoc,
         .uHsvChannelViewLoc = uHsvChannelViewLoc,
-        // aov selects which AOV the path tracer's snapshot supplies (see selectPathTracedImage);
-        // channelView isolates one R/G/B channel of whatever aov currently shows. userLut is the LUT
-        // 'L' cycles through -- kept separate from OcioDisplayTransform's active LUT because non-Beauty
-        // AOVs force Raw (see the LUT-select comment in presentFrame) and must not clobber the user's
-        // actual choice. Both aov and userLut start from profile.json rather than a fixed literal.
+        // aov selects which AOV the path tracer's snapshot supplies (see selectPathTracedImage); channelView isolates one R/G/B channel of whatever aov currently shows. userLut is the LUT 'L' cycles through -- kept separate from OcioDisplayTransform's active LUT because non-Beauty AOVs force Raw (see the LUT-select comment in presentFrame) and must not clobber the user's actual choice. Both aov and userLut start from profile.json rather than a fixed literal.
         .aov = profileConfig.defaultAov,
         .channelView = 0,
         .userLut = profileConfig.defaultLut,
@@ -360,11 +326,7 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
                 .roughnessMax = materialConfig.roughnessMax,
             },
         .maxSamples = profileConfig.maxSamples,
-        // Constructed in main() right after initializeApp() returns -- see path_trace_driver.h's
-        // constructor precondition (its reference members must bind to sceneAccel/environmentMap/
-        // stumpModel at their final, permanent address, which this designated-initializer
-        // expression, still local-variable-based and one AppResources move away from that address,
-        // cannot yet guarantee).
+        // Constructed in main() right after initializeApp() returns -- see path_trace_driver.h's constructor precondition (its reference members must bind to sceneAccel/environmentMap/stumpModel at their final, permanent address, which this designated-initializer expression, still local-variable-based and one AppResources move away from that address, cannot yet guarantee).
         .pathTraceDriver = nullptr,
         .pathTraceDisplayTexture = std::nullopt,
         .pathTraceDisplayedAov = -1,
@@ -384,9 +346,7 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
     };
 }
 
-// Debug-only: 'L' cycles the viewer LUT (sRGB -> Rec709 -> Raw -> sRGB -> ...), Raw being a genuine no-display-encode passthrough for direct encoded-vs-unencoded comparison. 'R'/'G'/'B' toggle isolating a channel of the active AOV (pressing the active one again turns it back off) -- reset moved to '0' to free these back up. 'K' toggles the centre-crosshair framing overlay. No general input-mapping system for these few keys is needed: WASD/QE turned out to need continuous per-frame state (Window::isKeyDown) rather than this edge-triggered callback, so this single slot still covers everything that's actually event-shaped.
-//
-// Wired up here, not inside initializeApp: every callback captures a reference into app, which must already be at its final, stable address (main()'s local, unwrapped from the optional initializeApp returned) -- capturing a reference during initializeApp would dangle the moment that AppResources is moved into its optional's storage.
+// Debug-only: 'L' cycles the viewer LUT (sRGB -> Rec709 -> Raw -> sRGB -> ...), Raw being a genuine no-display-encode passthrough for direct encoded-vs-unencoded comparison. 'R'/'G'/'B' toggle isolating a channel of the active AOV (pressing the active one again turns it back off) -- reset moved to '0' to free these back up. 'K' toggles the centre-crosshair framing overlay. No general input-mapping system for these few keys is needed: WASD/QE need continuous per-frame state (Window::isKeyDown) rather than this edge-triggered callback, so this single slot still covers everything that's actually event-shaped. Wired up here, not inside initializeApp: every callback captures a reference into app, which must already be at its final, stable address (main()'s local, unwrapped from the optional initializeApp returned) -- capturing a reference during initializeApp would dangle the moment that AppResources is moved into its optional's storage.
 void wireCallbacks(engine::platform::Window& window, AppResources& app) {
     window.setKeyCallback([&app](int key, int action) {
         if (action != GLFW_PRESS) {
@@ -449,13 +409,7 @@ glm::vec3 sampleTexel(const engine::gfx::HdrImage& image, int x, int y) {
     return {image.rgba[idx + 0], image.rgba[idx + 1], image.rgba[idx + 2]};
 }
 
-// Reads back the literal on-screen pixel under the cursor, for the bottom-right HUD probe --
-// framebuffer 0 already holds presentFrame's composited, OCIO-display-transformed image (LUT+exposure
-// for Beauty, Raw for everything else, including the post-filter AOVs' actual filtered pixel), so this
-// is correct for every AOV by construction with no duplicated shading/curve math.
-// cursorPosition()/windowSize() are screen points, framebufferSize() is framebuffer pixels -- scale,
-// don't divide by framebuffer size directly (wrong by DPI factor on Retina). GL's Y origin is
-// bottom-left, cursor's is top-left, hence the flip.
+// Reads back the literal on-screen pixel under the cursor, for the bottom-right HUD probe -- framebuffer 0 already holds presentFrame's composited, OCIO-display-transformed image (LUT+exposure for Beauty, Raw for everything else, including the post-filter AOVs' actual filtered pixel), so this is correct for every AOV by construction with no duplicated shading/curve math. cursorPosition()/windowSize() are screen points, framebufferSize() is framebuffer pixels -- scale, don't divide by framebuffer size directly (wrong by DPI factor on Retina). GL's Y origin is bottom-left, cursor's is top-left, hence the flip.
 engine::debug::PixelProbeSample samplePixelProbe(const engine::platform::Window& window) {
     const auto [windowWidth, windowHeight] = window.windowSize();
     if (windowWidth <= 0 || windowHeight <= 0) {
@@ -479,10 +433,7 @@ engine::debug::PixelProbeSample samplePixelProbe(const engine::platform::Window&
     return {true, glm::vec4(pixel[0], pixel[1], pixel[2], pixel[3]) / 255.0F};
 }
 
-// Orbit pivot picked from the path tracer's own G-buffer (worldPos/alpha at its centre pixel) --
-// sampled at the gbuffer image's own resolution, not the live window size, in case of a resize race.
-// Falls back to a fixed forward-offset pivot when no pass has published yet or the centre pixel missed
-// all geometry.
+// Orbit pivot picked from the path tracer's own G-buffer (worldPos/alpha at its centre pixel) -- sampled at the gbuffer image's own resolution, not the live window size, in case of a resize race. Falls back to a fixed forward-offset pivot when no pass has published yet or the centre pixel missed all geometry.
 void resolveOrbitPick(engine::platform::Window& window, AppResources& app,
                        const engine::scene::Camera& camera,
                        const engine::scene::PathTraceSnapshot& pathTraceSnapshot) {
@@ -508,16 +459,7 @@ void resolveOrbitPick(engine::platform::Window& window, AppResources& app,
     app.lastCursorY = cursorY;
 }
 
-// HdrImage's row 0 is documented as the image's top (EXR/glTF convention, hdr_image.h); GL texture
-// v=0 samples the first uploaded row, and fullscreen_triangle.vert's vUv places v=0 at the bottom of
-// the window. Row-reversing here -- only for this fixed-blit display path, never for material or
-// environment HdrImages sampled via mesh UVs / the equirect formula (environment_map.cpp), which
-// already agree with row-0-top by construction -- makes the uploaded buffer's first row the image's
-// bottom row, matching every other texture this same blit displays.
-//
-// channelView isolates one R/G/B channel (broadcast to grey) -- folded into this same per-pixel copy
-// rather than a separate shader pass, since the path-traced display texture is a direct CPU-image
-// upload with no shader pass of its own to apply it in.
+// HdrImage's row 0 is documented as the image's top (EXR/glTF convention, hdr_image.h); GL texture v=0 samples the first uploaded row, and fullscreen_triangle.vert's vUv places v=0 at the bottom of the window. Row-reversing here -- only for this fixed-blit display path, never for material or environment HdrImages sampled via mesh UVs / the equirect formula (environment_map.cpp), which already agree with row-0-top by construction -- makes the uploaded buffer's first row the image's bottom row, matching every other texture this same blit displays. channelView isolates one R/G/B channel (broadcast to grey) -- folded into this same per-pixel copy rather than a separate shader pass, since the path-traced display texture is a direct CPU-image upload with no shader pass of its own to apply it in.
 std::vector<float> flipRowsForDisplay(const engine::gfx::HdrImage& image, int channelView) {
     std::vector<float> flipped(image.rgba.size());
     const std::size_t rowFloats = static_cast<std::size_t>(image.width) * 4;
@@ -539,18 +481,13 @@ std::vector<float> flipRowsForDisplay(const engine::gfx::HdrImage& image, int ch
     return flipped;
 }
 
-// Bundles the HdrImage a given AOV should display with a type-erased strong ref to whichever of
-// PathTraceSnapshot's two objects (gbuffer/dynamic) actually owns it. That ref both keeps the owning
-// object alive and gives ensurePathTraceDisplayTexture an ABA-safe cache-key identity: a raw pointer
-// to it could, in principle, be freed and have a later unrelated shared_ptr allocation reuse the same
-// address; holding a real shared_ptr can't.
+// Bundles the HdrImage a given AOV should display with a type-erased strong ref to whichever of PathTraceSnapshot's two objects (gbuffer/dynamic) actually owns it. That ref both keeps the owning object alive and gives ensurePathTraceDisplayTexture an ABA-safe cache-key identity: a raw pointer to it could, in principle, be freed and have a later unrelated shared_ptr allocation reuse the same address; holding a real shared_ptr can't.
 struct PathTracedAovSource {
     const engine::gfx::HdrImage* image = nullptr;
     std::shared_ptr<const void> owner;
 };
 
-// Returns a default (null image) while either half of the snapshot hasn't published its first pass
-// yet -- callers show black instead. Extended as PathTraceGBuffer/PathTraceDynamic grow more buffers.
+// Returns a default (null image) while either half of the snapshot hasn't published its first pass yet -- callers show black instead. Extended as PathTraceGBuffer/PathTraceDynamic grow more buffers.
 PathTracedAovSource selectPathTracedImage(const engine::scene::PathTraceSnapshot& snapshot,
                                            engine::debug::AovId aov) {
     if (!snapshot.gbuffer || !snapshot.dynamic) {
@@ -610,24 +547,7 @@ PathTracedAovSource selectPathTracedImage(const engine::scene::PathTraceSnapshot
     }
 }
 
-// Rebuilds pathTraceDisplayTexture only when the selected AOV, the channel-view isolation, or the
-// driver's published result object actually changed -- recreating a GL texture (alloc + upload +
-// mipmap) every frame just to redisplay the same image would violate this codebase's
-// no-allocation-after-init convention for no reason. The driver publishes a fresh result object every
-// completed pass, though, so while it's actively converging this does rebuild the texture up to once
-// per rendered frame -- that per-frame cap (not a lower one) is deliberate: it is what makes
-// newly-accumulated samples visible at all.
-//
-// channelViewToBake: normally app.channelView, isolating an R/G/B channel of `image` itself before
-// upload -- except the HSV AOV, which passes 0 (no isolation here) and applies channel view to its
-// own H/S/V output instead (see hsv_display.frag's uChannelView): isolating a source RGB channel
-// first would broadcast it to grey, and grey always converts to H=0/S=0, destroying the very thing
-// that AOV exists to show.
-//
-// owner: a strong ref to whichever PathTraceSnapshot object actually owns `image` (see
-// PathTracedAovSource) -- comparing shared_ptr identity, not a raw pointer, since a raw pointer to a
-// previous frame's already-freed result could in principle have its address reused by a later
-// allocation (ABA); holding a real shared_ptr in app.pathTraceDisplayedOwner rules that out.
+// Rebuilds pathTraceDisplayTexture only when the selected AOV, the channel-view isolation, or the driver's published result object actually changed -- recreating a GL texture (alloc + upload + mipmap) every frame just to redisplay the same image would violate this codebase's no-allocation-after-init convention for no reason. The driver publishes a fresh result object every completed pass, though, so while it's actively converging this does rebuild the texture up to once per rendered frame -- that per-frame cap (not a lower one) is deliberate: it is what makes newly-accumulated samples visible at all. channelViewToBake: normally app.channelView, isolating an R/G/B channel of `image` itself before upload -- except the HSV AOV, which passes 0 (no isolation here) and applies channel view to its own H/S/V output instead (see hsv_display.frag's uChannelView): isolating a source RGB channel first would broadcast it to grey, and grey always converts to H=0/S=0, destroying the very thing that AOV exists to show. owner: a strong ref to whichever PathTraceSnapshot object actually owns `image` (see PathTracedAovSource) -- comparing shared_ptr identity, not a raw pointer, since a raw pointer to a previous frame's already-freed result could in principle have its address reused by a later allocation (ABA); holding a real shared_ptr in app.pathTraceDisplayedOwner rules that out.
 void ensurePathTraceDisplayTexture(AppResources& app, const std::shared_ptr<const void>& owner,
                                     const engine::gfx::HdrImage& image, int channelViewToBake) {
     if (app.pathTraceDisplayTexture.has_value() && app.pathTraceDisplayedAov == app.aov &&
@@ -643,8 +563,7 @@ void ensurePathTraceDisplayTexture(AppResources& app, const std::shared_ptr<cons
     app.pathTraceDisplayedOwner = owner;
 }
 
-// Nothing to show yet (no path-trace pass has published) or the selected AOV has no buffer -- clears
-// the default framebuffer instead of leaving stale contents on screen.
+// Nothing to show yet (no path-trace pass has published) or the selected AOV has no buffer -- clears the default framebuffer instead of leaving stale contents on screen.
 void clearToBlack(int winWidth, int winHeight) {
     GL_CALL(glBindFramebuffer(GL_FRAMEBUFFER, 0));
     GL_CALL(glViewport(0, 0, winWidth, winHeight));
@@ -652,9 +571,7 @@ void clearToBlack(int winWidth, int winHeight) {
     GL_CALL(glClear(GL_COLOR_BUFFER_BIT));
 }
 
-// Blits the path-traced buffer for the selected AOV through the shared OCIO/post-process path --
-// Beauty uses the user's LUT, everything else forces Raw (not scene-referred radiance, a display
-// curve would distort them).
+// Blits the path-traced buffer for the selected AOV through the shared OCIO/post-process path -- Beauty uses the user's LUT, everything else forces Raw (not scene-referred radiance, a display curve would distort them).
 void presentFrame(AppResources& app, const engine::scene::PathTraceSnapshot& pathTraceSnapshot,
                    int winWidth, int winHeight) {
     const auto aovId = static_cast<engine::debug::AovId>(app.aov);
@@ -668,8 +585,7 @@ void presentFrame(AppResources& app, const engine::scene::PathTraceSnapshot& pat
         aovId == engine::debug::AovId::HSV || aovId == engine::debug::AovId::Luminance ||
         aovId == engine::debug::AovId::Sobel || aovId == engine::debug::AovId::Gabor;
     if (isPostFilterAov) {
-        // These are 2D image filters of the beauty image, not independent per-AOV buffers -- always
-        // read path-traced Beauty regardless of which of the four is selected.
+        // These are 2D image filters of the beauty image, not independent per-AOV buffers -- always read path-traced Beauty regardless of which of the four is selected.
         const bool isHsv = aovId == engine::debug::AovId::HSV;
         ensurePathTraceDisplayTexture(app, pathTraceSnapshot.dynamic, pathTraceSnapshot.dynamic->beauty,
                                        isHsv ? 0 : app.channelView);
@@ -709,10 +625,7 @@ void presentFrame(AppResources& app, const engine::scene::PathTraceSnapshot& pat
     clearToBlack(winWidth, winHeight);
 }
 
-// Non-blocking: hands a fresh request to the background PathTraceDriver, which restarts progressive
-// accumulation at this camera pose/window size (superseding whatever it was accumulating before) and
-// converges over subsequent passes on its own thread. Called only from renderFrame, whenever
-// PathTraceTriggerState detects camera/scene state renderPathTraced depends on has changed.
+// Non-blocking: hands a fresh request to the background PathTraceDriver, which restarts progressive accumulation at this camera pose/window size (superseding whatever it was accumulating before) and converges over subsequent passes on its own thread. Called only from renderFrame, whenever PathTraceTriggerState detects camera/scene state renderPathTraced depends on has changed.
 void requestPathTrace(AppResources& app, const engine::scene::Camera& camera, int winWidth,
                       int winHeight) {
     app.pathTraceDriver->requestTrace(engine::scene::PathTraceDriver::Request{
@@ -720,13 +633,7 @@ void requestPathTrace(AppResources& app, const engine::scene::Camera& camera, in
         app.showSky, std::exp2(app.envExposureStops), app.pathTraceSettings, app.maxSamples});
 }
 
-// Called once per rendered frame. Re-traces on any input that would actually change the image --
-// not a fixed timer -- so the path-traced view stays live without retracing every frame the camera
-// happens to sit still. Because DebugCameraController's fly/orbit controls update every frame a
-// key/mouse-drag is held, this does mean a fresh (progressive-accumulation-reset) request fires on
-// almost every frame for the duration of any camera interaction -- accepted: async execution
-// (PathTraceDriver) keeps that from blocking the UI, it just converges more slowly while the camera
-// is moving, matching how every interactive path tracer (Cycles' viewport, Brigade) behaves.
+// Called once per rendered frame. Re-traces on any input that would actually change the image -- not a fixed timer -- so the path-traced view stays live without retracing every frame the camera happens to sit still. Because DebugCameraController's fly/orbit controls update every frame a key/mouse-drag is held, this does mean a fresh (progressive-accumulation-reset) request fires on almost every frame for the duration of any camera interaction -- accepted: async execution (PathTraceDriver) keeps that from blocking the UI, it just converges more slowly while the camera is moving, matching how every interactive path tracer (Cycles' viewport, Brigade) behaves.
 void requestPathTraceIfTriggerChanged(AppResources& app, const engine::scene::Camera& camera,
                                        int winWidth, int winHeight) {
     const PathTraceTriggerState current{
@@ -773,8 +680,7 @@ void updateHud(AppResources& app, const engine::platform::Window& window,
         app.histogram,
         pathTracedStatus,
     };
-    // Round-tripped through locals so the HUD's sliders can bind plain float&s, same as aov --
-    // DebugCameraController is the authoritative owner, read before draw() and written back after.
+    // Round-tripped through locals so the HUD's sliders can bind plain float&s, same as aov -- DebugCameraController is the authoritative owner, read before draw() and written back after.
     float focalLengthMm = app.debugCamera.focalLengthMm();
     float aperture = app.debugCamera.aperture();
     float shutterSeconds = app.debugCamera.shutterSeconds();
@@ -789,8 +695,7 @@ void updateHud(AppResources& app, const engine::platform::Window& window,
     app.hud.render();
 }
 
-// One frame: poll -> update camera -> request a fresh path trace if input changed -> orbit-pick from
-// the path tracer's own G-buffer -> post-process blit to the default framebuffer -> swap.
+// One frame: poll -> update camera -> request a fresh path trace if input changed -> orbit-pick from the path tracer's own G-buffer -> post-process blit to the default framebuffer -> swap.
 void renderFrame(engine::platform::Window& window, AppResources& app) {
     window.pollEvents();
     app.hud.beginFrame();
@@ -805,10 +710,7 @@ void renderFrame(engine::platform::Window& window, AppResources& app) {
 
     requestPathTraceIfTriggerChanged(app, camera, winWidth, winHeight);
 
-    // Held for the rest of this frame so the objects behind it stay valid even if the driver
-    // publishes a newer result mid-frame -- shared_ptrs, not a raw fetch. gbuffer/dynamic are two
-    // separately-published objects (see PathTraceSnapshot's doc comment); either being null means no
-    // pass has completed yet.
+    // Held for the rest of this frame so the objects behind it stay valid even if the driver publishes a newer result mid-frame -- shared_ptrs, not a raw fetch. gbuffer/dynamic are two separately-published objects (see PathTraceSnapshot's doc comment); either being null means no pass has completed yet.
     const engine::scene::PathTraceSnapshot pathTraceSnapshot =
         app.pathTraceDriver != nullptr ? app.pathTraceDriver->latestResult()
                                         : engine::scene::PathTraceSnapshot{};
@@ -884,12 +786,7 @@ int main() {
                 if (!app) {
                     exitCode = EXIT_FAILURE;
                 } else {
-                    // Constructed here, not as part of AppResources's designated-initializer list:
-                    // app (this std::optional<AppResources> local) is where sceneAccel/environmentMap/
-                    // stumpModel first reach their final, permanent address (initializeApp's own
-                    // return-type conversion to std::optional<AppResources> move-constructs once en
-                    // route), so this is the first point at which PathTraceDriver's reference members
-                    // can safely bind to them -- see path_trace_driver.h's constructor comment.
+                    // Constructed here, not as part of AppResources's designated-initializer list: app (this std::optional<AppResources> local) is where sceneAccel/environmentMap/stumpModel first reach their final, permanent address (initializeApp's own return-type conversion to std::optional<AppResources> move-constructs once en route), so this is the first point at which PathTraceDriver's reference members can safely bind to them -- see path_trace_driver.h's constructor comment.
                     app->pathTraceDriver = std::make_unique<engine::scene::PathTraceDriver>(
                         app->sceneAccel, app->stumpModel.shadingTriangles, app->stumpModel.instances,
                         app->environmentMap);
