@@ -19,10 +19,14 @@ namespace engine::scene {
 // value here.
 struct PathTraceSettings {
     int samplesPerPixel;
-    int maxBounces;
+    int maxBounces;  // secondary/indirect bounces beyond the always-traced primary hit; 0 = direct lighting only
     int russianRouletteStartBounce;
     float rrMinProb = 0.05F;
     float rrMaxProb = 0.95F;
+    // Sourced from MaterialConfig/material.json -- see resolveRoughness/buildShadingFrame (path_tracer.cpp).
+    float bumpStrength;
+    float roughnessMin;
+    float roughnessMax;
 };
 
 // Single-channel fields are broadcast to RGB (alpha=1), matching HdrImage's fixed 4-floats/texel
@@ -39,9 +43,9 @@ struct PathTraceSettings {
 //
 // One renderPathTraced() call's raw output -- what a single pass computes. PathTraceDriver splits
 // this into PathTraceGBuffer (published once, on pass 1) and PathTraceDynamic (republished every
-// pass) at its publish boundary, since 14 of these 21 fields never change after the first pass; see
+// pass) at its publish boundary, since 17 of these 24 fields never change after the first pass; see
 // those two structs' own doc comments. renderPathTraced itself stays unaware of that distinction --
-// it always computes and returns the full 21 fields, same as a synchronous/non-driver caller would
+// it always computes and returns the full 24 fields, same as a synchronous/non-driver caller would
 // want.
 struct PathTraceResult {
     engine::gfx::HdrImage beauty;
@@ -62,6 +66,9 @@ struct PathTraceResult {
     engine::gfx::HdrImage alpha;       // 1.0 on a primary hit, 0.0 on a primary miss -- a real coverage mask, since this renderer isn't opaque-only-by-construction
     engine::gfx::HdrImage fresnel;     // Schlick term at the primary hit's view angle
     engine::gfx::HdrImage ao;          // baked AO texture sample at the primary hit (not ray-traced AO)
+    engine::gfx::HdrImage shadow;      // 1.0 = primary hit is shadowed/occluded from the env light's NEE sample, 0.0 = lit or no primary hit (background)
+    engine::gfx::HdrImage wireframe;   // 1.0 near a hit triangle's edge (barycentric distance), 0.0 elsewhere/no hit
+    engine::gfx::HdrImage boundingBox; // 1.0 near an edge of the scene's wireframe bounding cube -- independent of mesh hit, drawn over background too
 
     // Light-transport component breakdown, replacing a single combined "IBL" term. Averaged the same
     // way beauty is (across samples/passes). A path is bucketed once, by the lobe type sampled at its
@@ -70,17 +77,19 @@ struct PathTraceResult {
     // contributing event happens after exactly one bounce or more than one, not a separately tracked
     // decision. Refraction is orthogonal to this: any transmission-lobe sample, at bounce 0 or any
     // later bounce, stickily overrides the path's bucket to Refraction from that point on, regardless
-    // of what the bucket was before -- so directSpecular+indirectSpecular+refraction (PHYSICAL,
-    // unmodified) plus the true (albedo-multiplied) diffuse contribution sums to beauty MINUS whatever
-    // radiance the camera ray picked up by missing all geometry on bounce 0 (seeing the environment
-    // directly -- not attributed to any of these five, the same way a "background" AOV is
-    // conventionally kept separate from surface-interaction AOVs in production renderers).
+    // of what the bucket was before. refraction is PHYSICAL/unmodified.
     //
-    // directDiffuse/indirectDiffuse are DELIGHTED, not physical: the primary (bounce-0) surface's own
-    // base color texture is factored out (replaced by the diffuse lobe's raw kd weight) so these read
-    // as "how much light is arriving," not "light times this object's own texture" -- so they do NOT
-    // sum into beauty the way the other three buckets do. Later-bounce surfaces' colors still
-    // legitimately tint indirectDiffuse (that's real bounce transport, not this object's own texture).
+    // directDiffuse/indirectDiffuse and directSpecular/indirectSpecular are all DELIGHTED, not
+    // physical: at bounce 0, each isolates its own lobe's contribution to NEE from the vertex's
+    // combined diffuse+specular BSDF value (evaluateDiffuseRaw / evaluateSpecularOnly, bsdf.h) --
+    // diffuse additionally factors out the primary surface's own base color texture (replaced by the
+    // diffuse lobe's raw kd weight), specular does not need to (the specular lobe isn't texture-
+    // modulated the way baseColor modulates diffuse). Because bounce 0's non-bucketed lobe is dropped
+    // rather than attributed elsewhere, these four buckets plus refraction do NOT sum to beauty (nor
+    // to each other) the way a naive partition would -- each reads as "how much light of this
+    // transport type is arriving," not a literal decomposition of the beauty image. Later-bounce
+    // surfaces' colors still legitimately tint the indirect buckets (that's real bounce transport, not
+    // this object's own texture).
     engine::gfx::HdrImage directDiffuse;
     engine::gfx::HdrImage indirectDiffuse;
     engine::gfx::HdrImage directSpecular;
@@ -88,7 +97,7 @@ struct PathTraceResult {
     engine::gfx::HdrImage refraction;
 };
 
-// PathTraceResult's 14 primary-hit fields -- deterministic given an unchanged camera/scene, so
+// PathTraceResult's 17 primary-hit fields -- deterministic given an unchanged camera/scene, so
 // PathTraceDriver captures these once (pass 1 of a generation) and never rebuilds/republishes them
 // again, instead of paying their copy cost on every pass alongside the 7 fields that actually
 // accumulate (see PathTraceDynamic). Field meanings are identical to PathTraceResult's own doc
@@ -108,6 +117,9 @@ struct PathTraceGBuffer {
     engine::gfx::HdrImage alpha;
     engine::gfx::HdrImage fresnel;
     engine::gfx::HdrImage ao;
+    engine::gfx::HdrImage shadow;
+    engine::gfx::HdrImage wireframe;
+    engine::gfx::HdrImage boundingBox;
 };
 
 // PathTraceResult's 7 fields that genuinely re-average across passes -- see PathTraceGBuffer's doc
@@ -146,7 +158,7 @@ struct PathTraceDynamic {
                                                 const std::vector<MeshInstance>& instances,
                                                 const EnvironmentMap& environmentMap, int width,
                                                 int height, float envRotationRadians, bool showSky,
-                                                const PathTraceSettings& settings,
+                                                float envExposure, const PathTraceSettings& settings,
                                                 std::uint32_t runSeed,
                                                 const std::atomic<std::uint64_t>& generation,
                                                 std::uint64_t requestedGeneration,

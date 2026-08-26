@@ -77,13 +77,19 @@ void PathTraceDriver::driverLoop(std::stop_token stopToken) {
             continue;
         }
 
+        if (activeRequest->maxSamples > 0 &&
+            accumulatedSamples_.load(std::memory_order_relaxed) >= activeRequest->maxSamples) {
+            std::this_thread::sleep_for(kIdlePollInterval);
+            continue;
+        }
+
         const int passIndex = accumulatedSamples_.load(std::memory_order_relaxed) + 1;
         const auto passStart = std::chrono::steady_clock::now();
         PathTraceResult pass = renderPathTraced(
             activeRequest->camera, accel_, shadingTriangles_, instances_, environmentMap_,
             activeRequest->width, activeRequest->height, activeRequest->envRotationRadians,
-            activeRequest->showSky, activeRequest->settings, static_cast<std::uint32_t>(passIndex),
-            generation_, activeGeneration, threadPool_);
+            activeRequest->showSky, activeRequest->envExposure, activeRequest->settings,
+            static_cast<std::uint32_t>(passIndex), generation_, activeGeneration, threadPool_);
 
         if (generation_.load(std::memory_order_relaxed) != activeGeneration) {
             continue;  // superseded mid-pass -- discard, next iteration picks up the new request
@@ -100,7 +106,8 @@ void PathTraceDriver::driverLoop(std::stop_token stopToken) {
                 std::move(pass.uv), std::move(pass.normal), std::move(pass.geomNormal),
                 std::move(pass.albedo), std::move(pass.metallic), std::move(pass.roughness),
                 std::move(pass.tangent), std::move(pass.objectId), std::move(pass.alpha),
-                std::move(pass.fresnel), std::move(pass.ao)});
+                std::move(pass.fresnel), std::move(pass.ao), std::move(pass.shadow),
+                std::move(pass.wireframe), std::move(pass.boundingBox)});
             accumulator = PathTraceDynamic{
                 std::move(pass.beauty),         std::move(pass.bounceHeatmap),
                 std::move(pass.directDiffuse),  std::move(pass.indirectDiffuse),

@@ -75,6 +75,13 @@ std::pair<int, int> Window::framebufferSize() const {
     return {width, height};
 }
 
+std::pair<int, int> Window::windowSize() const {
+    int width = 0;
+    int height = 0;
+    glfwGetWindowSize(window_, &width, &height);
+    return {width, height};
+}
+
 void Window::setKeyCallback(KeyCallback callback) {
     keyCallback_ = std::move(callback);
 }

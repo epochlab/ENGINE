@@ -13,6 +13,7 @@ struct Material {
     float roughnessFactor;
     engine::gfx::HdrImage baseColorTexture;
     engine::gfx::HdrImage normalTexture;
+    engine::gfx::HdrImage bumpTexture;
     engine::gfx::HdrImage roughnessTexture;
     engine::gfx::HdrImage specularTexture;
     engine::gfx::HdrImage aoTexture;
