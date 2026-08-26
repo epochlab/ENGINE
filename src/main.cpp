@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
@@ -16,6 +17,7 @@
 
 #include <glm/glm.hpp>
 #include <glm/gtc/constants.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 
 #include "engine/config/profile_config.h"
 #include "engine/config/scene_config.h"
@@ -96,6 +98,7 @@ struct PathTraceTriggerState {
     float focalLengthMm = 0.0F;
     int envRotationDegrees = -1;
     bool showSky = false;
+    float envExposureStops = 0.0F;
     int winWidth = 0;
     int winHeight = 0;
 
@@ -136,6 +139,7 @@ struct AppResources {
     engine::debug::FramingOverlayState framingState;
     bool showSky;
     int envRotationDegrees;
+    float envExposureStops;  // stops, not a multiplier; requestPathTrace does exp2()
 
     // Async path-traced view, selected via the `aov` field (engine::debug::AovId, the HUD's AOV
     // dropdown). pathTraceDriver runs continuously on its own background thread once constructed
@@ -248,10 +252,17 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
                   << " exposure=" << initialCamera.exposure() << '\n';
     }
 
+    // Scene-level placement (scene.json position/rotationDegrees), order X,Y,Z.
+    const glm::mat4 sceneTransform =
+        glm::translate(glm::mat4(1.0F), sceneConfig.position) *
+        glm::rotate(glm::mat4(1.0F), glm::radians(sceneConfig.rotationDegrees.z), glm::vec3(0.0F, 0.0F, 1.0F)) *
+        glm::rotate(glm::mat4(1.0F), glm::radians(sceneConfig.rotationDegrees.y), glm::vec3(0.0F, 1.0F, 0.0F)) *
+        glm::rotate(glm::mat4(1.0F), glm::radians(sceneConfig.rotationDegrees.x), glm::vec3(1.0F, 0.0F, 0.0F));
+
     // tier1 LOD (36.5k triangles): fast iteration for shader work.
     const auto loadStart = std::chrono::steady_clock::now();
-    std::optional<engine::scene::LoadedModel> stumpModel =
-        engine::scene::loadGltf(std::string(ASSET_ROOT_DIR) + "/" + sceneConfig.gltfPath);
+    std::optional<engine::scene::LoadedModel> stumpModel = engine::scene::loadGltf(
+        std::string(ASSET_ROOT_DIR) + "/" + sceneConfig.gltfPath, sceneTransform);
     const double loadMs =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - loadStart)
             .count();
@@ -334,6 +345,8 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         .showSky = false,
         // HDR environment's Y-axis (world up) rotation, degrees [0,359] -- affects both the background and the environment's contribution to lighting (see environment_map.h), rotated at query time rather than re-baked.
         .envRotationDegrees = 0,
+        // HDRI Exposure slider, stops. requestPathTrace does exp2() -> path_tracer.cpp miss-ray sampleDirection.
+        .envExposureStops = 0.0F,
         .pathTraceSettings = engine::scene::PathTraceSettings{sceneConfig.samplesPerPixel,
                                                                 sceneConfig.maxBounces,
                                                                 sceneConfig.russianRouletteStartBounce},
@@ -361,7 +374,7 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
     };
 }
 
-// Debug-only: 'L' cycles the viewer LUT (sRGB -> Rec709 -> Raw -> sRGB -> ...), Raw being a genuine no-display-encode passthrough for direct encoded-vs-unencoded comparison. '1'/'2'/'3' toggle isolating a channel of the active AOV (pressing the active one again turns it back off) -- moved off R/G/B in Phase 3 so 'R' is free to reset the debug camera. 'K' toggles the centre-crosshair framing overlay. No general input-mapping system for these few keys is needed: WASD/QE turned out to need continuous per-frame state (Window::isKeyDown) rather than this edge-triggered callback, so this single slot still covers everything that's actually event-shaped.
+// Debug-only: 'L' cycles the viewer LUT (sRGB -> Rec709 -> Raw -> sRGB -> ...), Raw being a genuine no-display-encode passthrough for direct encoded-vs-unencoded comparison. 'R'/'G'/'B' toggle isolating a channel of the active AOV (pressing the active one again turns it back off) -- reset moved to '0' to free these back up. 'K' toggles the centre-crosshair framing overlay. No general input-mapping system for these few keys is needed: WASD/QE turned out to need continuous per-frame state (Window::isKeyDown) rather than this edge-triggered callback, so this single slot still covers everything that's actually event-shaped.
 //
 // Wired up here, not inside initializeApp: every callback captures a reference into app, which must already be at its final, stable address (main()'s local, unwrapped from the optional initializeApp returned) -- capturing a reference during initializeApp would dangle the moment that AppResources is moved into its optional's storage.
 void wireCallbacks(engine::platform::Window& window, AppResources& app) {
@@ -375,13 +388,13 @@ void wireCallbacks(engine::platform::Window& window, AppResources& app) {
                           : app.userLut == Lut::Rec709 ? Lut::Raw
                                                         : Lut::SRGB;
             std::cout << "OcioDisplayTransform: active LUT = " << lutName(app.userLut) << '\n';
-        } else if (key == GLFW_KEY_1) {
-            app.channelView = app.channelView == 1 ? 0 : 1;
-        } else if (key == GLFW_KEY_2) {
-            app.channelView = app.channelView == 2 ? 0 : 2;
-        } else if (key == GLFW_KEY_3) {
-            app.channelView = app.channelView == 3 ? 0 : 3;
         } else if (key == GLFW_KEY_R) {
+            app.channelView = app.channelView == 1 ? 0 : 1;
+        } else if (key == GLFW_KEY_G) {
+            app.channelView = app.channelView == 2 ? 0 : 2;
+        } else if (key == GLFW_KEY_B) {
+            app.channelView = app.channelView == 3 ? 0 : 3;
+        } else if (key == GLFW_KEY_0) {
             app.debugCamera.resetToDefault();
         } else if (key == GLFW_KEY_K) {
             app.framingState.crosshair = !app.framingState.crosshair;
@@ -418,12 +431,46 @@ engine::scene::Camera updateCamera(engine::platform::Window& window, AppResource
     return app.debugCamera.snapshot();
 }
 
-// Reads one RGB texel directly (no bilinear) -- gbuffer AOVs are per-pixel snapshots, not resampled here.
+// Direct texel read, no bilinear -- gbuffer AOVs are per-pixel snapshots.
 glm::vec3 sampleTexel(const engine::gfx::HdrImage& image, int x, int y) {
     const std::size_t idx = ((static_cast<std::size_t>(y) * static_cast<std::size_t>(image.width)) +
                               static_cast<std::size_t>(x)) *
                              4;
     return {image.rgba[idx + 0], image.rgba[idx + 1], image.rgba[idx + 2]};
+}
+
+// sampleTexel + alpha, for the pixel probe.
+glm::vec4 sampleTexelRgba(const engine::gfx::HdrImage& image, int x, int y) {
+    const std::size_t idx = ((static_cast<std::size_t>(y) * static_cast<std::size_t>(image.width)) +
+                              static_cast<std::size_t>(x)) *
+                             4;
+    return {image.rgba[idx + 0], image.rgba[idx + 1], image.rgba[idx + 2], image.rgba[idx + 3]};
+}
+
+// Samples presentFrame's returned image at the cursor, for the bottom-right HUD probe. For the
+// post-filter AOVs (HSV/Sobel/Gabor/Luminance) this is pre-filter beauty, not the filtered pixel on screen.
+// Linear, exposure-applied (RGB only), pre-LUT. exposureEv: relativeExposureEv() if aov==Beauty else 0.
+// cursorPosition()/windowSize() are screen points, image is framebuffer pixels -- scale, don't divide by framebuffer size directly (wrong by DPI factor on Retina).
+engine::debug::PixelProbeSample samplePixelProbe(const engine::platform::Window& window,
+                                                  const engine::gfx::HdrImage* image,
+                                                  float exposureEv) {
+    if (image == nullptr || image->width <= 0 || image->height <= 0) {
+        return {};
+    }
+    const auto [windowWidth, windowHeight] = window.windowSize();
+    if (windowWidth <= 0 || windowHeight <= 0) {
+        return {};
+    }
+    const auto [cursorX, cursorY] = window.cursorPosition();
+    if (cursorX < 0.0 || cursorY < 0.0 || cursorX >= windowWidth || cursorY >= windowHeight) {
+        return {};
+    }
+    const int imageX =
+        std::min(image->width - 1, static_cast<int>(cursorX / windowWidth * image->width));
+    const int imageY =
+        std::min(image->height - 1, static_cast<int>(cursorY / windowHeight * image->height));
+    const glm::vec4 texel = sampleTexelRgba(*image, imageX, imageY);
+    return {true, glm::vec4(glm::vec3(texel) * std::exp2(exposureEv), texel.a)};
 }
 
 // Orbit pivot picked from the path tracer's own G-buffer (worldPos/alpha at its centre pixel) --
@@ -595,14 +642,15 @@ void clearToBlack(int winWidth, int winHeight) {
 
 // Blits the path-traced buffer for the selected AOV through the shared OCIO/post-process path --
 // Beauty uses the user's LUT, everything else forces Raw (not scene-referred radiance, a display
-// curve would distort them).
-void presentFrame(AppResources& app, const engine::scene::PathTraceSnapshot& pathTraceSnapshot,
-                   int winWidth, int winHeight) {
+// curve would distort them). Returns the displayed HdrImage (nullptr if none) for samplePixelProbe.
+const engine::gfx::HdrImage* presentFrame(AppResources& app,
+                                           const engine::scene::PathTraceSnapshot& pathTraceSnapshot,
+                                           int winWidth, int winHeight) {
     const auto aovId = static_cast<engine::debug::AovId>(app.aov);
     const bool hasPathTraceResult = pathTraceSnapshot.gbuffer && pathTraceSnapshot.dynamic;
     if (!hasPathTraceResult) {
         clearToBlack(winWidth, winHeight);
-        return;
+        return nullptr;
     }
 
     const bool isPostFilterAov =
@@ -629,23 +677,26 @@ void presentFrame(AppResources& app, const engine::scene::PathTraceSnapshot& pat
             app.postProcess.draw(app.pathTraceDisplayTexture->id(), app.edgeFilterShader,
                                   {winWidth, winHeight});
         }
-        return;
+        return &pathTraceSnapshot.dynamic->beauty;
     }
 
     const PathTracedAovSource pathTracedSource = selectPathTracedImage(pathTraceSnapshot, aovId);
     if (pathTracedSource.image != nullptr) {
         ensurePathTraceDisplayTexture(app, pathTracedSource.owner, *pathTracedSource.image,
                                        app.channelView);
-        app.ocioTransform.setActiveLut(aovId == engine::debug::AovId::Beauty
-                                            ? app.userLut
-                                            : engine::gfx::OcioDisplayTransform::Lut::Raw);
+        const bool isBeauty = aovId == engine::debug::AovId::Beauty;
+        app.ocioTransform.setActiveLut(isBeauty ? app.userLut
+                                                 : engine::gfx::OcioDisplayTransform::Lut::Raw);
+        // Camera exposure applies to Beauty only, same reasoning as forcing Raw LUT above.
+        app.ocioTransform.setExposureEv(isBeauty ? app.debugCamera.relativeExposureEv() : 0.0F);
         app.ocioTransform.bind();
         app.postProcess.draw(app.pathTraceDisplayTexture->id(), app.ocioTransform.activeShader(),
                               {winWidth, winHeight});
-        return;
+        return pathTracedSource.image;
     }
 
     clearToBlack(winWidth, winHeight);
+    return nullptr;
 }
 
 // Non-blocking: hands a fresh request to the background PathTraceDriver, which restarts progressive
@@ -656,7 +707,7 @@ void requestPathTrace(AppResources& app, const engine::scene::Camera& camera, in
                       int winHeight) {
     app.pathTraceDriver->requestTrace(engine::scene::PathTraceDriver::Request{
         camera, winWidth, winHeight, glm::radians(static_cast<float>(app.envRotationDegrees)),
-        app.showSky, app.pathTraceSettings});
+        app.showSky, std::exp2(app.envExposureStops), app.pathTraceSettings});
 }
 
 // Called once per rendered frame. Re-traces on any input that would actually change the image --
@@ -670,7 +721,7 @@ void requestPathTraceIfTriggerChanged(AppResources& app, const engine::scene::Ca
                                        int winWidth, int winHeight) {
     const PathTraceTriggerState current{
         camera.position(),       app.debugCamera.yawDegrees(), app.debugCamera.pitchDegrees(),
-        app.debugCamera.focalLengthMm(), app.envRotationDegrees, app.showSky,
+        app.debugCamera.focalLengthMm(), app.envRotationDegrees, app.showSky, app.envExposureStops,
         winWidth,                winHeight};
     if (current == app.lastPathTraceTrigger) {
         return;
@@ -679,7 +730,9 @@ void requestPathTraceIfTriggerChanged(AppResources& app, const engine::scene::Ca
     app.lastPathTraceTrigger = current;
 }
 
-void updateHud(AppResources& app, const engine::scene::Camera& camera, int winWidth, int winHeight) {
+void updateHud(AppResources& app, const engine::platform::Window& window,
+               const engine::scene::Camera& camera, const engine::gfx::HdrImage* displayedImage,
+               int winWidth, int winHeight) {
     const int accumulatedSamples =
         app.pathTraceDriver != nullptr ? app.pathTraceDriver->accumulatedSamples() : 0;
     const engine::debug::PathTracedStatus pathTracedStatus{
@@ -711,11 +764,23 @@ void updateHud(AppResources& app, const engine::scene::Camera& camera, int winWi
         app.histogram,
         pathTracedStatus,
     };
-    // Round-tripped through a local so the HUD's Lens slider can bind a plain float&, same as aov -- DebugCameraController is the authoritative owner, read before draw() and written back after.
+    // Round-tripped through locals so the HUD's sliders can bind plain float&s, same as aov --
+    // DebugCameraController is the authoritative owner, read before draw() and written back after.
     float focalLengthMm = app.debugCamera.focalLengthMm();
-    app.hud.draw(hudFrameData, app.aov, focalLengthMm, app.showSky, app.envRotationDegrees,
-                 app.framingState);
+    float aperture = app.debugCamera.aperture();
+    float shutterSeconds = app.debugCamera.shutterSeconds();
+    float iso = app.debugCamera.iso();
+    const float probeExposureEv = static_cast<engine::debug::AovId>(app.aov) == engine::debug::AovId::Beauty
+                                       ? app.debugCamera.relativeExposureEv()
+                                       : 0.0F;
+    const engine::debug::PixelProbeSample pixelProbe =
+        samplePixelProbe(window, displayedImage, probeExposureEv);
+    app.hud.draw(hudFrameData, app.aov, focalLengthMm, aperture, shutterSeconds, iso, app.showSky,
+                 app.envRotationDegrees, app.envExposureStops, app.framingState, pixelProbe);
     app.debugCamera.setFocalLengthMm(focalLengthMm);
+    app.debugCamera.setAperture(aperture);
+    app.debugCamera.setShutterSeconds(shutterSeconds);
+    app.debugCamera.setIso(iso);
     app.hud.render();
 }
 
@@ -746,7 +811,7 @@ void renderFrame(engine::platform::Window& window, AppResources& app) {
     resolveOrbitPick(window, app, camera, pathTraceSnapshot);
 
     app.postTimer.begin();
-    presentFrame(app, pathTraceSnapshot, winWidth, winHeight);
+    const engine::gfx::HdrImage* displayedImage = presentFrame(app, pathTraceSnapshot, winWidth, winHeight);
     app.postTimer.end();
 
     // Captured after the composited image lands in the default framebuffer, before the HUD draws on top of it.
@@ -759,7 +824,7 @@ void renderFrame(engine::platform::Window& window, AppResources& app) {
         app.lastRamSample = now;
     }
 
-    updateHud(app, camera, winWidth, winHeight);
+    updateHud(app, window, camera, displayedImage, winWidth, winHeight);
 
     window.swapBuffers();
 }

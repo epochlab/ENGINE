@@ -27,6 +27,8 @@ struct LoadedModel {
 };
 
 // Parses path via cgltf, resolving each material's textures (relative to path's directory) via loadExr -- this project's glTF assets ship linear EXR maps, not glTF's usual PNG/JPEG. Returns nullopt and logs to stderr on any failure (bad file, missing accessor, missing texture, non-triangle primitive): fails clearly rather than substituting a placeholder for something this loader doesn't yet support.
-std::optional<LoadedModel> loadGltf(const std::string& path);
+// rootTransform seeds the node-hierarchy walk in place of identity (scene_config.h position/rotationDegrees, composed by caller).
+std::optional<LoadedModel> loadGltf(const std::string& path,
+                                     const glm::mat4& rootTransform = glm::mat4(1.0F));
 
 }  // namespace engine::scene

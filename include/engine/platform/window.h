@@ -30,6 +30,9 @@ public:
     // {width, height} in framebuffer pixels (glfwGetFramebufferSize), not screen points — the two differ by 2x on Retina displays. Queried fresh each call, not cached from a resize event.
     [[nodiscard]] std::pair<int, int> framebufferSize() const;
 
+    // {width, height} in screen points (glfwGetWindowSize), same units as cursorPosition(). Use to scale cursor into framebufferSize()/image pixel space; don't divide cursorPosition() by framebufferSize() directly.
+    [[nodiscard]] std::pair<int, int> windowSize() const;
+
     // Invoked on GLFW's key event (GLFW_PRESS/GLFW_RELEASE/GLFW_REPEAT). Scancode/mods aren't forwarded — no consumer needs them yet. First consumer was Stage F's debug LUT-toggle key ('L'); Phase 3's 'R' camera-reset and channel-isolation hotkeys share this same single slot. WASD/QE turned out to need continuous per-frame state, not an edge-triggered event, so they use isKeyDown() below instead — this slot never needed to become multi-consumer.
     using KeyCallback = std::function<void(int key, int action)>;
     void setKeyCallback(KeyCallback callback);

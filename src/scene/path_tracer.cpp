@@ -98,7 +98,8 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
                        const std::vector<ShadingTriangle>& shadingTriangles,
                        const std::vector<MeshInstance>& instances,
                        const EnvironmentMap& environmentMap, float envRotationRadians,
-                       bool showSky, const PathTraceSettings& settings, Sampler& sampler) {
+                       bool showSky, float envExposure, const PathTraceSettings& settings,
+                       Sampler& sampler) {
     glm::vec3 radiance(0.0F);
     glm::vec3 throughput(1.0F);
     // Mirrors `throughput` exactly except a diffuse-lobe pick at bounce 0 multiplies in
@@ -175,7 +176,8 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
             if (bounce == 0 && !showSky) {
                 break;
             }
-            const glm::vec3 envRadiance = environmentMap.sampleDirection(ray.dir, envRotationRadians);
+            const glm::vec3 envRadiance =
+                environmentMap.sampleDirection(ray.dir, envRotationRadians) * envExposure;
             // Power heuristic (Veach 1997): full weight for bounce 0 (camera ray, not part of the
             // MIS estimator) and after a transmission sample (delta lobe -- NEE has zero density
             // there, so there's no double-counting risk to correct for).
@@ -371,7 +373,7 @@ PathTraceResult renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                                   const std::vector<ShadingTriangle>& shadingTriangles,
                                   const std::vector<MeshInstance>& instances,
                                   const EnvironmentMap& environmentMap, int width, int height,
-                                  float envRotationRadians, bool showSky,
+                                  float envRotationRadians, bool showSky, float envExposure,
                                   const PathTraceSettings& settings, std::uint32_t runSeed,
                                   const std::atomic<std::uint64_t>& generation,
                                   std::uint64_t requestedGeneration, RowThreadPool& threadPool) {
@@ -416,7 +418,7 @@ PathTraceResult renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                 const Ray primary = camera.primaryRay(ndcX, ndcY, aspect);
                 const TraceResult trace = tracePath(primary, accel, shadingTriangles, instances,
                                                      environmentMap, envRotationRadians, showSky,
-                                                     settings, sampler);
+                                                     envExposure, settings, sampler);
                 colorAccum += trace.radiance;
                 if (s == 0) {
                     iorSample = trace.firstHitIor;
@@ -454,7 +456,10 @@ PathTraceResult renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                        primarySample.primaryHit ? falseColorForId(primarySample.objectIndex)
                                                  : glm::vec3(0.0F));
             writeTexel(result.alpha, x, y, glm::vec3(primarySample.primaryHit ? 1.0F : 0.0F));
-            writeTexel(result.fresnel, x, y, glm::vec3(primarySample.fresnel));
+            writeTexel(result.fresnel, x, y,
+                       primarySample.primaryHit
+                           ? glm::vec3(primarySample.fresnel, 1.0F - primarySample.fresnel, 0.0F)
+                           : glm::vec3(0.0F));
             writeTexel(result.ao, x, y, glm::vec3(primarySample.ao));
         }
     };

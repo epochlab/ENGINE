@@ -3,6 +3,8 @@
 #include <optional>
 #include <string>
 
+#include <glm/glm.hpp>
+
 #include "engine/gfx/ocio_display_transform.h"
 
 namespace engine::config {
@@ -10,6 +12,8 @@ namespace engine::config {
 // Everything main.cpp needs at startup that isn't camera/lens state (that's ProfileConfig): the model to load, window size, and initial debug-view state. gltfPath is relative to ASSET_ROOT_DIR, matching this project's existing asset-path convention. See assets/config/scene.json for the checked-in defaults.
 struct SceneConfig {
     std::string gltfPath;
+    glm::vec3 position;         // model root, composed on top of the glTF's own node transforms
+    glm::vec3 rotationDegrees;  // order X,Y,Z, see main.cpp's loadGltf call
     int windowWidth;
     int windowHeight;
     // Index into engine::debug::AovId / kAovNames (aov.h) (0 = Beauty).

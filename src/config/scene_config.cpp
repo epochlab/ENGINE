@@ -32,6 +32,8 @@ std::optional<SceneConfig> loadSceneConfig(const std::string& path) {
     }
 
     const std::optional<std::string> gltfPath = json::findString(*text, "gltfPath");
+    const std::optional<glm::vec3> position = json::findVec3(*text, "position");
+    const std::optional<glm::vec3> rotationDegrees = json::findVec3(*text, "rotationDegrees");
     const std::optional<double> windowWidth = json::findNumber(*text, "windowWidth");
     const std::optional<double> windowHeight = json::findNumber(*text, "windowHeight");
     const std::optional<double> initialAov = json::findNumber(*text, "initialAov");
@@ -43,15 +45,18 @@ std::optional<SceneConfig> loadSceneConfig(const std::string& path) {
     const std::optional<double> russianRouletteStartBounce =
         json::findNumber(*text, "russianRouletteStartBounce");
 
-    if (!gltfPath.has_value() || !windowWidth.has_value() || !windowHeight.has_value() ||
-        !initialAov.has_value() || !initialLut.has_value() || !samplesPerPixel.has_value() ||
-        !maxBounces.has_value() || !russianRouletteStartBounce.has_value()) {
+    if (!gltfPath.has_value() || !position.has_value() || !rotationDegrees.has_value() ||
+        !windowWidth.has_value() || !windowHeight.has_value() || !initialAov.has_value() ||
+        !initialLut.has_value() || !samplesPerPixel.has_value() || !maxBounces.has_value() ||
+        !russianRouletteStartBounce.has_value()) {
         std::cerr << "loadSceneConfig: " << path << " is missing one or more required fields\n";
         return std::nullopt;
     }
 
     return SceneConfig{
         *gltfPath,
+        *position,
+        *rotationDegrees,
         static_cast<int>(*windowWidth),
         static_cast<int>(*windowHeight),
         static_cast<int>(*initialAov),

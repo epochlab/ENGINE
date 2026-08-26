@@ -1,5 +1,7 @@
 {
     "gltfPath": "geometry/broken_stump_rkswd_raw/rkswd_tier_1.gltf",
+    "position": [0.0, 0.0, 0.0],
+    "rotationDegrees": [90.0, 0.0, -90.0],
     "windowWidth": 1024,
     "windowHeight": 576,
     "initialAov": 0,

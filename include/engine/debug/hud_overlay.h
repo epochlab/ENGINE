@@ -3,6 +3,8 @@
 #include <cstddef>
 #include <cstdint>
 
+#include <glm/glm.hpp>
+
 #include "engine/debug/scene_stats.h"
 
 struct GLFWwindow;
@@ -30,6 +32,12 @@ struct PathTracedStatus {
     bool hasResult = false;
     double lastPassSeconds = 0.0;
     int accumulatedSamples = 0;
+};
+
+// Pixel under cursor, sampled by main.cpp, exposure-applied but pre-LUT. valid=false off-viewport.
+struct PixelProbeSample {
+    bool valid = false;
+    glm::vec4 color{0.0F};
 };
 
 // Everything HudOverlay::draw needs for one frame, bundled to keep its signature from growing indefinitely as sections are added. aov and FramingOverlayState stay as separate mutable out-parameters on draw() itself since ImGui widgets bind directly to them.
@@ -66,17 +74,14 @@ public:
     // Call after window.pollEvents(), before any GL draw calls.
     void beginFrame() const;
 
-    // Builds the panel from already-collected values. Call after beginFrame(), before render(). aov
-    // is mutated in place by the single AOV combo box (indices/names from AovId, engine/debug/aov.h);
-    // focalLengthMm by the Lens section's slider; showSky by the HDRI section's "Show/Hide Background"
-    // checkbox (only takes visible effect for the Beauty AOV -- see main.cpp's render loop); envRotationDegrees
-    // ([0,359]) by the HDRI section's "Y-Axis" slider. The crosshair overlay is drawn over the full
-    // viewport (foreground draw list), independent of the ##hud panel, gated on framing.crosshair.
-    // The path tracer's convergence readout (frame.pathTraced) is shown in the Frame section --
-    // there's no manual render trigger, PathTraceDriver retraces automatically on any input change
-    // (see main.cpp's requestPathTraceIfTriggerChanged).
-    void draw(const HudFrameData& frame, int& aov, float& focalLengthMm, bool& showSky,
-              int& envRotationDegrees, const FramingOverlayState& framing) const;
+    // Call after beginFrame(), before render(). aov/focalLengthMm/aperture/shutterSeconds/iso/
+    // showSky/envRotationDegrees/envExposureStops are widget-bound out-params (Camera/HDRI sections).
+    // envExposureStops is EV; main.cpp's requestPathTrace does exp2(). pixelProbe is read-only,
+    // rendered bottom-right. framing.crosshair gates the centre-crosshair foreground overlay.
+    void draw(const HudFrameData& frame, int& aov, float& focalLengthMm, float& aperture,
+              float& shutterSeconds, float& iso, bool& showSky, int& envRotationDegrees,
+              float& envExposureStops, const FramingOverlayState& framing,
+              const PixelProbeSample& pixelProbe) const;
 
     // ImGui::Render + backend draw-data submit. Call after the post-process blit, before window.swapBuffers().
     void render() const;
