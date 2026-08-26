@@ -204,9 +204,10 @@ std::optional<Material> loadMaterialTextures(const cgltf_data* data, const cgltf
         loadTextureByIndex(data, extrasTextureIndex(mat.extras.data, "roughnessTexture"), dir);
     auto specular =
         loadTextureByIndex(data, extrasTextureIndex(mat.extras.data, "specularTexture"), dir);
-    if (!baseColor || !normal || !ao || !roughness || !specular) {
+    auto bump = loadTextureByIndex(data, extrasTextureIndex(mat.extras.data, "bumpTexture"), dir);
+    if (!baseColor || !normal || !ao || !roughness || !specular || !bump) {
         std::cerr << "loadGltf: material '" << (mat.name != nullptr ? mat.name : "<unnamed>")
-                   << "' is missing one or more of the 5 required textures\n";
+                   << "' is missing one or more of the 6 required textures\n";
         return std::nullopt;
     }
 
@@ -221,6 +222,7 @@ std::optional<Material> loadMaterialTextures(const cgltf_data* data, const cgltf
         pbr.roughness_factor,
         std::move(*baseColor),
         std::move(*normal),
+        std::move(*bump),
         std::move(*roughness),
         std::move(*specular),
         std::move(*ao),
