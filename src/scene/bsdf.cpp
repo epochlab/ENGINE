@@ -229,8 +229,13 @@ std::optional<BsdfSample> sampleBsdf(const BsdfParams& params, const glm::vec3& 
             return std::nullopt;
         }
         const glm::vec3 throughput = (f * wi.z) / pdf;
-        const glm::vec3 rawThroughput =
-            sampledSpecular ? throughput : glm::vec3(std::max(lobes.diffuseKd, 0.0F));
+        const glm::vec3 rawThroughput = [&]() -> glm::vec3 {
+            if (!sampledSpecular) {
+                return glm::vec3(std::max(lobes.diffuseKd, 0.0F));
+            }
+            const LobeEval spec = evaluateSpecularLobe(params, wo, wi, alpha, lobes.etaI, lobes.etaT);
+            return spec.pdf > 1e-8F ? spec.f * wi.z / spec.pdf : glm::vec3(0.0F);
+        }();
         return BsdfSample{glm::vec3(wi.x, wi.y, wi.z * sign), throughput,
                            sampledSpecular ? LobeType::SpecularReflection : LobeType::Diffuse,
                            rawThroughput};
