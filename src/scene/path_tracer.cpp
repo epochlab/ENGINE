@@ -296,6 +296,16 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
                                 bounce == 0 ? evaluateDiffuseRaw(params, woLocal, wiLocalLight) : bsdfValue;
                             bucketContribution = diffuseRawThroughput * diffuseLobeRaw * envRadiance *
                                                   shadingCos * misWeightLight / lightSample.pdf;
+                        } else if (pathBucket == PathBucket::SpecularReflection) {
+                            // Mirrors the Diffuse branch above: isolate bounce 0's own specular lobe
+                            // so its NEE contribution isn't contaminated by this vertex's diffuse
+                            // term (evaluateBsdf/bsdfValue is the combined value of both lobes). No
+                            // albedo-factor swap needed here (see evaluateSpecularOnly) -- throughput
+                            // is already the right multiplier, unlike diffuseRawThroughput.
+                            const glm::vec3 specularLobe =
+                                bounce == 0 ? evaluateSpecularOnly(params, woLocal, wiLocalLight) : bsdfValue;
+                            bucketContribution = throughput * specularLobe * envRadiance *
+                                                  shadingCos * misWeightLight / lightSample.pdf;
                         }
                         addToBucket(bucketContribution, /*isDirect=*/bounce == 0);
                     }
