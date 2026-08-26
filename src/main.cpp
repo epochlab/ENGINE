@@ -260,10 +260,10 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         glm::rotate(glm::mat4(1.0F), glm::radians(sceneConfig.rotationDegrees.y), glm::vec3(0.0F, 1.0F, 0.0F)) *
         glm::rotate(glm::mat4(1.0F), glm::radians(sceneConfig.rotationDegrees.x), glm::vec3(1.0F, 0.0F, 0.0F));
 
-    // tier1 LOD (36.5k triangles): fast iteration for shader work.
     const auto loadStart = std::chrono::steady_clock::now();
     std::optional<engine::scene::LoadedModel> stumpModel = engine::scene::loadGltf(
-        std::string(ASSET_ROOT_DIR) + "/" + sceneConfig.gltfPath, sceneTransform);
+        std::string(ASSET_ROOT_DIR) + "/" + sceneConfig.gltfPath, sceneTransform,
+        std::string(ASSET_ROOT_DIR) + "/" + sceneConfig.texturePath);
     const double loadMs =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - loadStart)
             .count();
@@ -281,7 +281,7 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
     // Decoded once here (not via a texture-upload helper) since projectIrradianceSH9-era GPU upload
     // no longer exists -- the path tracer is the only consumer, sampling this CPU HdrImage directly.
     std::optional<engine::gfx::HdrImage> environmentImage =
-        engine::gfx::loadExr(std::string(ASSET_ROOT_DIR) + "/textures/republiqueHDR_2k.exr");
+        engine::gfx::loadExr(std::string(ASSET_ROOT_DIR) + "/" + sceneConfig.hdriPath);
 
     if (!shaders || !stumpModel || !environmentImage) {
         std::cerr << "main: shader compile/link, model load, or environment map load failed, "
@@ -338,9 +338,9 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         // 'L' cycles through -- kept separate from OcioDisplayTransform's active LUT because non-Beauty
         // AOVs force Raw (see the LUT-select comment in presentFrame) and must not clobber the user's
         // actual choice. Both aov and userLut start from scene.json rather than a fixed literal.
-        .aov = sceneConfig.initialAov,
+        .aov = sceneConfig.defaultAov,
         .channelView = 0,
-        .userLut = sceneConfig.initialLut,
+        .userLut = sceneConfig.defaultLut,
         .framingState = engine::debug::FramingOverlayState{},
         // "Show/Hide Background" HDRI-section checkbox -- off by default; only takes visible effect for the Beauty AOV, see presentFrame.
         .showSky = false,

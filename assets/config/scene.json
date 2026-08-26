@@ -1,13 +1,15 @@
 {
-    "gltfPath": "geometry/broken_stump_rkswd_raw/rkswd_tier_1.gltf",
+    "gltfPath": "geometry/broken_stump_rkswd_raw/rkswd_tier_2.gltf",
+    "texturePath": "geometry/broken_stump_rkswd_raw/broken_stump_rkswd_exr_raw_4k",
+    "hdriPath": "textures/republiqueHDR_2k.exr",
     "position": [0.0, 0.0, 0.0],
     "rotationDegrees": [90.0, 0.0, -90.0],
     "windowWidth": 1024,
     "windowHeight": 576,
-    "initialAov": 0,
-    "initialLut": "sRGB",
+    "defaultAOV": 0,
+    "defaultLUT": "sRGB",
     "samplesPerPixel": 1,
-    "maxBounces": 2,
+    "maxBounces": 0,
     "russianRouletteStartBounce": 3,
     "maxSamples": 16
 }
