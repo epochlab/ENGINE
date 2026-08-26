@@ -26,6 +26,11 @@ constexpr float kRayEpsilon = 1e-4F;
 constexpr float kWireframeThickness = 0.02F;      // fraction of a triangle's barycentric extent
 constexpr float kBoundingBoxThickness = 0.0025F;  // fraction of the hit box face's local extent
 
+// Bump-mapping strength (buildShadingFrame) -- converts the bump texture's UV-space height gradient
+// into a tangent-space normal tilt. No glTF-standard scale factor exists for this asset's custom
+// extras.bumpTexture field to source a value from, so this is a tuned magic number.
+constexpr float kBumpStrength = 10.0F;
+
 // Distance-to-nearest-edge test in a triangle's barycentric coordinates (u, v, w=1-u-v each in
 // [0,1], summing to 1) -- true near any of the triangle's three edges. Feeds the Wireframe AOV.
 bool nearBarycentricEdge(float u, float v) {
@@ -91,7 +96,7 @@ BsdfParams resolveBsdfParams(const Material& material, glm::vec2 uv) {
                        material.transmissionFactor};
 }
 
-// Gram-Schmidt re-orthogonalized tangent frame, normal-mapped.
+// Gram-Schmidt re-orthogonalized tangent frame, normal- and bump-mapped.
 ShadingFrame buildShadingFrame(const ShadingVertex& shading, const Material& material) {
     const glm::vec3 normal = glm::normalize(shading.normal);
     glm::vec3 tangent = glm::vec3(shading.tangent);
@@ -104,10 +109,29 @@ ShadingFrame buildShadingFrame(const ShadingVertex& shading, const Material& mat
         (tangentSpaceNormal.x * tangent) + (tangentSpaceNormal.y * bitangent) +
         (tangentSpaceNormal.z * normal));
 
+    // Blinn 1978 bump mapping: perturbs mappedNormal further using the bump texture's height
+    // difference between adjacent texels -- a texture-space (not screen-space) derivative, so no
+    // ray-differential tracking is needed. Applied on top of the normal map (not the base geometric
+    // normal), since this asset ships both: the normal map carries the sculpted macro surface
+    // direction, bump adds a finer wrinkle on top. Deliberately NOT divided by texel size into a
+    // true per-UV-unit derivative: at this asset's 4096px resolution that divisor is ~4096, which
+    // amplifies even tiny neighboring-texel differences into a huge tilt -- kBumpStrength instead
+    // scales the raw (small, well-behaved) per-texel height difference directly.
+    const glm::vec2 texel(1.0F / static_cast<float>(material.bumpTexture.width),
+                           1.0F / static_cast<float>(material.bumpTexture.height));
+    const float dHdu =
+        engine::gfx::sampleBilinear(material.bumpTexture, shading.uv + glm::vec2(texel.x, 0.0F)).r -
+        engine::gfx::sampleBilinear(material.bumpTexture, shading.uv - glm::vec2(texel.x, 0.0F)).r;
+    const float dHdv =
+        engine::gfx::sampleBilinear(material.bumpTexture, shading.uv + glm::vec2(0.0F, texel.y)).r -
+        engine::gfx::sampleBilinear(material.bumpTexture, shading.uv - glm::vec2(0.0F, texel.y)).r;
+    const glm::vec3 bumpedNormal = glm::normalize(
+        mappedNormal - (kBumpStrength * dHdu * tangent) - (kBumpStrength * dHdv * bitangent));
+
     const glm::vec3 finalTangent =
-        glm::normalize(tangent - (glm::dot(tangent, mappedNormal) * mappedNormal));
-    const glm::vec3 finalBitangent = glm::cross(mappedNormal, finalTangent) * shading.tangent.w;
-    return ShadingFrame{finalTangent, finalBitangent, mappedNormal};
+        glm::normalize(tangent - (glm::dot(tangent, bumpedNormal) * bumpedNormal));
+    const glm::vec3 finalBitangent = glm::cross(bumpedNormal, finalTangent) * shading.tangent.w;
+    return ShadingFrame{finalTangent, finalBitangent, bumpedNormal};
 }
 
 glm::vec3 geometricNormalOf(const ShadingTriangle& tri) {
