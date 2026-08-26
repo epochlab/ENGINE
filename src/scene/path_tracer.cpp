@@ -273,11 +273,14 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
                     const Ray shadowRay{shadowOrigin, lightSample.direction, kRayEpsilon,
                                          std::numeric_limits<float>::max()};
                     if (!accel.occluded(shadowRay)) {
+                        const glm::vec3 envRadiance =
+                            environmentMap.sampleDirection(lightSample.direction, envRotationRadians) *
+                            envExposure;
                         const float lightPdf2 = lightSample.pdf * lightSample.pdf;
                         const float bsdfPdf2 = bsdfPdf * bsdfPdf;
                         const float misWeightLight = lightPdf2 / (lightPdf2 + bsdfPdf2);
-                        const glm::vec3 neeContribution = throughput * bsdfValue * shadingCos *
-                                                            misWeightLight / lightSample.pdf;
+                        const glm::vec3 neeContribution = throughput * bsdfValue * envRadiance *
+                                                            shadingCos * misWeightLight / lightSample.pdf;
                         radiance += neeContribution;
                         glm::vec3 bucketContribution = neeContribution;
                         if (pathBucket == PathBucket::Diffuse) {
@@ -288,8 +291,8 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
                             // the primary surface's albedo) needs to differ from throughput there.
                             const glm::vec3 diffuseLobeRaw =
                                 bounce == 0 ? evaluateDiffuseRaw(params, woLocal, wiLocalLight) : bsdfValue;
-                            bucketContribution = diffuseRawThroughput * diffuseLobeRaw * shadingCos *
-                                                  misWeightLight / lightSample.pdf;
+                            bucketContribution = diffuseRawThroughput * diffuseLobeRaw * envRadiance *
+                                                  shadingCos * misWeightLight / lightSample.pdf;
                         }
                         addToBucket(bucketContribution, /*isDirect=*/bounce == 0);
                     }

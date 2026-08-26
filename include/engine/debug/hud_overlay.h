@@ -34,7 +34,8 @@ struct PathTracedStatus {
     int accumulatedSamples = 0;
 };
 
-// Pixel under cursor, sampled by main.cpp, exposure-applied but pre-LUT. valid=false off-viewport.
+// Pixel under cursor, read back from the composited framebuffer (post-LUT, post-exposure, the literal
+// on-screen value) by main.cpp. valid=false off-viewport.
 struct PixelProbeSample {
     bool valid = false;
     glm::vec4 color{0.0F};
