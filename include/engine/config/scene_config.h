@@ -12,13 +12,15 @@ namespace engine::config {
 // Everything main.cpp needs at startup that isn't camera/lens state (that's ProfileConfig): the model to load, window size, and initial debug-view state. gltfPath is relative to ASSET_ROOT_DIR, matching this project's existing asset-path convention. See assets/config/scene.json for the checked-in defaults.
 struct SceneConfig {
     std::string gltfPath;
+    std::string texturePath;  // directory (relative to ASSET_ROOT_DIR) glTF image URIs resolve against, overriding the .gltf's own directory -- lets one config swap texture resolution (2K/4K/8K) across every tier without editing each .gltf
+    std::string hdriPath;     // environment map, relative to ASSET_ROOT_DIR
     glm::vec3 position;         // model root, composed on top of the glTF's own node transforms
     glm::vec3 rotationDegrees;  // order X,Y,Z, see main.cpp's loadGltf call
     int windowWidth;
     int windowHeight;
     // Index into engine::debug::AovId / kAovNames (aov.h) (0 = Beauty).
-    int initialAov;
-    engine::gfx::OcioDisplayTransform::Lut initialLut;
+    int defaultAov;
+    engine::gfx::OcioDisplayTransform::Lut defaultLut;
     int samplesPerPixel;   // path tracer startup default
     int maxBounces;        // path tracer startup default; secondary/indirect bounces beyond the primary hit, 0 = direct lighting only
     int russianRouletteStartBounce;  // 0-based bounce index RR kicks in from
