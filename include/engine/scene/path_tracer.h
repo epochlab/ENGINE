@@ -23,6 +23,10 @@ struct PathTraceSettings {
     int russianRouletteStartBounce;
     float rrMinProb = 0.05F;
     float rrMaxProb = 0.95F;
+    // Sourced from MaterialConfig/material.json -- see resolveRoughness/buildShadingFrame (path_tracer.cpp).
+    float bumpStrength;
+    float roughnessMin;
+    float roughnessMax;
 };
 
 // Single-channel fields are broadcast to RGB (alpha=1), matching HdrImage's fixed 4-floats/texel

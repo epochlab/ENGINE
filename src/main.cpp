@@ -19,6 +19,7 @@
 #include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
+#include "engine/config/material_config.h"
 #include "engine/config/profile_config.h"
 #include "engine/config/scene_config.h"
 #include "engine/debug/aov.h"
@@ -230,6 +231,7 @@ int setupHsvDisplayShader(const engine::gfx::ShaderProgram& hsvDisplayShader) {
 // into its final std::optional storage would dangle.
 std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sceneConfig,
                                            const engine::config::ProfileConfig& profileConfig,
+                                           const engine::config::MaterialConfig& materialConfig,
                                            engine::platform::Window& window) {
     std::cout << "GL_KHR_debug available: " << std::boolalpha << engine::gfx::khrDebugAvailable()
               << '\n';
@@ -281,7 +283,7 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
     // Decoded once here (not via a texture-upload helper) since projectIrradianceSH9-era GPU upload
     // no longer exists -- the path tracer is the only consumer, sampling this CPU HdrImage directly.
     std::optional<engine::gfx::HdrImage> environmentImage =
-        engine::gfx::loadExr(std::string(ASSET_ROOT_DIR) + "/" + sceneConfig.hdriPath);
+        engine::gfx::loadExr(std::string(ASSET_ROOT_DIR) + "/" + profileConfig.hdriPath);
 
     if (!shaders || !stumpModel || !environmentImage) {
         std::cerr << "main: shader compile/link, model load, or environment map load failed, "
@@ -337,10 +339,10 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         // channelView isolates one R/G/B channel of whatever aov currently shows. userLut is the LUT
         // 'L' cycles through -- kept separate from OcioDisplayTransform's active LUT because non-Beauty
         // AOVs force Raw (see the LUT-select comment in presentFrame) and must not clobber the user's
-        // actual choice. Both aov and userLut start from scene.json rather than a fixed literal.
-        .aov = sceneConfig.defaultAov,
+        // actual choice. Both aov and userLut start from profile.json rather than a fixed literal.
+        .aov = profileConfig.defaultAov,
         .channelView = 0,
-        .userLut = sceneConfig.defaultLut,
+        .userLut = profileConfig.defaultLut,
         .framingState = engine::debug::FramingOverlayState{},
         // "Show/Hide Background" HDRI-section checkbox -- off by default; only takes visible effect for the Beauty AOV, see presentFrame.
         .showSky = false,
@@ -348,10 +350,16 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         .envRotationDegrees = 0,
         // HDRI Exposure slider, stops. requestPathTrace does exp2() -> path_tracer.cpp miss-ray sampleDirection.
         .envExposureStops = 0.0F,
-        .pathTraceSettings = engine::scene::PathTraceSettings{sceneConfig.samplesPerPixel,
-                                                                sceneConfig.maxBounces,
-                                                                sceneConfig.russianRouletteStartBounce},
-        .maxSamples = sceneConfig.maxSamples,
+        .pathTraceSettings =
+            engine::scene::PathTraceSettings{
+                .samplesPerPixel = profileConfig.samplesPerPixel,
+                .maxBounces = profileConfig.maxBounces,
+                .russianRouletteStartBounce = profileConfig.russianRouletteStartBounce,
+                .bumpStrength = materialConfig.bumpStrength,
+                .roughnessMin = materialConfig.roughnessMin,
+                .roughnessMax = materialConfig.roughnessMax,
+            },
+        .maxSamples = profileConfig.maxSamples,
         // Constructed in main() right after initializeApp() returns -- see path_trace_driver.h's
         // constructor precondition (its reference members must bind to sceneAccel/environmentMap/
         // stumpModel at their final, permanent address, which this designated-initializer
@@ -838,18 +846,23 @@ int main() {
 
     int exitCode = EXIT_SUCCESS;
     {
-        // Config is pure file I/O with no GL dependency, but scene.json's window size must be known before Window is constructed, so it's loaded first, before any GLFW/GL object exists. Both files hard-fail identically on missing or malformed: this is user-editable input where a load failure is a real, expected-to-happen event, not an internal invariant, so it's surfaced immediately rather than defaulted around -- matching the shader/model/OCIO all-or-nothing gate inside initializeApp.
+        // Config is pure file I/O with no GL dependency, but profile.json's window size must be known before Window is constructed, so it's loaded first, before any GLFW/GL object exists. All three files hard-fail identically on missing or malformed: this is user-editable input where a load failure is a real, expected-to-happen event, not an internal invariant, so it's surfaced immediately rather than defaulted around -- matching the shader/model/OCIO all-or-nothing gate inside initializeApp.
         std::optional<engine::config::SceneConfig> sceneConfig =
             engine::config::loadSceneConfig(ASSET_ROOT_DIR "/config/scene.json");
         std::optional<engine::config::ProfileConfig> profileConfig =
             engine::config::loadProfileConfig(ASSET_ROOT_DIR "/config/profile.json");
+        std::optional<engine::config::MaterialConfig> materialConfig =
+            sceneConfig.has_value()
+                ? engine::config::loadMaterialConfig(std::string(ASSET_ROOT_DIR) + "/" +
+                                                      sceneConfig->materialPath)
+                : std::nullopt;
 
-        if (!sceneConfig || !profileConfig) {
-            std::cerr << "main: scene/profile config load failed, aborting startup\n";
+        if (!sceneConfig || !profileConfig || !materialConfig) {
+            std::cerr << "main: scene/profile/material config load failed, aborting startup\n";
             exitCode = EXIT_FAILURE;
         } else {
             // Window construction creates the GL 4.1 core/fwd-compat context and makes it current; fatal failure inside it exits the process directly (see window.cpp) since nothing recoverable exists yet.
-            engine::platform::Window window(sceneConfig->windowWidth, sceneConfig->windowHeight,
+            engine::platform::Window window(profileConfig->windowWidth, profileConfig->windowHeight,
                                              "ENGINE");
 
             glewExperimental = GL_TRUE;
@@ -867,7 +880,7 @@ int main() {
                 glfwSwapInterval(1);
 
                 std::optional<AppResources> app =
-                    initializeApp(*sceneConfig, *profileConfig, window);
+                    initializeApp(*sceneConfig, *profileConfig, *materialConfig, window);
                 if (!app) {
                     exitCode = EXIT_FAILURE;
                 } else {

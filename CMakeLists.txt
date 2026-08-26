@@ -91,6 +91,7 @@ add_executable(engine
     src/scene/sampler.cpp
     src/scene/shading_scene.cpp
     src/config/json_scan.cpp
+    src/config/material_config.cpp
     src/config/profile_config.cpp
     src/config/scene_config.cpp
     src/debug/system_info.cpp

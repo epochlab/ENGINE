@@ -26,11 +26,6 @@ constexpr float kRayEpsilon = 1e-4F;
 constexpr float kWireframeThickness = 0.02F;      // fraction of a triangle's barycentric extent
 constexpr float kBoundingBoxThickness = 0.0025F;  // fraction of the hit box face's local extent
 
-// Bump-mapping strength (buildShadingFrame) -- converts the bump texture's UV-space height gradient
-// into a tangent-space normal tilt. No glTF-standard scale factor exists for this asset's custom
-// extras.bumpTexture field to source a value from, so this is a tuned magic number.
-constexpr float kBumpStrength = 10.0F;
-
 // Distance-to-nearest-edge test in a triangle's barycentric coordinates (u, v, w=1-u-v each in
 // [0,1], summing to 1) -- true near any of the triangle's three edges. Feeds the Wireframe AOV.
 bool nearBarycentricEdge(float u, float v) {
@@ -81,15 +76,15 @@ glm::vec3 resolveBaseColor(const Material& material, glm::vec2 uv) {
     return glm::vec3(sample) * glm::vec3(material.baseColorFactor);
 }
 
-float resolveRoughness(const Material& material, glm::vec2 uv) {
+float resolveRoughness(const Material& material, glm::vec2 uv, const PathTraceSettings& settings) {
     const float sample = engine::gfx::sampleBilinear(material.roughnessTexture, uv).r;
-    // 0.045 floor (UE4/Frostbite convention) avoids a near-zero-roughness GGX singularity.
-    return std::clamp(sample * material.roughnessFactor, 0.045F, 1.0F);
+    // Floor (UE4/Frostbite convention) avoids a near-zero-roughness GGX singularity.
+    return std::clamp(sample * material.roughnessFactor, settings.roughnessMin, settings.roughnessMax);
 }
 
-BsdfParams resolveBsdfParams(const Material& material, glm::vec2 uv) {
+BsdfParams resolveBsdfParams(const Material& material, glm::vec2 uv, const PathTraceSettings& settings) {
     const glm::vec3 baseColor = resolveBaseColor(material, uv);
-    const float roughness = resolveRoughness(material, uv);
+    const float roughness = resolveRoughness(material, uv, settings);
     const glm::vec3 specular = glm::vec3(engine::gfx::sampleBilinear(material.specularTexture, uv));
     const glm::vec3 f0 = glm::mix(specular, baseColor, material.metallicFactor);
     return BsdfParams{baseColor, material.metallicFactor, roughness, f0, material.ior,
@@ -97,7 +92,8 @@ BsdfParams resolveBsdfParams(const Material& material, glm::vec2 uv) {
 }
 
 // Gram-Schmidt re-orthogonalized tangent frame, normal- and bump-mapped.
-ShadingFrame buildShadingFrame(const ShadingVertex& shading, const Material& material) {
+ShadingFrame buildShadingFrame(const ShadingVertex& shading, const Material& material,
+                                const PathTraceSettings& settings) {
     const glm::vec3 normal = glm::normalize(shading.normal);
     glm::vec3 tangent = glm::vec3(shading.tangent);
     tangent = glm::normalize(tangent - (glm::dot(tangent, normal) * normal));
@@ -115,8 +111,8 @@ ShadingFrame buildShadingFrame(const ShadingVertex& shading, const Material& mat
     // normal), since this asset ships both: the normal map carries the sculpted macro surface
     // direction, bump adds a finer wrinkle on top. Deliberately NOT divided by texel size into a
     // true per-UV-unit derivative: at this asset's 4096px resolution that divisor is ~4096, which
-    // amplifies even tiny neighboring-texel differences into a huge tilt -- kBumpStrength instead
-    // scales the raw (small, well-behaved) per-texel height difference directly.
+    // amplifies even tiny neighboring-texel differences into a huge tilt -- settings.bumpStrength
+    // instead scales the raw (small, well-behaved) per-texel height difference directly.
     const glm::vec2 texel(1.0F / static_cast<float>(material.bumpTexture.width),
                            1.0F / static_cast<float>(material.bumpTexture.height));
     const float dHdu =
@@ -126,7 +122,8 @@ ShadingFrame buildShadingFrame(const ShadingVertex& shading, const Material& mat
         engine::gfx::sampleBilinear(material.bumpTexture, shading.uv + glm::vec2(0.0F, texel.y)).r -
         engine::gfx::sampleBilinear(material.bumpTexture, shading.uv - glm::vec2(0.0F, texel.y)).r;
     const glm::vec3 bumpedNormal = glm::normalize(
-        mappedNormal - (kBumpStrength * dHdu * tangent) - (kBumpStrength * dHdv * bitangent));
+        mappedNormal - (settings.bumpStrength * dHdu * tangent) -
+        (settings.bumpStrength * dHdv * bitangent));
 
     const glm::vec3 finalTangent =
         glm::normalize(tangent - (glm::dot(tangent, bumpedNormal) * bumpedNormal));
@@ -286,8 +283,8 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
             instances[static_cast<std::size_t>(triangle.instanceIndex)].material;
 
         const ShadingVertex shading = interpolateShading(triangle, hit->u, hit->v);
-        const ShadingFrame frame = buildShadingFrame(shading, material);
-        const BsdfParams params = resolveBsdfParams(material, shading.uv);
+        const ShadingFrame frame = buildShadingFrame(shading, material, settings);
+        const BsdfParams params = resolveBsdfParams(material, shading.uv, settings);
         const glm::vec3 woWorld = -ray.dir;
         // Geometric (unmapped) normal -- needed both for the G-buffer snapshot below and for the
         // normal-map light-leak rejection further down, computed once and reused for both.
