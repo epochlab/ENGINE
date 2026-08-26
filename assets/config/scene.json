@@ -8,5 +8,6 @@
     "initialLut": "sRGB",
     "samplesPerPixel": 1,
     "maxBounces": 2,
-    "russianRouletteStartBounce": 3
+    "russianRouletteStartBounce": 3,
+    "maxSamples": 0
 }

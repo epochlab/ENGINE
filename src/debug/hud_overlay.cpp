@@ -253,8 +253,13 @@ void drawFrameSection(const HudFrameData& frame) {
     ImGui::Text("Cap  vsync");
     ImGui::Text("LUT  %s", frame.lutName);
     if (frame.pathTraced.hasResult) {
-        ImGui::Text("path-traced  %d samples  %.2f s/pass", frame.pathTraced.accumulatedSamples,
-                    frame.pathTraced.lastPassSeconds);
+        if (frame.pathTraced.maxSamples > 0) {
+            ImGui::Text("path-traced  %d / %d samples  %.2f s/pass", frame.pathTraced.accumulatedSamples,
+                        frame.pathTraced.maxSamples, frame.pathTraced.lastPassSeconds);
+        } else {
+            ImGui::Text("path-traced  %d samples  %.2f s/pass", frame.pathTraced.accumulatedSamples,
+                        frame.pathTraced.lastPassSeconds);
+        }
     } else {
         ImGui::TextDisabled("path-traced: no render yet");
     }

@@ -32,6 +32,7 @@ struct PathTracedStatus {
     bool hasResult = false;
     double lastPassSeconds = 0.0;
     int accumulatedSamples = 0;
+    int maxSamples = 0;  // 0 = unbounded
 };
 
 // Pixel under cursor, read back from the composited framebuffer (post-LUT, post-exposure, the literal

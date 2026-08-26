@@ -22,6 +22,7 @@ struct SceneConfig {
     int samplesPerPixel;   // path tracer startup default
     int maxBounces;        // path tracer startup default
     int russianRouletteStartBounce;  // 0-based bounce index RR kicks in from
+    int maxSamples;  // accumulated-pass cap for PathTraceDriver; 0 = unbounded
 };
 
 // Reads and parses path. Returns nullopt and logs to stderr if the file is missing, unreadable, or any required field can't be found/parsed — this is user-editable input, not an internal invariant, so failure is expected to happen and is surfaced rather than defaulted around.
