@@ -146,7 +146,7 @@ struct PathTraceDynamic {
                                                 const std::vector<MeshInstance>& instances,
                                                 const EnvironmentMap& environmentMap, int width,
                                                 int height, float envRotationRadians, bool showSky,
-                                                const PathTraceSettings& settings,
+                                                float envExposure, const PathTraceSettings& settings,
                                                 std::uint32_t runSeed,
                                                 const std::atomic<std::uint64_t>& generation,
                                                 std::uint64_t requestedGeneration,

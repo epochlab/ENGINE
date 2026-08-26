@@ -35,6 +35,9 @@ DebugCameraController::DebugCameraController(const glm::vec3& position, float ya
       aperture_(aperture),
       shutterSeconds_(shutterSeconds),
       iso_(iso),
+      defaultAperture_(aperture),
+      defaultShutterSeconds_(shutterSeconds),
+      defaultIso_(iso),
       flySpeedMetersPerSecond_(flySpeedMetersPerSecond),
       orbitSensitivityDegPerPixel_(orbitSensitivityDegPerPixel) {}
 

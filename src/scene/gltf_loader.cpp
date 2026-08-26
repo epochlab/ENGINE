@@ -306,7 +306,7 @@ bool walkNodes(const cgltf_data* data, cgltf_node* const* nodes, cgltf_size coun
 
 }  // namespace
 
-std::optional<LoadedModel> loadGltf(const std::string& path) {
+std::optional<LoadedModel> loadGltf(const std::string& path, const glm::mat4& rootTransform) {
     const cgltf_options options{};
     cgltf_data* data = nullptr;
 
@@ -328,7 +328,7 @@ std::optional<LoadedModel> loadGltf(const std::string& path) {
     LoadedModel model;
     const std::string dir = dirOf(path);
     const bool ok = data->scene != nullptr &&
-                    walkNodes(data, data->scene->nodes, data->scene->nodes_count, glm::mat4(1.0F),
+                    walkNodes(data, data->scene->nodes, data->scene->nodes_count, rootTransform,
                               dir, model.instances, model.worldTriangles, model.shadingTriangles);
 
     cgltf_free(data);

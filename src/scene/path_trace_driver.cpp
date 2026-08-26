@@ -82,8 +82,8 @@ void PathTraceDriver::driverLoop(std::stop_token stopToken) {
         PathTraceResult pass = renderPathTraced(
             activeRequest->camera, accel_, shadingTriangles_, instances_, environmentMap_,
             activeRequest->width, activeRequest->height, activeRequest->envRotationRadians,
-            activeRequest->showSky, activeRequest->settings, static_cast<std::uint32_t>(passIndex),
-            generation_, activeGeneration, threadPool_);
+            activeRequest->showSky, activeRequest->envExposure, activeRequest->settings,
+            static_cast<std::uint32_t>(passIndex), generation_, activeGeneration, threadPool_);
 
         if (generation_.load(std::memory_order_relaxed) != activeGeneration) {
             continue;  // superseded mid-pass -- discard, next iteration picks up the new request

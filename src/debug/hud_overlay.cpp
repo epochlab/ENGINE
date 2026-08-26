@@ -291,35 +291,67 @@ void drawAovSection(int& aov) {
     ImGui::Separator();
 }
 
-void drawCameraSection(const HudFrameData& frame) {
+// pos/rot/filmback/clip: read-only text. focalLength/aperture/shutter/iso: editable sliders.
+void drawCameraSection(const HudFrameData& frame, float& focalLengthMm, float& aperture,
+                        float& shutterSeconds, float& iso) {
     ImGui::TextColored(kCyan, "Camera");
     const glm::vec3 camPos = frame.camera.position();
     ImGui::Text("pos  x %.2f  y %.2f  z %.2f", camPos.x, camPos.y, camPos.z);
     ImGui::Text("rot  x %.1f  y %.1f", frame.cameraPitchDegrees, frame.cameraYawDegrees);
     const engine::scene::Camera::FilmBack filmBack = frame.camera.filmBack();
     ImGui::Text("Filmback  %.1f x %.1f mm", filmBack.widthMm, filmBack.heightMm);
-    ImGui::Text("Focal  %.1f mm", frame.camera.focalLengthMm());
     ImGui::Text("Near  %.2f  Far  %.1f", frame.camera.nearClip(), frame.camera.farClip());
     if (frame.cameraOrbiting) {
         ImGui::TextColored(kCyan, "orbiting");
     }
-    ImGui::Separator();
-}
-
-void drawLensSection(float& focalLengthMm) {
-    ImGui::TextColored(kCyan, "Lens");
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
     ImGui::SliderFloat("##focalLength", &focalLengthMm, 10.0F, 300.0F, "Focal Length  %.0f mm");
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+    ImGui::SliderFloat("##aperture", &aperture, 1.0F, 22.0F, "Aperture  f/%.1f");
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+    ImGui::SliderFloat("##shutterSeconds", &shutterSeconds, 1.0F / 4000.0F, 1.0F,
+                        "Shutter  %.4f s", ImGuiSliderFlags_Logarithmic);
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+    ImGui::SliderFloat("##iso", &iso, 50.0F, 6400.0F, "ISO  %.0f", ImGuiSliderFlags_Logarithmic);
     ImGui::Separator();
 }
 
-void drawHdriSection(bool& showSky, int& envRotationDegrees) {
+void drawHdriSection(bool& showSky, int& envRotationDegrees, float& envExposureStops) {
     ImGui::TextColored(kCyan, "HDRI");
     // Only visibly affects the Beauty AOV (main.cpp's render loop gates the actual sky draw on aov==0) -- left interactive regardless of the active AOV rather than grayed out, simplest for a checkbox whose effect is just "no-op elsewhere".
     ImGui::Checkbox("Show/Hide Background", &showSky);
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
     ImGui::SliderInt("##envRotation", &envRotationDegrees, 0, 359, "Y-Axis  %d deg");
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+    // Stops, not a multiplier. main.cpp's requestPathTrace does exp2().
+    ImGui::SliderFloat("##envExposureStops", &envExposureStops, -6.0F, 6.0F, "Exposure  %+.2f EV");
     ImGui::Separator();
+}
+
+// Bottom-right, pinned via (1,1) pivot. Swatch + RGBA to 3dp; blank if !pixelProbe.valid.
+void drawPixelProbePanel(const PixelProbeSample& pixelProbe) {
+    const ImVec2 displaySize = ImGui::GetIO().DisplaySize;
+    ImGui::SetNextWindowPos(ImVec2(displaySize.x - 8.0F, displaySize.y - 8.0F), ImGuiCond_Always,
+                             ImVec2(1.0F, 1.0F));
+    constexpr ImGuiWindowFlags flags =
+        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+        ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_AlwaysAutoResize |
+        ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
+        ImGuiWindowFlags_NoNav;
+    ImGui::Begin("##pixelProbe", nullptr, flags);
+
+    const glm::vec4 color = pixelProbe.valid ? pixelProbe.color : glm::vec4(0.0F);
+    ImGui::ColorButton("##pixelProbeSwatch", ImVec4(color.r, color.g, color.b, color.a),
+                        ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoBorder,
+                        ImVec2(14.0F, 14.0F));
+    ImGui::SameLine();
+    if (pixelProbe.valid) {
+        ImGui::Text("R %.3f  G %.3f  B %.3f  A %.3f", color.r, color.g, color.b, color.a);
+    } else {
+        ImGui::TextDisabled("R --   G --   B --   A --");
+    }
+
+    ImGui::End();
 }
 
 // Active R/G/B channel isolation, top-right corner -- foreground draw list, independent of the ##hud window.
@@ -391,8 +423,10 @@ void HudOverlay::beginFrame() const {
     ImGui::NewFrame();
 }
 
-void HudOverlay::draw(const HudFrameData& frame, int& aov, float& focalLengthMm, bool& showSky,
-                       int& envRotationDegrees, const FramingOverlayState& framing) const {
+void HudOverlay::draw(const HudFrameData& frame, int& aov, float& focalLengthMm, float& aperture,
+                       float& shutterSeconds, float& iso, bool& showSky, int& envRotationDegrees,
+                       float& envExposureStops, const FramingOverlayState& framing,
+                       const PixelProbeSample& pixelProbe) const {
     ImGui::SetNextWindowPos(ImVec2(8, 8), ImGuiCond_Always);
     constexpr ImGuiWindowFlags flags =
         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
@@ -412,14 +446,14 @@ void HudOverlay::draw(const HudFrameData& frame, int& aov, float& focalLengthMm,
     }
 
     drawAovSection(aov);
-    drawCameraSection(frame);
-    drawLensSection(focalLengthMm);
-    drawHdriSection(showSky, envRotationDegrees);
+    drawCameraSection(frame, focalLengthMm, aperture, shutterSeconds, iso);
+    drawHdriSection(showSky, envRotationDegrees, envExposureStops);
 
     ImGui::End();
 
     drawChannelViewCorner(frame.channelView);
     drawFramingOverlays(framing, ImGui::GetIO().DisplaySize);
+    drawPixelProbePanel(pixelProbe);
 }
 
 void HudOverlay::render() const {

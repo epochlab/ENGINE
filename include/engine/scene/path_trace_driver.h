@@ -42,6 +42,7 @@ public:
         int height = 0;
         float envRotationRadians = 0.0F;
         bool showSky = true;
+        float envExposure = 1.0F;
         PathTraceSettings settings;  // samplesPerPixel is "samples per pass", see path_tracer.h
     };
 
