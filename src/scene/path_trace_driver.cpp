@@ -77,6 +77,12 @@ void PathTraceDriver::driverLoop(std::stop_token stopToken) {
             continue;
         }
 
+        if (activeRequest->maxSamples > 0 &&
+            accumulatedSamples_.load(std::memory_order_relaxed) >= activeRequest->maxSamples) {
+            std::this_thread::sleep_for(kIdlePollInterval);
+            continue;
+        }
+
         const int passIndex = accumulatedSamples_.load(std::memory_order_relaxed) + 1;
         const auto passStart = std::chrono::steady_clock::now();
         PathTraceResult pass = renderPathTraced(

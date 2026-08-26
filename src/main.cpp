@@ -156,6 +156,7 @@ struct AppResources {
     // pointee's address, never touching PathTraceDriver's reference members, so AppResources stays
     // movable and PathTraceDriver itself is never relocated in memory once constructed.
     engine::scene::PathTraceSettings pathTraceSettings;
+    int maxSamples;  // accumulated-pass cap for PathTraceDriver; 0 = unbounded
     std::unique_ptr<engine::scene::PathTraceDriver> pathTraceDriver;
     std::optional<engine::gfx::Texture> pathTraceDisplayTexture;
     int pathTraceDisplayedAov;  // which AovId pathTraceDisplayTexture currently holds, -1 = none yet
@@ -350,6 +351,7 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         .pathTraceSettings = engine::scene::PathTraceSettings{sceneConfig.samplesPerPixel,
                                                                 sceneConfig.maxBounces,
                                                                 sceneConfig.russianRouletteStartBounce},
+        .maxSamples = sceneConfig.maxSamples,
         // Constructed in main() right after initializeApp() returns -- see path_trace_driver.h's
         // constructor precondition (its reference members must bind to sceneAccel/environmentMap/
         // stumpModel at their final, permanent address, which this designated-initializer
@@ -701,7 +703,7 @@ void requestPathTrace(AppResources& app, const engine::scene::Camera& camera, in
                       int winHeight) {
     app.pathTraceDriver->requestTrace(engine::scene::PathTraceDriver::Request{
         camera, winWidth, winHeight, glm::radians(static_cast<float>(app.envRotationDegrees)),
-        app.showSky, std::exp2(app.envExposureStops), app.pathTraceSettings});
+        app.showSky, std::exp2(app.envExposureStops), app.pathTraceSettings, app.maxSamples});
 }
 
 // Called once per rendered frame. Re-traces on any input that would actually change the image --
@@ -731,7 +733,7 @@ void updateHud(AppResources& app, const engine::platform::Window& window,
     const engine::debug::PathTracedStatus pathTracedStatus{
         accumulatedSamples > 0,
         app.pathTraceDriver != nullptr ? app.pathTraceDriver->lastPassSeconds() : 0.0,
-        accumulatedSamples};
+        accumulatedSamples, app.maxSamples};
     const engine::debug::SceneStats sceneStats{
         static_cast<int>(app.stumpModel.instances.size()),
         app.totalTriangles,

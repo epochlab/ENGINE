@@ -44,11 +44,12 @@ std::optional<SceneConfig> loadSceneConfig(const std::string& path) {
     const std::optional<double> maxBounces = json::findNumber(*text, "maxBounces");
     const std::optional<double> russianRouletteStartBounce =
         json::findNumber(*text, "russianRouletteStartBounce");
+    const std::optional<double> maxSamples = json::findNumber(*text, "maxSamples");
 
     if (!gltfPath.has_value() || !position.has_value() || !rotationDegrees.has_value() ||
         !windowWidth.has_value() || !windowHeight.has_value() || !initialAov.has_value() ||
         !initialLut.has_value() || !samplesPerPixel.has_value() || !maxBounces.has_value() ||
-        !russianRouletteStartBounce.has_value()) {
+        !russianRouletteStartBounce.has_value() || !maxSamples.has_value()) {
         std::cerr << "loadSceneConfig: " << path << " is missing one or more required fields\n";
         return std::nullopt;
     }
@@ -64,6 +65,7 @@ std::optional<SceneConfig> loadSceneConfig(const std::string& path) {
         static_cast<int>(*samplesPerPixel),
         static_cast<int>(*maxBounces),
         static_cast<int>(*russianRouletteStartBounce),
+        static_cast<int>(*maxSamples),
     };
 }
 
