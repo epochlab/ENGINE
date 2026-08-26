@@ -10,5 +10,14 @@
     "shutterSeconds": 0.008,
     "iso": 400.0,
     "flySpeedMetersPerSecond": 1.0,
-    "orbitSensitivityDegPerPixel": 0.25
+    "orbitSensitivityDegPerPixel": 0.25,
+    "hdriPath": "textures/republiqueHDR_2k.exr",
+    "windowWidth": 1024,
+    "windowHeight": 576,
+    "defaultAOV": 0,
+    "defaultLUT": "sRGB",
+    "samplesPerPixel": 1,
+    "maxBounces": 0,
+    "russianRouletteStartBounce": 3,
+    "maxSamples": 32
 }
