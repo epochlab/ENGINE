@@ -19,7 +19,7 @@ namespace engine::scene {
 // value here.
 struct PathTraceSettings {
     int samplesPerPixel;
-    int maxBounces;
+    int maxBounces;  // secondary/indirect bounces beyond the always-traced primary hit; 0 = direct lighting only
     int russianRouletteStartBounce;
     float rrMinProb = 0.05F;
     float rrMaxProb = 0.95F;

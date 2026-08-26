@@ -64,7 +64,7 @@ glm::vec3 geometricNormalOf(const ShadingTriangle& tri) {
 struct TraceResult {
     glm::vec3 radiance;
     float firstHitIor;      // -1 if the primary ray never hit geometry
-    int terminationBounce;  // bounce index the path stopped at (== maxBounces if depth-capped)
+    int terminationBounce;  // bounce index the path stopped at (== maxBounces + 1 if depth-capped)
 
     // Primary-hit (bounce==0) G-buffer data -- default-valued (primaryHit=false) on a primary miss.
     bool primaryHit = false;
@@ -167,7 +167,10 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
     float lastBsdfPdf = 0.0F;
     bool lastSampleWasTransmission = false;
 
-    for (; bounce < settings.maxBounces; ++bounce) {
+    // bounce 0 (the primary/camera ray, direct lighting via NEE) always traces regardless of
+    // maxBounces -- maxBounces counts secondary/indirect bounces beyond it, so maxBounces==0 means
+    // direct lighting only, no continuation rays.
+    for (; bounce <= settings.maxBounces; ++bounce) {
         const std::optional<Hit> hit = accel.intersect(ray);
         if (!hit.has_value()) {
             // showSky gates only the primary ray's own miss (the camera seeing the background
