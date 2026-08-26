@@ -204,9 +204,10 @@ std::optional<Material> loadMaterialTextures(const cgltf_data* data, const cgltf
         loadTextureByIndex(data, extrasTextureIndex(mat.extras.data, "roughnessTexture"), dir);
     auto specular =
         loadTextureByIndex(data, extrasTextureIndex(mat.extras.data, "specularTexture"), dir);
-    if (!baseColor || !normal || !ao || !roughness || !specular) {
+    auto bump = loadTextureByIndex(data, extrasTextureIndex(mat.extras.data, "bumpTexture"), dir);
+    if (!baseColor || !normal || !ao || !roughness || !specular || !bump) {
         std::cerr << "loadGltf: material '" << (mat.name != nullptr ? mat.name : "<unnamed>")
-                   << "' is missing one or more of the 5 required textures\n";
+                   << "' is missing one or more of the 6 required textures\n";
         return std::nullopt;
     }
 
@@ -221,6 +222,7 @@ std::optional<Material> loadMaterialTextures(const cgltf_data* data, const cgltf
         pbr.roughness_factor,
         std::move(*baseColor),
         std::move(*normal),
+        std::move(*bump),
         std::move(*roughness),
         std::move(*specular),
         std::move(*ao),
@@ -306,7 +308,8 @@ bool walkNodes(const cgltf_data* data, cgltf_node* const* nodes, cgltf_size coun
 
 }  // namespace
 
-std::optional<LoadedModel> loadGltf(const std::string& path) {
+std::optional<LoadedModel> loadGltf(const std::string& path, const glm::mat4& rootTransform,
+                                     const std::string& textureDir) {
     const cgltf_options options{};
     cgltf_data* data = nullptr;
 
@@ -326,9 +329,9 @@ std::optional<LoadedModel> loadGltf(const std::string& path) {
     }
 
     LoadedModel model;
-    const std::string dir = dirOf(path);
+    const std::string dir = textureDir.empty() ? dirOf(path) : textureDir;
     const bool ok = data->scene != nullptr &&
-                    walkNodes(data, data->scene->nodes, data->scene->nodes_count, glm::mat4(1.0F),
+                    walkNodes(data, data->scene->nodes, data->scene->nodes_count, rootTransform,
                               dir, model.instances, model.worldTriangles, model.shadingTriangles);
 
     cgltf_free(data);

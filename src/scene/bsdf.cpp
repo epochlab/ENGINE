@@ -206,6 +206,16 @@ glm::vec3 evaluateDiffuseRaw(const BsdfParams& params, const glm::vec3& woLocal,
     return glm::vec3(std::max(lobes.diffuseKd, 0.0F) / kPi);
 }
 
+glm::vec3 evaluateSpecularOnly(const BsdfParams& params, const glm::vec3& woLocal,
+                                const glm::vec3& wiLocal) {
+    const float sign = woLocal.z >= 0.0F ? 1.0F : -1.0F;
+    const glm::vec3 wo(woLocal.x, woLocal.y, woLocal.z * sign);
+    const glm::vec3 wi(wiLocal.x, wiLocal.y, wiLocal.z * sign);
+    const float alpha = std::max(params.roughness * params.roughness, kMinAlpha);
+    const LobeProbabilities lobes = computeLobeProbabilities(params, wo, sign);
+    return evaluateSpecularLobe(params, wo, wi, alpha, lobes.etaI, lobes.etaT).f;
+}
+
 std::optional<BsdfSample> sampleBsdf(const BsdfParams& params, const glm::vec3& woLocal,
                                       Sampler& sampler) {
     const float sign = woLocal.z >= 0.0F ? 1.0F : -1.0F;
