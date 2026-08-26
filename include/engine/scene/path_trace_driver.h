@@ -44,6 +44,7 @@ public:
         bool showSky = true;
         float envExposure = 1.0F;
         PathTraceSettings settings;  // samplesPerPixel is "samples per pass", see path_tracer.h
+        int maxSamples = 0;  // accumulated-pass cap; 0 = unbounded
     };
 
     // accel/shadingTriangles/instances/environmentMap must already be at their final, permanent
