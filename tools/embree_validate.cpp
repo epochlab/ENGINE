@@ -1,8 +1,4 @@
-// Standalone correctness check for engine::scene::EmbreeAccel (embree_accel.h): builds an Embree
-// scene over synthetic triangle soup, fires many random rays, and asserts EmbreeAccel::intersect/
-// occluded agree with bruteForceIntersect (ray_types.h), a deliberately dependency-free O(n)
-// reference. Same standalone-CLI convention as bsdf_validate.cpp/nee_validate.cpp/furnace_test.cpp:
-// no test framework, non-zero exit on failure.
+// Standalone correctness check for engine::scene::EmbreeAccel (embree_accel.h): builds an Embree scene over synthetic triangle soup, fires many random rays, and asserts EmbreeAccel::intersect/occluded agree with bruteForceIntersect (ray_types.h), a deliberately dependency-free O(n) reference. Same standalone-CLI convention as bsdf_validate.cpp/nee_validate.cpp/furnace_test.cpp: no test framework, non-zero exit on failure.
 
 #include <cmath>
 #include <cstdlib>
@@ -27,8 +23,7 @@ constexpr int kTriangleCount = 2000;
 constexpr int kRayCount = 20000;
 constexpr float kTEpsilon = 1e-3F;
 
-// Triangles clustered around random centres -- exercises ordinary BVH splitting (clusters spread
-// across the scene) as well as tightly-packed clusters.
+// Triangles clustered around random centres -- exercises ordinary BVH splitting (clusters spread across the scene) as well as tightly-packed clusters.
 std::vector<Triangle> makeSyntheticTriangles(std::mt19937& rng) {
     std::uniform_real_distribution<float> centerDist(-50.0F, 50.0F);
     std::uniform_real_distribution<float> offsetDist(-1.0F, 1.0F);

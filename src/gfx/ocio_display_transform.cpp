@@ -66,9 +66,7 @@ std::string buildRawFragmentSource() {
            "}\n";
 }
 
-// Builds one LUT's fragment source via OCIO's real Display/View API (getProcessor(scene, display, view, direction)) using the "Un-tone-mapped" view — a genuine View entry on this config, not a colorspace-pair bypass. Both displays resolve to pure Matrix+Gamma OETF math (verified against OCIO's own source + empirical testing): no LUT ops, no filmic tone-mapping.
-//
-// OCIO::Exception here means our own config/display/view/style names are wrong — an internal defect, not recoverable input — so it exits immediately like Window/HudOverlay do for unrecoverable configuration errors, rather than threading optional through callers.
+// Builds one LUT's fragment source via OCIO's real Display/View API (getProcessor(scene, display, view, direction)) using the "Un-tone-mapped" view — a genuine View entry on this config, not a colorspace-pair bypass. Both displays resolve to pure Matrix+Gamma OETF math (verified against OCIO's own source + empirical testing): no LUT ops, no filmic tone-mapping. OCIO::Exception here means our own config/display/view/style names are wrong — an internal defect, not recoverable input — so it exits immediately like Window/HudOverlay do for unrecoverable configuration errors, rather than threading optional through callers.
 std::string buildOcioFragmentSource(const char* display, const char* functionName) {
     try {
         const OCIO::ConstConfigRcPtr config = OCIO::Config::CreateFromBuiltinConfig(kBuiltinConfigName);

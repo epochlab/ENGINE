@@ -8,8 +8,7 @@ uniform float uGaborKernel[100];  // 4 orientations x 5x5 taps, see main.cpp's b
 
 out vec4 fragColor;
 
-// Rec.709 luminance. Not just texture(...).r: uHdrColor is real RGB, where .r alone would isolate
-// the red channel, not luminance.
+// Rec.709 luminance. Not just texture(...).r: uHdrColor is real RGB, where .r alone would isolate the red channel, not luminance.
 float sampleLuminance(vec2 uv, vec2 texel, vec2 offset) {
     vec3 color = texture(uHdrColor, uv + offset * texel).rgb;
     return dot(color, vec3(0.2126, 0.7152, 0.0722));
@@ -52,9 +51,7 @@ float gabor(vec2 texel) {
 
 void main() {
     vec2 texel = 1.0 / vec2(textureSize(uHdrColor, 0));
-    // Mode 2 (Luminance): the path tracer has no per-AOV Luminance buffer -- reusing this shader's
-    // existing uHdrColor/sampleLuminance plumbing for a plain center-tap read is cheaper than a whole
-    // new ShaderProgram just to broadcast one dot product.
+    // Mode 2 (Luminance): the path tracer has no per-AOV Luminance buffer -- reusing this shader's existing uHdrColor/sampleLuminance plumbing for a plain center-tap read is cheaper than a whole new ShaderProgram just to broadcast one dot product.
     float value = uFilterMode == 2   ? sampleLuminance(vUv, texel, vec2(0.0))
                   : uFilterMode == 1 ? gabor(texel)
                                      : sobel(texel);

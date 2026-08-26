@@ -65,17 +65,10 @@ std::optional<EmbreeAccel> EmbreeAccel::build(std::vector<Triangle> triangles) {
         RTCGeometry geometry = rtcNewGeometry(device, RTC_GEOMETRY_TYPE_TRIANGLE);
         rtcSetGeometryBuildQuality(geometry, RTC_BUILD_QUALITY_HIGH);
 
-        // triangles is non-indexed triangle soup (Triangle{v0,v1,v2}, three unique vertices per
-        // triangle) -- shared directly as Embree's vertex buffer (stride = sizeof(glm::vec3), no
-        // copy) rather than deduplicated into an indexed mesh, matching the data's existing shape.
+        // triangles is non-indexed triangle soup (Triangle{v0,v1,v2}, three unique vertices per triangle) -- shared directly as Embree's vertex buffer (stride = sizeof(glm::vec3), no copy) rather than deduplicated into an indexed mesh, matching the data's existing shape.
         static_assert(sizeof(Triangle) == 3 * sizeof(glm::vec3),
                       "Triangle must be tightly packed for the shared vertex buffer stride below");
-        // Embree reads the last vertex of a shared buffer with a 16-byte SSE load, so the buffer
-        // must have at least one float of padding past the last vertex (Embree's documented shared-
-        // buffer contract) -- Triangle has no such slack, so grow triangles' capacity (not size) by
-        // one vertex worth of memory before handing its pointer to Embree. Must happen before the
-        // pointer below is captured, and triangles must not reallocate (no further push_back/reserve)
-        // for the rest of this function or after the std::move into the returned EmbreeAccel.
+        // Embree reads the last vertex of a shared buffer with a 16-byte SSE load, so the buffer must have at least one float of padding past the last vertex (Embree's documented shared-buffer contract) -- Triangle has no such slack, so grow triangles' capacity (not size) by one vertex worth of memory before handing its pointer to Embree. Must happen before the pointer below is captured, and triangles must not reallocate (no further push_back/reserve) for the rest of this function or after the std::move into the returned EmbreeAccel.
         triangles.reserve(triangles.size() + 1);
         rtcSetSharedGeometryBuffer(geometry, RTC_BUFFER_TYPE_VERTEX, 0, RTC_FORMAT_FLOAT3,
                                     triangles.data(), 0, sizeof(glm::vec3),
@@ -150,8 +143,7 @@ bool EmbreeAccel::occluded(const Ray& ray) const {
 
     rtcOccluded1(scene_, &embreeRay, nullptr);
 
-    // rtcOccluded1 signals a hit by setting tfar to -inf, per Embree convention -- it doesn't
-    // populate a hit record (there is none to check) since occlusion is a boolean query.
+    // rtcOccluded1 signals a hit by setting tfar to -inf, per Embree convention -- it doesn't populate a hit record (there is none to check) since occlusion is a boolean query.
     return embreeRay.tfar < 0.0F;
 }
 
