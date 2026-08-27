@@ -143,6 +143,8 @@ struct AppResources {
     int pathTraceDisplayedChannelView;  // which channelView pathTraceDisplayTexture was isolated for, -1 = none yet
     // Strong ref (kept alive, not just an identity pointer) to whichever PathTraceSnapshot object (gbuffer/dynamic) pathTraceDisplayTexture currently reflects -- see ensurePathTraceDisplayTexture.
     std::shared_ptr<const void> pathTraceDisplayedOwner;
+    // Max raw Depth value seen in the last rebuilt pathTraceDisplayTexture -- see ensurePathTraceDisplayTexture; only meaningful/updated when aov==Depth.
+    float pathTraceDisplayedDepthMax;
     PathTraceTriggerState lastPathTraceTrigger;  // sentinel-initialized, see its own doc comment
 
     // Orbit-pick and RAM-sampling state carried frame to frame.
@@ -332,6 +334,7 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         .pathTraceDisplayedAov = -1,
         .pathTraceDisplayedChannelView = -1,
         .pathTraceDisplayedOwner = nullptr,
+        .pathTraceDisplayedDepthMax = 0.0F,
         .lastPathTraceTrigger = PathTraceTriggerState{},
         .orbitPickRequested = false,
         .lastCursorX = 0.0,
@@ -407,30 +410,6 @@ glm::vec3 sampleTexel(const engine::gfx::HdrImage& image, int x, int y) {
                               static_cast<std::size_t>(x)) *
                              4;
     return {image.rgba[idx + 0], image.rgba[idx + 1], image.rgba[idx + 2]};
-}
-
-// Reads back the literal on-screen pixel under the cursor, for the bottom-right HUD probe -- framebuffer 0 already holds presentFrame's composited, OCIO-display-transformed image (LUT+exposure for Beauty, Raw for everything else, including the post-filter AOVs' actual filtered pixel), so this is correct for every AOV by construction with no duplicated shading/curve math. cursorPosition()/windowSize() are screen points, framebufferSize() is framebuffer pixels -- scale, don't divide by framebuffer size directly (wrong by DPI factor on Retina). GL's Y origin is bottom-left, cursor's is top-left, hence the flip.
-engine::debug::PixelProbeSample samplePixelProbe(const engine::platform::Window& window) {
-    const auto [windowWidth, windowHeight] = window.windowSize();
-    if (windowWidth <= 0 || windowHeight <= 0) {
-        return {};
-    }
-    const auto [cursorX, cursorY] = window.cursorPosition();
-    if (cursorX < 0.0 || cursorY < 0.0 || cursorX >= windowWidth || cursorY >= windowHeight) {
-        return {};
-    }
-    const auto [fbWidth, fbHeight] = window.framebufferSize();
-    if (fbWidth <= 0 || fbHeight <= 0) {
-        return {};
-    }
-    const int fbX = std::min(fbWidth - 1, static_cast<int>(cursorX / windowWidth * fbWidth));
-    const int fbY = std::min(fbHeight - 1,
-                              fbHeight - 1 - static_cast<int>(cursorY / windowHeight * fbHeight));
-
-    std::array<unsigned char, 4> pixel{};
-    GL_CALL(glBindFramebuffer(GL_READ_FRAMEBUFFER, 0));
-    GL_CALL(glReadPixels(fbX, fbY, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel.data()));
-    return {true, glm::vec4(pixel[0], pixel[1], pixel[2], pixel[3]) / 255.0F};
 }
 
 // Orbit pivot picked from the path tracer's own G-buffer (worldPos/alpha at its centre pixel) -- sampled at the gbuffer image's own resolution, not the live window size, in case of a resize race. Falls back to a fixed forward-offset pivot when no pass has published yet or the centre pixel missed all geometry.
@@ -547,13 +526,72 @@ PathTracedAovSource selectPathTracedImage(const engine::scene::PathTraceSnapshot
     }
 }
 
-// Rebuilds pathTraceDisplayTexture only when the selected AOV, the channel-view isolation, or the driver's published result object actually changed -- recreating a GL texture (alloc + upload + mipmap) every frame just to redisplay the same image would violate this codebase's no-allocation-after-init convention for no reason. The driver publishes a fresh result object every completed pass, though, so while it's actively converging this does rebuild the texture up to once per rendered frame -- that per-frame cap (not a lower one) is deliberate: it is what makes newly-accumulated samples visible at all. channelViewToBake: normally app.channelView, isolating an R/G/B channel of `image` itself before upload -- except the HSV AOV, which passes 0 (no isolation here) and applies channel view to its own H/S/V output instead (see hsv_display.frag's uChannelView): isolating a source RGB channel first would broadcast it to grey, and grey always converts to H=0/S=0, destroying the very thing that AOV exists to show. owner: a strong ref to whichever PathTraceSnapshot object actually owns `image` (see PathTracedAovSource) -- comparing shared_ptr identity, not a raw pointer, since a raw pointer to a previous frame's already-freed result could in principle have its address reused by a later allocation (ABA); holding a real shared_ptr in app.pathTraceDisplayedOwner rules that out.
+// Bottom-right HUD probe: Beauty and the post-filter AOVs (HSV/Luminance/Sobel/Gabor, which have no
+// independent buffer of their own -- see presentFrame's isPostFilterAov) read back the literal
+// composited, OCIO-display-transformed pixel from framebuffer 0, since that IS the value being shown.
+// Every other AOV instead samples its own raw HdrImage texel directly (sampleTexel, full float
+// precision, no display-exposure/8-bit-quantization involved) so the readout is in that AOV's native
+// units (metres for Depth, bounce count for BounceCount, etc.) regardless of how it's displayed.
+// cursorPosition()/windowSize() are screen points; the framebuffer path scales by framebufferSize()
+// (not windowSize() directly -- wrong by DPI factor on Retina) and flips Y (GL's origin is
+// bottom-left, cursor's is top-left). The raw-texel path instead scales by the sampled image's own
+// resolution (robust to a resize race, same precedent as resolveOrbitPick) and needs no flip --
+// HdrImage row 0 is documented top, already matching cursor space's top-left origin.
+engine::debug::PixelProbeSample samplePixelProbe(const engine::platform::Window& window,
+                                                  const engine::scene::PathTraceSnapshot& pathTraceSnapshot,
+                                                  engine::debug::AovId aovId) {
+    const auto [windowWidth, windowHeight] = window.windowSize();
+    if (windowWidth <= 0 || windowHeight <= 0) {
+        return {};
+    }
+    const auto [cursorX, cursorY] = window.cursorPosition();
+    if (cursorX < 0.0 || cursorY < 0.0 || cursorX >= windowWidth || cursorY >= windowHeight) {
+        return {};
+    }
+
+    const bool isPostFilterAov =
+        aovId == engine::debug::AovId::HSV || aovId == engine::debug::AovId::Luminance ||
+        aovId == engine::debug::AovId::Sobel || aovId == engine::debug::AovId::Gabor;
+    if (aovId != engine::debug::AovId::Beauty && !isPostFilterAov) {
+        const PathTracedAovSource source = selectPathTracedImage(pathTraceSnapshot, aovId);
+        if (source.image == nullptr) {
+            return {};
+        }
+        const int imgX = std::min(source.image->width - 1,
+                                   static_cast<int>(cursorX / windowWidth * source.image->width));
+        const int imgY = std::min(source.image->height - 1,
+                                   static_cast<int>(cursorY / windowHeight * source.image->height));
+        return {true, glm::vec4(sampleTexel(*source.image, imgX, imgY), 1.0F)};
+    }
+
+    const auto [fbWidth, fbHeight] = window.framebufferSize();
+    if (fbWidth <= 0 || fbHeight <= 0) {
+        return {};
+    }
+    const int fbX = std::min(fbWidth - 1, static_cast<int>(cursorX / windowWidth * fbWidth));
+    const int fbY = std::min(fbHeight - 1,
+                              fbHeight - 1 - static_cast<int>(cursorY / windowHeight * fbHeight));
+
+    std::array<unsigned char, 4> pixel{};
+    GL_CALL(glBindFramebuffer(GL_READ_FRAMEBUFFER, 0));
+    GL_CALL(glReadPixels(fbX, fbY, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel.data()));
+    return {true, glm::vec4(pixel[0], pixel[1], pixel[2], pixel[3]) / 255.0F};
+}
+
+// Rebuilds pathTraceDisplayTexture only when the selected AOV, the channel-view isolation, or the driver's published result object actually changed -- recreating a GL texture (alloc + upload + mipmap) every frame just to redisplay the same image would violate this codebase's no-allocation-after-init convention for no reason. The driver publishes a fresh result object every completed pass, though, so while it's actively converging this does rebuild the texture up to once per rendered frame -- that per-frame cap (not a lower one) is deliberate: it is what makes newly-accumulated samples visible at all. channelViewToBake: normally app.channelView, isolating an R/G/B channel of `image` itself before upload -- except the HSV AOV, which passes 0 (no isolation here) and applies channel view to its own H/S/V output instead (see hsv_display.frag's uChannelView): isolating a source RGB channel first would broadcast it to grey, and grey always converts to H=0/S=0, destroying the very thing that AOV exists to show. owner: a strong ref to whichever PathTraceSnapshot object actually owns `image` (see PathTracedAovSource) -- comparing shared_ptr identity, not a raw pointer, since a raw pointer to a previous frame's already-freed result could in principle have its address reused by a later allocation (ABA); holding a real shared_ptr in app.pathTraceDisplayedOwner rules that out. For Depth specifically, also rescans `image` for its own max value into app.pathTraceDisplayedDepthMax on every rebuild -- presentFrame uses that as an auto-ranging display-exposure bound instead of Camera::farClip(), since farClip is a conservative ray tMax bound, not a proxy for the actual visible scene's depth extent.
 void ensurePathTraceDisplayTexture(AppResources& app, const std::shared_ptr<const void>& owner,
                                     const engine::gfx::HdrImage& image, int channelViewToBake) {
     if (app.pathTraceDisplayTexture.has_value() && app.pathTraceDisplayedAov == app.aov &&
         app.pathTraceDisplayedChannelView == channelViewToBake &&
         app.pathTraceDisplayedOwner == owner) {
         return;
+    }
+    if (app.aov == static_cast<int>(engine::debug::AovId::Depth)) {
+        float maxDepth = 0.0F;
+        for (int i = 0; i < image.width * image.height; ++i) {
+            maxDepth = std::max(maxDepth, image.rgba[static_cast<std::size_t>(i) * 4]);
+        }
+        app.pathTraceDisplayedDepthMax = maxDepth;
     }
     const std::vector<float> flipped = flipRowsForDisplay(image, channelViewToBake);
     app.pathTraceDisplayTexture =
@@ -571,7 +609,7 @@ void clearToBlack(int winWidth, int winHeight) {
     GL_CALL(glClear(GL_COLOR_BUFFER_BIT));
 }
 
-// Blits the path-traced buffer for the selected AOV through the shared OCIO/post-process path -- Beauty uses the user's LUT, everything else forces Raw (not scene-referred radiance, a display curve would distort them).
+// Blits the path-traced buffer for the selected AOV through the shared OCIO/post-process path -- Beauty uses the user's LUT, everything else forces Raw (not scene-referred radiance, a display curve would distort them). Depth/BounceCount additionally get an exposure-based normalization since their raw range exceeds the default framebuffer's fixed-point [0,1] clamp -- see the exposureEv branch below.
 void presentFrame(AppResources& app, const engine::scene::PathTraceSnapshot& pathTraceSnapshot,
                    int winWidth, int winHeight) {
     const auto aovId = static_cast<engine::debug::AovId>(app.aov);
@@ -614,8 +652,22 @@ void presentFrame(AppResources& app, const engine::scene::PathTraceSnapshot& pat
         const bool isBeauty = aovId == engine::debug::AovId::Beauty;
         app.ocioTransform.setActiveLut(isBeauty ? app.userLut
                                                  : engine::gfx::OcioDisplayTransform::Lut::Raw);
-        // Camera exposure applies to Beauty only, same reasoning as forcing Raw LUT above.
-        app.ocioTransform.setExposureEv(isBeauty ? app.debugCamera.relativeExposureEv() : 0.0F);
+        // Beauty: photographic exposure. Depth: auto-ranged to the actual max depth visible in the
+        // current buffer (see ensurePathTraceDisplayTexture) -- farClip is a conservative ray tMax
+        // bound, not a proxy for the scene's real depth extent, and normalizing by it left real scenes
+        // (a small fraction of farClip) reading as black. BounceCount: normalized by its own provable
+        // upper bound (maxBounces+1), a realistically tight range so this stays a static divide. Both
+        // exist because the default framebuffer is fixed-point and clamps any raw value >= 1 to white
+        // otherwise. Everything else: unscaled passthrough.
+        float exposureEv = 0.0F;
+        if (isBeauty) {
+            exposureEv = app.debugCamera.relativeExposureEv();
+        } else if (aovId == engine::debug::AovId::Depth) {
+            exposureEv = -std::log2(std::max(app.pathTraceDisplayedDepthMax, 1e-4F));
+        } else if (aovId == engine::debug::AovId::BounceCount) {
+            exposureEv = -std::log2(static_cast<float>(app.pathTraceSettings.maxBounces) + 1.0F);
+        }
+        app.ocioTransform.setExposureEv(exposureEv);
         app.ocioTransform.bind();
         app.postProcess.draw(app.pathTraceDisplayTexture->id(), app.ocioTransform.activeShader(),
                               {winWidth, winHeight});
@@ -648,7 +700,9 @@ void requestPathTraceIfTriggerChanged(AppResources& app, const engine::scene::Ca
 }
 
 void updateHud(AppResources& app, const engine::platform::Window& window,
-               const engine::scene::Camera& camera, int winWidth, int winHeight) {
+               const engine::scene::Camera& camera,
+               const engine::scene::PathTraceSnapshot& pathTraceSnapshot, int winWidth,
+               int winHeight) {
     const int accumulatedSamples =
         app.pathTraceDriver != nullptr ? app.pathTraceDriver->accumulatedSamples() : 0;
     const engine::debug::PathTracedStatus pathTracedStatus{
@@ -685,7 +739,8 @@ void updateHud(AppResources& app, const engine::platform::Window& window,
     float aperture = app.debugCamera.aperture();
     float shutterSeconds = app.debugCamera.shutterSeconds();
     float iso = app.debugCamera.iso();
-    const engine::debug::PixelProbeSample pixelProbe = samplePixelProbe(window);
+    const engine::debug::PixelProbeSample pixelProbe = samplePixelProbe(
+        window, pathTraceSnapshot, static_cast<engine::debug::AovId>(app.aov));
     app.hud.draw(hudFrameData, app.aov, focalLengthMm, aperture, shutterSeconds, iso, app.showSky,
                  app.envRotationDegrees, app.envExposureStops, app.framingState, pixelProbe);
     app.debugCamera.setFocalLengthMm(focalLengthMm);
@@ -731,7 +786,7 @@ void renderFrame(engine::platform::Window& window, AppResources& app) {
         app.lastRamSample = now;
     }
 
-    updateHud(app, window, camera, winWidth, winHeight);
+    updateHud(app, window, camera, pathTraceSnapshot, winWidth, winHeight);
 
     window.swapBuffers();
 }
