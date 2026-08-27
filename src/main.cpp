@@ -143,6 +143,8 @@ struct AppResources {
     int pathTraceDisplayedChannelView;  // which channelView pathTraceDisplayTexture was isolated for, -1 = none yet
     // Strong ref (kept alive, not just an identity pointer) to whichever PathTraceSnapshot object (gbuffer/dynamic) pathTraceDisplayTexture currently reflects -- see ensurePathTraceDisplayTexture.
     std::shared_ptr<const void> pathTraceDisplayedOwner;
+    // Max raw Depth value seen in the last rebuilt pathTraceDisplayTexture -- see ensurePathTraceDisplayTexture; only meaningful/updated when aov==Depth.
+    float pathTraceDisplayedDepthMax;
     PathTraceTriggerState lastPathTraceTrigger;  // sentinel-initialized, see its own doc comment
 
     // Orbit-pick and RAM-sampling state carried frame to frame.
@@ -332,6 +334,7 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         .pathTraceDisplayedAov = -1,
         .pathTraceDisplayedChannelView = -1,
         .pathTraceDisplayedOwner = nullptr,
+        .pathTraceDisplayedDepthMax = 0.0F,
         .lastPathTraceTrigger = PathTraceTriggerState{},
         .orbitPickRequested = false,
         .lastCursorX = 0.0,
@@ -575,13 +578,20 @@ engine::debug::PixelProbeSample samplePixelProbe(const engine::platform::Window&
     return {true, glm::vec4(pixel[0], pixel[1], pixel[2], pixel[3]) / 255.0F};
 }
 
-// Rebuilds pathTraceDisplayTexture only when the selected AOV, the channel-view isolation, or the driver's published result object actually changed -- recreating a GL texture (alloc + upload + mipmap) every frame just to redisplay the same image would violate this codebase's no-allocation-after-init convention for no reason. The driver publishes a fresh result object every completed pass, though, so while it's actively converging this does rebuild the texture up to once per rendered frame -- that per-frame cap (not a lower one) is deliberate: it is what makes newly-accumulated samples visible at all. channelViewToBake: normally app.channelView, isolating an R/G/B channel of `image` itself before upload -- except the HSV AOV, which passes 0 (no isolation here) and applies channel view to its own H/S/V output instead (see hsv_display.frag's uChannelView): isolating a source RGB channel first would broadcast it to grey, and grey always converts to H=0/S=0, destroying the very thing that AOV exists to show. owner: a strong ref to whichever PathTraceSnapshot object actually owns `image` (see PathTracedAovSource) -- comparing shared_ptr identity, not a raw pointer, since a raw pointer to a previous frame's already-freed result could in principle have its address reused by a later allocation (ABA); holding a real shared_ptr in app.pathTraceDisplayedOwner rules that out.
+// Rebuilds pathTraceDisplayTexture only when the selected AOV, the channel-view isolation, or the driver's published result object actually changed -- recreating a GL texture (alloc + upload + mipmap) every frame just to redisplay the same image would violate this codebase's no-allocation-after-init convention for no reason. The driver publishes a fresh result object every completed pass, though, so while it's actively converging this does rebuild the texture up to once per rendered frame -- that per-frame cap (not a lower one) is deliberate: it is what makes newly-accumulated samples visible at all. channelViewToBake: normally app.channelView, isolating an R/G/B channel of `image` itself before upload -- except the HSV AOV, which passes 0 (no isolation here) and applies channel view to its own H/S/V output instead (see hsv_display.frag's uChannelView): isolating a source RGB channel first would broadcast it to grey, and grey always converts to H=0/S=0, destroying the very thing that AOV exists to show. owner: a strong ref to whichever PathTraceSnapshot object actually owns `image` (see PathTracedAovSource) -- comparing shared_ptr identity, not a raw pointer, since a raw pointer to a previous frame's already-freed result could in principle have its address reused by a later allocation (ABA); holding a real shared_ptr in app.pathTraceDisplayedOwner rules that out. For Depth specifically, also rescans `image` for its own max value into app.pathTraceDisplayedDepthMax on every rebuild -- presentFrame uses that as an auto-ranging display-exposure bound instead of Camera::farClip(), since farClip is a conservative ray tMax bound, not a proxy for the actual visible scene's depth extent.
 void ensurePathTraceDisplayTexture(AppResources& app, const std::shared_ptr<const void>& owner,
                                     const engine::gfx::HdrImage& image, int channelViewToBake) {
     if (app.pathTraceDisplayTexture.has_value() && app.pathTraceDisplayedAov == app.aov &&
         app.pathTraceDisplayedChannelView == channelViewToBake &&
         app.pathTraceDisplayedOwner == owner) {
         return;
+    }
+    if (app.aov == static_cast<int>(engine::debug::AovId::Depth)) {
+        float maxDepth = 0.0F;
+        for (int i = 0; i < image.width * image.height; ++i) {
+            maxDepth = std::max(maxDepth, image.rgba[static_cast<std::size_t>(i) * 4]);
+        }
+        app.pathTraceDisplayedDepthMax = maxDepth;
     }
     const std::vector<float> flipped = flipRowsForDisplay(image, channelViewToBake);
     app.pathTraceDisplayTexture =
@@ -601,7 +611,7 @@ void clearToBlack(int winWidth, int winHeight) {
 
 // Blits the path-traced buffer for the selected AOV through the shared OCIO/post-process path -- Beauty uses the user's LUT, everything else forces Raw (not scene-referred radiance, a display curve would distort them). Depth/BounceCount additionally get an exposure-based normalization since their raw range exceeds the default framebuffer's fixed-point [0,1] clamp -- see the exposureEv branch below.
 void presentFrame(AppResources& app, const engine::scene::PathTraceSnapshot& pathTraceSnapshot,
-                   const engine::scene::Camera& camera, int winWidth, int winHeight) {
+                   int winWidth, int winHeight) {
     const auto aovId = static_cast<engine::debug::AovId>(app.aov);
     const bool hasPathTraceResult = pathTraceSnapshot.gbuffer && pathTraceSnapshot.dynamic;
     if (!hasPathTraceResult) {
@@ -642,15 +652,18 @@ void presentFrame(AppResources& app, const engine::scene::PathTraceSnapshot& pat
         const bool isBeauty = aovId == engine::debug::AovId::Beauty;
         app.ocioTransform.setActiveLut(isBeauty ? app.userLut
                                                  : engine::gfx::OcioDisplayTransform::Lut::Raw);
-        // Beauty: photographic exposure. Depth/BounceCount: normalize each AOV's own provable
-        // upper bound (farClip metres; maxBounces+1 termination depth) to [0,1] for display, since
-        // the default framebuffer is fixed-point and clamps any raw value >= 1 to white otherwise.
-        // Everything else: unscaled passthrough.
+        // Beauty: photographic exposure. Depth: auto-ranged to the actual max depth visible in the
+        // current buffer (see ensurePathTraceDisplayTexture) -- farClip is a conservative ray tMax
+        // bound, not a proxy for the scene's real depth extent, and normalizing by it left real scenes
+        // (a small fraction of farClip) reading as black. BounceCount: normalized by its own provable
+        // upper bound (maxBounces+1), a realistically tight range so this stays a static divide. Both
+        // exist because the default framebuffer is fixed-point and clamps any raw value >= 1 to white
+        // otherwise. Everything else: unscaled passthrough.
         float exposureEv = 0.0F;
         if (isBeauty) {
             exposureEv = app.debugCamera.relativeExposureEv();
         } else if (aovId == engine::debug::AovId::Depth) {
-            exposureEv = -std::log2(camera.farClip());
+            exposureEv = -std::log2(std::max(app.pathTraceDisplayedDepthMax, 1e-4F));
         } else if (aovId == engine::debug::AovId::BounceCount) {
             exposureEv = -std::log2(static_cast<float>(app.pathTraceSettings.maxBounces) + 1.0F);
         }
@@ -760,7 +773,7 @@ void renderFrame(engine::platform::Window& window, AppResources& app) {
     resolveOrbitPick(window, app, camera, pathTraceSnapshot);
 
     app.postTimer.begin();
-    presentFrame(app, pathTraceSnapshot, camera, winWidth, winHeight);
+    presentFrame(app, pathTraceSnapshot, winWidth, winHeight);
     app.postTimer.end();
 
     // Captured after the composited image lands in the default framebuffer, before the HUD draws on top of it.
