@@ -32,7 +32,7 @@ struct PathTracedStatus {
     int maxSamples = 0;  // 0 = unbounded
 };
 
-// Pixel under cursor, read back from the composited framebuffer (post-LUT, post-exposure, the literal on-screen value) by main.cpp. valid=false off-viewport.
+// Pixel under cursor, sampled by main.cpp's samplePixelProbe. For Beauty and the post-filter AOVs (HSV/Luminance/Sobel/Gabor), this is the composited framebuffer pixel (post-LUT, post-exposure, the literal on-screen value); for every other AOV, it's that AOV's own raw HdrImage texel (native units, full float precision, independent of the display transform). valid=false off-viewport.
 struct PixelProbeSample {
     bool valid = false;
     glm::vec4 color{0.0F};
