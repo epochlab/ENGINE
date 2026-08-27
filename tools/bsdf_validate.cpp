@@ -138,13 +138,72 @@ bool checkFurnace() {
     return ok;
 }
 
+// Regression check for the DirectSpecular/IndirectSpecular AOV albedo-leak bug: BsdfSample::rawThroughputWeight for a specular-sampled draw must be independent of baseColor. Drives sampleBsdf with two metallic=0 materials differing only in baseColor (white vs. saturated red) through identically-seeded Samplers -- lobe selection and wi depend only on wo/roughness/metallic/f0/ior (identical between the two), never baseColor, so both draws follow the same branch deterministically; wherever both land on LobeType::SpecularReflection, their rawThroughputWeight must match. Before the fix, rawThroughputWeight for a specular sample was the combined specular+diffuse value, which does depend on baseColor via the diffuse term -- this check would have caught that.
+bool checkSpecularRawThroughputIsolation() {
+    using engine::scene::LobeType;
+    constexpr int kSampleCount = 2000;
+    constexpr float kTolerance = 1e-4F;
+    const std::array<float, 4> roughnesses = {0.05F, 0.25F, 0.5F, 1.0F};
+    const std::array<float, 4> ndotVs = {0.2F, 0.6F, 1.0F, -0.6F};
+
+    bool ok = true;
+    int specularSamplesSeen = 0;
+    std::uint32_t seed = 0;
+    for (float roughness : roughnesses) {
+        for (float ndotV : ndotVs) {
+            ++seed;
+            const BsdfParams white = makeParams(roughness, 0.0F, 0.0F);
+            const BsdfParams red{glm::vec3(1.0F, 0.0F, 0.0F), 0.0F, roughness, glm::vec3(0.04F), 1.5F, 0.0F};
+            const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (ndotV * ndotV))), 0.0F, ndotV);
+            for (int i = 0; i < kSampleCount; ++i) {
+                engine::scene::Sampler samplerWhite(0, 0, i, seed);
+                engine::scene::Sampler samplerRed(0, 0, i, seed);
+                const std::optional<engine::scene::BsdfSample> sampleWhite =
+                    engine::scene::sampleBsdf(white, wo, samplerWhite);
+                const std::optional<engine::scene::BsdfSample> sampleRed =
+                    engine::scene::sampleBsdf(red, wo, samplerRed);
+                if (!sampleWhite.has_value() || !sampleRed.has_value()) {
+                    continue;
+                }
+                if (sampleWhite->type != sampleRed->type) {
+                    std::cerr << "bsdf_validate: FAILED specular isolation lobe-selection parity at "
+                                 "roughness="
+                              << roughness << " ndotV=" << ndotV << " sample=" << i << "\n";
+                    ok = false;
+                    continue;
+                }
+                if (sampleWhite->type != LobeType::SpecularReflection) {
+                    continue;
+                }
+                ++specularSamplesSeen;
+                const glm::vec3 diff = sampleWhite->rawThroughputWeight - sampleRed->rawThroughputWeight;
+                if (std::max({std::fabs(diff.x), std::fabs(diff.y), std::fabs(diff.z)}) > kTolerance) {
+                    std::cerr << "bsdf_validate: FAILED specular rawThroughputWeight depends on baseColor "
+                                 "at roughness="
+                              << roughness << " ndotV=" << ndotV << " white=(" << sampleWhite->rawThroughputWeight.x
+                              << "," << sampleWhite->rawThroughputWeight.y << "," << sampleWhite->rawThroughputWeight.z
+                              << ") red=(" << sampleRed->rawThroughputWeight.x << ","
+                              << sampleRed->rawThroughputWeight.y << "," << sampleRed->rawThroughputWeight.z << ")\n";
+                    ok = false;
+                }
+            }
+        }
+    }
+    if (specularSamplesSeen == 0) {
+        std::cerr << "bsdf_validate: FAILED specular isolation check observed zero SpecularReflection samples\n";
+        ok = false;
+    }
+    return ok;
+}
+
 }  // namespace
 
 int main() {
     const bool pdfOk = checkPdfNormalization();
     const bool furnaceOk = checkFurnace();
+    const bool specularIsolationOk = checkSpecularRawThroughputIsolation();
 
-    if (!pdfOk || !furnaceOk) {
+    if (!pdfOk || !furnaceOk || !specularIsolationOk) {
         std::cerr << "bsdf_validate: FAILED\n";
         return EXIT_FAILURE;
     }
