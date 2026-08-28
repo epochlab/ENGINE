@@ -506,7 +506,7 @@ PathTracedAovSource selectPathTracedImage(const engine::scene::PathTraceSnapshot
         case engine::debug::AovId::AO:
             return {&snapshot.gbuffer->ao, snapshot.gbuffer};
         case engine::debug::AovId::Shadow:
-            return {&snapshot.gbuffer->shadow, snapshot.gbuffer};
+            return {&snapshot.dynamic->shadow, snapshot.dynamic};
         case engine::debug::AovId::Wireframe:
             return {&snapshot.gbuffer->wireframe, snapshot.gbuffer};
         case engine::debug::AovId::BoundingBox:
