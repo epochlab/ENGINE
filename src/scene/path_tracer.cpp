@@ -61,24 +61,24 @@ bool nearAabbWireframeEdge(const Ray& ray, const AabbBounds& box) {
     return minEdgeDist < kBoundingBoxThickness;
 }
 
-glm::vec3 resolveBaseColor(const Material& material, glm::vec2 uv) {
+glm::vec3 resolveBaseColor(const Material& material, glm::vec2 uv, const PathTraceSettings& settings) {
     const glm::vec4 sample = engine::gfx::sampleBilinear(material.baseColorTexture, uv);
-    return glm::vec3(sample) * glm::vec3(material.baseColorFactor);
+    return glm::vec3(sample) * settings.diffuseColour;
 }
 
 float resolveRoughness(const Material& material, glm::vec2 uv, const PathTraceSettings& settings) {
     const float sample = engine::gfx::sampleBilinear(material.roughnessTexture, uv).r;
     // Floor (UE4/Frostbite convention) avoids a near-zero-roughness GGX singularity.
-    return std::clamp(sample * material.roughnessFactor, settings.roughnessMin, settings.roughnessMax);
+    return std::clamp(sample * settings.roughnessFactor, settings.roughnessMin, settings.roughnessMax);
 }
 
 BsdfParams resolveBsdfParams(const Material& material, glm::vec2 uv, const PathTraceSettings& settings) {
-    const glm::vec3 baseColor = resolveBaseColor(material, uv);
+    const glm::vec3 baseColor = resolveBaseColor(material, uv, settings);
     const float roughness = resolveRoughness(material, uv, settings);
     const glm::vec3 specular = glm::vec3(engine::gfx::sampleBilinear(material.specularTexture, uv));
-    const glm::vec3 f0 = glm::mix(specular, baseColor, material.metallicFactor);
-    return BsdfParams{baseColor, material.metallicFactor, roughness, f0, material.ior,
-                       material.transmissionFactor};
+    const glm::vec3 f0 = glm::mix(specular, baseColor, settings.metallicFactor);
+    return BsdfParams{baseColor, settings.metallicFactor, roughness, f0, settings.ior,
+                       settings.transmissionFactor};
 }
 
 // Gram-Schmidt re-orthogonalized tangent frame, normal- and bump-mapped.
@@ -246,7 +246,7 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
         const glm::vec3 geoNormal = geometricNormalOf(triangle);
 
         if (bounce == 0) {
-            firstHitIor = material.ior;
+            firstHitIor = settings.ior;
             primaryHit = true;
             gWorldPos = shading.position;
             gUv = shading.uv;
