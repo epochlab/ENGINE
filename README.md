@@ -110,6 +110,9 @@ Every AOV below is computed directly by the path tracer each pass, except HSV/Lu
 | Tangent | Material | Shading tangent basis at the primary hit | Debugs the tangent-space basis used for normal mapping |
 | ObjectID | Material | Per-instance index, false-coloured (`falseColorForId`) | Isolation mask for compositing/debugging |
 | AO | Material | Authored ambient-occlusion texture sample at the primary hit | Debug baked AO independent of lighting |
+| Shadow | Utility | Binary NEE occlusion test toward the env light at the primary hit, re-averaged across progressive passes into continuous shadow/penumbra density | Isolates direct-light visibility from material/lighting colour |
+| Wireframe | Utility | Barycentric distance-to-nearest-edge at the primary hit's triangle | Visualizes triangle density/topology |
+| BoundingBox | Utility | Ray-vs-AABB slab test against the scene's bounds; drawn over background too | Sanity-checks scene extent/framing |
 | Fresnel | Transport | Schlick term at the primary hit's view angle | Debug grazing-angle reflectance behaviour in isolation |
 | IOR | Transport | Per-material dielectric IOR at the primary hit, -1 on a miss | Isolates the raw refractive-index input driving Fresnel/transmission |
 | BounceCount | Transport | Mean path termination depth across samples, per pixel | Debug Russian roulette/termination behaviour |
