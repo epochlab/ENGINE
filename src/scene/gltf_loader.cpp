@@ -195,9 +195,7 @@ std::optional<std::vector<unsigned int>> readIndices(const cgltf_accessor* indic
 
 std::optional<Material> loadMaterialTextures(const cgltf_data* data, const cgltf_material& mat,
                                               const std::string& dir) {
-    const cgltf_pbr_metallic_roughness& pbr = mat.pbr_metallic_roughness;
-
-    auto baseColor = loadTexture(pbr.base_color_texture.texture, dir);
+    auto baseColor = loadTexture(mat.pbr_metallic_roughness.base_color_texture.texture, dir);
     auto normal = loadTexture(mat.normal_texture.texture, dir);
     auto ao = loadTexture(mat.occlusion_texture.texture, dir);
     auto roughness =
@@ -211,23 +209,13 @@ std::optional<Material> loadMaterialTextures(const cgltf_data* data, const cgltf
         return std::nullopt;
     }
 
-    // Defaults match the glTF extension specs.
-    const float ior = mat.has_ior ? mat.ior.ior : 1.5F;
-    const float transmissionFactor =
-        mat.has_transmission ? mat.transmission.transmission_factor : 0.0F;
-
     return Material{
-        glm::make_vec4(pbr.base_color_factor),
-        pbr.metallic_factor,
-        pbr.roughness_factor,
         std::move(*baseColor),
         std::move(*normal),
         std::move(*bump),
         std::move(*roughness),
         std::move(*specular),
         std::move(*ao),
-        ior,
-        transmissionFactor,
     };
 }
 
