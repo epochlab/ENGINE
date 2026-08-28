@@ -99,16 +99,18 @@ void PathTraceDriver::driverLoop(std::stop_token stopToken) {
                 std::move(pass.uv), std::move(pass.normal), std::move(pass.geomNormal),
                 std::move(pass.albedo), std::move(pass.metallic), std::move(pass.roughness),
                 std::move(pass.tangent), std::move(pass.objectId), std::move(pass.alpha),
-                std::move(pass.fresnel), std::move(pass.ao), std::move(pass.shadow),
+                std::move(pass.fresnel), std::move(pass.ao),
                 std::move(pass.wireframe), std::move(pass.boundingBox)});
             accumulator = PathTraceDynamic{
                 std::move(pass.beauty),         std::move(pass.bounceHeatmap),
+                std::move(pass.shadow),
                 std::move(pass.directDiffuse),  std::move(pass.indirectDiffuse),
                 std::move(pass.directSpecular), std::move(pass.indirectSpecular),
                 std::move(pass.refraction)};
         } else {
             accumulateInPlace(accumulator.beauty, pass.beauty, n);
             accumulateInPlace(accumulator.bounceHeatmap, pass.bounceHeatmap, n);
+            accumulateInPlace(accumulator.shadow, pass.shadow, n);
             accumulateInPlace(accumulator.directDiffuse, pass.directDiffuse, n);
             accumulateInPlace(accumulator.indirectDiffuse, pass.indirectDiffuse, n);
             accumulateInPlace(accumulator.directSpecular, pass.directSpecular, n);
