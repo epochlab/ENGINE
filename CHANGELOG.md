@@ -201,3 +201,17 @@ Follow-on to the path tracer becoming the continuously-converging primary render
 - docs: README rewritten to describe the shipped CPU path tracer + thin OpenGL display/HUD layer directly, replacing the phase-by-phase dual-renderer build history
 
 **Phase 5 — Materials & recursive transport complete.**
+
+## HUD polish, new debug AOVs & config split
+
+- feat: HDRI Exposure slider, per-AOV pixel probe (native units, on-screen composited value for Beauty/post-filter AOVs), configurable progressive-accumulation max-samples cap
+- feat: Shadow, Wireframe, Bounding Box AOVs — binary NEE occlusion, barycentric edge distance, ray-vs-AABB slab test
+- feat: `material.json`/`profile.json` split — renderer/material defaults moved out of `scene.json`; configurable texture/HDRI asset paths; Bump texture wired up (previously loaded, unused)
+- fix: `maxBounces=0` now renders direct lighting only; pixel probe reads the true on-screen pixel; specular lobe isolated from diffuse in NEE's DirectSpecular/IndirectSpecular routing
+- chore: comments consolidated to single-line, technical-only style; default ISO 400, `maxBounces` 0→1, max-samples cap enabled by default
+
+## AOV correctness fixes
+
+- fix: specular lobe's throughput isolated from diffuse admixture in DirectSpecular/IndirectSpecular AOV routing
+- fix: Depth AOV auto-ranges display exposure to the actual max depth visible in-frame, replacing a `farClip`-based normalization that read real scenes as black; Depth/BounceCount no longer clamp to white; HUD pixel-probe units corrected
+- fix: Shadow AOV re-averages across progressive passes (`PathTraceGBuffer` → `PathTraceDynamic`) instead of freezing as binary speckle from pass 1; confirmed HDR exposure correctly has no effect on it (occlusion is exposure-invariant)
