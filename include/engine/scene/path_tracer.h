@@ -4,6 +4,8 @@
 #include <cstdint>
 #include <vector>
 
+#include <glm/glm.hpp>
+
 #include "engine/gfx/hdr_image.h"
 #include "engine/scene/camera.h"
 #include "engine/scene/embree_accel.h"
@@ -24,12 +26,18 @@ struct PathTraceSettings {
     float bumpStrength;
     float roughnessMin;
     float roughnessMax;
+    // Global material override, sourced from MaterialConfig/material.json -- see resolveBsdfParams (path_tracer.cpp).
+    glm::vec3 diffuseColour;
+    float ior;
+    float transmissionFactor;
+    float metallicFactor;
+    float roughnessFactor;
 };
 
 // Single-channel fields are broadcast to RGB (alpha=1), matching HdrImage's fixed 4-floats/texel layout so every field can go straight through Texture::createFromFloatPixels unchanged. beauty/bounceHeatmap are averaged across every sample of every call (and, under PathTraceDriver, across every accumulated pass); shadow is a single binary NEE sample within one call but is likewise re-averaged across accumulated passes under PathTraceDriver, converging into continuous soft-shadow density (see its own comment below). Every other field is read once, off the primary ray's hit record at sample 0 only (same precedent as iorAov) -- under PathTraceDriver they're populated on the first pass of a generation and left untouched on every later pass, since the primary hit is deterministic given an unchanged camera/scene and doesn't benefit from re-averaging. worldPos/normal/geomNormal are stored raw (world-space metres / unit vectors in [-1,1]), scene-referred values, not remapped to a [0,1] display range -- display-side remapping, if any, happens downstream. One renderPathTraced() call's raw output -- what a single pass computes. PathTraceDriver splits this into PathTraceGBuffer (published once, on pass 1) and PathTraceDynamic (republished every pass) at its publish boundary, since 16 of these 24 fields never change after the first pass; see those two structs' own doc comments. renderPathTraced itself stays unaware of that distinction -- it always computes and returns the full 24 fields, same as a synchronous/non-driver caller would want.
 struct PathTraceResult {
     engine::gfx::HdrImage beauty;
-    engine::gfx::HdrImage iorAov;          // per-material IOR at the primary hit, -1 = miss
+    engine::gfx::HdrImage iorAov;          // global scene IOR at the primary hit, -1 = miss
     engine::gfx::HdrImage bounceHeatmap;   // mean bounce depth at termination, across samples
 
     // Primary-hit G-buffer AOVs.
