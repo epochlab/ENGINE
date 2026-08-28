@@ -19,5 +19,5 @@
     "samplesPerPixel": 1,
     "maxBounces": 1,
     "russianRouletteStartBounce": 3,
-    "maxSamples": 32
+    "maxSamples": 4
 }
