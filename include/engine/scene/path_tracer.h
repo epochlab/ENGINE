@@ -26,7 +26,7 @@ struct PathTraceSettings {
     float roughnessMax;
 };
 
-// Single-channel fields are broadcast to RGB (alpha=1), matching HdrImage's fixed 4-floats/texel layout so every field can go straight through Texture::createFromFloatPixels unchanged. beauty/bounceHeatmap are averaged across every sample of every call (and, under PathTraceDriver, across every accumulated pass); every other field below is read once, off the primary ray's hit record at sample 0 only (same precedent as iorAov) -- under PathTraceDriver they're populated on the first pass of a generation and left untouched on every later pass, since the primary hit is deterministic given an unchanged camera/scene and doesn't benefit from re-averaging. worldPos/normal/geomNormal are stored raw (world-space metres / unit vectors in [-1,1]), scene-referred values, not remapped to a [0,1] display range -- display-side remapping, if any, happens downstream. One renderPathTraced() call's raw output -- what a single pass computes. PathTraceDriver splits this into PathTraceGBuffer (published once, on pass 1) and PathTraceDynamic (republished every pass) at its publish boundary, since 17 of these 24 fields never change after the first pass; see those two structs' own doc comments. renderPathTraced itself stays unaware of that distinction -- it always computes and returns the full 24 fields, same as a synchronous/non-driver caller would want.
+// Single-channel fields are broadcast to RGB (alpha=1), matching HdrImage's fixed 4-floats/texel layout so every field can go straight through Texture::createFromFloatPixels unchanged. beauty/bounceHeatmap are averaged across every sample of every call (and, under PathTraceDriver, across every accumulated pass); shadow is a single binary NEE sample within one call but is likewise re-averaged across accumulated passes under PathTraceDriver, converging into continuous soft-shadow density (see its own comment below). Every other field is read once, off the primary ray's hit record at sample 0 only (same precedent as iorAov) -- under PathTraceDriver they're populated on the first pass of a generation and left untouched on every later pass, since the primary hit is deterministic given an unchanged camera/scene and doesn't benefit from re-averaging. worldPos/normal/geomNormal are stored raw (world-space metres / unit vectors in [-1,1]), scene-referred values, not remapped to a [0,1] display range -- display-side remapping, if any, happens downstream. One renderPathTraced() call's raw output -- what a single pass computes. PathTraceDriver splits this into PathTraceGBuffer (published once, on pass 1) and PathTraceDynamic (republished every pass) at its publish boundary, since 16 of these 24 fields never change after the first pass; see those two structs' own doc comments. renderPathTraced itself stays unaware of that distinction -- it always computes and returns the full 24 fields, same as a synchronous/non-driver caller would want.
 struct PathTraceResult {
     engine::gfx::HdrImage beauty;
     engine::gfx::HdrImage iorAov;          // per-material IOR at the primary hit, -1 = miss
@@ -46,7 +46,7 @@ struct PathTraceResult {
     engine::gfx::HdrImage alpha;       // 1.0 on a primary hit, 0.0 on a primary miss -- a real coverage mask, since this renderer isn't opaque-only-by-construction
     engine::gfx::HdrImage fresnel;     // Schlick term at the primary hit's view angle
     engine::gfx::HdrImage ao;          // baked AO texture sample at the primary hit (not ray-traced AO)
-    engine::gfx::HdrImage shadow;      // 1.0 = primary hit is shadowed/occluded from the env light's NEE sample, 0.0 = lit or no primary hit (background)
+    engine::gfx::HdrImage shadow;      // fraction of accumulated passes where the primary hit's NEE sample toward the env light was occluded -- 1.0 = fully shadowed, 0.0 = fully lit or no primary hit (background); re-averaged across passes like beauty, so it converges from a single pass's binary sample into continuous soft-shadow/penumbra density over time
     engine::gfx::HdrImage wireframe;   // 1.0 near a hit triangle's edge (barycentric distance), 0.0 elsewhere/no hit
     engine::gfx::HdrImage boundingBox; // 1.0 near an edge of the scene's wireframe bounding cube -- independent of mesh hit, drawn over background too
 
@@ -58,7 +58,7 @@ struct PathTraceResult {
     engine::gfx::HdrImage refraction;
 };
 
-// PathTraceResult's 17 primary-hit fields -- deterministic given an unchanged camera/scene, so PathTraceDriver captures these once (pass 1 of a generation) and never rebuilds/republishes them again, instead of paying their copy cost on every pass alongside the 7 fields that actually accumulate (see PathTraceDynamic). Field meanings are identical to PathTraceResult's own doc comments above.
+// PathTraceResult's 16 primary-hit fields -- deterministic given an unchanged camera/scene, so PathTraceDriver captures these once (pass 1 of a generation) and never rebuilds/republishes them again, instead of paying their copy cost on every pass alongside the 8 fields that actually accumulate (see PathTraceDynamic). Field meanings are identical to PathTraceResult's own doc comments above.
 struct PathTraceGBuffer {
     engine::gfx::HdrImage iorAov;
     engine::gfx::HdrImage depth;
@@ -74,15 +74,15 @@ struct PathTraceGBuffer {
     engine::gfx::HdrImage alpha;
     engine::gfx::HdrImage fresnel;
     engine::gfx::HdrImage ao;
-    engine::gfx::HdrImage shadow;
     engine::gfx::HdrImage wireframe;
     engine::gfx::HdrImage boundingBox;
 };
 
-// PathTraceResult's 7 fields that genuinely re-average across passes -- see PathTraceGBuffer's doc comment for why these are split out. Field meanings are identical to PathTraceResult's own doc comments above.
+// PathTraceResult's 8 fields that genuinely re-average across passes -- see PathTraceGBuffer's doc comment for why these are split out. Field meanings are identical to PathTraceResult's own doc comments above.
 struct PathTraceDynamic {
     engine::gfx::HdrImage beauty;
     engine::gfx::HdrImage bounceHeatmap;
+    engine::gfx::HdrImage shadow;
     engine::gfx::HdrImage directDiffuse;
     engine::gfx::HdrImage indirectDiffuse;
     engine::gfx::HdrImage directSpecular;
