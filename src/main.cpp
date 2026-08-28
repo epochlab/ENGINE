@@ -326,6 +326,11 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
                 .bumpStrength = materialConfig.bumpStrength,
                 .roughnessMin = materialConfig.roughnessMin,
                 .roughnessMax = materialConfig.roughnessMax,
+                .diffuseColour = materialConfig.diffuseColour,
+                .ior = materialConfig.ior,
+                .transmissionFactor = materialConfig.transmissionFactor,
+                .metallicFactor = materialConfig.metallicFactor,
+                .roughnessFactor = materialConfig.roughnessFactor,
             },
         .maxSamples = profileConfig.maxSamples,
         // Constructed in main() right after initializeApp() returns -- see path_trace_driver.h's constructor precondition (its reference members must bind to sceneAccel/environmentMap/stumpModel at their final, permanent address, which this designated-initializer expression, still local-variable-based and one AppResources move away from that address, cannot yet guarantee).
