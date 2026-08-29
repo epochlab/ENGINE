@@ -1,8 +1,8 @@
 {
-    "position": [0.0, 0.1, 3.0],
+    "position": [0.0, 0.15, 5.0],
     "yawDegrees": 0.0,
     "pitchDegrees": 0.0,
-    "filmBack": { "widthMm": 36.0, "heightMm": 24.0 },
+    "filmBack": { "widthMm": 23.76, "heightMm": 13.37 },
     "focalLengthMm": 70.0,
     "nearClip": 0.1,
     "farClip": 100.0,
@@ -19,5 +19,5 @@
     "samplesPerPixel": 1,
     "maxBounces": 1,
     "russianRouletteStartBounce": 3,
-    "maxSamples": 16
+    "maxSamples": 4
 }
