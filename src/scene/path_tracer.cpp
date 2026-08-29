@@ -42,8 +42,6 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
                        Sampler& sampler) {
     glm::vec3 radiance(0.0F);
     glm::vec3 throughput(1.0F);
-    // Mirrors `throughput` exactly except every bounce's lobe pick multiplies in sample->rawThroughputWeight (that lobe's own isolated weight -- kd for Diffuse, F*G2/G1 for SpecularReflection, no admixture from the other lobe) instead of the physical throughputWeight -- used only to compute the delighted Direct/Indirect Diffuse/Specular AOV bucket writes below, never `radiance` itself. Diverges from `throughput` by the cumulative product of every traversed bounce's own-lobe isolation factor (not just bounce 0's).
-    glm::vec3 lobeRawThroughput(1.0F);
     Ray ray = primaryRay;
     int bounce = 0;
     std::optional<PathBucket> pathBucket;  // unset until bounce 0 successfully samples a lobe
@@ -95,10 +93,7 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
             }
             const glm::vec3 missRadiance = throughput * envRadiance * misWeight;
             radiance += missRadiance;
-            const bool isolatedBucket = pathBucket == PathBucket::Diffuse ||
-                                         pathBucket == PathBucket::SpecularReflection;
-            addToBucket(isolatedBucket ? lobeRawThroughput * envRadiance * misWeight : missRadiance,
-                        /*isDirect=*/bounce == 1);
+            addToBucket(missRadiance, /*isDirect=*/bounce == 1);
             break;
         }
 
@@ -150,9 +145,10 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
             if (nearSide || farSide) {
                 const glm::vec3 wiLocalLight = frame.toLocal(lightSample.direction);
                 const float lightCos = std::abs(shadingCos);  // far-side samples carry a negative cosine
-                const glm::vec3 bsdfValue = evaluateBsdf(params, woLocal, wiLocalLight);
-                const float bsdfPdf = pdfBsdf(params, woLocal, wiLocalLight);
-                if (bsdfPdf > 0.0F &&
+                // One evaluation for the value, the pdf and the per-lobe split the transport AOVs need -- the four separate calls this replaced (evaluateBsdf, pdfBsdf, and one isolating call per lobe) each recomputed the same lobe probabilities, GGX/Fresnel terms and albedo-table lookups.
+                const BsdfEval eval = evaluateBsdfSplit(params, woLocal, wiLocalLight);
+                const glm::vec3 bsdfValue = eval.total();
+                if (eval.pdf > 0.0F &&
                     (bsdfValue.x > 0.0F || bsdfValue.y > 0.0F || bsdfValue.z > 0.0F)) {
                     // Offset along geoNormal toward whichever side the light sample is on -- the far side for a transmissive vertex lit from behind, the near side otherwise.
                     const glm::vec3 shadowOrigin =
@@ -170,32 +166,20 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
                                                                    envRotationRadians) *
                             envExposure;
                         const float lightPdf2 = lightSample.pdf * lightSample.pdf;
-                        const float bsdfPdf2 = bsdfPdf * bsdfPdf;
+                        const float bsdfPdf2 = eval.pdf * eval.pdf;
                         const float misWeightLight = lightPdf2 / (lightPdf2 + bsdfPdf2);
-                        const glm::vec3 neeContribution = throughput * bsdfValue * envRadiance *
-                                                            lightCos * misWeightLight / lightSample.pdf;
+                        const glm::vec3 common =
+                            throughput * envRadiance * lightCos * misWeightLight / lightSample.pdf;
+                        const glm::vec3 neeContribution = bsdfValue * common;
                         radiance += neeContribution;
                         if (bounce == 0) {
-                            // Bounce 0's NEE contribution is split deterministically across BOTH lobe buckets, never routed by sample->type. Which lobe the *continuation* ray happened to draw has nothing to do with NEE, and routing by it wrote only one bucket per sample -- thinning each in expectation by that lobe's selection probability (a Fresnel- and view-angle-dependent factor, clamped to [0.05,0.95] in computeLobeProbabilities), so an evenly-lit flat wall read as a Fresnel gradient -- while adding the variance of a binary coin flip to an estimator that need not be stochastic. Each lobe is isolated at its own value so the primary surface's own texture never enters the AOV (evaluateDiffuseRaw drops baseColor; the specular lobe's F*G2/G1 carries none at metallic=0). throughput and lobeRawThroughput are both still (1,1,1) here -- neither is multiplied until after this block -- so no multiplier is needed. Deliberately bypasses addToBucket: that routes by pathBucket, which is exactly what must not happen, and which is unset anyway when sampleBsdf failed.
-                            if (farSide) {
-                                // Only the transmission lobe is non-zero across the interface, so there is no diffuse/specular split to make -- this is refraction transport, and Refraction is a physical bucket rather than a delighted one.
-                                refractionAccum += neeContribution;
-                            } else {
-                                const glm::vec3 common =
-                                    envRadiance * lightCos * misWeightLight / lightSample.pdf;
-                                directDiffuseAccum +=
-                                    evaluateDiffuseRaw(params, woLocal, wiLocalLight) * common;
-                                directSpecularAccum +=
-                                    evaluateSpecularOnly(params, woLocal, wiLocalLight) * common;
-                            }
+                            // Bounce 0's NEE contribution is split across the buckets by the LOBE THAT CARRIED IT, deterministically and at its own physical value -- never routed by sample->type, which is the lobe the continuation ray happened to draw and has nothing to do with NEE. The three components partition eval.total() exactly (bsdf.h), so this writes the same energy `radiance` just took, only attributed. throughput is still (1,1,1) here -- it isn't multiplied until after this block -- so `common` is unaffected by it.
+                            directDiffuseAccum += eval.diffuse * common;
+                            directSpecularAccum += eval.specular * common;
+                            refractionAccum += eval.transmission * common;
                         } else {
-                            // Deeper bounces keep the path's sticky bucket: this vertex's own colour legitimately tints indirect transport, so the full combined bsdfValue is used. Only Diffuse differs from neeContribution, via lobeRawThroughput (which keeps stripping each traversed bounce's own-lobe admixture); Specular and Refraction both reduce to neeContribution exactly.
-                            glm::vec3 bucketContribution = neeContribution;
-                            if (pathBucket == PathBucket::Diffuse) {
-                                bucketContribution = lobeRawThroughput * bsdfValue * envRadiance *
-                                                      lightCos * misWeightLight / lightSample.pdf;
-                            }
-                            addToBucket(bucketContribution, /*isDirect=*/false);
+                            // Deeper bounces keep the path's sticky bucket at the full physical contribution: which lobe carries the light at THIS vertex no longer names the transport type of a path already bucketed at bounce 0, and this vertex's own colour legitimately tints indirect transport.
+                            addToBucket(neeContribution, /*isDirect=*/false);
                         }
                     }
                 }
@@ -207,7 +191,7 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
             break;
         }
 
-        lastBsdfPdf = pdfBsdf(params, woLocal, sample->wiLocal);
+        lastBsdfPdf = sample->pdf;
         lastSampleWasDelta = lastBsdfPdf <= 0.0F;
 
         const glm::vec3 wiWorld = frame.toWorld(sample->wiLocal);
@@ -222,7 +206,6 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
         }
 
         throughput *= sample->throughputWeight;
-        lobeRawThroughput *= sample->rawThroughputWeight;
 
         if (bounce >= settings.russianRouletteStartBounce) {
             const float continueProb = std::clamp(
@@ -232,7 +215,6 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
                 break;
             }
             throughput /= continueProb;
-            lobeRawThroughput /= continueProb;
         }
 
         // Chiang/Li/Burley shadow-terminator-corrected origin, nudged off the true triangle plane along the geometric normal (toward wi's side) to avoid self-intersection.

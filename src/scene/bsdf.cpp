@@ -446,8 +446,7 @@ glm::vec3 transmitMultiScatter(const BsdfParams& params, float wiZ, const LobePr
 }
 
 // The full reciprocal coupling factor at wi: the wo-side half is precomputed into lobes.diffuseKd, the
-// wi-side half is the same (1 - coatAlbedo) evaluated here. Shared with evaluateDiffuseRaw and
-// sampleBsdf's raw AOV weight so all three cannot drift apart.
+// wi-side half is the same (1 - coatAlbedo) evaluated here.
 float diffuseKdAt(const BsdfParams& params, const glm::vec3& wi, const LobeProbabilities& lobes) {
     const AlbedoSplit splitWi = directionalAlbedo(wi.z, params.roughness);
     const float coat = coatAlbedo(splitWi, lobes.albedoAvg, lobes.coatF0,
@@ -659,8 +658,8 @@ LobeEval evaluateTransmissionLobe(const BsdfParams& params, const glm::vec3& wo,
              vndfPdf * etaR * etaR * std::abs(wiDotH) / denom2};
 }
 
-glm::vec3 evaluateContinuousLobes(const BsdfParams& params, const glm::vec3& wo, const glm::vec3& wi,
-                                   float alpha, const LobeProbabilities& lobes, float& outPdf) {
+BsdfEval evaluateContinuousLobes(const BsdfParams& params, const glm::vec3& wo, const glm::vec3& wi,
+                                  float alpha, const LobeProbabilities& lobes) {
     // Reflection and transmission occupy disjoint hemispheres, so the mixture is piecewise -- no overlap
     // between the two to double-count.
     if (wi.z < 0.0F) {
@@ -668,17 +667,17 @@ glm::vec3 evaluateContinuousLobes(const BsdfParams& params, const glm::vec3& wo,
         // side, and a non-zero value there would be silently discarded by path_tracer.cpp's bsdfPdf > 0
         // guard -- energy lost rather than gained.
         if (!transmissionIsRough(params, alpha)) {
-            outPdf = 0.0F;
-            return glm::vec3(0.0F);
+            return {};
         }
         const LobeEval transmission = evaluateTransmissionLobe(params, wo, wi, alpha, lobes);
-        outPdf = (lobes.transmit * transmission.pdf) + (lobes.msTransmit * -wi.z / kPi);
-        return transmission.f + transmitMultiScatter(params, wi.z, lobes);
+        return {glm::vec3(0.0F), glm::vec3(0.0F),
+                transmission.f + transmitMultiScatter(params, wi.z, lobes),
+                (lobes.transmit * transmission.pdf) + (lobes.msTransmit * -wi.z / kPi)};
     }
     const LobeEval specular = evaluateSpecularLobe(params, wo, wi, alpha, lobes);
     const LobeEval diffuse = evaluateDiffuseLobe(params, wi, lobes);
-    outPdf = (lobes.specular * specular.pdf) + (lobes.diffuse * diffuse.pdf);
-    return specular.f + diffuse.f;
+    return {diffuse.f, specular.f, glm::vec3(0.0F),
+            (lobes.specular * specular.pdf) + (lobes.diffuse * diffuse.pdf)};
 }
 
 }  // namespace
@@ -687,50 +686,22 @@ glm::vec3 fresnelSchlick(float cosTheta, const glm::vec3& f0) {
     return f0 + ((glm::vec3(1.0F) - f0) * std::pow(std::clamp(1.0F - cosTheta, 0.0F, 1.0F), 5.0F));
 }
 
-float pdfBsdf(const BsdfParams& params, const glm::vec3& woLocal, const glm::vec3& wiLocal) {
+BsdfEval evaluateBsdfSplit(const BsdfParams& params, const glm::vec3& woLocal,
+                            const glm::vec3& wiLocal) {
     const float sign = woLocal.z >= 0.0F ? 1.0F : -1.0F;
     const glm::vec3 wo(woLocal.x, woLocal.y, woLocal.z * sign);
     const glm::vec3 wi(wiLocal.x, wiLocal.y, wiLocal.z * sign);
     const float alpha = std::max(params.roughness * params.roughness, kMinAlpha);
     const LobeProbabilities lobes = computeLobeProbabilities(params, wo, sign, alpha);
-    float pdf = 0.0F;
-    evaluateContinuousLobes(params, wo, wi, alpha, lobes, pdf);
-    return pdf;
+    return evaluateContinuousLobes(params, wo, wi, alpha, lobes);
+}
+
+float pdfBsdf(const BsdfParams& params, const glm::vec3& woLocal, const glm::vec3& wiLocal) {
+    return evaluateBsdfSplit(params, woLocal, wiLocal).pdf;
 }
 
 glm::vec3 evaluateBsdf(const BsdfParams& params, const glm::vec3& woLocal, const glm::vec3& wiLocal) {
-    const float sign = woLocal.z >= 0.0F ? 1.0F : -1.0F;
-    const glm::vec3 wo(woLocal.x, woLocal.y, woLocal.z * sign);
-    const glm::vec3 wi(wiLocal.x, wiLocal.y, wiLocal.z * sign);
-    const float alpha = std::max(params.roughness * params.roughness, kMinAlpha);
-    const LobeProbabilities lobes = computeLobeProbabilities(params, wo, sign, alpha);
-    float pdf = 0.0F;
-    return evaluateContinuousLobes(params, wo, wi, alpha, lobes, pdf);
-}
-
-glm::vec3 evaluateDiffuseRaw(const BsdfParams& params, const glm::vec3& woLocal,
-                              const glm::vec3& wiLocal) {
-    const float sign = woLocal.z >= 0.0F ? 1.0F : -1.0F;
-    const glm::vec3 wo(woLocal.x, woLocal.y, woLocal.z * sign);
-    const glm::vec3 wi(wiLocal.x, wiLocal.y, wiLocal.z * sign);
-    if (wi.z <= 0.0F) {
-        return glm::vec3(0.0F);
-    }
-    const float alpha = std::max(params.roughness * params.roughness, kMinAlpha);
-    const LobeProbabilities lobes = computeLobeProbabilities(params, wo, sign, alpha);
-    // Same kd as evaluateDiffuseLobe, minus the baseColor factor -- both halves of the reciprocal
-    // coupling, so this AOV tracks the shaded value rather than drifting from it.
-    return glm::vec3(diffuseKdAt(params, wi, lobes) / kPi);
-}
-
-glm::vec3 evaluateSpecularOnly(const BsdfParams& params, const glm::vec3& woLocal,
-                                const glm::vec3& wiLocal) {
-    const float sign = woLocal.z >= 0.0F ? 1.0F : -1.0F;
-    const glm::vec3 wo(woLocal.x, woLocal.y, woLocal.z * sign);
-    const glm::vec3 wi(wiLocal.x, wiLocal.y, wiLocal.z * sign);
-    const float alpha = std::max(params.roughness * params.roughness, kMinAlpha);
-    const LobeProbabilities lobes = computeLobeProbabilities(params, wo, sign, alpha);
-    return evaluateSpecularLobe(params, wo, wi, alpha, lobes).f;
+    return evaluateBsdfSplit(params, woLocal, wiLocal).total();
 }
 
 std::optional<BsdfSample> sampleBsdf(const BsdfParams& params, const glm::vec3& woLocal,
@@ -754,22 +725,14 @@ std::optional<BsdfSample> sampleBsdf(const BsdfParams& params, const glm::vec3& 
         if (wi.z <= 0.0F) {
             return std::nullopt;
         }
-        float pdf = 0.0F;
-        const glm::vec3 f = evaluateContinuousLobes(params, wo, wi, alpha, lobes, pdf);
-        if (pdf <= 1e-8F) {
+        const BsdfEval eval = evaluateContinuousLobes(params, wo, wi, alpha, lobes);
+        if (eval.pdf <= 1e-8F) {
             return std::nullopt;
         }
-        const glm::vec3 throughput = (f * wi.z) / pdf;
-        const glm::vec3 rawThroughput = [&]() -> glm::vec3 {
-            if (!sampledSpecular) {
-                return glm::vec3(diffuseKdAt(params, wi, lobes));
-            }
-            const LobeEval spec = evaluateSpecularLobe(params, wo, wi, alpha, lobes);
-            return spec.pdf > 1e-8F ? spec.f * wi.z / spec.pdf : glm::vec3(0.0F);
-        }();
+        const glm::vec3 throughput = (eval.total() * wi.z) / eval.pdf;
         return BsdfSample{glm::vec3(wi.x, wi.y, wi.z * sign), throughput,
                            sampledSpecular ? LobeType::SpecularReflection : LobeType::Diffuse,
-                           rawThroughput};
+                           eval.pdf};
     }
 
     // Top slice of the ladder: the multiple-scattering transmission lobe, cosine over the far hemisphere.
@@ -781,14 +744,13 @@ std::optional<BsdfSample> sampleBsdf(const BsdfParams& params, const glm::vec3& 
     if (lobes.msTransmit > 0.0F && lobeU >= lobes.specular + lobes.diffuse + lobes.transmit) {
         glm::vec3 wi = sampleCosineHemisphere(sampler.next2D());
         wi.z = -wi.z;
-        float pdf = 0.0F;
-        const glm::vec3 f = evaluateContinuousLobes(params, wo, wi, alpha, lobes, pdf);
-        if (pdf <= 1e-8F) {
+        const BsdfEval eval = evaluateContinuousLobes(params, wo, wi, alpha, lobes);
+        if (eval.pdf <= 1e-8F) {
             return std::nullopt;
         }
-        const glm::vec3 throughput = (f * -wi.z) / pdf;
+        const glm::vec3 throughput = (eval.total() * -wi.z) / eval.pdf;
         return BsdfSample{glm::vec3(wi.x, wi.y, wi.z * sign), throughput, LobeType::Transmission,
-                           throughput};
+                           eval.pdf};
     }
 
     if (lobes.transmit <= 0.0F) {
@@ -803,14 +765,13 @@ std::optional<BsdfSample> sampleBsdf(const BsdfParams& params, const glm::vec3& 
         if (!refractAbout(wo, ht, lobes.etaI / lobes.etaT, wi) || wi.z >= 0.0F) {
             return std::nullopt;
         }
-        float pdf = 0.0F;
-        const glm::vec3 f = evaluateContinuousLobes(params, wo, wi, alpha, lobes, pdf);
-        if (pdf <= 1e-8F) {
+        const BsdfEval eval = evaluateContinuousLobes(params, wo, wi, alpha, lobes);
+        if (eval.pdf <= 1e-8F) {
             return std::nullopt;
         }
-        const glm::vec3 throughput = (f * -wi.z) / pdf;
+        const glm::vec3 throughput = (eval.total() * -wi.z) / eval.pdf;
         return BsdfSample{glm::vec3(wi.x, wi.y, wi.z * sign), throughput, LobeType::Transmission,
-                           throughput};
+                           eval.pdf};
     }
 
     // Smooth specular transmission (delta lobe): Snell's law, TIR already folded into lobes.specular via fresnelDielectric returning 1.0 past the critical angle.
@@ -824,8 +785,8 @@ std::optional<BsdfSample> sampleBsdf(const BsdfParams& params, const glm::vec3& 
     // Non-symmetric radiance-compression factor for camera-originated (Veach 1997 sec. 5.2, PBRT's SpecularTransmission::Sample_f under TransportMode::Radiance) transport: eta^2 = (etaI/etaT)^2, the squared ratio of the medium the ray is leaving to the medium it's entering. Self-consistent under round trips -- entering (eta=1/ior) times exiting (eta=ior/1) squared multiplies to 1, so a ray that enters and exits the same surface loses no net energy (tools/bsdf_validate.cpp's furnace test).
     const glm::vec3 throughput =
         params.baseColor * (lobes.transmitPhysicalValue / lobes.transmit) * (eta * eta);
-    return BsdfSample{glm::vec3(wt.x, wt.y, wt.z * sign), throughput, LobeType::Transmission,
-                       throughput};
+    // pdf 0: a delta lobe has no density for NEE to double-count against, which is exactly the test path_tracer.cpp's MIS weighting makes.
+    return BsdfSample{glm::vec3(wt.x, wt.y, wt.z * sign), throughput, LobeType::Transmission, 0.0F};
 }
 
 }  // namespace engine::scene
