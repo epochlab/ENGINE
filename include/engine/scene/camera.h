@@ -35,6 +35,16 @@ public:
     // Vertical FOV derived from focal length + film back height, not set directly — this is what a real lens/sensor combo actually determines.
     [[nodiscard]] float verticalFovRadians() const;
 
+    // Orthonormal forward/right/up + view-plane half-extents, everything primaryRay() derives a ray direction from minus the per-pixel ndcX/ndcY weight -- exposed so a screen-space projector (e.g. a rasterizer) shares this exact basis instead of re-deriving it.
+    struct ViewBasis {
+        glm::vec3 forward;
+        glm::vec3 right;
+        glm::vec3 up;
+        float halfWidth;
+        float halfHeight;
+    };
+    [[nodiscard]] ViewBasis viewBasis(float aspect) const;
+
     // Pinhole primary ray for a point in normalized device coordinates (ndcX/ndcY in [-1,1], +Y up). tMin/tMax are nearClip()/farClip().
     [[nodiscard]] Ray primaryRay(float ndcX, float ndcY, float aspect) const;
 

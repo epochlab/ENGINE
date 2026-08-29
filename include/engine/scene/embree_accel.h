@@ -35,7 +35,7 @@ public:
 
     [[nodiscard]] int triangleCount() const { return triangleCount_; }
 
-    // World-space AABB of the whole committed scene -- Embree already computes and caches this during rtcCommitScene, so this is a cheap query, not a re-scan of the triangle data. Feeds the BoundingBox AOV (path_tracer.cpp).
+    // World-space AABB of the whole committed scene -- Embree already computes and caches this during rtcCommitScene, so this is a cheap query, not a re-scan of the triangle data. Feeds the Wireframe AOV's bounding-box edges (rasterizer.cpp).
     [[nodiscard]] AabbBounds sceneBounds() const;
 
 private:
