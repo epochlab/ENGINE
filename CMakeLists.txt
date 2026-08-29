@@ -169,3 +169,22 @@ target_link_libraries(rasterizer_validate PRIVATE glm::glm embree OpenEXR::OpenE
 if(IPO_SUPPORTED)
     set_target_properties(rasterizer_validate PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
 endif()
+
+add_executable(integrator_validate tools/integrator_validate.cpp src/scene/path_tracer.cpp
+               src/scene/gbuffer_shading.cpp src/scene/embree_accel.cpp src/scene/ray_types.cpp
+               src/scene/shading_scene.cpp src/scene/bsdf.cpp src/scene/sampler.cpp
+               src/scene/environment_map.cpp src/scene/camera.cpp src/scene/row_thread_pool.cpp
+               src/gfx/hdr_image.cpp)
+target_include_directories(integrator_validate PRIVATE include)
+target_compile_options(integrator_validate PRIVATE -Wall -Wextra -Werror -march=native)
+target_link_libraries(integrator_validate PRIVATE glm::glm embree OpenEXR::OpenEXR Imath::Imath)
+if(IPO_SUPPORTED)
+    set_target_properties(integrator_validate PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
+endif()
+
+# All five correctness tools run under `ctest --test-dir build`. Previously they were buildable but
+# nothing ran them, so a regression only surfaced if someone remembered to invoke them by hand.
+enable_testing()
+foreach(validator embree_validate bsdf_validate nee_validate rasterizer_validate integrator_validate)
+    add_test(NAME ${validator} COMMAND ${validator})
+endforeach()

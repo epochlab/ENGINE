@@ -1,7 +1,8 @@
-// Standalone correctness check for path_tracer.cpp's NEE + MIS combination (Veach & Guibas 1995 power heuristic) against EnvironmentMap's importance sampling (environment_map.h). Exercises the exact estimator combination tracePath uses -- NEE via EnvironmentMap::importanceSampleDirection + evaluateBsdf/pdfBsdf, and the BSDF-sampled path's environment hit via sampleBsdf + EnvironmentMap::pdf, MIS-weighted by the power heuristic -- without needing scene geometry/a BVH/GPU resources (Material/MeshInstance require a live GL context to construct, which this headless CLI tool deliberately avoids, same as embree_validate.cpp/bsdf_validate.cpp/furnace_test.cpp). Reference: a flat, unoccluded surface under a uniform-radiance (L0=1) environment has an exactly computable outgoing radiance, Lo(wo) = integral over the hemisphere of evaluateBsdf(wo,wi)*cos(wi) dwi -- evaluated here via independent uniform-hemisphere Monte Carlo, same convention as furnace_test.cpp/bsdf_validate.cpp. The MIS-combined NEE+BSDF-sampling estimator (mirroring tracePath's single-bounce case exactly: no occluding geometry, so NEE's shadow ray and the BSDF-sampled continuation both always reach the environment) must converge to the same value -- a mismatch would indicate a double-counting or under-counting bug in the MIS weighting. Restricted to opaque materials (transmissionFactor=0): the delta transmission lobe has no continuous pdf, so it's structurally excluded from evaluateBsdf/NEE already and always takes MIS weight 1.0 on the BSDF-sampled side (see path_tracer.cpp) -- there's no double-counting question to test there, only in the two continuous lobes this check covers.
+// Standalone correctness check for path_tracer.cpp's NEE + MIS combination (Veach & Guibas 1995 power heuristic) against EnvironmentMap's importance sampling (environment_map.h). Exercises the exact estimator combination tracePath uses -- NEE via EnvironmentMap::importanceSampleDirection + evaluateBsdf/pdfBsdf, and the BSDF-sampled path's environment hit via sampleBsdf + EnvironmentMap::pdf, MIS-weighted by the power heuristic -- without needing scene geometry/a BVH/GPU resources (this tool needs no scene geometry at all -- integrator_validate.cpp covers the full renderPathTraced path, including the Material/MeshInstance construction an earlier version of this comment wrongly claimed required a live GL context; both are plain data). Reference: a flat, unoccluded surface under a uniform-radiance (L0=1) environment has an exactly computable outgoing radiance, Lo(wo) = integral over the hemisphere of evaluateBsdf(wo,wi)*cos(wi) dwi -- evaluated here via independent uniform-hemisphere Monte Carlo, same convention as furnace_test.cpp/bsdf_validate.cpp. The MIS-combined NEE+BSDF-sampling estimator (mirroring tracePath's single-bounce case exactly: no occluding geometry, so NEE's shadow ray and the BSDF-sampled continuation both always reach the environment) must converge to the same value -- a mismatch would indicate a double-counting or under-counting bug in the MIS weighting. Restricted to opaque materials (transmissionFactor=0): the delta transmission lobe has no continuous pdf, so it's structurally excluded from evaluateBsdf/NEE already and always takes MIS weight 1.0 on the BSDF-sampled side (see path_tracer.cpp) -- there's no double-counting question to test there, only in the two continuous lobes this check covers.
 
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstdlib>
 #include <iostream>
 #include <optional>
@@ -35,6 +36,66 @@ glm::vec3 sampleUniformHemisphere(std::mt19937& rng) {
     const float sinTheta = std::sqrt(std::max(0.0F, 1.0F - (cosTheta * cosTheta)));
     const float phi = 2.0F * kPi * unit(rng);
     return {sinTheta * std::cos(phi), sinTheta * std::sin(phi), cosTheta};
+}
+
+// Structured environment: a dim background with one small bright patch, so the luminance CDF has real
+// structure to invert (a uniform map makes both marginal and conditional CDFs linear, which would let a
+// mis-scaled Jacobian or an off-by-one bin lookup pass unnoticed).
+EnvironmentMap makeStructuredEnvironment() {
+    engine::gfx::HdrImage image;
+    image.width = 64;
+    image.height = 32;
+    image.rgba.assign(static_cast<std::size_t>(image.width) * static_cast<std::size_t>(image.height) * 4,
+                       0.05F);
+    for (int y = 8; y < 12; ++y) {
+        for (int x = 20; x < 26; ++x) {
+            const std::size_t idx =
+                ((static_cast<std::size_t>(y) * static_cast<std::size_t>(image.width)) +
+                 static_cast<std::size_t>(x)) *
+                4;
+            image.rgba[idx + 0] = 400.0F;
+            image.rgba[idx + 1] = 380.0F;
+            image.rgba[idx + 2] = 300.0F;
+        }
+    }
+    return EnvironmentMap(std::move(image));
+}
+
+// importanceSampleDirection returns a direction AND the solid-angle density it was drawn with; pdf()
+// independently recovers that density from a direction. MIS divides by the first and weights by the
+// second, so any disagreement between them silently corrupts every MIS weight in the renderer while
+// leaving each function looking individually reasonable. Nothing tested this before.
+bool checkEnvPdfConsistency() {
+    constexpr int kSampleCount = 20000;
+    constexpr float kTolerance = 1e-3F;
+    const EnvironmentMap env = makeStructuredEnvironment();
+    std::mt19937 rng(1234);
+    std::uniform_real_distribution<float> unit(0.0F, 1.0F);
+
+    // Non-zero rotation: the sample path rotates by +angle and the query path by -angle, so a sign slip
+    // between them cancels at 0 and only shows up here.
+    constexpr float kRotation = 0.7F;
+    bool ok = true;
+    int worstIndex = -1;
+    float worstRelative = 0.0F;
+    for (int i = 0; i < kSampleCount; ++i) {
+        const EnvironmentMap::EnvSample sample =
+            env.importanceSampleDirection(glm::vec2(unit(rng), unit(rng)), kRotation);
+        const float queried = env.pdf(sample.direction, kRotation);
+        const float relative = std::fabs(queried - sample.pdf) / std::max(sample.pdf, 1e-6F);
+        if (relative > worstRelative) {
+            worstRelative = relative;
+            worstIndex = i;
+        }
+    }
+    if (worstRelative > kTolerance) {
+        std::cerr << "nee_validate: FAILED env pdf consistency -- worst relative mismatch "
+                  << worstRelative << " at sample " << worstIndex
+                  << "; importanceSampleDirection's own pdf and pdf() must agree for the same "
+                     "direction, or every MIS weight is wrong.\n";
+        ok = false;
+    }
+    return ok;
 }
 
 // Uniform-radiance (L0=1) equirect environment -- constant regardless of resolution, but a real image so EnvironmentMap's CDF machinery runs through its normal (non-degenerate) path rather than the all-black fallback.
@@ -131,7 +192,9 @@ bool checkMisAgreement() {
 }  // namespace
 
 int main() {
-    if (!checkMisAgreement()) {
+    const bool envPdfOk = checkEnvPdfConsistency();
+    const bool misOk = checkMisAgreement();
+    if (!envPdfOk || !misOk) {
         std::cerr << "nee_validate: FAILED\n";
         return EXIT_FAILURE;
     }
