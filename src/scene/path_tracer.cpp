@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstddef>
 #include <limits>
 #include <optional>
@@ -102,7 +103,8 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
 
     // MIS state for the *previous* bounce's BSDF sample (the one that produced `ray`) -- used to reweight this bounce's miss contribution against NEE's light-sampling pdf, so a direction reachable by both strategies isn't double-counted. Meaningless at bounce==0 (ray is the primary/camera ray, not a BSDF sample -- its miss is a pure camera-visibility event, not part of the two-strategy light-transport estimator NEE/MIS balances).
     float lastBsdfPdf = 0.0F;
-    bool lastSampleWasTransmission = false;
+    // A delta lobe has no density for NEE to double-count against, so its miss takes full weight. Derived from lastBsdfPdf rather than the lobe type: pdfBsdf returns exactly 0 only for the smooth-glass transmission branch, and sampleBsdf rejects pdf <= 1e-8 on every other lobe.
+    bool lastSampleWasDelta = false;
 
     // bounce 0 (the primary/camera ray, direct lighting via NEE) always traces regardless of maxBounces -- maxBounces counts secondary/indirect bounces beyond it, so maxBounces==0 means direct lighting only, no continuation rays. The loop runs one iteration PAST maxBounces so the final BSDF-sampled ray can still collect its MIS-weighted environment contribution via the miss branch below; that extra iteration breaks at the depth guard before any surface interaction -- see the guard for why the terminal ray must be traced rather than dropped.
     for (; bounce <= settings.maxBounces + 1; ++bounce) {
@@ -114,9 +116,9 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
             }
             const glm::vec3 envRadiance =
                 environmentMap.sampleDirection(ray.dir, envRotationRadians) * envExposure;
-            // Power heuristic (Veach 1997): full weight for bounce 0 (camera ray, not part of the MIS estimator) and after any transmission sample. KNOWN GAP: that second bypass is correct only for a DELTA transmission sample, where NEE has zero density and there is no double-counting to correct. Since rough transmission gained a real continuous pdf (bsdf.cpp), a rough transmission sample is MIS-eligible and taking it at full weight double-counts against NEE -- but NEE cannot currently reach the far side of a transmissive surface either (see the NEE block below), so nothing is double-counted in practice yet. Both halves are fixed together when NEE opens to the back side.
+            // Power heuristic (Veach 1997): full weight for bounce 0 (camera ray, not part of the MIS estimator) and after a delta sample, where NEE has zero density and there is nothing to balance against. A ROUGH transmission sample is MIS-eligible like any other lobe and takes the heuristic -- NEE reaches the far side of a transmissive vertex (see the NEE block below), so weighting it at 1.0 double-counted their overlap.
             float misWeight = 1.0F;
-            if (bounce > 0 && !lastSampleWasTransmission) {
+            if (bounce > 0 && !lastSampleWasDelta) {
                 const float lightPdf = environmentMap.pdf(ray.dir, envRotationRadians);
                 const float bsdfPdf2 = lastBsdfPdf * lastBsdfPdf;
                 misWeight = bsdfPdf2 / (bsdfPdf2 + (lightPdf * lightPdf));
@@ -181,21 +183,26 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
             }
         }
 
-        // Next-event estimation: sample the environment directly from this vertex (importance sampled by luminance, see EnvironmentMap::importanceSampleDirection), evaluate the combined BSDF value/pdf toward it, and add the MIS-weighted contribution if unoccluded. Independent of whichever lobe `sample` above drew for the continuing bounce -- NEE and the continuing ray are two separate estimators for two separate directions from the same vertex, only sharing this vertex's params/frame. Firing unconditionally (no lobe-type check) is deliberate, but it does NOT come for free: the geoCos/shadingCos guard below restricts light samples to wo's own side, so at a near-pure-transmissive vertex the contribution is negligible while the full shadow-ray cost is still paid (specularProb is floored at 0.05 in computeLobeProbabilities, so the bsdfValue > 0 guard passes and accel.occluded still fires). That guard is also why a rough transmissive surface lit from behind currently gets BSDF sampling only -- opening it to the back side is what makes refraction NEE-sampleable.
+        // Next-event estimation: sample the environment directly from this vertex (importance sampled by luminance, see EnvironmentMap::importanceSampleDirection), evaluate the combined BSDF value/pdf toward it, and add the MIS-weighted contribution if unoccluded. Independent of whichever lobe `sample` above drew for the continuing bounce -- NEE and the continuing ray are two separate estimators for two separate directions from the same vertex, only sharing this vertex's params/frame. Firing unconditionally (no lobe-type check) is deliberate: the guard below admits both sides of a transmissive vertex, so refraction is light-sampled rather than left to BSDF sampling alone, and the MIS weights above and below now balance the same two strategies over the same directions.
         {
             const EnvironmentMap::EnvSample lightSample =
                 environmentMap.importanceSampleDirection(sampler.next2D(), envRotationRadians);
             const float geoCos = glm::dot(lightSample.direction, geoNormal);
             const float shadingCos = glm::dot(lightSample.direction, frame.normal);
-            if (geoCos > 0.0F && shadingCos > 0.0F) {
+            // Both sides, not just wo's: on a transmissive surface a light behind the vertex reaches the eye through the transmission lobe, so restricting NEE to the near side left rough glass lit by BSDF sampling alone. Requiring geoCos and shadingCos to agree in sign keeps the normal-map light-leak rejection intact on either side. The lobe itself decides whether the far side carries anything -- a delta interface returns pdfBsdf == 0 there and the guard below drops it, which is correct since a delta lobe cannot be light-sampled.
+            const bool nearSide = geoCos > 0.0F && shadingCos > 0.0F;
+            const bool farSide = geoCos < 0.0F && shadingCos < 0.0F && params.transmissionFactor > 0.0F;
+            if (nearSide || farSide) {
                 const glm::vec3 wiLocalLight = frame.toLocal(lightSample.direction);
+                const float lightCos = std::abs(shadingCos);  // far-side samples carry a negative cosine
                 const glm::vec3 bsdfValue = evaluateBsdf(params, woLocal, wiLocalLight);
                 const float bsdfPdf = pdfBsdf(params, woLocal, wiLocalLight);
                 if (bsdfPdf > 0.0F &&
                     (bsdfValue.x > 0.0F || bsdfValue.y > 0.0F || bsdfValue.z > 0.0F)) {
-                    // Shadow ray offset toward geoNormal only -- geoCos>0 already established the light sample is on that side, unlike the continuing bounce ray below which can go either side depending on wi.
+                    // Offset along geoNormal toward whichever side the light sample is on -- the far side for a transmissive vertex lit from behind, the near side otherwise.
                     const glm::vec3 shadowOrigin =
-                        shadowTerminatorOffset(triangle, hit->u, hit->v) + (geoNormal * kRayEpsilon);
+                        shadowTerminatorOffset(triangle, hit->u, hit->v) +
+                        (geoNormal * kRayEpsilon * (geoCos > 0.0F ? 1.0F : -1.0F));
                     const Ray shadowRay{shadowOrigin, lightSample.direction, kRayEpsilon,
                                          std::numeric_limits<float>::max()};
                     if (!accel.occluded(shadowRay)) {
@@ -211,22 +218,27 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
                         const float bsdfPdf2 = bsdfPdf * bsdfPdf;
                         const float misWeightLight = lightPdf2 / (lightPdf2 + bsdfPdf2);
                         const glm::vec3 neeContribution = throughput * bsdfValue * envRadiance *
-                                                            shadingCos * misWeightLight / lightSample.pdf;
+                                                            lightCos * misWeightLight / lightSample.pdf;
                         radiance += neeContribution;
                         if (bounce == 0) {
                             // Bounce 0's NEE contribution is split deterministically across BOTH lobe buckets, never routed by sample->type. Which lobe the *continuation* ray happened to draw has nothing to do with NEE, and routing by it wrote only one bucket per sample -- thinning each in expectation by that lobe's selection probability (a Fresnel- and view-angle-dependent factor, clamped to [0.05,0.95] in computeLobeProbabilities), so an evenly-lit flat wall read as a Fresnel gradient -- while adding the variance of a binary coin flip to an estimator that need not be stochastic. Each lobe is isolated at its own value so the primary surface's own texture never enters the AOV (evaluateDiffuseRaw drops baseColor; the specular lobe's F*G2/G1 carries none at metallic=0). throughput and lobeRawThroughput are both still (1,1,1) here -- neither is multiplied until after this block -- so no multiplier is needed. Deliberately bypasses addToBucket: that routes by pathBucket, which is exactly what must not happen, and which is unset anyway when sampleBsdf failed.
-                            const glm::vec3 common =
-                                envRadiance * shadingCos * misWeightLight / lightSample.pdf;
-                            directDiffuseAccum +=
-                                evaluateDiffuseRaw(params, woLocal, wiLocalLight) * common;
-                            directSpecularAccum +=
-                                evaluateSpecularOnly(params, woLocal, wiLocalLight) * common;
+                            if (farSide) {
+                                // Only the transmission lobe is non-zero across the interface, so there is no diffuse/specular split to make -- this is refraction transport, and Refraction is a physical bucket rather than a delighted one.
+                                refractionAccum += neeContribution;
+                            } else {
+                                const glm::vec3 common =
+                                    envRadiance * lightCos * misWeightLight / lightSample.pdf;
+                                directDiffuseAccum +=
+                                    evaluateDiffuseRaw(params, woLocal, wiLocalLight) * common;
+                                directSpecularAccum +=
+                                    evaluateSpecularOnly(params, woLocal, wiLocalLight) * common;
+                            }
                         } else {
                             // Deeper bounces keep the path's sticky bucket: this vertex's own colour legitimately tints indirect transport, so the full combined bsdfValue is used. Only Diffuse differs from neeContribution, via lobeRawThroughput (which keeps stripping each traversed bounce's own-lobe admixture); Specular and Refraction both reduce to neeContribution exactly.
                             glm::vec3 bucketContribution = neeContribution;
                             if (pathBucket == PathBucket::Diffuse) {
                                 bucketContribution = lobeRawThroughput * bsdfValue * envRadiance *
-                                                      shadingCos * misWeightLight / lightSample.pdf;
+                                                      lightCos * misWeightLight / lightSample.pdf;
                             }
                             addToBucket(bucketContribution, /*isDirect=*/false);
                         }
@@ -240,12 +252,8 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
             break;
         }
 
-        if (sample->type == LobeType::Transmission) {
-            lastSampleWasTransmission = true;
-        } else {
-            lastSampleWasTransmission = false;
-            lastBsdfPdf = pdfBsdf(params, woLocal, sample->wiLocal);
-        }
+        lastBsdfPdf = pdfBsdf(params, woLocal, sample->wiLocal);
+        lastSampleWasDelta = lastBsdfPdf <= 0.0F;
 
         const glm::vec3 wiWorld = frame.toWorld(sample->wiLocal);
 
