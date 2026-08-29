@@ -12,7 +12,7 @@
 
 namespace engine::scene {
 
-// Primary-hit-only G-buffer AOVs computed by a standalone CPU rasterizer instead of tracing an Embree primary ray per pixel -- no lighting model, no BSDF sampling, no recursion, just geometry projection plus gbuffer_shading.h's material/texture sampling. The first 14 fields' meanings and order match PathTraceGBuffer (path_tracer.h); wireframe (mesh + bounding-box edges, rasterizer.cpp) has no path-traced equivalent -- this rasterizer is its only producer.
+// Primary-hit-only G-buffer AOVs computed by a standalone CPU rasterizer instead of tracing an Embree primary ray per pixel -- no lighting model, no BSDF sampling, no recursion, just geometry projection plus gbuffer_shading.h's material/texture sampling. Sole producer of all 15: main.cpp's selectPathTracedImage routes every one of these AOVs here, and the path tracer computes none of them (path_tracer.h).
 struct RasterGBuffer {
     engine::gfx::HdrImage iorAov;
     engine::gfx::HdrImage depth;
@@ -32,7 +32,7 @@ struct RasterGBuffer {
     engine::gfx::HdrImage wireframe;
 };
 
-// Row-parallel (RowThreadPool, renderPathTraced's own dispatch model -- each worker owns disjoint rows, so no synchronization is needed on the shared z-buffer/output images) edge-function rasterization (Pineda 1988) with a single near-plane Sutherland-Hodgman clip per triangle. Synchronous per-frame alternative to renderPathTraced's Embree-traced primary-hit G-buffer; Beauty and the light-transport AOVs are untouched, still converging through PathTraceDriver. threadPool: owned by the caller and reused across calls, same convention as renderPathTraced's own parameter.
+// Row-parallel (RowThreadPool, renderPathTraced's own dispatch model -- each worker owns disjoint rows, so no synchronization is needed on the shared z-buffer/output images) edge-function rasterization (Pineda 1988) with a single near-plane Sutherland-Hodgman clip per triangle. Runs synchronously on the render thread every frame, so these AOVs are correct from frame 1; Beauty and the light-transport AOVs are untouched, still converging asynchronously through PathTraceDriver. threadPool: owned by the caller and reused across calls, same convention as renderPathTraced's own parameter.
 [[nodiscard]] RasterGBuffer renderRasterGBuffer(const Camera& camera, const EmbreeAccel& accel,
                                                  const std::vector<ShadingTriangle>& shadingTriangles,
                                                  const std::vector<MeshInstance>& instances,
