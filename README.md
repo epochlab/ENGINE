@@ -98,6 +98,7 @@ Every AOV below is computed by the path tracer each pass, except: the 15 primary
 | AOV | Category | Mechanism | Role / why it matters |
 |---|---|---|---|
 | Beauty | Utility | Final accumulated radiance, post tone-mapping | The primary output |
+| Wireframe | Utility | Screen-space line rasterization (Pineda 1988), z-tested against the scene's own depth: white mesh-triangle edges, yellow scene-bounding-box edges (drawn on top, so yellow wins) | Visualizes triangle density/topology and sanity-checks scene extent/framing in one combined view |
 | Alpha | Utility | 1.0 on a primary hit, 0.0 on a primary miss | Real coverage mask (this renderer isn't opaque-only-by-construction) |
 | Depth | Utility | Planar camera-space Z (Arnold/RenderMan/EXR "Z" convention) at the primary hit | Depth-based compositing/debugging |
 | HSV | Utility | Colour-space transform of Beauty | Isolates hue/saturation shifts a pure RGB view can hide |
@@ -114,8 +115,6 @@ Every AOV below is computed by the path tracer each pass, except: the 15 primary
 | Tangent | Material | Shading tangent basis at the primary hit | Debugs the tangent-space basis used for normal mapping |
 | ObjectID | Material | Per-instance index, false-coloured (`falseColorForId`) | Isolation mask for compositing/debugging |
 | AO | Material | Authored ambient-occlusion texture sample at the primary hit | Debug baked AO independent of lighting |
-| Shadow | Utility | Binary NEE occlusion test toward the env light at the primary hit, re-averaged across progressive passes into continuous shadow/penumbra density | Isolates direct-light visibility from material/lighting colour |
-| Wireframe | Utility | Screen-space line rasterization (Pineda 1988), z-tested against the scene's own depth: white mesh-triangle edges, yellow scene-bounding-box edges (drawn on top, so yellow wins) | Visualizes triangle density/topology and sanity-checks scene extent/framing in one combined view |
 | Fresnel | Transport | Schlick term at the primary hit's view angle | Debug grazing-angle reflectance behaviour in isolation |
 | IOR | Transport | Per-material dielectric IOR at the primary hit, -1 on a miss | Isolates the raw refractive-index input driving Fresnel/transmission |
 | BounceCount | Transport | Mean path termination depth across samples, per pixel | Debug Russian roulette/termination behaviour |
@@ -123,7 +122,8 @@ Every AOV below is computed by the path tracer each pass, except: the 15 primary
 | IndirectDiffuse | Lighting | Diffuse-bucketed radiance from later bounces | Isolates indirect (bounced) diffuse contribution |
 | DirectSpecular | Lighting | Specular-reflection-bucketed radiance, one bounce from camera | Isolates direct specular contribution |
 | IndirectSpecular | Lighting | Specular-reflection-bucketed radiance, later bounces | Isolates indirect specular (reflections) |
-| Refraction | Transport | Radiance from any path that sampled a transmission lobe (sticky bucket) | Isolates glass/transmissive transport |
+| Refraction | Lighting | Radiance from any path that sampled a transmission lobe (sticky bucket) | Isolates glass/transmissive transport |
+| Shadow | Lighting | Binary NEE occlusion test toward the env light at the primary hit, re-averaged across progressive passes into continuous shadow/penumbra density | Isolates direct-light visibility from material/lighting colour |
 
 ## 4. Roadmap
 
