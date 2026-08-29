@@ -215,3 +215,12 @@ Follow-on to the path tracer becoming the continuously-converging primary render
 - fix: specular lobe's throughput isolated from diffuse admixture in DirectSpecular/IndirectSpecular AOV routing
 - fix: Depth AOV auto-ranges display exposure to the actual max depth visible in-frame, replacing a `farClip`-based normalization that read real scenes as black; Depth/BounceCount no longer clamp to white; HUD pixel-probe units corrected
 - fix: Shadow AOV re-averages across progressive passes (`PathTraceGBuffer` → `PathTraceDynamic`) instead of freezing as binary speckle from pass 1; confirmed HDR exposure correctly has no effect on it (occlusion is exposure-invariant)
+
+## Synchronous CPU rasterizer for primary-hit AOVs
+
+- feat: `rasterizer.h/.cpp` — row-parallel edge-function rasterization (Pineda 1988) with a near-plane Sutherland-Hodgman clip, computing the 15 primary-hit-only G-buffer AOVs synchronously every frame instead of via the async path tracer's convergence loop; `gbuffer_shading.h/.cpp` factors the material/shading sampling shared with the path tracer out of `path_tracer.cpp`
+- feat: Wireframe and BoundingBox merged into one combined AOV — real screen-space line rasterization z-tested against scene depth (white mesh edges, yellow bounding-box edges drawn on top), replacing the old per-pixel analytic distance tests
+- feat: path-traced accumulation only restarts when the selected AOV actually needs light-transport data, avoiding wasted CPU on a raster-only AOV during camera movement
+- chore: `tools/rasterizer_validate.cpp` cross-checks the rasterizer against a fresh Embree oracle, including box-edge occlusion and wireframe coverage
+- chore: debug camera profile reframed (`filmBack` matched to window aspect, camera pulled back for a wider view), `maxSamples` settled at 4
+- docs: README updated (pipeline, component reference, AOV table, roadmap item 0 retired now implemented)
