@@ -142,7 +142,7 @@ float misCombinedLo(const BsdfParams& params, const glm::vec3& wo, const Environ
 
         // BSDF-sampled.
         const std::optional<engine::scene::BsdfSample> sample = engine::scene::sampleBsdf(params, wo, sampler);
-        if (sample.has_value() && sample->type != LobeType::SpecularTransmission) {
+        if (sample.has_value() && sample->type != LobeType::Transmission) {
             const float bsdfPdf = engine::scene::pdfBsdf(params, wo, sample->wiLocal);
             const float lightPdf = env.pdf(sample->wiLocal, 0.0F);
             const float bsdfPdf2 = bsdfPdf * bsdfPdf;

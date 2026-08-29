@@ -114,7 +114,7 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
             }
             const glm::vec3 envRadiance =
                 environmentMap.sampleDirection(ray.dir, envRotationRadians) * envExposure;
-            // Power heuristic (Veach 1997): full weight for bounce 0 (camera ray, not part of the MIS estimator) and after a transmission sample (delta lobe -- NEE has zero density there, so there's no double-counting risk to correct for).
+            // Power heuristic (Veach 1997): full weight for bounce 0 (camera ray, not part of the MIS estimator) and after any transmission sample. KNOWN GAP: that second bypass is correct only for a DELTA transmission sample, where NEE has zero density and there is no double-counting to correct. Since rough transmission gained a real continuous pdf (bsdf.cpp), a rough transmission sample is MIS-eligible and taking it at full weight double-counts against NEE -- but NEE cannot currently reach the far side of a transmissive surface either (see the NEE block below), so nothing is double-counted in practice yet. Both halves are fixed together when NEE opens to the back side.
             float misWeight = 1.0F;
             if (bounce > 0 && !lastSampleWasTransmission) {
                 const float lightPdf = environmentMap.pdf(ray.dir, envRotationRadians);
@@ -173,15 +173,15 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
         // Bucket assignment: bounce 0 sets the path's bucket from scratch; any later bounce only ever overrides it to Refraction (sticky -- once a path passes through a transmission lobe, its remaining contribution is refraction transport regardless of what it was before). Skipped entirely when no lobe could be sampled, leaving pathBucket unset at bounce 0 -- the same convention addToBucket already applies to an unbucketed background contribution.
         if (sample.has_value()) {
             if (bounce == 0) {
-                pathBucket = sample->type == LobeType::SpecularTransmission ? PathBucket::Refraction
+                pathBucket = sample->type == LobeType::Transmission ? PathBucket::Refraction
                              : sample->type == LobeType::Diffuse            ? PathBucket::Diffuse
                                                                              : PathBucket::SpecularReflection;
-            } else if (sample->type == LobeType::SpecularTransmission) {
+            } else if (sample->type == LobeType::Transmission) {
                 pathBucket = PathBucket::Refraction;
             }
         }
 
-        // Next-event estimation: sample the environment directly from this vertex (importance sampled by luminance, see EnvironmentMap::importanceSampleDirection), evaluate the (combined, delta-transmission-lobe-excluded) BSDF value/pdf toward it, and add the MIS-weighted contribution if unoccluded. Independent of whichever lobe `sample` above drew for the continuing bounce -- NEE and the continuing ray are two separate estimators for two separate directions from the same vertex, only sharing this vertex's params/frame. Firing unconditionally (no lobe-type check) is deliberate: evaluateBsdf/pdfBsdf already return ~0 at a near-pure-transmissive vertex (both structurally exclude the delta transmission lobe), so NEE self-attenuates to negligible cost/contribution there with no special-casing.
+        // Next-event estimation: sample the environment directly from this vertex (importance sampled by luminance, see EnvironmentMap::importanceSampleDirection), evaluate the combined BSDF value/pdf toward it, and add the MIS-weighted contribution if unoccluded. Independent of whichever lobe `sample` above drew for the continuing bounce -- NEE and the continuing ray are two separate estimators for two separate directions from the same vertex, only sharing this vertex's params/frame. Firing unconditionally (no lobe-type check) is deliberate, but it does NOT come for free: the geoCos/shadingCos guard below restricts light samples to wo's own side, so at a near-pure-transmissive vertex the contribution is negligible while the full shadow-ray cost is still paid (specularProb is floored at 0.05 in computeLobeProbabilities, so the bsdfValue > 0 guard passes and accel.occluded still fires). That guard is also why a rough transmissive surface lit from behind currently gets BSDF sampling only -- opening it to the back side is what makes refraction NEE-sampleable.
         {
             const EnvironmentMap::EnvSample lightSample =
                 environmentMap.importanceSampleDirection(sampler.next2D(), envRotationRadians);
@@ -240,7 +240,7 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
             break;
         }
 
-        if (sample->type == LobeType::SpecularTransmission) {
+        if (sample->type == LobeType::Transmission) {
             lastSampleWasTransmission = true;
         } else {
             lastSampleWasTransmission = false;
@@ -250,7 +250,7 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
         const glm::vec3 wiWorld = frame.toWorld(sample->wiLocal);
 
         // Geometric-normal-consistency rejection (normal-map robustness -- simpler stand-in for Schussler et al. 2017's full two-facet microsurface reconstruction): a reflection/diffuse sample crossing to the wrong side of the true triangle plane is a normal-map light-leak artifact, not a physical bounce.
-        if (sample->type != LobeType::SpecularTransmission) {
+        if (sample->type != LobeType::Transmission) {
             const bool woAbove = glm::dot(woWorld, geoNormal) > 0.0F;
             const bool wiAbove = glm::dot(wiWorld, geoNormal) > 0.0F;
             if (woAbove != wiAbove) {
