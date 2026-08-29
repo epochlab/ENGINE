@@ -134,6 +134,30 @@ QuadScene makeSlabScene(float roughness, glm::vec3 f0, float thickness) {
     return scene;
 }
 
+// The quad above plus an opaque wall at x=1 facing -X, the only scene here where a NON-transmissive path
+// reaches a second surface: the wall sits outside the narrow view frustum (primary rays land within
+// |x| < 0.31 at z=0) so it is never primary-visible, but it catches the floor's +X-going bounce rays, and
+// NEE fires there at bounce >= 1 -- which is the only way anything reaches the Indirect buckets.
+QuadScene makeCornerScene(float roughness, glm::vec3 f0) {
+    QuadScene scene = makeQuadScene(roughness, f0);
+    const glm::vec3 wallNormal(-1.0F, 0.0F, 0.0F);
+    const glm::vec4 wallTangent(0.0F, 1.0F, 0.0F, 1.0F);
+    const auto vertex = [&](float y, float z) {
+        return ShadingVertex{glm::vec3(1.0F, y, z), wallNormal, glm::vec2(0.5F, 0.5F), wallTangent};
+    };
+    // Wound so geometricNormalOf gives -X, i.e. facing back across the floor rather than away from it.
+    const ShadingVertex w0 = vertex(-kQuadExtent, 0.0F);
+    const ShadingVertex w1 = vertex(kQuadExtent, 0.0F);
+    const ShadingVertex w2 = vertex(kQuadExtent, kQuadExtent);
+    const ShadingVertex w3 = vertex(-kQuadExtent, kQuadExtent);
+
+    scene.worldTriangles.push_back(Triangle{w0.position, w3.position, w2.position});
+    scene.worldTriangles.push_back(Triangle{w0.position, w2.position, w1.position});
+    scene.shadingTriangles.push_back(ShadingTriangle{w0, w3, w2, 0});
+    scene.shadingTriangles.push_back(ShadingTriangle{w0, w2, w1, 0});
+    return scene;
+}
+
 EnvironmentMap makeUniformEnvironment() {
     engine::gfx::HdrImage image;
     image.width = 64;
@@ -199,15 +223,22 @@ float referenceLo(const BsdfParams& params, const glm::vec3& wo, int sampleCount
     return std::max({accum.x, accum.y, accum.z}) / static_cast<float>(sampleCount);
 }
 
-// Runs one full renderPathTraced pass over the quad scene and returns the centre-region mean radiance.
+// Runs one full renderPathTraced pass over the quad scene. showSky gates only the primary ray's own miss, so turning it off zeroes the background term the transport buckets deliberately exclude.
+engine::scene::PathTraceResult renderPass(const QuadScene& scene, const EnvironmentMap& env,
+                                           const PathTraceSettings& settings, EmbreeAccel& accel,
+                                           engine::scene::RowThreadPool& pool, bool showSky) {
+    const std::atomic<std::uint64_t> generation{1};
+    return engine::scene::renderPathTraced(makeCamera(), accel, scene.shadingTriangles,
+                                            scene.instances, env, kImageSize, kImageSize,
+                                            /*envRotationRadians=*/0.0F, showSky,
+                                            /*envExposure=*/1.0F, settings, /*runSeed=*/7U,
+                                            generation, /*requestedGeneration=*/1U, pool);
+}
+
+// Centre-region mean radiance of one pass.
 float renderCentre(const QuadScene& scene, const EnvironmentMap& env, const PathTraceSettings& settings,
                     EmbreeAccel& accel, engine::scene::RowThreadPool& pool) {
-    const std::atomic<std::uint64_t> generation{1};
-    const engine::scene::PathTraceResult result = engine::scene::renderPathTraced(
-        makeCamera(), accel, scene.shadingTriangles, scene.instances, env, kImageSize, kImageSize,
-        /*envRotationRadians=*/0.0F, /*showSky=*/true, /*envExposure=*/1.0F, settings,
-        /*runSeed=*/7U, generation, /*requestedGeneration=*/1U, pool);
-    const glm::vec3 mean = centreMean(result.beauty);
+    const glm::vec3 mean = centreMean(renderPass(scene, env, settings, accel, pool, true).beauty);
     return std::max({mean.x, mean.y, mean.z});
 }
 
@@ -341,12 +372,112 @@ bool checkTransmissiveSlab() {
     return ok;
 }
 
+// The five transport buckets are a PARTITION of beauty, not a set of related-looking images: with the
+// background term zeroed (showSky off), DirectDiffuse + IndirectDiffuse + DirectSpecular +
+// IndirectSpecular + Refraction must equal Beauty at every pixel, to float error. Every radiance
+// contribution tracePath adds is written to exactly one bucket at its own physical value, so any gap here
+// means a contribution was bucketed twice, dropped, or rescaled -- which is exactly what the previous
+// delighted buckets did by construction (they stripped baseColor at bounce 0 only, leaving direct and
+// indirect in different units and neither summing to anything).
+//
+// The slab rows carry the load: a single quad reaches only the Direct buckets, while the slab's internal
+// reflections populate Indirect and Refraction and exercise the transmissive exiting vertex.
+bool checkTransportPartition() {
+    // Relative to beauty, since the absolute scale differs by case; float error over kSamplesPerPixel
+    // accumulations of ~1e-3 each is orders of magnitude below this.
+    constexpr float kTolerance = 1e-4F;
+
+    enum class Geometry { Quad, Corner, Slab };
+    struct PartitionCase {
+        const char* name;
+        Geometry geometry;
+        float roughness;
+        float metallic;
+        float transmission;
+        int maxBounces;
+    };
+    const std::array<PartitionCase, 6> cases{{
+        {"quad diffuse (rough 1.0)", Geometry::Quad, 1.0F, 0.0F, 0.0F, 1},
+        {"quad glossy dielectric (rough 0.35)", Geometry::Quad, 0.35F, 0.0F, 0.0F, 1},
+        {"quad rough conductor (rough 0.5)", Geometry::Quad, 0.5F, 1.0F, 0.0F, 2},
+        {"corner diffuse (rough 1.0)", Geometry::Corner, 1.0F, 0.0F, 0.0F, 4},
+        {"slab smooth glass (rough 0.02)", Geometry::Slab, 0.02F, 0.0F, 1.0F, 8},
+        {"slab rough glass (rough 0.4)", Geometry::Slab, 0.4F, 0.0F, 1.0F, 8},
+    }};
+
+    const EnvironmentMap env = makeUniformEnvironment();
+    engine::scene::RowThreadPool pool;
+    bool ok = true;
+
+    std::cout << "integrator_validate: transport buckets partition beauty (showSky off)\n";
+    for (const PartitionCase& testCase : cases) {
+        const QuadScene scene =
+            testCase.geometry == Geometry::Slab
+                ? makeSlabScene(testCase.roughness, glm::vec3(0.04F), 0.5F)
+                : testCase.geometry == Geometry::Corner
+                      ? makeCornerScene(testCase.roughness, glm::vec3(0.04F))
+                      : makeQuadScene(testCase.roughness, glm::vec3(0.04F));
+        std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
+        if (!accel.has_value()) {
+            std::cerr << "integrator_validate: FAILED to build Embree scene for " << testCase.name << '\n';
+            return false;
+        }
+        const engine::scene::PathTraceResult result = renderPass(
+            scene, env,
+            makeSettings(testCase.maxBounces, 999, testCase.metallic, testCase.transmission), *accel,
+            pool, /*showSky=*/false);
+
+        float worstGap = 0.0F;
+        float worstBeauty = 0.0F;
+        float maxIndirect = 0.0F;
+        for (std::size_t i = 0; i < result.beauty.rgba.size(); i += 4) {
+            for (std::size_t c = 0; c < 3; ++c) {
+                const float beauty = result.beauty.rgba[i + c];
+                const float sum = result.directDiffuse.rgba[i + c] + result.indirectDiffuse.rgba[i + c] +
+                                   result.directSpecular.rgba[i + c] +
+                                   result.indirectSpecular.rgba[i + c] + result.refraction.rgba[i + c];
+                const float gap = std::fabs(beauty - sum) / std::max(std::fabs(beauty), 1e-3F);
+                if (gap > worstGap) {
+                    worstGap = gap;
+                    worstBeauty = beauty;
+                }
+                maxIndirect = std::max({maxIndirect, result.indirectDiffuse.rgba[i + c],
+                                         result.indirectSpecular.rgba[i + c]});
+            }
+        }
+
+        std::cout << "  " << testCase.name;
+        for (std::size_t pad = std::string(testCase.name).size(); pad < 38; ++pad) {
+            std::cout << ' ';
+        }
+        std::cout << "worst relative gap " << worstGap << "   max indirect " << maxIndirect << '\n';
+        // A flat quad's continuation ray always escapes at bounce 1 (Direct) and the slab's every multi-vertex path is transmission-sticky (Refraction), so without the corner the two Indirect buckets are identically zero in every case and the identity guards nothing about them.
+        if (testCase.geometry == Geometry::Corner && maxIndirect <= 0.0F) {
+            std::cerr << "integrator_validate: FAILED transport partition coverage -- the corner scene "
+                         "produced no Indirect bucket energy, so the identity below is not testing "
+                         "them. Check that the wall is being hit by bounce rays.\n";
+            ok = false;
+        }
+        if (worstGap > kTolerance) {
+            std::cerr << "integrator_validate: FAILED transport partition at " << testCase.name
+                      << " -- worst pixel is off by " << (worstGap * 100.0F) << "% of its beauty value "
+                      << worstBeauty
+                      << ". The five buckets must sum to beauty exactly once the background term is "
+                         "zeroed; a gap means a contribution is unbucketed, double-bucketed or "
+                         "rescaled.\n";
+            ok = false;
+        }
+    }
+    return ok;
+}
+
 }  // namespace
 
 int main() {
     const bool casesOk = runCases();
     const bool slabOk = checkTransmissiveSlab();
-    if (!casesOk || !slabOk) {
+    const bool partitionOk = checkTransportPartition();
+    if (!casesOk || !slabOk || !partitionOk) {
         std::cerr << "integrator_validate: FAILED\n";
         return EXIT_FAILURE;
     }
