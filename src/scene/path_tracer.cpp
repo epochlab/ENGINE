@@ -8,6 +8,7 @@
 
 #include "engine/scene/bsdf.h"
 #include "engine/scene/false_color.h"
+#include "engine/scene/gbuffer_shading.h"
 #include "engine/scene/sampler.h"
 #include "engine/scene/shading_scene.h"
 
@@ -16,108 +17,6 @@ namespace engine::scene {
 namespace {
 
 constexpr float kRayEpsilon = 1e-4F;
-// Thresholds below which a point counts as "on an edge" for the Wireframe/BoundingBox AOVs -- this path tracer has no ray-differential/screen-space-derivative tracking, so line thickness isn't held constant in screen space (thicker on distant/small triangles, thinner on near/large ones); an accepted simplification for a debug overlay. Two separate constants, not one shared value: they're fractions of unrelated-scale spaces -- a triangle's barycentric extent (~pixels to tens of pixels on screen) versus a single face of the *whole scene's* bounding box (which can span most of the viewport), so the same fraction reads as a hairline on one and a thick bar on the other.
-constexpr float kWireframeThickness = 0.02F;      // fraction of a triangle's barycentric extent
-constexpr float kBoundingBoxThickness = 0.0025F;  // fraction of the hit box face's local extent
-
-// Distance-to-nearest-edge test in a triangle's barycentric coordinates (u, v, w=1-u-v each in [0,1], summing to 1) -- true near any of the triangle's three edges. Feeds the Wireframe AOV.
-bool nearBarycentricEdge(float u, float v) {
-    const float w = 1.0F - u - v;
-    return std::min({u, v, w}) < kWireframeThickness;
-}
-
-// Ray-vs-AABB slab test (standard technique) that reports true only near one of the box's 12 edges, not its whole solid volume -- feeds the BoundingBox AOV. Independent of tracePath/scene geometry: evaluated straight against the camera ray, so it draws over background pixels too.
-bool nearAabbWireframeEdge(const Ray& ray, const AabbBounds& box) {
-    float tNear = ray.tMin;
-    float tFar = ray.tMax;
-    int enterAxis = 0;
-    for (int axis = 0; axis < 3; ++axis) {
-        const float invD = 1.0F / ray.dir[axis];
-        float t0 = (box.min[axis] - ray.origin[axis]) * invD;
-        float t1 = (box.max[axis] - ray.origin[axis]) * invD;
-        if (invD < 0.0F) {
-            std::swap(t0, t1);
-        }
-        if (t0 > tNear) {
-            tNear = t0;
-            enterAxis = axis;
-        }
-        tFar = std::min(tFar, t1);
-        if (tNear > tFar) {
-            return false;
-        }
-    }
-    // enterAxis's local coordinate is locked at whichever face was entered (0 or 1) -- only the other two axes' distance-to-0-or-1 matters for "is this point near an edge of that face".
-    const glm::vec3 hitPoint = ray.origin + (ray.dir * tNear);
-    const glm::vec3 extent = box.max - box.min;
-    const glm::vec3 local = (hitPoint - box.min) / glm::max(extent, glm::vec3(1e-6F));
-    float minEdgeDist = std::numeric_limits<float>::max();
-    for (int axis = 0; axis < 3; ++axis) {
-        if (axis == enterAxis) {
-            continue;
-        }
-        minEdgeDist = std::min({minEdgeDist, local[axis], 1.0F - local[axis]});
-    }
-    return minEdgeDist < kBoundingBoxThickness;
-}
-
-glm::vec3 resolveBaseColor(const Material& material, glm::vec2 uv, const PathTraceSettings& settings) {
-    const glm::vec4 sample = engine::gfx::sampleBilinear(material.baseColorTexture, uv);
-    return glm::vec3(sample) * settings.diffuseColour;
-}
-
-float resolveRoughness(const Material& material, glm::vec2 uv, const PathTraceSettings& settings) {
-    const float sample = engine::gfx::sampleBilinear(material.roughnessTexture, uv).r;
-    // Floor (UE4/Frostbite convention) avoids a near-zero-roughness GGX singularity.
-    return std::clamp(sample * settings.roughnessFactor, settings.roughnessMin, settings.roughnessMax);
-}
-
-BsdfParams resolveBsdfParams(const Material& material, glm::vec2 uv, const PathTraceSettings& settings) {
-    const glm::vec3 baseColor = resolveBaseColor(material, uv, settings);
-    const float roughness = resolveRoughness(material, uv, settings);
-    const glm::vec3 specular = glm::vec3(engine::gfx::sampleBilinear(material.specularTexture, uv));
-    const glm::vec3 f0 = glm::mix(specular, baseColor, settings.metallicFactor);
-    return BsdfParams{baseColor, settings.metallicFactor, roughness, f0, settings.ior,
-                       settings.transmissionFactor};
-}
-
-// Gram-Schmidt re-orthogonalized tangent frame, normal- and bump-mapped.
-ShadingFrame buildShadingFrame(const ShadingVertex& shading, const Material& material,
-                                const PathTraceSettings& settings) {
-    const glm::vec3 normal = glm::normalize(shading.normal);
-    glm::vec3 tangent = glm::vec3(shading.tangent);
-    tangent = glm::normalize(tangent - (glm::dot(tangent, normal) * normal));
-    const glm::vec3 bitangent = glm::cross(normal, tangent) * shading.tangent.w;
-
-    const glm::vec4 normalSample = engine::gfx::sampleBilinear(material.normalTexture, shading.uv);
-    const glm::vec3 tangentSpaceNormal = glm::normalize((glm::vec3(normalSample) * 2.0F) - 1.0F);
-    const glm::vec3 mappedNormal = glm::normalize(
-        (tangentSpaceNormal.x * tangent) + (tangentSpaceNormal.y * bitangent) +
-        (tangentSpaceNormal.z * normal));
-
-    // Blinn 1978 bump mapping: perturbs mappedNormal further using the bump texture's height difference between adjacent texels -- a texture-space (not screen-space) derivative, so no ray-differential tracking is needed. Applied on top of the normal map (not the base geometric normal), since this asset ships both: the normal map carries the sculpted macro surface direction, bump adds a finer wrinkle on top. Deliberately NOT divided by texel size into a true per-UV-unit derivative: at this asset's 4096px resolution that divisor is ~4096, which amplifies even tiny neighboring-texel differences into a huge tilt -- settings.bumpStrength instead scales the raw (small, well-behaved) per-texel height difference directly.
-    const glm::vec2 texel(1.0F / static_cast<float>(material.bumpTexture.width),
-                           1.0F / static_cast<float>(material.bumpTexture.height));
-    const float dHdu =
-        engine::gfx::sampleBilinear(material.bumpTexture, shading.uv + glm::vec2(texel.x, 0.0F)).r -
-        engine::gfx::sampleBilinear(material.bumpTexture, shading.uv - glm::vec2(texel.x, 0.0F)).r;
-    const float dHdv =
-        engine::gfx::sampleBilinear(material.bumpTexture, shading.uv + glm::vec2(0.0F, texel.y)).r -
-        engine::gfx::sampleBilinear(material.bumpTexture, shading.uv - glm::vec2(0.0F, texel.y)).r;
-    const glm::vec3 bumpedNormal = glm::normalize(
-        mappedNormal - (settings.bumpStrength * dHdu * tangent) -
-        (settings.bumpStrength * dHdv * bitangent));
-
-    const glm::vec3 finalTangent =
-        glm::normalize(tangent - (glm::dot(tangent, bumpedNormal) * bumpedNormal));
-    const glm::vec3 finalBitangent = glm::cross(bumpedNormal, finalTangent) * shading.tangent.w;
-    return ShadingFrame{finalTangent, finalBitangent, bumpedNormal};
-}
-
-glm::vec3 geometricNormalOf(const ShadingTriangle& tri) {
-    return glm::normalize(
-        glm::cross(tri.v1.position - tri.v0.position, tri.v2.position - tri.v0.position));
-}
 
 struct TraceResult {
     glm::vec3 radiance;
@@ -138,7 +37,6 @@ struct TraceResult {
     float fresnel = 0.0F;
     float ao = 0.0F;
     float shadow = 0.0F;  // 1.0 = shadowed/occluded, 0.0 = lit or no primary hit at all (background)
-    float wireframe = 0.0F;
 
     // Transport-component breakdown -- see PathTraceResult's doc comment for the bucketing rule.
     glm::vec3 directDiffuse{0.0F};
@@ -201,7 +99,6 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
     float gFresnel = 0.0F;
     float gAo = 0.0F;
     float gShadow = 0.0F;  // default: no surface hit at all -- not "shadowed", just background
-    float gWireframe = 0.0F;
 
     // MIS state for the *previous* bounce's BSDF sample (the one that produced `ray`) -- used to reweight this bounce's miss contribution against NEE's light-sampling pdf, so a direction reachable by both strategies isn't double-counted. Meaningless at bounce==0 (ray is the primary/camera ray, not a BSDF sample -- its miss is a pure camera-visibility event, not part of the two-strategy light-transport estimator NEE/MIS balances).
     float lastBsdfPdf = 0.0F;
@@ -261,7 +158,6 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
             const float ndotV = std::max(glm::dot(frame.normal, woWorld), 1e-4F);
             gFresnel = fresnelSchlick(ndotV, params.f0).x;  // scalar AOV -- see writeTexel's broadcast convention
             gAo = engine::gfx::sampleBilinear(material.aoTexture, shading.uv).r;
-            gWireframe = nearBarycentricEdge(hit->u, hit->v) ? 1.0F : 0.0F;
             gShadow = 1.0F;  // assume shadowed once we know there's a real surface; the NEE check below may clear this
         }
 
@@ -374,27 +270,9 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
             gNormal,    gGeomNormal,          gAlbedo,
             gMetallic,  gRoughness,           gTangent,
             gObjectIndex, gFresnel,           gAo,
-            gShadow, gWireframe,
+            gShadow,
             directDiffuseAccum, indirectDiffuseAccum, directSpecularAccum,
             indirectSpecularAccum, refractionAccum};
-}
-
-void writeTexel(engine::gfx::HdrImage& image, int x, int y, glm::vec3 rgb) {
-    const std::size_t idx = ((static_cast<std::size_t>(y) * static_cast<std::size_t>(image.width)) +
-                              static_cast<std::size_t>(x)) *
-                             4;
-    image.rgba[idx + 0] = rgb.x;
-    image.rgba[idx + 1] = rgb.y;
-    image.rgba[idx + 2] = rgb.z;
-    image.rgba[idx + 3] = 1.0F;
-}
-
-engine::gfx::HdrImage makeImage(int width, int height) {
-    engine::gfx::HdrImage image;
-    image.width = width;
-    image.height = height;
-    image.rgba.assign(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4, 0.0F);
-    return image;
 }
 
 }  // namespace
@@ -407,9 +285,8 @@ PathTraceResult renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                                   const PathTraceSettings& settings, std::uint32_t runSeed,
                                   const std::atomic<std::uint64_t>& generation,
                                   std::uint64_t requestedGeneration, RowThreadPool& threadPool) {
-    // 24 fields (beauty/iorAov/bounceHeatmap + 16 G-buffer AOVs + 5 transport-component AOVs) -- see PathTraceResult's declaration order in path_tracer.h, which this positional init must match.
+    // 22 fields (beauty/iorAov/bounceHeatmap + 14 G-buffer AOVs + 5 transport-component AOVs) -- see PathTraceResult's declaration order in path_tracer.h, which this positional init must match.
     PathTraceResult result{makeImage(width, height), makeImage(width, height),
-                            makeImage(width, height), makeImage(width, height),
                             makeImage(width, height), makeImage(width, height),
                             makeImage(width, height), makeImage(width, height),
                             makeImage(width, height), makeImage(width, height),
@@ -424,8 +301,6 @@ PathTraceResult renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
     const float sppInv = 1.0F / static_cast<float>(settings.samplesPerPixel);
     const glm::vec3 cameraPos = camera.position();
     const glm::vec3 cameraForward = camera.forward();
-    // Queried once for the whole pass (not per-pixel) -- feeds the BoundingBox AOV below.
-    const AabbBounds sceneBounds = accel.sceneBounds();
 
     const auto renderRow = [&](int y) {
         for (int x = 0; x < width; ++x) {
@@ -438,7 +313,6 @@ PathTraceResult renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
             glm::vec3 indirectSpecularAccum(0.0F);
             glm::vec3 refractionAccum(0.0F);
             TraceResult primarySample{};  // sample 0's G-buffer snapshot, see PathTraceResult's doc comment
-            Ray primaryRay0{};            // sample 0's camera ray -- feeds the BoundingBox AOV
             for (int s = 0; s < settings.samplesPerPixel; ++s) {
                 Sampler sampler(x, y, s, runSeed);
                 const glm::vec2 jitter = sampler.next2D();
@@ -456,7 +330,6 @@ PathTraceResult renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                 if (s == 0) {
                     iorSample = trace.firstHitIor;
                     primarySample = trace;
-                    primaryRay0 = primary;
                 }
                 bounceAccum += static_cast<float>(trace.terminationBounce);
                 directDiffuseAccum += trace.directDiffuse;
@@ -496,9 +369,6 @@ PathTraceResult renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                            : glm::vec3(0.0F));
             writeTexel(result.ao, x, y, glm::vec3(primarySample.ao));
             writeTexel(result.shadow, x, y, glm::vec3(primarySample.shadow));
-            writeTexel(result.wireframe, x, y, glm::vec3(primarySample.wireframe));
-            writeTexel(result.boundingBox, x, y,
-                       glm::vec3(nearAabbWireframeEdge(primaryRay0, sceneBounds) ? 1.0F : 0.0F));
         }
     };
 

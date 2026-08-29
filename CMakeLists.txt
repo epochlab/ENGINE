@@ -83,9 +83,11 @@ add_executable(engine
     src/scene/debug_camera_controller.cpp
     src/scene/embree_accel.cpp
     src/scene/environment_map.cpp
+    src/scene/gbuffer_shading.cpp
     src/scene/gltf_loader.cpp
     src/scene/path_tracer.cpp
     src/scene/path_trace_driver.cpp
+    src/scene/rasterizer.cpp
     src/scene/ray_types.cpp
     src/scene/row_thread_pool.cpp
     src/scene/sampler.cpp
@@ -155,4 +157,15 @@ target_compile_options(nee_validate PRIVATE -Wall -Wextra -Werror -march=native)
 target_link_libraries(nee_validate PRIVATE glm::glm OpenEXR::OpenEXR Imath::Imath)
 if(IPO_SUPPORTED)
     set_target_properties(nee_validate PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
+endif()
+
+add_executable(rasterizer_validate tools/rasterizer_validate.cpp src/scene/rasterizer.cpp
+               src/scene/gbuffer_shading.cpp src/scene/embree_accel.cpp src/scene/ray_types.cpp
+               src/scene/shading_scene.cpp src/scene/bsdf.cpp src/scene/sampler.cpp
+               src/scene/camera.cpp src/scene/row_thread_pool.cpp src/gfx/hdr_image.cpp)
+target_include_directories(rasterizer_validate PRIVATE include)
+target_compile_options(rasterizer_validate PRIVATE -Wall -Wextra -Werror -march=native)
+target_link_libraries(rasterizer_validate PRIVATE glm::glm embree OpenEXR::OpenEXR Imath::Imath)
+if(IPO_SUPPORTED)
+    set_target_properties(rasterizer_validate PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
 endif()
