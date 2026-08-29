@@ -104,8 +104,8 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
     float lastBsdfPdf = 0.0F;
     bool lastSampleWasTransmission = false;
 
-    // bounce 0 (the primary/camera ray, direct lighting via NEE) always traces regardless of maxBounces -- maxBounces counts secondary/indirect bounces beyond it, so maxBounces==0 means direct lighting only, no continuation rays.
-    for (; bounce <= settings.maxBounces; ++bounce) {
+    // bounce 0 (the primary/camera ray, direct lighting via NEE) always traces regardless of maxBounces -- maxBounces counts secondary/indirect bounces beyond it, so maxBounces==0 means direct lighting only, no continuation rays. The loop runs one iteration PAST maxBounces so the final BSDF-sampled ray can still collect its MIS-weighted environment contribution via the miss branch below; that extra iteration breaks at the depth guard before any surface interaction -- see the guard for why the terminal ray must be traced rather than dropped.
+    for (; bounce <= settings.maxBounces + 1; ++bounce) {
         const std::optional<Hit> hit = accel.intersect(ray);
         if (!hit.has_value()) {
             // showSky gates only the primary ray's own miss (the camera seeing the background directly) -- indirect bounces and NEE (below) always sample real environment radiance regardless of showSky, so hiding the background doesn't unlight the scene.
@@ -127,6 +127,11 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
                                          pathBucket == PathBucket::SpecularReflection;
             addToBucket(isolatedBucket ? lobeRawThroughput * envRadiance * misWeight : missRadiance,
                         /*isDirect=*/bounce == 1);
+            break;
+        }
+
+        // Depth cap. The extra iteration past maxBounces exists solely so the final BSDF-sampled ray can collect its MIS-weighted environment contribution in the miss branch above; a ray reaching real geometry here contributes nothing (no emissive surfaces) and must not shade. Without it, NEE at the final vertex is MIS-weighted down against a BSDF-sampling counterpart that never fires, losing bsdfPdf^2/(bsdfPdf^2 + lightPdf^2) of that vertex's direct lighting -- approaching 100% where bsdfPdf >> lightPdf, and applying to every second surface vertex at maxBounces==1. Breaking here keeps terminationBounce == maxBounces + 1 for a depth-capped path, unchanged from before.
+        if (bounce > settings.maxBounces) {
             break;
         }
 
@@ -162,18 +167,18 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
         }
 
         const glm::vec3 woLocal = frame.toLocal(woWorld);
+        // A failed sample must NOT skip the NEE block below: NEE and the continuing ray are independent estimators of independent directions, sharing only this vertex's params/frame, so the failure of one says nothing about the other. sampleBsdf returns nullopt on a below-horizon VNDF reflection, an underflowed mixture pdf, or a transmission lobe with no mass (bsdf.cpp) -- none of which say anything about the BSDF's value toward the light. The terminating break is therefore deferred to after NEE, matching the geometric-consistency rejection further down, which already breaks there.
         const std::optional<BsdfSample> sample = sampleBsdf(params, woLocal, sampler);
-        if (!sample.has_value()) {
-            break;
-        }
 
-        // Bucket assignment: bounce 0 sets the path's bucket from scratch; any later bounce only ever overrides it to Refraction (sticky -- once a path passes through a transmission lobe, its remaining contribution is refraction transport regardless of what it was before).
-        if (bounce == 0) {
-            pathBucket = sample->type == LobeType::SpecularTransmission ? PathBucket::Refraction
-                         : sample->type == LobeType::Diffuse            ? PathBucket::Diffuse
-                                                                         : PathBucket::SpecularReflection;
-        } else if (sample->type == LobeType::SpecularTransmission) {
-            pathBucket = PathBucket::Refraction;
+        // Bucket assignment: bounce 0 sets the path's bucket from scratch; any later bounce only ever overrides it to Refraction (sticky -- once a path passes through a transmission lobe, its remaining contribution is refraction transport regardless of what it was before). Skipped entirely when no lobe could be sampled, leaving pathBucket unset at bounce 0 -- the same convention addToBucket already applies to an unbucketed background contribution.
+        if (sample.has_value()) {
+            if (bounce == 0) {
+                pathBucket = sample->type == LobeType::SpecularTransmission ? PathBucket::Refraction
+                             : sample->type == LobeType::Diffuse            ? PathBucket::Diffuse
+                                                                             : PathBucket::SpecularReflection;
+            } else if (sample->type == LobeType::SpecularTransmission) {
+                pathBucket = PathBucket::Refraction;
+            }
         }
 
         // Next-event estimation: sample the environment directly from this vertex (importance sampled by luminance, see EnvironmentMap::importanceSampleDirection), evaluate the (combined, delta-transmission-lobe-excluded) BSDF value/pdf toward it, and add the MIS-weighted contribution if unoccluded. Independent of whichever lobe `sample` above drew for the continuing bounce -- NEE and the continuing ray are two separate estimators for two separate directions from the same vertex, only sharing this vertex's params/frame. Firing unconditionally (no lobe-type check) is deliberate: evaluateBsdf/pdfBsdf already return ~0 at a near-pure-transmissive vertex (both structurally exclude the delta transmission lobe), so NEE self-attenuates to negligible cost/contribution there with no special-casing.
@@ -197,8 +202,10 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
                         if (bounce == 0) {
                             gShadow = 0.0F;
                         }
+                        // Nearest, not bilinear: this radiance is divided by lightSample.pdf below, and that pdf is the density of one piecewise-constant texel. Bilinear here would bleed a bright texel's energy into neighbours whose density is correctly low, spiking f/pdf into fireflies at exactly the small bright features the luminance CDF exists to find. The miss path above keeps bilinear -- there the env pdf enters only a bounded MIS weight.
                         const glm::vec3 envRadiance =
-                            environmentMap.sampleDirection(lightSample.direction, envRotationRadians) *
+                            environmentMap.sampleDirectionNearest(lightSample.direction,
+                                                                   envRotationRadians) *
                             envExposure;
                         const float lightPdf2 = lightSample.pdf * lightSample.pdf;
                         const float bsdfPdf2 = bsdfPdf * bsdfPdf;
@@ -206,24 +213,31 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
                         const glm::vec3 neeContribution = throughput * bsdfValue * envRadiance *
                                                             shadingCos * misWeightLight / lightSample.pdf;
                         radiance += neeContribution;
-                        glm::vec3 bucketContribution = neeContribution;
-                        if (pathBucket == PathBucket::Diffuse) {
-                            // At bounce 0, this vertex IS the primary surface -- use the raw (no baseColor) diffuse lobe so its own texture never enters the AOV. At deeper bounces this vertex's own color legitimately tints indirect diffuse, so diffuseLobeRaw switches to the full bsdfValue -- only the lobeRawThroughput multiplier (which keeps stripping each traversed bounce's own-lobe admixture) still differs from throughput here.
-                            const glm::vec3 diffuseLobeRaw =
-                                bounce == 0 ? evaluateDiffuseRaw(params, woLocal, wiLocalLight) : bsdfValue;
-                            bucketContribution = lobeRawThroughput * diffuseLobeRaw * envRadiance *
-                                                  shadingCos * misWeightLight / lightSample.pdf;
-                        } else if (pathBucket == PathBucket::SpecularReflection) {
-                            // Mirrors the Diffuse branch above: isolate bounce 0's own specular lobe so its NEE contribution isn't contaminated by this vertex's diffuse term (evaluateBsdf/bsdfValue is the combined value of both lobes). No albedo-factor swap needed here (see evaluateSpecularOnly) -- throughput is already the right multiplier, unlike lobeRawThroughput, which may have already diverged from it at a deeper bounce via an earlier diffuse pick along the path.
-                            const glm::vec3 specularLobe =
-                                bounce == 0 ? evaluateSpecularOnly(params, woLocal, wiLocalLight) : bsdfValue;
-                            bucketContribution = throughput * specularLobe * envRadiance *
-                                                  shadingCos * misWeightLight / lightSample.pdf;
+                        if (bounce == 0) {
+                            // Bounce 0's NEE contribution is split deterministically across BOTH lobe buckets, never routed by sample->type. Which lobe the *continuation* ray happened to draw has nothing to do with NEE, and routing by it wrote only one bucket per sample -- thinning each in expectation by that lobe's selection probability (a Fresnel- and view-angle-dependent factor, clamped to [0.05,0.95] in computeLobeProbabilities), so an evenly-lit flat wall read as a Fresnel gradient -- while adding the variance of a binary coin flip to an estimator that need not be stochastic. Each lobe is isolated at its own value so the primary surface's own texture never enters the AOV (evaluateDiffuseRaw drops baseColor; the specular lobe's F*G2/G1 carries none at metallic=0). throughput and lobeRawThroughput are both still (1,1,1) here -- neither is multiplied until after this block -- so no multiplier is needed. Deliberately bypasses addToBucket: that routes by pathBucket, which is exactly what must not happen, and which is unset anyway when sampleBsdf failed.
+                            const glm::vec3 common =
+                                envRadiance * shadingCos * misWeightLight / lightSample.pdf;
+                            directDiffuseAccum +=
+                                evaluateDiffuseRaw(params, woLocal, wiLocalLight) * common;
+                            directSpecularAccum +=
+                                evaluateSpecularOnly(params, woLocal, wiLocalLight) * common;
+                        } else {
+                            // Deeper bounces keep the path's sticky bucket: this vertex's own colour legitimately tints indirect transport, so the full combined bsdfValue is used. Only Diffuse differs from neeContribution, via lobeRawThroughput (which keeps stripping each traversed bounce's own-lobe admixture); Specular and Refraction both reduce to neeContribution exactly.
+                            glm::vec3 bucketContribution = neeContribution;
+                            if (pathBucket == PathBucket::Diffuse) {
+                                bucketContribution = lobeRawThroughput * bsdfValue * envRadiance *
+                                                      shadingCos * misWeightLight / lightSample.pdf;
+                            }
+                            addToBucket(bucketContribution, /*isDirect=*/false);
                         }
-                        addToBucket(bucketContribution, /*isDirect=*/bounce == 0);
                     }
                 }
             }
+        }
+
+        // No continuation direction could be sampled -- terminate here, after NEE has already taken this vertex's direct lighting (see sampleBsdf's call site above for why the two are independent).
+        if (!sample.has_value()) {
+            break;
         }
 
         if (sample->type == LobeType::SpecularTransmission) {
