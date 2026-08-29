@@ -103,6 +103,37 @@ QuadScene makeQuadScene(float roughness, glm::vec3 f0) {
     return scene;
 }
 
+// Two parallel quads with OPPOSING geometric normals -- the front facing the camera at +Z, the back facing
+// away at -Z. A camera ray therefore enters at the front face (woLocal.z > 0) and leaves at the back
+// (woLocal.z < 0), which is the only configuration that exercises bsdf.cpp's exiting side and the far-side
+// NEE guard. A single quad cannot: it is entered from the front and every hit reads as entering.
+QuadScene makeSlabScene(float roughness, glm::vec3 f0, float thickness) {
+    const glm::vec4 tangent(1.0F, 0.0F, 0.0F, 1.0F);
+    const auto vertex = [&](float x, float y, float z, float nz) {
+        return ShadingVertex{glm::vec3(x, y, z), glm::vec3(0.0F, 0.0F, nz), glm::vec2(0.5F, 0.5F),
+                              tangent};
+    };
+    // Front wound counter-clockwise as seen from +Z, back clockwise, so geometricNormalOf gives +Z and -Z.
+    const ShadingVertex fv0 = vertex(-kQuadExtent, -kQuadExtent, 0.0F, 1.0F);
+    const ShadingVertex fv1 = vertex(kQuadExtent, -kQuadExtent, 0.0F, 1.0F);
+    const ShadingVertex fv2 = vertex(kQuadExtent, kQuadExtent, 0.0F, 1.0F);
+    const ShadingVertex fv3 = vertex(-kQuadExtent, kQuadExtent, 0.0F, 1.0F);
+    const ShadingVertex bv0 = vertex(-kQuadExtent, -kQuadExtent, -thickness, -1.0F);
+    const ShadingVertex bv1 = vertex(-kQuadExtent, kQuadExtent, -thickness, -1.0F);
+    const ShadingVertex bv2 = vertex(kQuadExtent, kQuadExtent, -thickness, -1.0F);
+    const ShadingVertex bv3 = vertex(kQuadExtent, -kQuadExtent, -thickness, -1.0F);
+
+    QuadScene scene;
+    scene.worldTriangles = {Triangle{fv0.position, fv1.position, fv2.position},
+                             Triangle{fv0.position, fv2.position, fv3.position},
+                             Triangle{bv0.position, bv1.position, bv2.position},
+                             Triangle{bv0.position, bv2.position, bv3.position}};
+    scene.shadingTriangles = {ShadingTriangle{fv0, fv1, fv2, 0}, ShadingTriangle{fv0, fv2, fv3, 0},
+                               ShadingTriangle{bv0, bv1, bv2, 0}, ShadingTriangle{bv0, bv2, bv3, 0}};
+    scene.instances = {MeshInstance{makeMaterial(roughness, f0), glm::mat4(1.0F)}};
+    return scene;
+}
+
 EnvironmentMap makeUniformEnvironment() {
     engine::gfx::HdrImage image;
     image.width = 64;
@@ -114,7 +145,8 @@ EnvironmentMap makeUniformEnvironment() {
 
 // Only `metallic` travels through PathTraceSettings; roughness and f0 reach the renderer through the
 // material's 1x1 roughness and specular textures, which resolveBsdfParams samples (gbuffer_shading.cpp).
-PathTraceSettings makeSettings(int maxBounces, int rrStartBounce, float metallic) {
+PathTraceSettings makeSettings(int maxBounces, int rrStartBounce, float metallic,
+                               float transmission = 0.0F) {
     PathTraceSettings settings{};
     settings.samplesPerPixel = kSamplesPerPixel;
     settings.maxBounces = maxBounces;
@@ -124,7 +156,7 @@ PathTraceSettings makeSettings(int maxBounces, int rrStartBounce, float metallic
     settings.roughnessMax = 1.0F;
     settings.diffuseColour = glm::vec3(1.0F);
     settings.ior = 1.5F;
-    settings.transmissionFactor = 0.0F;
+    settings.transmissionFactor = transmission;
     settings.metallicFactor = metallic;
     settings.roughnessFactor = 1.0F;
     return settings;
@@ -263,10 +295,58 @@ bool runCases() {
     return ok;
 }
 
+// A white, non-absorbing dielectric slab in a uniform L0=1 environment is INVISIBLE: the camera must read
+// exactly 1.0 through it. Every photon entering the front face leaves somewhere, and the non-symmetric
+// eta^2 radiance compression applied on entering is undone on exiting, so the round trip is lossless.
+//
+// This is the only case in the suite that reaches a transmissive EXITING vertex, and it is what gates the
+// far-side NEE guard against the miss branch's MIS weight. Weighting a rough transmission sample at 1.0
+// (correct only for a delta lobe) while NEE also evaluates the transmission lobe toward the same
+// directions double-counts their overlap, and reads above 1.0 here. Both bounds matter: the same test
+// catches a transmissive vertex that loses energy instead.
+bool checkTransmissiveSlab() {
+    // Enough depth for internally reflected paths to converge; truncation only ever darkens.
+    constexpr int kSlabBounces = 12;
+    constexpr float kThickness = 0.5F;
+    constexpr float kTolerance = 0.03F;
+    // 0.02 is below bsdf.cpp's smooth-roughness threshold, so it exercises the delta transmission path;
+    // the rest take the Walter lobe.
+    const std::array<float, 5> roughnesses = {0.02F, 0.05F, 0.4F, 0.7F, 1.0F};
+
+    const EnvironmentMap env = makeUniformEnvironment();
+    engine::scene::RowThreadPool pool;
+    bool ok = true;
+
+    std::cout << "integrator_validate: white non-absorbing slab, uniform L0=1 (1.0 = invisible)\n";
+    for (float roughness : roughnesses) {
+        const QuadScene scene = makeSlabScene(roughness, glm::vec3(0.04F), kThickness);
+        std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
+        if (!accel.has_value()) {
+            std::cerr << "integrator_validate: FAILED to build Embree slab scene\n";
+            return false;
+        }
+        const float lo = renderCentre(
+            scene, env, makeSettings(kSlabBounces, 999, /*metallic=*/0.0F, /*transmission=*/1.0F),
+            *accel, pool);
+        std::cout << "  roughness " << roughness << "   Lo " << lo << '\n';
+        if (std::fabs(lo - 1.0F) > kTolerance) {
+            std::cerr << "integrator_validate: FAILED slab transparency at roughness=" << roughness
+                      << " -- rendered " << lo
+                      << ", expected 1.0. A white non-absorbing slab must neither add nor remove "
+                         "energy; above 1.0 means NEE and the BSDF-sampled miss are double-counting "
+                         "the transmission lobe, below means a transmissive vertex is losing energy.\n";
+            ok = false;
+        }
+    }
+    return ok;
+}
+
 }  // namespace
 
 int main() {
-    if (!runCases()) {
+    const bool casesOk = runCases();
+    const bool slabOk = checkTransmissiveSlab();
+    if (!casesOk || !slabOk) {
         std::cerr << "integrator_validate: FAILED\n";
         return EXIT_FAILURE;
     }
