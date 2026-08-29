@@ -31,7 +31,7 @@ cmake -B build
 cmake --build build
 ```
 
-This produces six targets:
+This produces seven targets:
 
 - `build/engine` — the path tracer
 - `build/test_pattern` — EXR calibration-pattern generator (`tools/test_pattern.cpp`)
@@ -39,6 +39,7 @@ This produces six targets:
 - `build/embree_validate` — headless Embree ray-scene intersection correctness check (`tools/embree_validate.cpp`)
 - `build/bsdf_validate` — headless BSDF pdf-normalization and furnace-test check (`tools/bsdf_validate.cpp`)
 - `build/nee_validate` — headless NEE/MIS unbiasedness check against a brute-force reference (`tools/nee_validate.cpp`)
+- `build/rasterizer_validate` — headless CPU-rasterizer-vs-Embree G-buffer correctness check (`tools/rasterizer_validate.cpp`)
 
 `-Wall -Wextra -Werror` gates every target. If `clang-tidy` is installed, it also runs on every compile of `engine`'s own sources (see `.clang-tidy`); if `cppcheck` is installed, `cmake --build build --target cppcheck` runs it over `src/`. Both are skipped, not required, if not installed.
 
@@ -111,8 +112,7 @@ Every AOV below is computed directly by the path tracer each pass, except HSV/Lu
 | ObjectID | Material | Per-instance index, false-coloured (`falseColorForId`) | Isolation mask for compositing/debugging |
 | AO | Material | Authored ambient-occlusion texture sample at the primary hit | Debug baked AO independent of lighting |
 | Shadow | Utility | Binary NEE occlusion test toward the env light at the primary hit, re-averaged across progressive passes into continuous shadow/penumbra density | Isolates direct-light visibility from material/lighting colour |
-| Wireframe | Utility | Barycentric distance-to-nearest-edge at the primary hit's triangle | Visualizes triangle density/topology |
-| BoundingBox | Utility | Ray-vs-AABB slab test against the scene's bounds; drawn over background too | Sanity-checks scene extent/framing |
+| Wireframe | Utility | Screen-space line rasterization (Pineda 1988), z-tested against the scene's own depth: white mesh-triangle edges, yellow scene-bounding-box edges (drawn on top, so yellow wins) | Visualizes triangle density/topology and sanity-checks scene extent/framing in one combined view |
 | Fresnel | Transport | Schlick term at the primary hit's view angle | Debug grazing-angle reflectance behaviour in isolation |
 | IOR | Transport | Per-material dielectric IOR at the primary hit, -1 on a miss | Isolates the raw refractive-index input driving Fresnel/transmission |
 | BounceCount | Transport | Mean path termination depth across samples, per pixel | Debug Russian roulette/termination behaviour |
@@ -124,8 +124,9 @@ Every AOV below is computed directly by the path tracer each pass, except HSV/Lu
 
 ## 4. Roadmap
 
-Unimplemented, in dependency order — each item lands on top of a feature-complete version of everything above it, not before it, since it either multiplies the cost of the existing transport/sampling or assumes it's already correct:
+Unimplemented, in dependency order — each item lands on top of a feature-complete version of everything above it, not before it, since it either multiplies the cost of the existing transport/sampling or assumes it's already correct. Item 0 is the one exception: it touches no light transport at all, depends on nothing below, and nothing below depends on it, so it's listed first without being folded into that dependency chain.
 
+0. **Synchronous CPU rasterizer for primary-hit G-buffer AOVs** — Today's 15 primary-hit-only fields (§3: Wireframe, Depth, WorldPos, UV, Normal, GeomNormal, Albedo, Metallic, Roughness, Tangent, ObjectID, Alpha, Fresnel, AO, IOR) are a byproduct of Embree-tracing one primary ray per pixel inside the same async `PathTraceDriver` pass Beauty converges through — correct, but tied to whenever the background thread next completes a full pass, and stale on every camera move until it does. A standalone edge-function CPU rasterizer (Pineda 1988), row-parallel via the same `RowThreadPool` the path tracer itself uses, clipped against the near plane (Sutherland-Hodgman 1974), computes exactly these 15 fields synchronously on the render thread every frame — no Embree, no BSDF sampling, no recursion, just geometry projection and the same material/texture sampling the path tracer's own primary hit uses (`gbuffer_shading.h`, shared by both). Gives instant, glitch-free utility/debug-view feedback decoupled from Beauty's own progressive convergence loop, which keeps running exactly as it does today. Wireframe is one combined AOV: white mesh edges and yellow bounding-box edges, both real screen-space line rasterization (Pineda 1988) z-tested against the scene's own depth (box edges drawn last, so yellow wins) rather than the earlier per-pixel analytic distance test in object-space units.
 1. **Global illumination** — Area lights (emissive geometry, sampled by solid angle) and shadow/visibility rays to them; caustics (specular-diffuse-specular paths), emergent once area lights exist alongside the existing recursion/refraction. NEE, MIS, and importance-sampled lighting are already implemented, but only against the environment map — extending them to area lights is what's left. ReSTIR (spatiotemporal reservoir resampling, Bitterli et al. 2020) follows directly once multiple area lights exist, since uniform/single-light NEE selection degrades past a handful of emitters. Ray-traced ambient occlusion — a short-range hemispherical visibility integral reusing the same NEE cosine-hemisphere sampling this item already needs, just capped to a short max ray distance instead of a full light query — also belongs here, replacing today's AO AOV (§3), which only samples a baked texture rather than tracing anything.
 2. **Volumetric & subsurface transport** — Participating media (fog/smoke/atmosphere: extinction/scattering coefficients, phase functions, ray-marched or null-collision free-flight sampling) and subsurface scattering (translucent materials: a BSSRDF or random-walk diffusion approximation) are both additional transport modes layered on the existing surface path tracer — extending the same NEE/MIS machinery to volume-embedded and beneath-the-surface light paths rather than replacing it.
 3. **Multi-scattering microfacet energy compensation** — The specular lobe is single-scatter GGX only (Heitz, Hanika, d'Eon, Dachsbacher 2016, §5); at high roughness this loses energy compared to a real rough conductor/dielectric, visible as an over-dark specular response. A compensation term or explicit multi-bounce microfacet simulation closes the gap without changing the transport algorithm.
@@ -172,3 +173,5 @@ Unimplemented, in dependency order — each item lands on top of a feature-compl
 - Miller, G. (1994). Efficient algorithms for local and global accessibility shading. SIGGRAPH — ambient occlusion, named in §4's global-illumination roadmap item's ray-traced-AO note, not yet implemented (the AO AOV currently samples a baked texture, §3).
 - Xiao, L., Nouri, S., Chapman, M., Fix, A., Lanman, D., Kaplanyan, A. (2020). Neural supersampling for real-time rendering. SIGGRAPH — upscaling, named in §4's real-time-integration roadmap item, not yet implemented.
 - Ho, J., Jain, A., Abbeel, P. (2020). Denoising diffusion probabilistic models. NeurIPS; Rombach, R., Blattmann, A., Lorenz, D., Esser, P., Ommer, B. (2022). High-resolution image synthesis with latent diffusion models. CVPR — diffusion-model foundations, named in §4's genAI-diffusion-channel roadmap item, not yet implemented.
+- Pineda, J. (1988). A parallel algorithm for polygon rasterization. SIGGRAPH — the edge-function incremental rasterization technique named in §4's synchronous-rasterizer roadmap item, implemented (`rasterizer.cpp`).
+- Sutherland, I.E., Hodgman, G.W. (1974). Reentrant polygon clipping. CACM — the near-plane polygon clip §4's synchronous-rasterizer item's triangle setup uses, implemented (`rasterizer.cpp`).
