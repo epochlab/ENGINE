@@ -307,6 +307,10 @@ bool checkTransmissiveEnergyBalance() {
 // energy error -- the furnace passed throughout -- but a misdistribution across view/light geometry, and
 // the blocker for every bidirectional transport algorithm (BDPT, VCM, light tracing, photon mapping),
 // all of which require symmetric f.
+//
+// Transmission is excluded (transmissionFactor = 0, both cosines positive): radiance transport across a
+// refracting interface is genuinely non-symmetric, so f(wo->wi) == f(wi->wo) is the wrong invariant there.
+// The eta^2-corrected one it does satisfy lives in checkTransmissionReciprocity below.
 bool checkReciprocity() {
     constexpr float kRelativeTolerance = 1e-4F;
     const std::array<float, 4> roughnesses = {0.05F, 0.25F, 0.5F, 1.0F};
@@ -338,6 +342,98 @@ bool checkReciprocity() {
             }
         }
     }
+    return ok;
+}
+
+// eta^2-corrected reciprocity for the transmission lobe: f_t(wo->wi)*eta_wi^2 == f_t(wi->wo)*eta_wo^2.
+// Every term in evaluateTransmissionLobe is symmetric under the swap except denom = (wo.h) + etaR*(wi.h),
+// which the reversed frame rescales by etaI/etaT; squared, that is exactly the eta ratio above. With wo
+// outside and wi inside it reads f(wo->wi)*ior^2 == f(wi->wo). Catches a misplaced etaR^2, a flipped denom
+// orientation or an un-flipped ht -- O(1) errors (a stray eta^2 is 2.25x or 0.44x at ior 1.5) invisible to
+// the furnace and round-trip tests, which assert only totals and in which the two sides' errors cancel.
+//
+// SINGLE SCATTER ONLY. multiScatterShape evaluates escapeWi at the wo-side eta for every wi, transmitted
+// ones in the other medium included -- deliberate, and the reason its hemisphere integral comes out at
+// exactly (1 - escapeWo) -- but under the swap both etaSq and that eta flip. Known limitation (README
+// sec. 4): it blocks bidirectional transport through rough glass, not this unidirectional integrator.
+// Isolated with no new accessor by staying under bsdf.cpp's kMinDeficit, where the multiple-scattering
+// term switches itself off: 1 - escapeAvg measures 1.4e-4 at roughness 0.10 and 1.8e-3 at 0.20 against a
+// 1e-3 gate, so 0.15 upward is not safe. Both roughnesses stay above kSmoothAlpha or there is no
+// continuous lobe to test at all.
+//
+// wi is CONSTRUCTED, not sampled: at these roughnesses the lobe is a fraction of a degree wide, so an
+// arbitrary far-side direction returns zero on both sides and the check passes having tested nothing.
+// Refract wo through the macro normal, then perturb by a multiple of alpha for off-peak pairs; the
+// non-zero-pair count is asserted for the same reason.
+//
+// transmissionFactor is pinned at 1.0. Between 0 and 1 the entering side scales the lobe by it and the
+// exiting side by 1.0 -- a modelling asymmetry (inside the medium there is no substrate to withhold
+// anything), not a Jacobian error, so sweeping it would test the convention rather than the invariant.
+bool checkTransmissionReciprocity() {
+    // Not checkReciprocity's 1e-4: D is sharply peaked at these alphas (2.5e-3 to 1e-2) and the two
+    // queries build ht from differently scaled sums, so a few-ULP direction difference is amplified by
+    // dD/D ~ 4/alpha^2 off the peak. Worst measured 6.4e-3 at roughness 0.05, 2.1e-3 at 0.10. Full
+    // discriminating power against the O(1) structural errors above survives at 1e-2.
+    constexpr float kRelativeTolerance = 1e-2F;
+    const std::array<float, 2> roughnesses = {0.05F, 0.10F};
+    const std::array<float, 3> iors = {1.2F, 1.5F, 2.0F};
+    const std::array<float, 4> cosines = {1.0F, 0.9F, 0.7F, 0.5F};
+    const std::array<float, 5> offsets = {0.0F, 0.5F, 1.0F, 2.0F, 4.0F};  // multiples of alpha
+    // Perturbation axes. Out-of-plane and diagonal put wo and wi at different azimuths, so a swapped-phi
+    // bug cannot hide the way it would on a coplanar pair.
+    const std::array<glm::vec3, 3> axes = {
+        {{0.0F, 1.0F, 0.0F}, {1.0F, 0.0F, 0.0F}, {0.70710678F, 0.70710678F, 0.0F}}};
+
+    bool ok = true;
+    int pairsSeen = 0;
+    for (float roughness : roughnesses) {
+        const float alpha = roughness * roughness;
+        for (float ior : iors) {
+            const BsdfParams params{glm::vec3(1.0F), 0.0F, roughness, glm::vec3(0.04F), ior, 1.0F};
+            for (float mu : cosines) {
+                const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (mu * mu))), 0.0F, mu);
+                const glm::vec3 refracted =
+                    glm::refract(-wo, glm::vec3(0.0F, 0.0F, 1.0F), 1.0F / ior);
+                for (float offset : offsets) {
+                    const float angle = offset * alpha;
+                    for (std::size_t axisIndex = 0; axisIndex < axes.size(); ++axisIndex) {
+                        // A zero offset lands on the refracted direction whatever the axis is, so only
+                        // the first pass over it is a distinct pair.
+                        if (offset == 0.0F && axisIndex > 0) {
+                            continue;
+                        }
+                        const glm::vec3& axis = axes[axisIndex];
+                        const glm::vec3 tangent =
+                            glm::normalize(axis - (refracted * glm::dot(axis, refracted)));
+                        const glm::vec3 wi = glm::normalize((std::cos(angle) * refracted) +
+                                                             (std::sin(angle) * tangent));
+                        const glm::vec3 forward =
+                            engine::scene::evaluateBsdf(params, wo, wi) * ior * ior;
+                        const glm::vec3 reverse = engine::scene::evaluateBsdf(params, wi, wo);
+                        const float scale = std::max(maxChannel(forward), maxChannel(reverse));
+                        if (scale <= 0.0F) {
+                            continue;
+                        }
+                        ++pairsSeen;
+                        if (maxChannel(glm::abs(forward - reverse)) > kRelativeTolerance * scale) {
+                            std::cerr << "bsdf_validate: FAILED transmission reciprocity at roughness="
+                                      << roughness << " ior=" << ior << " muO=" << mu
+                                      << " offset=" << offset << "*alpha"
+                                      << " f(wo->wi)*ior^2=" << maxChannel(forward)
+                                      << " f(wi->wo)=" << maxChannel(reverse) << '\n';
+                            ok = false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if (pairsSeen == 0) {
+        std::cerr << "bsdf_validate: FAILED transmission reciprocity observed zero non-zero pairs -- "
+                     "every constructed wi missed the lobe, so nothing was tested\n";
+        ok = false;
+    }
+    std::cout << "  transmission reciprocity: " << pairsSeen << " non-zero pairs\n";
     return ok;
 }
 
@@ -456,11 +552,12 @@ int main() {
     const bool whiteFurnaceOk = checkWhiteFurnaceTwoSided();
     const bool transmissiveEnergyOk = checkTransmissiveEnergyBalance();
     const bool reciprocityOk = checkReciprocity();
+    const bool transmissionReciprocityOk = checkTransmissionReciprocity();
     const bool roundTripOk = checkTransmissionRoundTrip();
     const bool specularIsolationOk = checkSpecularRawThroughputIsolation();
 
     if (!pdfOk || !furnaceOk || !whiteFurnaceOk || !transmissiveEnergyOk || !reciprocityOk ||
-        !roundTripOk || !specularIsolationOk) {
+        !transmissionReciprocityOk || !roundTripOk || !specularIsolationOk) {
         std::cerr << "bsdf_validate: FAILED\n";
         return EXIT_FAILURE;
     }
