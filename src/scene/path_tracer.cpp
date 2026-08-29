@@ -8,7 +8,6 @@
 #include <optional>
 
 #include "engine/scene/bsdf.h"
-#include "engine/scene/false_color.h"
 #include "engine/scene/gbuffer_shading.h"
 #include "engine/scene/sampler.h"
 #include "engine/scene/shading_scene.h"
@@ -21,23 +20,8 @@ constexpr float kRayEpsilon = 1e-4F;
 
 struct TraceResult {
     glm::vec3 radiance;
-    float firstHitIor;      // -1 if the primary ray never hit geometry
     int terminationBounce;  // bounce index the path stopped at (== maxBounces + 1 if depth-capped)
-
-    // Primary-hit (bounce==0) G-buffer data -- default-valued (primaryHit=false) on a primary miss.
-    bool primaryHit = false;
-    glm::vec3 worldPos{0.0F};
-    glm::vec2 uv{0.0F};
-    glm::vec3 normal{0.0F};
-    glm::vec3 geomNormal{0.0F};
-    glm::vec3 albedo{0.0F};
-    float metallic = 0.0F;
-    float roughness = 0.0F;
-    glm::vec3 tangent{0.0F};
-    int objectIndex = -1;
-    float fresnel = 0.0F;
-    float ao = 0.0F;
-    float shadow = 0.0F;  // 1.0 = shadowed/occluded, 0.0 = lit or no primary hit at all (background)
+    float shadow;           // 1.0 = shadowed/occluded, 0.0 = lit or no primary hit at all (background)
 
     // Transport-component breakdown -- see PathTraceResult's doc comment for the bucketing rule.
     glm::vec3 directDiffuse{0.0F};
@@ -61,7 +45,6 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
     // Mirrors `throughput` exactly except every bounce's lobe pick multiplies in sample->rawThroughputWeight (that lobe's own isolated weight -- kd for Diffuse, F*G2/G1 for SpecularReflection, no admixture from the other lobe) instead of the physical throughputWeight -- used only to compute the delighted Direct/Indirect Diffuse/Specular AOV bucket writes below, never `radiance` itself. Diverges from `throughput` by the cumulative product of every traversed bounce's own-lobe isolation factor (not just bounce 0's).
     glm::vec3 lobeRawThroughput(1.0F);
     Ray ray = primaryRay;
-    float firstHitIor = -1.0F;
     int bounce = 0;
     std::optional<PathBucket> pathBucket;  // unset until bounce 0 successfully samples a lobe
     glm::vec3 directDiffuseAccum(0.0F);
@@ -86,19 +69,6 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
                 break;
         }
     };
-    // Primary-hit (bounce==0) G-buffer locals, folded into the final TraceResult at the end of this function -- captured separately from radiance/firstHitIor/bounce since those keep changing for the rest of the loop after bounce 0, while the G-buffer is a one-shot snapshot.
-    bool primaryHit = false;
-    glm::vec3 gWorldPos(0.0F);
-    glm::vec2 gUv(0.0F);
-    glm::vec3 gNormal(0.0F);
-    glm::vec3 gGeomNormal(0.0F);
-    glm::vec3 gAlbedo(0.0F);
-    float gMetallic = 0.0F;
-    float gRoughness = 0.0F;
-    glm::vec3 gTangent(0.0F);
-    int gObjectIndex = -1;
-    float gFresnel = 0.0F;
-    float gAo = 0.0F;
     float gShadow = 0.0F;  // default: no surface hit at all -- not "shadowed", just background
 
     // MIS state for the *previous* bounce's BSDF sample (the one that produced `ray`) -- used to reweight this bounce's miss contribution against NEE's light-sampling pdf, so a direction reachable by both strategies isn't double-counted. Meaningless at bounce==0 (ray is the primary/camera ray, not a BSDF sample -- its miss is a pure camera-visibility event, not part of the two-strategy light-transport estimator NEE/MIS balances).
@@ -146,25 +116,10 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
         const ShadingFrame frame = buildShadingFrame(shading, material, settings);
         const BsdfParams params = resolveBsdfParams(material, shading.uv, settings);
         const glm::vec3 woWorld = -ray.dir;
-        // Geometric (unmapped) normal -- needed both for the G-buffer snapshot below and for the normal-map light-leak rejection further down, computed once and reused for both.
+        // True flat per-triangle plane normal -- used below for the normal-map light-leak rejection and for offsetting shadow/continuation ray origins off the surface, both of which need the actual geometry rather than the interpolated or normal-mapped shading normal.
         const glm::vec3 geoNormal = geometricNormalOf(triangle);
 
         if (bounce == 0) {
-            firstHitIor = settings.ior;
-            primaryHit = true;
-            gWorldPos = shading.position;
-            gUv = shading.uv;
-            gNormal = frame.normal;
-            // Smooth interpolated vertex normal, before normal-mapping -- distinct from `geoNormal` (the true flat per-triangle plane normal used below for shadow-ray offsetting and normal-map light-leak rejection, which needs the actual geometry, not this).
-            gGeomNormal = glm::normalize(shading.normal);
-            gAlbedo = params.baseColor;
-            gMetallic = params.metallic;
-            gRoughness = params.roughness;
-            gTangent = frame.tangent;
-            gObjectIndex = triangle.instanceIndex;
-            const float ndotV = std::max(glm::dot(frame.normal, woWorld), 1e-4F);
-            gFresnel = fresnelSchlick(ndotV, params.f0).x;  // scalar AOV -- see writeTexel's broadcast convention
-            gAo = engine::gfx::sampleBilinear(material.aoTexture, shading.uv).r;
             gShadow = 1.0F;  // assume shadowed once we know there's a real surface; the NEE check below may clear this
         }
 
@@ -287,12 +242,7 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
         ray = Ray{offsetOrigin, wiWorld, kRayEpsilon, std::numeric_limits<float>::max()};
     }
 
-    return {radiance,   firstHitIor,          bounce,
-            primaryHit, gWorldPos,            gUv,
-            gNormal,    gGeomNormal,          gAlbedo,
-            gMetallic,  gRoughness,           gTangent,
-            gObjectIndex, gFresnel,           gAo,
-            gShadow,
+    return {radiance,           bounce,               gShadow,
             directDiffuseAccum, indirectDiffuseAccum, directSpecularAccum,
             indirectSpecularAccum, refractionAccum};
 }
@@ -307,34 +257,24 @@ PathTraceResult renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                                   const PathTraceSettings& settings, std::uint32_t runSeed,
                                   const std::atomic<std::uint64_t>& generation,
                                   std::uint64_t requestedGeneration, RowThreadPool& threadPool) {
-    // 22 fields (beauty/iorAov/bounceHeatmap + 14 G-buffer AOVs + 5 transport-component AOVs) -- see PathTraceResult's declaration order in path_tracer.h, which this positional init must match.
+    // 8 fields (beauty/bounceHeatmap/shadow + 5 transport-component AOVs) -- see PathTraceResult's declaration order in path_tracer.h, which this positional init must match.
     PathTraceResult result{makeImage(width, height), makeImage(width, height),
-                            makeImage(width, height), makeImage(width, height),
-                            makeImage(width, height), makeImage(width, height),
-                            makeImage(width, height), makeImage(width, height),
-                            makeImage(width, height), makeImage(width, height),
-                            makeImage(width, height), makeImage(width, height),
-                            makeImage(width, height), makeImage(width, height),
-                            makeImage(width, height), makeImage(width, height),
                             makeImage(width, height), makeImage(width, height),
                             makeImage(width, height), makeImage(width, height),
                             makeImage(width, height), makeImage(width, height)};
     const float aspect = static_cast<float>(width) / static_cast<float>(height);
     const float sppInv = 1.0F / static_cast<float>(settings.samplesPerPixel);
-    const glm::vec3 cameraPos = camera.position();
-    const glm::vec3 cameraForward = camera.forward();
 
     const auto renderRow = [&](int y) {
         for (int x = 0; x < width; ++x) {
             glm::vec3 colorAccum(0.0F);
-            float iorSample = -1.0F;
             float bounceAccum = 0.0F;
+            float shadowAccum = 0.0F;
             glm::vec3 directDiffuseAccum(0.0F);
             glm::vec3 indirectDiffuseAccum(0.0F);
             glm::vec3 directSpecularAccum(0.0F);
             glm::vec3 indirectSpecularAccum(0.0F);
             glm::vec3 refractionAccum(0.0F);
-            TraceResult primarySample{};  // sample 0's G-buffer snapshot, see PathTraceResult's doc comment
             for (int s = 0; s < settings.samplesPerPixel; ++s) {
                 Sampler sampler(x, y, s, runSeed);
                 const glm::vec2 jitter = sampler.next2D();
@@ -349,11 +289,8 @@ PathTraceResult renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                                                      environmentMap, envRotationRadians, showSky,
                                                      envExposure, settings, sampler);
                 colorAccum += trace.radiance;
-                if (s == 0) {
-                    iorSample = trace.firstHitIor;
-                    primarySample = trace;
-                }
                 bounceAccum += static_cast<float>(trace.terminationBounce);
+                shadowAccum += trace.shadow;
                 directDiffuseAccum += trace.directDiffuse;
                 indirectDiffuseAccum += trace.indirectDiffuse;
                 directSpecularAccum += trace.directSpecular;
@@ -361,36 +298,13 @@ PathTraceResult renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                 refractionAccum += trace.refraction;
             }
             writeTexel(result.beauty, x, y, colorAccum * sppInv);
-            writeTexel(result.iorAov, x, y, glm::vec3(iorSample));
             writeTexel(result.bounceHeatmap, x, y, glm::vec3(bounceAccum * sppInv));
+            writeTexel(result.shadow, x, y, glm::vec3(shadowAccum * sppInv));
             writeTexel(result.directDiffuse, x, y, directDiffuseAccum * sppInv);
             writeTexel(result.indirectDiffuse, x, y, indirectDiffuseAccum * sppInv);
             writeTexel(result.directSpecular, x, y, directSpecularAccum * sppInv);
             writeTexel(result.indirectSpecular, x, y, indirectSpecularAccum * sppInv);
             writeTexel(result.refraction, x, y, refractionAccum * sppInv);
-
-            const float depth = primarySample.primaryHit
-                                     ? glm::dot(primarySample.worldPos - cameraPos, cameraForward)
-                                     : 0.0F;
-            writeTexel(result.depth, x, y, glm::vec3(depth));
-            writeTexel(result.worldPos, x, y, primarySample.worldPos);
-            writeTexel(result.uv, x, y, glm::vec3(glm::fract(primarySample.uv), 0.0F));
-            writeTexel(result.normal, x, y, primarySample.normal);
-            writeTexel(result.geomNormal, x, y, primarySample.geomNormal);
-            writeTexel(result.albedo, x, y, primarySample.albedo);
-            writeTexel(result.metallic, x, y, glm::vec3(primarySample.metallic));
-            writeTexel(result.roughness, x, y, glm::vec3(primarySample.roughness));
-            writeTexel(result.tangent, x, y, primarySample.tangent);
-            writeTexel(result.objectId, x, y,
-                       primarySample.primaryHit ? falseColorForId(primarySample.objectIndex)
-                                                 : glm::vec3(0.0F));
-            writeTexel(result.alpha, x, y, glm::vec3(primarySample.primaryHit ? 1.0F : 0.0F));
-            writeTexel(result.fresnel, x, y,
-                       primarySample.primaryHit
-                           ? glm::vec3(primarySample.fresnel, 1.0F - primarySample.fresnel, 0.0F)
-                           : glm::vec3(0.0F));
-            writeTexel(result.ao, x, y, glm::vec3(primarySample.ao));
-            writeTexel(result.shadow, x, y, glm::vec3(primarySample.shadow));
         }
     };
 
