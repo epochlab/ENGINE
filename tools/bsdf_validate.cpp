@@ -1,4 +1,4 @@
-// Standalone correctness check for engine::scene::bsdf (bsdf.h): verifies the combined specular+diffuse pdf integrates to the expected continuous-lobe probability mass, and runs a furnace test (uniform incident radiance from every direction, including through transmission) via BSDF importance sampling -- must never reflect/transmit more energy than received. Same standalone-CLI convention as embree_validate.cpp/furnace_test.cpp: no test framework, non-zero exit on failure.
+// Standalone correctness check for engine::scene::bsdf (bsdf.h): verifies the combined specular+diffuse pdf never integrates to MORE than the total lobe-selection mass (upper bound only, deliberately: VNDF reflection sampling is not normalized over the hemisphere -- samples reflecting below the horizon are discarded -- so the true integral is the horizon-clipped mass, which has no closed form and is measured instead by the white furnace test below), and runs a furnace test (uniform incident radiance from every direction, including through transmission) via BSDF importance sampling -- must never reflect/transmit more energy than received. Same standalone-CLI convention as embree_validate.cpp/furnace_test.cpp: no test framework, non-zero exit on failure.
 
 #include <array>
 #include <cmath>
@@ -55,13 +55,20 @@ bool checkPdfNormalization() {
                 const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (ndotV * ndotV))), 0.0F, ndotV);
                 double integral = 0.0;
                 for (int i = 0; i < kSampleCount; ++i) {
-                    const glm::vec3 wi = sampleUniformHemisphere(rng);
+                    glm::vec3 wi = sampleUniformHemisphere(rng);
+                    // pdfBsdf mirrors wi into wo's hemisphere, so for a below-surface wo the density
+                    // over the +z hemisphere is identically zero. Integrating the +z hemisphere there
+                    // measured 0 and passed the <= 1.0 assertion vacuously -- the exiting-side rows
+                    // tested nothing at all. Flip the sampled hemisphere to match wo's side.
+                    if (ndotV < 0.0F) {
+                        wi.z = -wi.z;
+                    }
                     integral += engine::scene::pdfBsdf(params, wo, wi) / kUniformPdf;
                 }
                 integral /= kSampleCount;
                 if (integral > 1.0 + kTolerance) {
-                    std::cerr << "bsdf_validate: FAILED pdf normalization at roughness=" << roughness
-                              << " metallic=" << metallic << " ndotV=" << ndotV
+                    std::cerr << "bsdf_validate: FAILED pdf normalization UPPER bound at roughness="
+                              << roughness << " metallic=" << metallic << " ndotV=" << ndotV
                               << " integral=" << integral << " (expected <= 1.0)\n";
                     ok = false;
                 }
@@ -71,7 +78,7 @@ bool checkPdfNormalization() {
     return ok;
 }
 
-float furnaceLo(const BsdfParams& params, const glm::vec3& wo, int sampleCount, std::uint32_t seed) {
+glm::vec3 furnaceLo(const BsdfParams& params, const glm::vec3& wo, int sampleCount, std::uint32_t seed) {
     glm::vec3 accum(0.0F);
     for (int i = 0; i < sampleCount; ++i) {
         engine::scene::Sampler sampler(0, 0, i, seed);
@@ -81,9 +88,11 @@ float furnaceLo(const BsdfParams& params, const glm::vec3& wo, int sampleCount, 
             accum += sample->throughputWeight;  // L0=1
         }
     }
-    const glm::vec3 lo = accum / static_cast<float>(sampleCount);
-    return std::max({lo.x, lo.y, lo.z});
+    return accum / static_cast<float>(sampleCount);
 }
+
+float maxChannel(const glm::vec3& v) { return std::max({v.x, v.y, v.z}); }
+float minChannel(const glm::vec3& v) { return std::min({v.x, v.y, v.z}); }
 
 // Furnace test through sampleBsdf: uniform radiance L0=1 from every direction (both hemispheres -- transmission can receive from the far side), estimator Lo = mean(throughputWeight) since throughputWeight already folds in f*cosTheta/pdf. ndotV sweep includes negative values (woLocal.z<0, the exiting side of a transmissive dielectric) and a value past the ior=1.5 critical angle (~41.8deg, cosTheta~0.745) to force total internal reflection. Energy bound: 1.0 (L0) everywhere EXCEPT the exiting side (ndotV<0) of a transmissive material below the critical angle, where sampleBsdf's eta^2 non-symmetric radiance-compression factor (Veach 1997 sec. 5.2 -- see bsdf.cpp's transmission branch) legitimately raises Lo above L0: L/n^2 is the invariant along a ray, so radiance increases going from a denser medium (ior=1.5, inside) into a rarer one (1.0, outside) by up to ior^2. The naive Lo<=1 bound only holds for eta==1 interfaces (pure reflection) or the entering side, where this same factor is < 1 -- exactly compensating so a round trip through the surface loses no net energy.
 bool checkFurnace() {
@@ -105,7 +114,7 @@ bool checkFurnace() {
                     const BsdfParams params = makeParams(roughness, metallic, transmission);
                     const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (ndotV * ndotV))), 0.0F,
                                         ndotV);
-                    const float maxLo = furnaceLo(params, wo, kSampleCount, seed);
+                    const float maxLo = maxChannel(furnaceLo(params, wo, kSampleCount, seed));
                     const bool exitingTransmissive = ndotV < 0.0F && transmission > 0.0F;
                     const float energyBound = exitingTransmissive ? kIor * kIor : 1.0F;
                     if (maxLo > energyBound + kTolerance) {
@@ -126,13 +135,138 @@ bool checkFurnace() {
             ++seed;
             const BsdfParams params = makeColoredMetalParams(roughness);
             const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (ndotV * ndotV))), 0.0F, ndotV);
-            const float maxLo = furnaceLo(params, wo, kSampleCount, seed);
+            const float maxLo = maxChannel(furnaceLo(params, wo, kSampleCount, seed));
             if (maxLo > 1.0F + kTolerance) {
                 std::cerr << "bsdf_validate: FAILED colored-metal furnace test at roughness="
                           << roughness << " ndotV=" << ndotV << " Lo=" << maxLo
                           << " (expected <= 1.0)\n";
                 ok = false;
             }
+        }
+    }
+    return ok;
+}
+
+// TWO-SIDED white furnace. A white, non-absorbing surface under uniform L0=1 radiance must return
+// exactly 1.0: every photon it receives leaves again. checkFurnace above only ever asserts Lo <= bound,
+// so it cannot see energy LOSS -- which is the failure mode this BSDF actually has. Restricted to the
+// cases where 1.0 is the analytically correct answer: white base colour, no transmission, entering side.
+// A coloured conductor (f0 = 0.5) legitimately absorbs and has no closed-form expectation, so it stays
+// upper-bound-only in checkFurnace.
+//
+// The measured shortfall from 1.0 is single-scatter GGX energy loss (Heitz, Hanika, d'Eon, Dachsbacher
+// 2016): smithG2 removes masked/shadowed microfacet paths and never returns them. That is a known,
+// accepted approximation, so the floors below are a REGRESSION BASELINE (measured, then rounded down),
+// not a correctness target -- they lock in "do not get worse" today. When multiple-scattering
+// compensation lands they should all tighten to 1.0 - kTolerance and this comment should go.
+struct WhiteFurnaceFloor {
+    float roughness;
+    float ndotV;
+    float conductorFloor;
+    float dielectricFloor;
+};
+
+bool checkWhiteFurnaceTwoSided() {
+    constexpr int kSampleCount = 400000;
+    constexpr float kUpperTolerance = 0.02F;
+    // Floors are the measured values rounded down by ~5% for Monte Carlo noise and platform variation.
+    // Listed per (roughness, ndotV) rather than scaled from a normal-incidence figure: the loss is NOT
+    // monotonic in angle -- at roughness 1.0 the conductor retains 0.31 head-on but 0.50 oblique, since
+    // a grazing view sees a narrower, less self-shadowed slice of the microsurface.
+    const std::array<WhiteFurnaceFloor, 8> floors = {{
+        {0.05F, 1.0F, 0.95F, 0.95F},
+        {0.05F, 0.4F, 0.95F, 0.95F},
+        {0.25F, 1.0F, 0.95F, 0.95F},
+        {0.25F, 0.4F, 0.93F, 0.94F},
+        {0.50F, 1.0F, 0.87F, 0.94F},
+        {0.50F, 0.4F, 0.80F, 0.90F},
+        {1.00F, 1.0F, 0.29F, 0.92F},
+        {1.00F, 0.4F, 0.47F, 0.85F},
+    }};
+
+    bool ok = true;
+    std::uint32_t seed = 9000;
+    std::cout << "bsdf_validate: white furnace energy (1.0 = perfectly energy-conserving)\n";
+    std::cout << "  roughness  ndotV  conductor  dielectric\n";
+    for (const WhiteFurnaceFloor& entry : floors) {
+        ++seed;
+        const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (entry.ndotV * entry.ndotV))), 0.0F,
+                            entry.ndotV);
+        const glm::vec3 conductor =
+            furnaceLo(makeParams(entry.roughness, 1.0F, 0.0F), wo, kSampleCount, seed);
+        const glm::vec3 dielectric =
+            furnaceLo(makeParams(entry.roughness, 0.0F, 0.0F), wo, kSampleCount, seed + 500U);
+        std::cout << "  " << entry.roughness << "       " << entry.ndotV << "    "
+                  << minChannel(conductor) << "   " << minChannel(dielectric) << '\n';
+
+        if (minChannel(conductor) < entry.conductorFloor) {
+            std::cerr << "bsdf_validate: FAILED white-conductor furnace LOWER bound at roughness="
+                      << entry.roughness << " ndotV=" << entry.ndotV
+                      << " Lo=" << minChannel(conductor) << " (floor " << entry.conductorFloor
+                      << ")\n";
+            ok = false;
+        }
+        if (minChannel(dielectric) < entry.dielectricFloor) {
+            std::cerr << "bsdf_validate: FAILED white-dielectric furnace LOWER bound at roughness="
+                      << entry.roughness << " ndotV=" << entry.ndotV
+                      << " Lo=" << minChannel(dielectric) << " (floor " << entry.dielectricFloor
+                      << ")\n";
+            ok = false;
+        }
+        if (maxChannel(conductor) > 1.0F + kUpperTolerance ||
+            maxChannel(dielectric) > 1.0F + kUpperTolerance) {
+            std::cerr << "bsdf_validate: FAILED white furnace UPPER bound at roughness="
+                      << entry.roughness << " ndotV=" << entry.ndotV << '\n';
+            ok = false;
+        }
+    }
+    return ok;
+}
+
+// Round trip through a transmissive interface. sampleBsdf applies a non-symmetric eta^2 radiance
+// compression on refraction (Veach 1997 sec. 5.2): entering scales by (1/ior)^2, exiting by ior^2, so a
+// ray that enters and leaves the same surface must lose no net energy. checkFurnace tests each side
+// separately against a per-side bound (1.0 entering, ior^2 exiting), which passes even if the two
+// factors do not actually cancel -- this asserts the invariant bsdf.cpp's own comment claims.
+bool checkTransmissionRoundTrip() {
+    constexpr int kSampleCount = 200000;
+    // Not tight to 1.0: each side's furnace value also contains that interface's REFLECTED
+    // lobe, so the product carries a Fresnel cross-term that grows toward grazing (measured
+    // 1.027 at normal incidence, 1.058 at 60 degrees). The band still has large discriminating
+    // power -- factors that compounded rather than cancelled would land near ior^2 = 2.25, and
+    // ones that under-cancelled near 1/2.25 = 0.44.
+    constexpr float kTolerance = 0.08F;
+    constexpr float kIorRoundTrip = 1.5F;  // matches makeParams
+    const std::array<float, 3> ndotVs = {1.0F, 0.8F, 0.5F};
+
+    bool ok = true;
+    std::uint32_t seed = 4000;
+    for (float ndotV : ndotVs) {
+        ++seed;
+        // Snell-correct pairing. A ray entering at cos(thetaI) travels inside the medium at
+        // cos(thetaT), sin(thetaT) = sin(thetaI)/ior -- so the exiting leg must be probed at thetaT,
+        // not at thetaI. Reusing thetaI puts the exit past the critical angle (cos ~0.745 at ior 1.5)
+        // where the interface totally internally reflects and no round trip exists at all.
+        const BsdfParams params = makeParams(0.05F, 0.0F, 1.0F);
+        const float sinThetaI = std::sqrt(std::max(0.0F, 1.0F - (ndotV * ndotV)));
+        const float sinThetaT = sinThetaI / kIorRoundTrip;
+        const float cosThetaT = std::sqrt(std::max(0.0F, 1.0F - (sinThetaT * sinThetaT)));
+        const glm::vec3 woIn(sinThetaI, 0.0F, ndotV);
+        const glm::vec3 woOut(sinThetaT, 0.0F, -cosThetaT);
+        const float entering = maxChannel(furnaceLo(params, woIn, kSampleCount, seed));
+        const float exiting = maxChannel(furnaceLo(params, woOut, kSampleCount, seed + 700U));
+        const float roundTrip = entering * exiting;
+        std::cout << "  transmission round trip ndotV=" << ndotV << ": " << entering << " x "
+                  << exiting << " = " << roundTrip << '\n';
+        // Two-sided deliberately. An upper bound alone catches the eta^2 factors COMPOUNDING but is
+        // blind to them under-cancelling, which loses energy on every round trip through glass -- the
+        // same one-sided blind spot the white furnace test above exists to close.
+        if (roundTrip > 1.0F + kTolerance || roundTrip < 1.0F - kTolerance) {
+            std::cerr << "bsdf_validate: FAILED transmission round trip at ndotV=" << ndotV
+                      << " -- entering " << entering << " x exiting " << exiting << " = " << roundTrip
+                      << "; the eta^2 radiance-compression factors must cancel over a round trip "
+                         "(expected 1.0 +/- " << kTolerance << ").\n";
+            ok = false;
         }
     }
     return ok;
@@ -201,9 +335,11 @@ bool checkSpecularRawThroughputIsolation() {
 int main() {
     const bool pdfOk = checkPdfNormalization();
     const bool furnaceOk = checkFurnace();
+    const bool whiteFurnaceOk = checkWhiteFurnaceTwoSided();
+    const bool roundTripOk = checkTransmissionRoundTrip();
     const bool specularIsolationOk = checkSpecularRawThroughputIsolation();
 
-    if (!pdfOk || !furnaceOk || !specularIsolationOk) {
+    if (!pdfOk || !furnaceOk || !whiteFurnaceOk || !roundTripOk || !specularIsolationOk) {
         std::cerr << "bsdf_validate: FAILED\n";
         return EXIT_FAILURE;
     }
