@@ -39,14 +39,19 @@ float Camera::verticalFovRadians() const {
     return 2.0F * std::atan(filmBack_.heightMm / (2.0F * focalLengthMm_));
 }
 
-Ray Camera::primaryRay(float ndcX, float ndcY, float aspect) const {
+Camera::ViewBasis Camera::viewBasis(float aspect) const {
     const glm::vec3 fwd = forwardFromEuler(yawRadians_, pitchRadians_);
     const glm::vec3 right = glm::normalize(glm::cross(fwd, kWorldUp));
     const glm::vec3 up = glm::cross(right, fwd);
     const float halfHeight = std::tan(verticalFovRadians() * 0.5F);
     const float halfWidth = halfHeight * aspect;
-    const glm::vec3 dir =
-        glm::normalize(fwd + (ndcX * halfWidth * right) + (ndcY * halfHeight * up));
+    return ViewBasis{fwd, right, up, halfWidth, halfHeight};
+}
+
+Ray Camera::primaryRay(float ndcX, float ndcY, float aspect) const {
+    const ViewBasis basis = viewBasis(aspect);
+    const glm::vec3 dir = glm::normalize(basis.forward + (ndcX * basis.halfWidth * basis.right) +
+                                          (ndcY * basis.halfHeight * basis.up));
     return Ray{position_, dir, nearClip_, farClip_};
 }
 
