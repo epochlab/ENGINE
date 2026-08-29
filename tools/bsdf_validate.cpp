@@ -221,6 +221,83 @@ bool checkWhiteFurnaceTwoSided() {
     return ok;
 }
 
+// Mean throughput through sampleBsdf with every transmitted draw converted back from radiance to ENERGY.
+// sampleBsdf applies the non-symmetric eta^2 radiance compression on refraction (Veach 1997 sec. 5.2), so a
+// transmitted sample carries radiance and a raw mean is bounded by ior^2, not 1.0 -- which is why
+// checkFurnace can only assert an upper bound on its transmissive rows and never sees energy LOSS there.
+// Dividing those draws by eta^2 puts every sample in one domain with an analytic answer.
+// LobeType::Transmission is exactly the far-hemisphere draws, delta and rough alike.
+glm::vec3 transmissiveEnergyLo(const BsdfParams& params, const glm::vec3& wo, int sampleCount,
+                                std::uint32_t seed) {
+    const float eta = wo.z < 0.0F ? params.ior : 1.0F / params.ior;  // etaI/etaT, exiting vs entering
+    const float etaSq = eta * eta;
+    glm::vec3 accum(0.0F);
+    for (int i = 0; i < sampleCount; ++i) {
+        engine::scene::Sampler sampler(0, 0, i, seed);
+        const std::optional<engine::scene::BsdfSample> sample =
+            engine::scene::sampleBsdf(params, wo, sampler);
+        if (!sample.has_value()) {
+            continue;
+        }
+        accum += sample->type == engine::scene::LobeType::Transmission
+                      ? sample->throughputWeight / etaSq
+                      : sample->throughputWeight;
+    }
+    return accum / static_cast<float>(sampleCount);
+}
+
+// TWO-SIDED energy balance for a TRANSMISSIVE interface -- the counterpart to checkWhiteFurnaceTwoSided,
+// which is restricted to "no transmission, entering side" because those are the only rows where 1.0 is
+// correct in the radiance domain. In the energy domain 1.0 is correct everywhere: a white, non-absorbing
+// interface reflects, refracts, or hands the rest to the diffuse substrate, and the multiple-scattering
+// lobes return what smithG2 masked. Nothing is absorbed at any roughness, side or transmissionFactor.
+//
+// Gates two failure modes the radiance-domain checks structurally cannot see: multiple-scattering
+// compensation delivered over the refraction-reachable cone only rather than the whole far hemisphere,
+// and a transmission lobe whose value drops transmissionFactor or (1-metallic) while its selection
+// probability keeps them -- the factors cancel out of throughput, so only an absolute bound catches it.
+// metallic=1 rows cover a conductor, which must transmit nothing however its transmissionFactor is set.
+bool checkTransmissiveEnergyBalance() {
+    constexpr int kSampleCount = 200000;
+    // Same tolerance as the opaque white furnace -- 1.0 is a correctness target, not a baseline. Residual
+    // is albedo-table interpolation error, worst across the TIR boundary where the transmitted channel
+    // steps in mu and eta=1.5 falls between two table slices.
+    constexpr float kTolerance = 0.02F;
+    const std::array<float, 4> roughnesses = {0.05F, 0.4F, 0.7F, 1.0F};
+    const std::array<float, 4> ndotVs = {1.0F, 0.6F, -0.9F, -0.4F};  // entering, entering, exiting, TIR
+    const std::array<float, 2> transmissions = {0.5F, 1.0F};
+    const std::array<float, 2> metallics = {0.0F, 1.0F};
+
+    bool ok = true;
+    std::uint32_t seed = 12000;
+    std::cout << "bsdf_validate: transmissive energy balance (1.0 = perfectly energy-conserving)\n";
+    std::cout << "  roughness  ndotV  transmission  metallic  Lo\n";
+    for (float roughness : roughnesses) {
+        for (float transmission : transmissions) {
+            for (float metallic : metallics) {
+                for (float ndotV : ndotVs) {
+                    ++seed;
+                    const BsdfParams params = makeParams(roughness, metallic, transmission);
+                    const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (ndotV * ndotV))), 0.0F,
+                                        ndotV);
+                    const glm::vec3 lo = transmissiveEnergyLo(params, wo, kSampleCount, seed);
+                    std::cout << "  " << roughness << "        " << ndotV << "     " << transmission
+                              << "           " << metallic << "       " << minChannel(lo) << '\n';
+                    if (minChannel(lo) < 1.0F - kTolerance || maxChannel(lo) > 1.0F + kTolerance) {
+                        std::cerr << "bsdf_validate: FAILED transmissive energy balance at roughness="
+                                  << roughness << " ndotV=" << ndotV
+                                  << " transmission=" << transmission << " metallic=" << metallic
+                                  << " Lo=[" << minChannel(lo) << ", " << maxChannel(lo)
+                                  << "] (expected 1.0 +/- " << kTolerance << ")\n";
+                        ok = false;
+                    }
+                }
+            }
+        }
+    }
+    return ok;
+}
+
 // Helmholtz reciprocity: f(wo->wi) == f(wi->wo). The continuous lobes are symmetric by construction after
 // the directional-albedo diffuse coupling landed -- D and G2 are symmetric, Fresnel is evaluated at the
 // shared half-vector, and both the coupling and the multiple-scattering lobe are products of matching
@@ -377,12 +454,13 @@ int main() {
     const bool pdfOk = checkPdfNormalization();
     const bool furnaceOk = checkFurnace();
     const bool whiteFurnaceOk = checkWhiteFurnaceTwoSided();
+    const bool transmissiveEnergyOk = checkTransmissiveEnergyBalance();
     const bool reciprocityOk = checkReciprocity();
     const bool roundTripOk = checkTransmissionRoundTrip();
     const bool specularIsolationOk = checkSpecularRawThroughputIsolation();
 
-    if (!pdfOk || !furnaceOk || !whiteFurnaceOk || !reciprocityOk || !roundTripOk ||
-        !specularIsolationOk) {
+    if (!pdfOk || !furnaceOk || !whiteFurnaceOk || !transmissiveEnergyOk || !reciprocityOk ||
+        !roundTripOk || !specularIsolationOk) {
         std::cerr << "bsdf_validate: FAILED\n";
         return EXIT_FAILURE;
     }
