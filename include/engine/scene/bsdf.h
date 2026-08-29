@@ -38,7 +38,8 @@ struct BsdfSample {
     glm::vec3 wiLocal;            // sampled direction, local shading frame
     glm::vec3 throughputWeight;   // f(wi)*|cosThetaI| / pdf(wi)
     LobeType type;
-    // For Diffuse/SpecularReflection, the sampled lobe's OWN pdf-cancelled weight in isolation (its own f, its own pdf -- not evaluateContinuousLobes' mixture pdf), excluding the other lobe's admixture at the same wi: `kd` (no baseColor) for Diffuse, `F*G2/G1` for SpecularReflection (Heitz 2018 VNDF weight identity, no baseColor at metallic=0). Identical to throughputWeight for SpecularTransmission. Lets path_tracer.cpp's delighted Direct/Indirect Diffuse/Specular AOVs access each lobe's own contribution without the other lobe's texture/energy bleeding in.
+    // For Diffuse/SpecularReflection, the sampled lobe's OWN pdf-cancelled weight in isolation (its own f, its own pdf -- not evaluateContinuousLobes' mixture pdf), excluding the other lobe's admixture at the same wi: `kd` (no baseColor) for Diffuse, `F*G2/G1` plus the multiple-scattering term for SpecularReflection (Heitz 2018 VNDF weight identity, no baseColor at metallic=0). Identical to throughputWeight for SpecularTransmission. Lets path_tracer.cpp's delighted Direct/Indirect Diffuse/Specular AOVs access each lobe's own contribution without the other lobe's texture/energy bleeding in.
+    // Known gap, AOV-only: the multiple-scattering lobe has no sampling strategy of its own, so it lands in BOTH raw weights imprecisely -- a Diffuse-typed sample carries multiple-scattering energy this field reports as diffuse, and a SpecularReflection-typed one divides it by the VNDF pdf, which is not the density it was drawn from. Beauty is exact either way (throughputWeight is the physical value, and the mixture pdf is the true sampling density); only the delighted split is approximate, and the physical transport buckets remove the mechanism entirely.
     glm::vec3 rawThroughputWeight;
 };
 
@@ -61,7 +62,7 @@ struct BsdfSample {
 [[nodiscard]] glm::vec3 evaluateSpecularOnly(const BsdfParams& params, const glm::vec3& woLocal,
                                               const glm::vec3& wiLocal);
 
-// Stochastically samples one of {rough specular reflection, diffuse, smooth specular transmission} by Fresnel-derived probability, returns the ready-to-multiply throughput weight. Diffuse+specular combine via the one-sample mixture estimator (both lobes evaluated at whichever wi was drawn, not just the sampled lobe -- required since a rough surface's lobes overlap). Transmission: Snell's law, TIR folded into the specular probability, single non-nested dielectric boundary. Returns nullopt if fully absorbed.
+// Stochastically samples one of {rough specular reflection, diffuse, smooth specular transmission} by Fresnel-derived probability, returns the ready-to-multiply throughput weight. Diffuse+specular combine via the one-sample mixture estimator (both lobes evaluated at whichever wi was drawn, not just the sampled lobe -- required since a rough surface's lobes overlap). The specular selection probability is scaled by the GGX directional albedo E(mu_o, roughness), so VNDF sampling takes the single-scattering share and the cosine strategy takes the (cosine-shaped) multiple-scattering share. Transmission: Snell's law, TIR folded into the specular probability, single non-nested dielectric boundary. Returns nullopt if fully absorbed.
 [[nodiscard]] std::optional<BsdfSample> sampleBsdf(const BsdfParams& params,
                                                     const glm::vec3& woLocal, Sampler& sampler);
 

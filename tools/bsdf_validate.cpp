@@ -154,41 +154,47 @@ bool checkFurnace() {
 // A coloured conductor (f0 = 0.5) legitimately absorbs and has no closed-form expectation, so it stays
 // upper-bound-only in checkFurnace.
 //
-// The measured shortfall from 1.0 is single-scatter GGX energy loss (Heitz, Hanika, d'Eon, Dachsbacher
-// 2016): smithG2 removes masked/shadowed microfacet paths and never returns them. That is a known,
-// accepted approximation, so the floors below are a REGRESSION BASELINE (measured, then rounded down),
-// not a correctness target -- they lock in "do not get worse" today. When multiple-scattering
-// compensation lands they should all tighten to 1.0 - kTolerance and this comment should go.
-struct WhiteFurnaceFloor {
+// Single-scatter GGX loses the energy smithG2 masks away (Heitz, Hanika, d'Eon, Dachsbacher 2016) -- a
+// white conductor at roughness 1.0 measured 0.307 here, returning under a third of the light it received.
+// Kulla-Conty multiple-scattering compensation plus the directional-albedo diffuse coupling (bsdf.cpp)
+// return it, so 1.0 is now a CORRECTNESS TARGET, not a regression baseline: both bounds are the same
+// tolerance and a shortfall is a bug, not an accepted approximation.
+//
+// Half the rows sit deliberately OFF the 32x32 albedo table's grid. At an off-grid point the measured
+// value is E_true + (1 - E_interpolated), so these rows test the table's interpolation error directly --
+// which is why bsdf.cpp needs no public accessor for the table itself.
+struct WhiteFurnaceCase {
     float roughness;
     float ndotV;
-    float conductorFloor;
-    float dielectricFloor;
+    bool offGrid;
 };
 
 bool checkWhiteFurnaceTwoSided() {
     constexpr int kSampleCount = 400000;
-    constexpr float kUpperTolerance = 0.02F;
-    // Floors are the measured values rounded down by ~5% for Monte Carlo noise and platform variation.
-    // Listed per (roughness, ndotV) rather than scaled from a normal-incidence figure: the loss is NOT
-    // monotonic in angle -- at roughness 1.0 the conductor retains 0.31 head-on but 0.50 oblique, since
-    // a grazing view sees a narrower, less self-shadowed slice of the microsurface.
-    const std::array<WhiteFurnaceFloor, 8> floors = {{
-        {0.05F, 1.0F, 0.95F, 0.95F},
-        {0.05F, 0.4F, 0.95F, 0.95F},
-        {0.25F, 1.0F, 0.95F, 0.95F},
-        {0.25F, 0.4F, 0.93F, 0.94F},
-        {0.50F, 1.0F, 0.87F, 0.94F},
-        {0.50F, 0.4F, 0.80F, 0.90F},
-        {1.00F, 1.0F, 0.29F, 0.92F},
-        {1.00F, 0.4F, 0.47F, 0.85F},
+    constexpr float kTolerance = 0.02F;
+    const std::array<WhiteFurnaceCase, 14> cases = {{
+        {0.05F, 1.0F, false},
+        {0.05F, 0.4F, false},
+        {0.25F, 1.0F, false},
+        {0.25F, 0.4F, false},
+        {0.50F, 1.0F, false},
+        {0.50F, 0.4F, false},
+        {1.00F, 1.0F, false},
+        {1.00F, 0.4F, false},
+        // Off-grid: table rows/columns land on k/31, so these fall mid-cell on both axes.
+        {0.37F, 0.565F, true},
+        {0.37F, 0.31F, true},
+        {0.63F, 0.565F, true},
+        {0.63F, 0.31F, true},
+        {0.82F, 0.565F, true},
+        {0.82F, 0.31F, true},
     }};
 
     bool ok = true;
     std::uint32_t seed = 9000;
     std::cout << "bsdf_validate: white furnace energy (1.0 = perfectly energy-conserving)\n";
     std::cout << "  roughness  ndotV  conductor  dielectric\n";
-    for (const WhiteFurnaceFloor& entry : floors) {
+    for (const WhiteFurnaceCase& entry : cases) {
         ++seed;
         const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (entry.ndotV * entry.ndotV))), 0.0F,
                             entry.ndotV);
@@ -197,27 +203,62 @@ bool checkWhiteFurnaceTwoSided() {
         const glm::vec3 dielectric =
             furnaceLo(makeParams(entry.roughness, 0.0F, 0.0F), wo, kSampleCount, seed + 500U);
         std::cout << "  " << entry.roughness << "       " << entry.ndotV << "    "
-                  << minChannel(conductor) << "   " << minChannel(dielectric) << '\n';
+                  << minChannel(conductor) << "   " << minChannel(dielectric)
+                  << (entry.offGrid ? "   (off-grid)" : "") << '\n';
 
-        if (minChannel(conductor) < entry.conductorFloor) {
-            std::cerr << "bsdf_validate: FAILED white-conductor furnace LOWER bound at roughness="
-                      << entry.roughness << " ndotV=" << entry.ndotV
-                      << " Lo=" << minChannel(conductor) << " (floor " << entry.conductorFloor
-                      << ")\n";
-            ok = false;
+        const std::array<std::pair<const char*, glm::vec3>, 2> measured = {
+            {{"conductor", conductor}, {"dielectric", dielectric}}};
+        for (const auto& [label, value] : measured) {
+            if (minChannel(value) < 1.0F - kTolerance || maxChannel(value) > 1.0F + kTolerance) {
+                std::cerr << "bsdf_validate: FAILED white-" << label
+                          << " furnace energy conservation at roughness=" << entry.roughness
+                          << " ndotV=" << entry.ndotV << " Lo=[" << minChannel(value) << ", "
+                          << maxChannel(value) << "] (expected 1.0 +/- " << kTolerance << ")\n";
+                ok = false;
+            }
         }
-        if (minChannel(dielectric) < entry.dielectricFloor) {
-            std::cerr << "bsdf_validate: FAILED white-dielectric furnace LOWER bound at roughness="
-                      << entry.roughness << " ndotV=" << entry.ndotV
-                      << " Lo=" << minChannel(dielectric) << " (floor " << entry.dielectricFloor
-                      << ")\n";
-            ok = false;
-        }
-        if (maxChannel(conductor) > 1.0F + kUpperTolerance ||
-            maxChannel(dielectric) > 1.0F + kUpperTolerance) {
-            std::cerr << "bsdf_validate: FAILED white furnace UPPER bound at roughness="
-                      << entry.roughness << " ndotV=" << entry.ndotV << '\n';
-            ok = false;
+    }
+    return ok;
+}
+
+// Helmholtz reciprocity: f(wo->wi) == f(wi->wo). The continuous lobes are symmetric by construction after
+// the directional-albedo diffuse coupling landed -- D and G2 are symmetric, Fresnel is evaluated at the
+// shared half-vector, and both the coupling and the multiple-scattering lobe are products of matching
+// wo-side and wi-side factors. So this is an equality to float precision, not a statistical bound.
+//
+// It fails hard on the pre-coupling code, where the diffuse lobe carried (1 - F(mu_o)) alone. Not an
+// energy error -- the furnace passed throughout -- but a misdistribution across view/light geometry, and
+// the blocker for every bidirectional transport algorithm (BDPT, VCM, light tracing, photon mapping),
+// all of which require symmetric f.
+bool checkReciprocity() {
+    constexpr float kRelativeTolerance = 1e-4F;
+    const std::array<float, 4> roughnesses = {0.05F, 0.25F, 0.5F, 1.0F};
+    const std::array<float, 3> metallics = {0.0F, 0.5F, 1.0F};
+    const std::array<float, 4> cosines = {1.0F, 0.7F, 0.4F, 0.15F};
+
+    bool ok = true;
+    for (float roughness : roughnesses) {
+        for (float metallic : metallics) {
+            const BsdfParams params = makeParams(roughness, metallic, 0.0F);
+            for (float muA : cosines) {
+                for (float muB : cosines) {
+                    // Non-coplanar pair: a shared azimuth would leave a swapped-phi bug invisible.
+                    const float sinA = std::sqrt(std::max(0.0F, 1.0F - (muA * muA)));
+                    const float sinB = std::sqrt(std::max(0.0F, 1.0F - (muB * muB)));
+                    const glm::vec3 wo(sinA, 0.0F, muA);
+                    const glm::vec3 wi(sinB * std::cos(1.1F), sinB * std::sin(1.1F), muB);
+                    const glm::vec3 forward = engine::scene::evaluateBsdf(params, wo, wi);
+                    const glm::vec3 reverse = engine::scene::evaluateBsdf(params, wi, wo);
+                    const float scale = std::max(maxChannel(forward), maxChannel(reverse));
+                    if (maxChannel(glm::abs(forward - reverse)) >
+                        kRelativeTolerance * std::max(scale, 1e-4F)) {
+                        std::cerr << "bsdf_validate: FAILED reciprocity at roughness=" << roughness
+                                  << " metallic=" << metallic << " muO=" << muA << " muI=" << muB
+                                  << " f(wo->wi)=" << forward.x << " f(wi->wo)=" << reverse.x << '\n';
+                        ok = false;
+                    }
+                }
+            }
         }
     }
     return ok;
@@ -336,10 +377,12 @@ int main() {
     const bool pdfOk = checkPdfNormalization();
     const bool furnaceOk = checkFurnace();
     const bool whiteFurnaceOk = checkWhiteFurnaceTwoSided();
+    const bool reciprocityOk = checkReciprocity();
     const bool roundTripOk = checkTransmissionRoundTrip();
     const bool specularIsolationOk = checkSpecularRawThroughputIsolation();
 
-    if (!pdfOk || !furnaceOk || !whiteFurnaceOk || !roundTripOk || !specularIsolationOk) {
+    if (!pdfOk || !furnaceOk || !whiteFurnaceOk || !reciprocityOk || !roundTripOk ||
+        !specularIsolationOk) {
         std::cerr << "bsdf_validate: FAILED\n";
         return EXIT_FAILURE;
     }
