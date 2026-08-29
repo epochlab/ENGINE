@@ -31,8 +31,7 @@ enum class AovId : int {
     IndirectSpecular,
     Refraction,
     Shadow,
-    Wireframe,
-    BoundingBox,
+    Wireframe,  // combined AOV: white mesh-edge lines + yellow scene-bounding-box lines (rasterizer.h)
     Count  // sentinel, == array size, not itself a selectable value
 };
 
@@ -45,7 +44,7 @@ inline constexpr const char* kAovNames[] = {
     "AO",           "Fresnel",        "IOR",             "Bounce Count",
     "Direct Diffuse", "Indirect Diffuse", "Direct Specular",
     "Indirect Specular", "Refraction",
-    "Shadow",       "Wireframe",      "Bounding Box",
+    "Shadow",       "Wireframe",
 };
 static_assert(sizeof(kAovNames) / sizeof(kAovNames[0]) == static_cast<int>(AovId::Count),
               "kAovNames must stay index-parallel with AovId");
