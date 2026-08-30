@@ -14,6 +14,7 @@ struct SceneConfig {
     std::string materialPath;  // path (relative to ASSET_ROOT_DIR) to the MaterialConfig JSON (material_config.h)
     glm::vec3 position;         // model root, composed on top of the glTF's own node transforms
     glm::vec3 rotationDegrees;  // order X,Y,Z, see main.cpp's loadGltf call
+    std::string hdriPath;  // environment map, relative to ASSET_ROOT_DIR
 };
 
 // Reads and parses path. Returns nullopt and logs to stderr if the file is missing, unreadable, or any required field can't be found/parsed — this is user-editable input, not an internal invariant, so failure is expected to happen and is surfaced rather than defaulted around.

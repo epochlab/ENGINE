@@ -1,8 +1,11 @@
 #include "engine/config/profile_config.h"
 
+#include <fstream>
 #include <iostream>
 
-#include "json_scan.h"
+#include <nlohmann/json.hpp>
+
+#include "json_glm.h"
 
 namespace engine::config {
 
@@ -25,94 +28,92 @@ std::optional<engine::gfx::OcioDisplayTransform::Lut> parseLut(const std::string
 }  // namespace
 
 std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
-    const std::optional<std::string> text = json::readFile(path);
-    if (!text.has_value()) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
         std::cerr << "loadProfileConfig: could not read " << path << '\n';
         return std::nullopt;
     }
 
-    const std::optional<glm::vec3> position = json::findVec3(*text, "position");
-    const std::optional<double> yawDegrees = json::findNumber(*text, "yawDegrees");
-    const std::optional<double> pitchDegrees = json::findNumber(*text, "pitchDegrees");
-    const std::string_view filmBackBody = json::findObjectBody(*text, "filmBack");
-    const std::optional<double> filmBackWidthMm = json::findNumber(filmBackBody, "widthMm");
-    const std::optional<double> filmBackHeightMm = json::findNumber(filmBackBody, "heightMm");
-    const std::optional<double> focalLengthMm = json::findNumber(*text, "focalLengthMm");
-    const std::optional<double> nearClip = json::findNumber(*text, "nearClip");
-    const std::optional<double> farClip = json::findNumber(*text, "farClip");
-    const std::optional<double> aperture = json::findNumber(*text, "aperture");
-    const std::optional<double> shutterSeconds = json::findNumber(*text, "shutterSeconds");
-    const std::optional<double> iso = json::findNumber(*text, "iso");
-    const std::optional<double> flySpeed = json::findNumber(*text, "flySpeedMetersPerSecond");
-    const std::optional<double> orbitSensitivity =
-        json::findNumber(*text, "orbitSensitivityDegPerPixel");
-    const std::optional<std::string> hdriPath = json::findString(*text, "hdriPath");
-    const std::optional<double> windowWidth = json::findNumber(*text, "windowWidth");
-    const std::optional<double> windowHeight = json::findNumber(*text, "windowHeight");
-    const std::optional<double> renderScale = json::findNumber(*text, "renderScale");
-    const std::optional<double> interactiveRenderScale =
-        json::findNumber(*text, "interactiveRenderScale");
-    const std::optional<double> defaultAov = json::findNumber(*text, "defaultAOV");
-    const std::optional<std::string> defaultLutName = json::findString(*text, "defaultLUT");
-    const std::optional<engine::gfx::OcioDisplayTransform::Lut> defaultLut =
-        defaultLutName.has_value() ? parseLut(*defaultLutName) : std::nullopt;
-    const std::optional<double> samplesPerPixel = json::findNumber(*text, "samplesPerPixel");
-    const std::optional<double> maxBounces = json::findNumber(*text, "maxBounces");
-    const std::optional<double> russianRouletteStartBounce =
-        json::findNumber(*text, "russianRouletteStartBounce");
-    const std::optional<double> maxSamples = json::findNumber(*text, "maxSamples");
+    try {
+        nlohmann::json j;
+        file >> j;
 
-    if (!position || !yawDegrees || !pitchDegrees || !filmBackWidthMm || !filmBackHeightMm ||
-        !focalLengthMm || !nearClip || !farClip || !aperture || !shutterSeconds || !iso ||
-        !flySpeed || !orbitSensitivity || !hdriPath.has_value() || !windowWidth.has_value() ||
-        !windowHeight.has_value() || !renderScale.has_value() ||
-        !interactiveRenderScale.has_value() || !defaultAov.has_value() || !defaultLut.has_value() ||
-        !samplesPerPixel.has_value() || !maxBounces.has_value() ||
-        !russianRouletteStartBounce.has_value() || !maxSamples.has_value()) {
-        std::cerr << "loadProfileConfig: " << path << " is missing one or more required fields\n";
-        return std::nullopt;
-    }
-    // These feed Camera::verticalFovRadians()/ev100() as denominators or bases of a physically meaningful quantity -- a zero/negative value would silently produce inf/NaN there instead of failing at this asset-load boundary.
-    if (*filmBackHeightMm <= 0.0 || *focalLengthMm <= 0.0 || *aperture <= 0.0 ||
-        *shutterSeconds <= 0.0 || *iso <= 0.0) {
-        std::cerr << "loadProfileConfig: " << path
-                   << " has a non-positive filmBack/focalLengthMm/aperture/shutterSeconds/iso\n";
-        return std::nullopt;
-    }
-    // Bounded at (0,1] rather than merely positive: above 1 would render above the framebuffer and hand the display blit a downscale it has no filter for, and at or below 0 the render target collapses.
-    if (*renderScale <= 0.0 || *renderScale > 1.0 || *interactiveRenderScale <= 0.0 ||
-        *interactiveRenderScale > 1.0) {
-        std::cerr << "loadProfileConfig: " << path
-                   << " has a renderScale/interactiveRenderScale outside (0,1]\n";
-        return std::nullopt;
-    }
+        const std::string defaultLutName = j.at("defaultLUT").get<std::string>();
+        const std::optional<engine::gfx::OcioDisplayTransform::Lut> defaultLut =
+            parseLut(defaultLutName);
+        if (!defaultLut.has_value()) {
+            std::cerr << "loadProfileConfig: " << path << " has an unrecognised defaultLUT \""
+                       << defaultLutName << "\"\n";
+            return std::nullopt;
+        }
 
-    return ProfileConfig{
-        *position,
-        static_cast<float>(*yawDegrees),
-        static_cast<float>(*pitchDegrees),
-        engine::scene::Camera::FilmBack{static_cast<float>(*filmBackWidthMm),
-                                         static_cast<float>(*filmBackHeightMm)},
-        static_cast<float>(*focalLengthMm),
-        static_cast<float>(*nearClip),
-        static_cast<float>(*farClip),
-        static_cast<float>(*aperture),
-        static_cast<float>(*shutterSeconds),
-        static_cast<float>(*iso),
-        static_cast<float>(*flySpeed),
-        static_cast<float>(*orbitSensitivity),
-        *hdriPath,
-        static_cast<int>(*windowWidth),
-        static_cast<int>(*windowHeight),
-        static_cast<float>(*renderScale),
-        static_cast<float>(*interactiveRenderScale),
-        static_cast<int>(*defaultAov),
-        *defaultLut,
-        static_cast<int>(*samplesPerPixel),
-        static_cast<int>(*maxBounces),
-        static_cast<int>(*russianRouletteStartBounce),
-        static_cast<int>(*maxSamples),
-    };
+        const int windowWidth = j.at("windowWidth").get<int>();
+        const int windowHeight = j.at("windowHeight").get<int>();
+        const glm::vec3 position = j.at("position").get<glm::vec3>();
+        const float yawDegrees = j.at("yawDegrees").get<float>();
+        const float pitchDegrees = j.at("pitchDegrees").get<float>();
+        const nlohmann::json& filmBackJson = j.at("filmBack");
+        const engine::scene::Camera::FilmBack filmBack{filmBackJson.at("widthMm").get<float>(),
+                                                         filmBackJson.at("heightMm").get<float>()};
+        const float focalLengthMm = j.at("focalLengthMm").get<float>();
+        const float nearClip = j.at("nearClip").get<float>();
+        const float farClip = j.at("farClip").get<float>();
+        const float aperture = j.at("aperture").get<float>();
+        const float shutterSeconds = j.at("shutterSeconds").get<float>();
+        const float iso = j.at("iso").get<float>();
+        const float flySpeed = j.at("flySpeedMetersPerSecond").get<float>();
+        const float orbitSensitivity = j.at("orbitSensitivityDegPerPixel").get<float>();
+        const float renderScale = j.at("renderScale").get<float>();
+        const float interactiveRenderScale = j.at("interactiveRenderScale").get<float>();
+        const int defaultAov = j.at("defaultAOV").get<int>();
+        const int samplesPerPixel = j.at("samplesPerPixel").get<int>();
+        const int maxBounces = j.at("maxBounces").get<int>();
+        const int russianRouletteStartBounce = j.at("russianRouletteStartBounce").get<int>();
+        const int maxSamples = j.at("maxSamples").get<int>();
+
+        // These feed Camera::verticalFovRadians()/ev100() as denominators or bases of a physically meaningful quantity -- a zero/negative value would silently produce inf/NaN there instead of failing at this asset-load boundary.
+        if (filmBack.heightMm <= 0.0F || focalLengthMm <= 0.0F || aperture <= 0.0F ||
+            shutterSeconds <= 0.0F || iso <= 0.0F) {
+            std::cerr << "loadProfileConfig: " << path
+                       << " has a non-positive filmBack/focalLengthMm/aperture/shutterSeconds/iso\n";
+            return std::nullopt;
+        }
+        // Bounded at (0,1] rather than merely positive: above 1 would render above the framebuffer and hand the display blit a downscale it has no filter for, and at or below 0 the render target collapses.
+        if (renderScale <= 0.0F || renderScale > 1.0F || interactiveRenderScale <= 0.0F ||
+            interactiveRenderScale > 1.0F) {
+            std::cerr << "loadProfileConfig: " << path
+                       << " has a renderScale/interactiveRenderScale outside (0,1]\n";
+            return std::nullopt;
+        }
+
+        return ProfileConfig{
+            windowWidth,
+            windowHeight,
+            position,
+            yawDegrees,
+            pitchDegrees,
+            filmBack,
+            focalLengthMm,
+            nearClip,
+            farClip,
+            aperture,
+            shutterSeconds,
+            iso,
+            flySpeed,
+            orbitSensitivity,
+            renderScale,
+            interactiveRenderScale,
+            defaultAov,
+            *defaultLut,
+            samplesPerPixel,
+            maxBounces,
+            russianRouletteStartBounce,
+            maxSamples,
+        };
+    } catch (const nlohmann::json::exception& e) {
+        std::cerr << "loadProfileConfig: " << path << ": " << e.what() << '\n';
+        return std::nullopt;
+    }
 }
 
 }  // namespace engine::config
