@@ -79,7 +79,7 @@ The render thread blits whichever AOV is selected through OCIO's display transfo
 | Memory HUD | Live RAM readout plus GPU allocation tracked at alloc/free (the path-traced display texture is the only GPU allocation left — OCIO uses zero LUT textures) | Surfaces a memory regression immediately, not after VRAM exhaustion |
 | Scene stats | Object/triangle/point counts, viewport resolution | Scene-complexity readout |
 | Debug camera controls | WASD/QE fly, R reset, LMB-drag orbit around a pivot read directly from the path tracer's own G-buffer (world-space hit position + hit mask at its centre pixel) | Interactive navigation without hand-editing camera parameters between runs |
-| Camera framing overlays | Letterbox mask, centre crosshair ('K'), 3×3 rule-of-thirds grid, drawn over the viewport | Composition aids that never contaminate the AOV buffers being debugged |
+| Camera framing overlays | Centre crosshair ('K'), drawn on the foreground overlay over the viewport | Composition aid that never contaminates the AOV buffers being debugged |
 | AOV selector | Dropdown across the full AOV set (§3), plus R/G/B channel-isolation hotkeys | Isolates one signal at a time for debugging |
 | Live histogram | Per-channel (R/G/B) histogram of the currently displayed image | Catches exposure/clipping and colour-space bugs a single still frame can hide |
 | glTF loading | cgltf; per-primitive vertices baked to world-space triangles/shading data at load time, materials' textures decoded once to `HdrImage` | Standard interchange format; nothing GPU-resident is needed once the CPU Embree scene/shading data exists |
@@ -110,13 +110,13 @@ Every AOV below is computed by the path tracer each pass, except: the 15 primary
 | Normal | Material | Shading (normal-mapped) normal at the primary hit | The normal actually used in shading |
 | GeomNormal | Material | Smooth interpolated vertex normal, before normal-mapping | Separates a bad normal map from a bad base mesh |
 | Albedo | Material | Base-colour texture sample at the primary hit | Isolates texture data from lighting |
-| Metallic | Material | Metallic factor (scalar only) | Debug material authoring independent of shading |
-| Roughness | Material | Roughness texture × factor, floored at 0.045 | Debug material authoring independent of shading |
+| Metallic | Material | Global metallic factor from `material.json` (`settings.metallicFactor`) — constant across the whole image; the engine has only one material config, not per-object metallic | Debug the configured global metallic value, not (yet) an authored per-material property |
+| Roughness | Material | Roughness texture × a global factor from `material.json`, floored at 0.045 — the texture varies per hit, the multiplying factor does not | Debug material authoring independent of shading |
 | Tangent | Material | Shading tangent basis at the primary hit | Debugs the tangent-space basis used for normal mapping |
 | ObjectID | Material | Per-instance index, false-coloured (`falseColorForId`) | Isolation mask for compositing/debugging |
 | AO | Material | Authored ambient-occlusion texture sample at the primary hit | Debug baked AO independent of lighting |
-| Fresnel | Transport | Schlick term at the primary hit's view angle | Debug grazing-angle reflectance behaviour in isolation |
-| IOR | Transport | Per-material dielectric IOR at the primary hit, -1 on a miss | Isolates the raw refractive-index input driving Fresnel/transmission |
+| Fresnel | Transport | Bare Schlick term at the primary hit's view angle from `f0` — simpler than shading's `mix(dielectric Fresnel, Schlick(f0), metallic)`, so it can disagree with what's actually rendered (e.g. reading near 1.0 from an unclamped specular texture where shading computes ~0.04 for a dielectric) | Debug grazing-angle reflectance behaviour in isolation; not a preview of the exact shading value |
+| IOR | Transport | Global dielectric IOR from `material.json` (`settings.ior`), -1 on a miss — constant across the whole image, not read per-material | Isolates the raw refractive-index input driving Fresnel/transmission |
 | BounceCount | Transport | Mean path termination depth across samples, per pixel | Debug Russian roulette/termination behaviour |
 | DirectDiffuse | Lighting | Diffuse-bucketed radiance from a path's first (bounce-0) surface, delighted (no base colour) | Isolates direct diffuse light arrival from the object's own texture |
 | IndirectDiffuse | Lighting | Diffuse-bucketed radiance from later bounces | Isolates indirect (bounced) diffuse contribution |
@@ -156,10 +156,10 @@ Ordered quick → complex; items within **Large** are a strict dependency chain 
 
 ### Large — strict dependency order
 
-1. **Global illumination** — area lights + shadow rays to them; caustics emergent once they exist. ReSTIR (Bitterli et al. 2020) follows once multiple area lights exist. Ray-traced AO replaces today's baked-texture AO AOV (§3).
+1. **Global illumination** — area lights + shadow rays to them. ReSTIR (Bitterli et al. 2020) follows once multiple area lights exist. Ray-traced AO replaces today's baked-texture AO AOV (§3). Caustics do not fall out of this: unidirectional path tracing structurally cannot sample specular-diffuse-specular paths regardless of light count — that needs (4).
 2. **Cornell box + per-material showcase** — blocked on (1): needs an emissive panel, only IBL exists today. Showcase: mirror/rough conductor, smooth/rough dielectric (both implemented), subsurface once (3) lands.
 3. **Volumetric & subsurface transport** — participating media + BSSRDF/random-walk subsurface. Blocked: the transmissive multiple-scattering lobe is non-reciprocal (`f(wo→wi) ≠ f(wi→wo)`, `bsdf.cpp`), needs reworking first (`tools/bsdf_validate.cpp`'s `checkTransmissionReciprocity`).
-4. **Bidirectional path tracing with MIS (caustics)** — light-subpath/eye-subpath vertex connection (Veach & Guibas 1995; Veach 1997); the efficient version of the caustics (1) only produces as slow-converging noise. Blocked on (1) + (3)'s reciprocity fix, since connection needs BSDF agreement in both directions.
+4. **Bidirectional path tracing with MIS (caustics)** — light-subpath/eye-subpath vertex connection (Veach & Guibas 1995; Veach 1997); the transport algorithm caustics need, since unidirectional path tracing (1) cannot produce them at all. Blocked on (1) + (3)'s reciprocity fix, since connection needs BSDF agreement in both directions.
 5. **Spectral upgrade** — per-wavelength transport, hero-wavelength sampling (Wilkie et al. 2014), spectral dispersion. Likely offline-only given sample-budget cost.
 6. **Denoising** — needs (1)-(5) transport correctness first; denoising an incorrect image just smooths the error.
 7. **GenAI diffusion channel** — img2img refinement AOV + raw latent/embedding output for HOST's cognitive pipeline. Needs (6)'s converged image.
