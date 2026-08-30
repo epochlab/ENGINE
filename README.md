@@ -136,7 +136,6 @@ Ordered quick → complex; items within **Large** are a strict dependency chain 
 - **JSON library** — replace the hand-rolled scanner (`json_scan.cpp`) with nlohmann/json; do first, every item below depends on it.
 - **scene.json as a CLI arg** — `main()` has no `argc`/`argv` (`main.cpp:864`); paths are hardcoded. Enables multi-scenario scenes.
 - **Texture bit depth (16/32) via JSON** — hardcoded `GL_RGBA16F` today (`texture.cpp:45`); 32F ~doubles VRAM/buffer.
-- **BounceCount AOV heatmap** — grayscale today (`path_tracer.cpp:286`); no colormap utility exists, write a small turbo/viridis/magma/spectral LUT.
 - **Fix DirectDiffuse/DirectSpecular regression** — `bdecb41` made them physical/lit instead of delighted (base colour divided out); Albedo is unaffected. Recover the delighted view without reverting that commit's single-lobe-eval perf win. Investigate first.
 - **Code-quality audit** — `rotateAboutY` (`environment_map.cpp:13`) → `glm::rotate`; `ShadingFrame::toLocal`/`toWorld` (`bsdf.h:26`) → `glm::mat3`. (BSDF math in `bsdf.cpp` — GGX/Smith/Fresnel/VNDF — is standard domain logic, not an offload candidate.)
 - **Chromatic aberration** — toggleable `PostProcessPass` filter over Beauty; no new render pass needed.
