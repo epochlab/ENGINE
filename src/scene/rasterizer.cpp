@@ -149,37 +149,91 @@ void pushSubTriangle(ScreenVertex v0, ScreenVertex v1, ScreenVertex v2, int tria
     out.push_back(RasterSubTriangle{v0, v1, v2, 1.0F / area, minX, maxX, minY, maxY, triangleIndex});
 }
 
-// Clips/projects/winding-normalizes every triangle once per call (sequential -- cheap projection math, no texture/material work), so the row-parallel scan-conversion pass below only reads this precomputed, immutable list.
+// Clips/projects/winding-normalizes every triangle once per call, in parallel over chunks of the triangle list -- cheap per-triangle math, but at a few million triangles doing it on one thread is a frame-rate ceiling by itself. Each chunk appends to its own vector, so the appends need no synchronization, and the chunks are concatenated in order afterwards: the result is the identical sequence a sequential build produces, which matters because the z-test below is first-writer-wins at exactly equal depth.
 std::vector<RasterSubTriangle> buildSubTriangles(const Camera& camera,
                                                   const std::vector<ShadingTriangle>& shadingTriangles,
-                                                  int width, int height) {
+                                                  int width, int height, RowThreadPool& threadPool) {
     const glm::vec3 camPos = camera.position();
     const Camera::ViewBasis basis = camera.viewBasis(static_cast<float>(width) / static_cast<float>(height));
-    std::vector<RasterSubTriangle> subTriangles;
-    subTriangles.reserve(shadingTriangles.size());
 
-    for (std::size_t i = 0; i < shadingTriangles.size(); ++i) {
-        const ShadingTriangle& tri = shadingTriangles[i];
-        const std::array<ClipVertex, 3> verts{
-            ClipVertex{tri.v0.position, 0.0F, 0.0F}, ClipVertex{tri.v1.position, 1.0F, 0.0F},
-            ClipVertex{tri.v2.position, 0.0F, 1.0F}};
-        std::array<ClipVertex, 4> clipped{};
-        const int clippedCount = clipNearPlane(verts, camPos, basis.forward, camera.nearClip(), clipped);
-        if (clippedCount < 3) {
-            continue;
+    const int triangleCount = static_cast<int>(shadingTriangles.size());
+    // Four chunks per worker, not one: parallelFor hands them out on demand, so the extra granularity absorbs the imbalance between a chunk that is entirely behind the camera and one that is entirely on screen.
+    const int chunkCount =
+        std::max(1, std::min(triangleCount, static_cast<int>(threadPool.threadCount()) * 4));
+    const int chunkSize = (triangleCount + chunkCount - 1) / chunkCount;
+    std::vector<std::vector<RasterSubTriangle>> chunks(static_cast<std::size_t>(chunkCount));
+
+    threadPool.parallelFor(chunkCount, [&](int chunk) {
+        const int begin = chunk * chunkSize;
+        const int end = std::min(begin + chunkSize, triangleCount);
+        std::vector<RasterSubTriangle>& out = chunks[static_cast<std::size_t>(chunk)];
+        out.reserve(static_cast<std::size_t>(std::max(0, end - begin)));
+        for (int i = begin; i < end; ++i) {
+            const ShadingTriangle& tri = shadingTriangles[static_cast<std::size_t>(i)];
+            const std::array<ClipVertex, 3> verts{
+                ClipVertex{tri.v0.position, 0.0F, 0.0F}, ClipVertex{tri.v1.position, 1.0F, 0.0F},
+                ClipVertex{tri.v2.position, 0.0F, 1.0F}};
+            std::array<ClipVertex, 4> clipped{};
+            const int clippedCount =
+                clipNearPlane(verts, camPos, basis.forward, camera.nearClip(), clipped);
+            if (clippedCount < 3) {
+                continue;
+            }
+            std::array<ScreenVertex, 4> screen{};
+            for (int k = 0; k < clippedCount; ++k) {
+                screen[static_cast<std::size_t>(k)] =
+                    projectToScreen(clipped[static_cast<std::size_t>(k)], camPos, basis, width, height);
+            }
+            pushSubTriangle(screen[0], screen[1], screen[2], i, width, height, out);
+            if (clippedCount == 4) {
+                pushSubTriangle(screen[0], screen[2], screen[3], i, width, height, out);
+            }
         }
-        std::array<ScreenVertex, 4> screen{};
-        for (int k = 0; k < clippedCount; ++k) {
-            screen[static_cast<std::size_t>(k)] =
-                projectToScreen(clipped[static_cast<std::size_t>(k)], camPos, basis, width, height);
-        }
-        const int triangleIndex = static_cast<int>(i);
-        pushSubTriangle(screen[0], screen[1], screen[2], triangleIndex, width, height, subTriangles);
-        if (clippedCount == 4) {
-            pushSubTriangle(screen[0], screen[2], screen[3], triangleIndex, width, height, subTriangles);
-        }
+    });
+
+    std::size_t total = 0;
+    for (const std::vector<RasterSubTriangle>& chunk : chunks) {
+        total += chunk.size();
+    }
+    std::vector<RasterSubTriangle> subTriangles;
+    subTriangles.reserve(total);
+    for (const std::vector<RasterSubTriangle>& chunk : chunks) {
+        subTriangles.insert(subTriangles.end(), chunk.begin(), chunk.end());
     }
     return subTriangles;
+}
+
+// Per-row lists of the sub-triangles whose bounding box covers that row, so renderRow visits only those instead of rejecting the whole array one triangle at a time. Flat CSR (count, prefix sum, fill) rather than a vector per row, which would be `height` heap allocations per frame.
+// The cost this removes is memory bandwidth, not comparisons: RasterSubTriangle is 84 bytes and the scan is linear, so every row streamed the entire array. That is invisible while the array fits in cache -- at the 20561-triangle scene it is 1.7 MB and the scan costs nothing measurable -- and dominant once it does not: at 5M triangles it is 420 MB, read 1152 times per frame.
+// Memory is O(sum of row spans), so a scene of few very large triangles can need more of it than the sub-triangle array itself. That is the opposite regime from the one this exists for, where triangles are small and each spans a handful of rows.
+struct RowBuckets {
+    std::vector<std::size_t> offsets;  // height+1 entries, offsets[y]..offsets[y+1] is row y's range in `indices`
+    std::vector<int> indices;          // indexes subTriangles; int since a clip splits at most one triangle into two, bounding this by 2x the scene's triangle count
+};
+
+RowBuckets buildRowBuckets(const std::vector<RasterSubTriangle>& subTriangles, int height) {
+    RowBuckets buckets;
+    buckets.offsets.assign(static_cast<std::size_t>(height) + 1, 0);
+    for (const RasterSubTriangle& st : subTriangles) {
+        for (int y = st.minY; y <= st.maxY; ++y) {
+            ++buckets.offsets[static_cast<std::size_t>(y) + 1];
+        }
+    }
+    for (int y = 0; y < height; ++y) {
+        buckets.offsets[static_cast<std::size_t>(y) + 1] +=
+            buckets.offsets[static_cast<std::size_t>(y)];
+    }
+    buckets.indices.resize(buckets.offsets[static_cast<std::size_t>(height)]);
+
+    // Per-row write cursor. Filing in increasing sub-triangle index leaves each row's list in the same relative order the old full-array scan visited them in, so the z-test's tie-break at exactly equal depth is unchanged.
+    std::vector<std::size_t> cursor(buckets.offsets.begin(), buckets.offsets.end() - 1);
+    for (std::size_t i = 0; i < subTriangles.size(); ++i) {
+        const RasterSubTriangle& st = subTriangles[i];
+        for (int y = st.minY; y <= st.maxY; ++y) {
+            buckets.indices[cursor[static_cast<std::size_t>(y)]++] = static_cast<int>(i);
+        }
+    }
+    return buckets;
 }
 
 // Builds the AABB's 12 edges (8-corner topology), near-clipped and projected once per call -- mirrors buildSubTriangles' role for a fixed 12 segments instead of the scene's triangle list.
@@ -281,7 +335,9 @@ void renderRasterGBuffer(const Camera& camera, const EmbreeAccel& accel,
     }
     ++result.generation;
 
-    const std::vector<RasterSubTriangle> subTriangles = buildSubTriangles(camera, shadingTriangles, width, height);
+    const std::vector<RasterSubTriangle> subTriangles =
+        buildSubTriangles(camera, shadingTriangles, width, height, threadPool);
+    const RowBuckets rowBuckets = buildRowBuckets(subTriangles, height);
     const AabbBounds sceneBounds = accel.sceneBounds();
     const std::vector<RasterLineSegment> boxEdges = buildBoxEdges(camera, sceneBounds, width, height);
     std::vector<float> zbuffer(static_cast<std::size_t>(width) * static_cast<std::size_t>(height));
@@ -300,10 +356,10 @@ void renderRasterGBuffer(const Camera& camera, const EmbreeAccel& accel,
             writeTexel(result.iorAov, x, y, glm::vec3(-1.0F));
         }
 
-        for (const RasterSubTriangle& st : subTriangles) {
-            if (y < st.minY || y > st.maxY) {
-                continue;
-            }
+        const std::size_t rowEnd = rowBuckets.offsets[static_cast<std::size_t>(y) + 1];
+        for (std::size_t k = rowBuckets.offsets[static_cast<std::size_t>(y)]; k < rowEnd; ++k) {
+            const RasterSubTriangle& st =
+                subTriangles[static_cast<std::size_t>(rowBuckets.indices[k])];
             for (int x = st.minX; x <= st.maxX; ++x) {
                 const float px = static_cast<float>(x) + 0.5F;
                 const float py = static_cast<float>(y) + 0.5F;
