@@ -22,10 +22,6 @@ Dear ImGui is vendored as a git submodule (`third_party/imgui`) — initialise i
 git submodule update --init --recursive
 ```
 
-### Assets
-
-`assets/geometry/` and `assets/textures/` hold the runtime glTF/EXR assets `assets/config/scene.json` and `main.cpp` reference (e.g. `assets/geometry/broken_stump_rkswd_raw/rkswd_tier_1.gltf`, `assets/textures/republiqueHDR_2k.exr`). They're gitignored as large/generated binaries, same policy as generated `*.exr` test output — supply them locally at those paths before running; nothing fetches them automatically.
-
 ### Configure & build
 
 ```
@@ -159,7 +155,7 @@ Ordered quick → complex; items within **Large** are a strict dependency chain 
 ### Large — strict dependency order
 
 1. **Global illumination** — area lights + shadow rays to them. ReSTIR (Bitterli et al. 2020) follows once multiple area lights exist. Ray-traced AO replaces today's baked-texture AO AOV (§3). Caustics do not fall out of this: unidirectional path tracing structurally cannot sample specular-diffuse-specular paths regardless of light count — that needs (4).
-2. **Cornell box + per-material showcase** — blocked on (1): needs an emissive panel, only IBL exists today. Showcase: mirror/rough conductor, smooth/rough dielectric (both implemented), subsurface once (3) lands. + **Macbeth chart scene** — no area-light dependency, validates albedo/colour under existing IBL (needs CLI-arg item above).
+2. **Cornell box + per-material showcase** — blocked on (1): needs an emissive panel, only IBL exists today. Showcase: mirror/rough conductor, smooth/rough dielectric (both implemented), subsurface once (3) lands. + **Macbeth chart** — no area-light dependency, validates albedo/colour under existing IBL (needs CLI-arg item above).
 3. **Volumetric & subsurface transport** — participating media + BSSRDF/random-walk subsurface. Blocked: the transmissive multiple-scattering lobe is non-reciprocal (`f(wo→wi) ≠ f(wi→wo)`, `bsdf.cpp`), needs reworking first (`tools/bsdf_validate.cpp`'s `checkTransmissionReciprocity`).
 4. **Bidirectional path tracing with MIS (caustics)** — light-subpath/eye-subpath vertex connection (Veach & Guibas 1995; Veach 1997); the transport algorithm caustics need, since unidirectional path tracing (1) cannot produce them at all. Blocked on (1) + (3)'s reciprocity fix, since connection needs BSDF agreement in both directions.
 5. **Spectral upgrade** — per-wavelength transport, hero-wavelength sampling (Wilkie et al. 2014), spectral dispersion. Likely offline-only given sample-budget cost.
