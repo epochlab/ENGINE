@@ -4,6 +4,7 @@ in vec2 vUv;
 
 uniform sampler2D uHdrColor;  // the path tracer's Beauty image
 uniform int uChannelView;  // 0=off(HSV) 1=Hue 2=Saturation 3=Value -- applied to the HSV output, not uHdrColor's RGB (isolating a source RGB channel first would broadcast it to grey, which always converts to H=0/S=0 -- destroying the very thing this AOV exists to show).
+uniform float uExposure;  // pow(2, relativeExposureEv()) -- same multiplier Beauty itself displays at (OcioDisplayTransform::bind), applied before HSV so exposure has visible effect on this AOV too instead of Beauty responding alone
 
 out vec4 fragColor;
 
@@ -17,7 +18,7 @@ vec3 rgb2hsv(vec3 c) {
 }
 
 void main() {
-    vec3 beauty = texture(uHdrColor, vUv).rgb;
+    vec3 beauty = texture(uHdrColor, vUv).rgb * uExposure;
     vec3 hsv = rgb2hsv(beauty);
     vec3 outColor = vec3(hsv.x, hsv.y, clamp(hsv.z, 0.0, 1.0));
     if (uChannelView == 1) {

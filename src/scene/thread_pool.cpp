@@ -1,15 +1,15 @@
-#include "engine/scene/row_thread_pool.h"
+#include "engine/scene/thread_pool.h"
 
 namespace engine::scene {
 
-RowThreadPool::RowThreadPool(unsigned int threadCount) {
+ThreadPool::ThreadPool(unsigned int threadCount) {
     workers_.reserve(threadCount);
     for (unsigned int i = 0; i < threadCount; ++i) {
         workers_.emplace_back([this] { workerLoop(); });
     }
 }
 
-RowThreadPool::~RowThreadPool() {
+ThreadPool::~ThreadPool() {
     {
         const std::lock_guard<std::mutex> lock(mutex_);
         shuttingDown_ = true;
@@ -21,14 +21,14 @@ RowThreadPool::~RowThreadPool() {
     }
 }
 
-void RowThreadPool::parallelForRows(int rowCount, const std::function<void(int)>& rowFn) {
-    if (rowCount <= 0) {
+void ThreadPool::parallelFor(int count, const std::function<void(int)>& fn) {
+    if (count <= 0) {
         return;
     }
     std::unique_lock<std::mutex> lock(mutex_);
-    rowFn_ = &rowFn;
-    rowCount_ = rowCount;
-    nextRow_.store(0, std::memory_order_relaxed);
+    fn_ = &fn;
+    count_ = count;
+    nextIndex_.store(0, std::memory_order_relaxed);
     workersRemaining_ = static_cast<unsigned int>(workers_.size());
     ++epoch_;
     lock.unlock();
@@ -36,10 +36,10 @@ void RowThreadPool::parallelForRows(int rowCount, const std::function<void(int)>
 
     lock.lock();
     doneCv_.wait(lock, [this] { return workersRemaining_ == 0; });
-    rowFn_ = nullptr;
+    fn_ = nullptr;
 }
 
-void RowThreadPool::workerLoop() {
+void ThreadPool::workerLoop() {
     std::uint64_t lastEpoch = 0;
     while (true) {
         std::unique_lock<std::mutex> lock(mutex_);
@@ -48,13 +48,13 @@ void RowThreadPool::workerLoop() {
         if (shuttingDown_) {
             return;
         }
-        const std::function<void(int)>* rowFn = rowFn_;
-        const int rowCount = rowCount_;
+        const std::function<void(int)>* fn = fn_;
+        const int count = count_;
         lock.unlock();
 
-        int y = 0;
-        while ((y = nextRow_.fetch_add(1, std::memory_order_relaxed)) < rowCount) {
-            (*rowFn)(y);
+        int index = 0;
+        while ((index = nextIndex_.fetch_add(1, std::memory_order_relaxed)) < count) {
+            (*fn)(index);
         }
 
         lock.lock();

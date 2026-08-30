@@ -49,18 +49,21 @@ Camera::ViewBasis Camera::viewBasis(float aspect) const {
 }
 
 Ray Camera::primaryRay(float ndcX, float ndcY, float aspect) const {
-    const ViewBasis basis = viewBasis(aspect);
+    return primaryRay(viewBasis(aspect), ndcX, ndcY);
+}
+
+Ray Camera::primaryRay(const ViewBasis& basis, float ndcX, float ndcY) const {
     const glm::vec3 dir = glm::normalize(basis.forward + (ndcX * basis.halfWidth * basis.right) +
                                           (ndcY * basis.halfHeight * basis.up));
     return Ray{position_, dir, nearClip_, farClip_};
 }
 
 float Camera::ev100() const {
-    return std::log2((aperture_ * aperture_) / shutterSeconds_ * (100.0F / iso_));
+    return ev100(aperture_, shutterSeconds_, iso_);
 }
 
-float Camera::exposure() const {
-    return 1.0F / (std::pow(2.0F, ev100()) * 1.2F);
+float Camera::ev100(float aperture, float shutterSeconds, float iso) {
+    return std::log2((aperture * aperture) / shutterSeconds * (100.0F / iso));
 }
 
 }  // namespace engine::scene
