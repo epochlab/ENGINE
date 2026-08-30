@@ -32,7 +32,7 @@ struct RasterGBuffer {
     engine::gfx::HdrImage wireframe;
 };
 
-// Row-parallel (RowThreadPool, renderPathTraced's own dispatch model -- each worker owns disjoint rows, so no synchronization is needed on the shared z-buffer/output images) edge-function rasterization (Pineda 1988) with a single near-plane Sutherland-Hodgman clip per triangle. Runs synchronously on the render thread every frame, so these AOVs are correct from frame 1; Beauty and the light-transport AOVs are untouched, still converging asynchronously through PathTraceDriver. threadPool: owned by the caller and reused across calls, same convention as renderPathTraced's own parameter.
+// Row-parallel (RowThreadPool, dispatched over rows -- each worker owns disjoint rows, so no synchronization is needed on the shared z-buffer/output images) edge-function rasterization (Pineda 1988) with a single near-plane Sutherland-Hodgman clip per triangle. Runs synchronously on the render thread every frame, so these AOVs are correct from frame 1; Beauty and the light-transport AOVs are untouched, still converging asynchronously through PathTraceDriver. threadPool: owned by the caller and reused across calls, same convention as renderPathTraced's own parameter.
 [[nodiscard]] RasterGBuffer renderRasterGBuffer(const Camera& camera, const EmbreeAccel& accel,
                                                  const std::vector<ShadingTriangle>& shadingTriangles,
                                                  const std::vector<MeshInstance>& instances,

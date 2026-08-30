@@ -11,7 +11,7 @@
 
 namespace engine::scene {
 
-// Persistent worker-thread pool for parallel row-based rendering. Spawning and joining hardware_concurrency() std::threads on every renderPathTraced call would repeat the OS thread-creation/join cost on every progressive pass under PathTraceDriver; this pool spawns its threads once at construction and parks them (condition_variable wait, no busy-spin) between dispatches instead.
+// Persistent worker-thread pool for parallel rendering. Spawning and joining hardware_concurrency() std::threads on every renderPathTraced call would repeat the OS thread-creation/join cost on every progressive pass under PathTraceDriver; this pool spawns its threads once at construction and parks them (condition_variable wait, no busy-spin) between dispatches instead.
 class RowThreadPool {
 public:
     explicit RowThreadPool(unsigned int threadCount = std::max(1U, std::thread::hardware_concurrency()));
@@ -22,8 +22,8 @@ public:
     RowThreadPool(RowThreadPool&&) = delete;
     RowThreadPool& operator=(RowThreadPool&&) = delete;
 
-    // Blocks the calling thread until rowFn(y) has run (on some worker) for every y in [0, rowCount) -- which worker handles which row, and the order, are unspecified; only that all complete before this returns. rowFn must be safe to call concurrently for different y. Not reentrant: only one parallelForRows call may be in flight at a time (true of every current caller -- PathTraceDriver runs one pass at a time on its single driver thread).
-    void parallelForRows(int rowCount, const std::function<void(int)>& rowFn);
+    // Blocks the calling thread until fn(i) has run (on some worker) for every i in [0, count) -- which worker handles which index, and the order, are unspecified; only that all complete before this returns. fn must be safe to call concurrently for different i. Index, not row: the rasterizer dispatches over rows and the path tracer over tiles (path_tracer.cpp), and the pool is indifferent to what the index means. Not reentrant: only one parallelFor call may be in flight at a time (true of every current caller -- PathTraceDriver runs one pass at a time on its single driver thread).
+    void parallelFor(int count, const std::function<void(int)>& fn);
 
 private:
     void workerLoop();
@@ -33,13 +33,13 @@ private:
     std::condition_variable dispatchCv_;
     std::condition_variable doneCv_;
 
-    // Bumped by parallelForRows to hand off a new dispatch; each worker remembers the last epoch it acted on so predicate-based waiting can't miss a notification (the epoch, not the notify signal itself, is the source of truth -- immune to the lost-wakeup races a bare notify would risk).
+    // Bumped by parallelFor to hand off a new dispatch; each worker remembers the last epoch it acted on so predicate-based waiting can't miss a notification (the epoch, not the notify signal itself, is the source of truth -- immune to the lost-wakeup races a bare notify would risk).
     std::uint64_t epoch_ = 0;
     bool shuttingDown_ = false;
 
-    const std::function<void(int)>* rowFn_ = nullptr;
-    std::atomic<int> nextRow_{0};
-    int rowCount_ = 0;
+    const std::function<void(int)>* fn_ = nullptr;
+    std::atomic<int> nextIndex_{0};
+    int count_ = 0;
     unsigned int workersRemaining_ = 0;
 };
 

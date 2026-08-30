@@ -348,7 +348,7 @@ RasterGBuffer renderRasterGBuffer(const Camera& camera, const EmbreeAccel& accel
         }
     };
 
-    threadPool.parallelForRows(height, renderRow);
+    threadPool.parallelFor(height, renderRow);
     return result;
 }
 
