@@ -166,13 +166,13 @@ struct AppResources {
     std::optional<engine::gfx::Texture> pathTraceDisplayTexture;
     int pathTraceDisplayedAov;  // which AovId pathTraceDisplayTexture currently holds, -1 = none yet
     int pathTraceDisplayedChannelView;  // which channelView pathTraceDisplayTexture was isolated for, -1 = none yet
-    // Strong ref (kept alive, not just an identity pointer) to whichever PathTraceSnapshot object (gbuffer/dynamic) pathTraceDisplayTexture currently reflects -- see ensurePathTraceDisplayTexture.
+    // Strong ref (kept alive, not just an identity pointer) to whichever published object -- PathTraceResult or RasterGBuffer -- pathTraceDisplayTexture currently reflects; see ensurePathTraceDisplayTexture.
     std::shared_ptr<const void> pathTraceDisplayedOwner;
     // Max raw Depth value seen in the last rebuilt pathTraceDisplayTexture -- see ensurePathTraceDisplayTexture; only meaningful/updated when aov==Depth.
     float pathTraceDisplayedDepthMax;
     PathTraceTriggerState lastPathTraceTrigger;  // sentinel-initialized, see its own doc comment
 
-    // Synchronous per-frame CPU rasterizer for the 15 primary-hit-only G-buffer AOVs (rasterizer.h) -- instant alternative to PathTraceGBuffer's Embree-traced primary hit, decoupled from PathTraceDriver's async convergence loop. unique_ptr for the same reason as pathTraceDriver: RowThreadPool's copy/move are deleted (owns worker threads), so a by-value member would break AppResources's movability.
+    // Synchronous per-frame CPU rasterizer for the 15 primary-hit-only G-buffer AOVs (rasterizer.h) -- their only producer, decoupled from PathTraceDriver's async convergence loop. unique_ptr for the same reason as pathTraceDriver: RowThreadPool's copy/move are deleted (owns worker threads), so a by-value member would break AppResources's movability.
     std::unique_ptr<engine::scene::RowThreadPool> rasterThreadPool;
     // Refreshed synchronously in requestPathTraceIfTriggerChanged on every camera/scene change -- nullptr only before the first refresh.
     std::shared_ptr<const engine::scene::RasterGBuffer> rasterGBuffer;
@@ -496,28 +496,27 @@ std::vector<float> flipRowsForDisplay(const engine::gfx::HdrImage& image, int ch
     return flipped;
 }
 
-// Bundles the HdrImage a given AOV should display with a type-erased strong ref to whichever of PathTraceSnapshot's two objects (gbuffer/dynamic) actually owns it. That ref both keeps the owning object alive and gives ensurePathTraceDisplayTexture an ABA-safe cache-key identity: a raw pointer to it could, in principle, be freed and have a later unrelated shared_ptr allocation reuse the same address; holding a real shared_ptr can't.
+// Bundles the HdrImage a given AOV should display with a type-erased strong ref to whichever published object -- the driver's PathTraceResult or the synchronous RasterGBuffer -- actually owns it. That ref both keeps the owning object alive and gives ensurePathTraceDisplayTexture an ABA-safe cache-key identity: a raw pointer to it could, in principle, be freed and have a later unrelated shared_ptr allocation reuse the same address; holding a real shared_ptr can't.
 struct PathTracedAovSource {
     const engine::gfx::HdrImage* image = nullptr;
     std::shared_ptr<const void> owner;
 };
 
-// Returns a default (null image) if the specific source an AOV needs hasn't published yet -- callers show black instead. The 15 primary-hit-only AOVs read rasterGBuffer (refreshed synchronously every trigger change, requestPathTraceIfTriggerChanged -- ready from frame 1, independent of PathTraceDriver); Beauty and the light-transport AOVs still read the async snapshot's dynamic half. Extended as RasterGBuffer/PathTraceDynamic grow more buffers.
+// Returns a default (null image) if the specific source an AOV needs hasn't published yet -- callers show black instead. The 15 primary-hit-only AOVs read rasterGBuffer (refreshed synchronously every trigger change, requestPathTraceIfTriggerChanged -- ready from frame 1, independent of PathTraceDriver); Beauty and the light-transport AOVs read the driver's asynchronously published PathTraceResult. Extended as RasterGBuffer/PathTraceResult grow more buffers.
 PathTracedAovSource selectPathTracedImage(
-    const engine::scene::PathTraceSnapshot& snapshot,
+    const std::shared_ptr<const engine::scene::PathTraceResult>& snapshot,
     const std::shared_ptr<const engine::scene::RasterGBuffer>& rasterGBuffer,
     engine::debug::AovId aov) {
     switch (aov) {
         case engine::debug::AovId::Beauty:
-            return snapshot.dynamic ? PathTracedAovSource{&snapshot.dynamic->beauty, snapshot.dynamic}
-                                     : PathTracedAovSource{};
+            return snapshot ? PathTracedAovSource{&snapshot->beauty, snapshot}
+                            : PathTracedAovSource{};
         case engine::debug::AovId::IOR:
             return rasterGBuffer ? PathTracedAovSource{&rasterGBuffer->iorAov, rasterGBuffer}
                                   : PathTracedAovSource{};
         case engine::debug::AovId::BounceCount:
-            return snapshot.dynamic
-                       ? PathTracedAovSource{&snapshot.dynamic->bounceHeatmap, snapshot.dynamic}
-                       : PathTracedAovSource{};
+            return snapshot ? PathTracedAovSource{&snapshot->bounceHeatmap, snapshot}
+                            : PathTracedAovSource{};
         case engine::debug::AovId::Depth:
             return rasterGBuffer ? PathTracedAovSource{&rasterGBuffer->depth, rasterGBuffer}
                                   : PathTracedAovSource{};
@@ -558,30 +557,26 @@ PathTracedAovSource selectPathTracedImage(
             return rasterGBuffer ? PathTracedAovSource{&rasterGBuffer->ao, rasterGBuffer}
                                   : PathTracedAovSource{};
         case engine::debug::AovId::Shadow:
-            return snapshot.dynamic ? PathTracedAovSource{&snapshot.dynamic->shadow, snapshot.dynamic}
-                                     : PathTracedAovSource{};
+            return snapshot ? PathTracedAovSource{&snapshot->shadow, snapshot}
+                            : PathTracedAovSource{};
         case engine::debug::AovId::Wireframe:
             return rasterGBuffer ? PathTracedAovSource{&rasterGBuffer->wireframe, rasterGBuffer}
                                   : PathTracedAovSource{};
         case engine::debug::AovId::DirectDiffuse:
-            return snapshot.dynamic
-                       ? PathTracedAovSource{&snapshot.dynamic->directDiffuse, snapshot.dynamic}
-                       : PathTracedAovSource{};
+            return snapshot ? PathTracedAovSource{&snapshot->directDiffuse, snapshot}
+                            : PathTracedAovSource{};
         case engine::debug::AovId::IndirectDiffuse:
-            return snapshot.dynamic
-                       ? PathTracedAovSource{&snapshot.dynamic->indirectDiffuse, snapshot.dynamic}
-                       : PathTracedAovSource{};
+            return snapshot ? PathTracedAovSource{&snapshot->indirectDiffuse, snapshot}
+                            : PathTracedAovSource{};
         case engine::debug::AovId::DirectSpecular:
-            return snapshot.dynamic
-                       ? PathTracedAovSource{&snapshot.dynamic->directSpecular, snapshot.dynamic}
-                       : PathTracedAovSource{};
+            return snapshot ? PathTracedAovSource{&snapshot->directSpecular, snapshot}
+                            : PathTracedAovSource{};
         case engine::debug::AovId::IndirectSpecular:
-            return snapshot.dynamic
-                       ? PathTracedAovSource{&snapshot.dynamic->indirectSpecular, snapshot.dynamic}
-                       : PathTracedAovSource{};
+            return snapshot ? PathTracedAovSource{&snapshot->indirectSpecular, snapshot}
+                            : PathTracedAovSource{};
         case engine::debug::AovId::Refraction:
-            return snapshot.dynamic ? PathTracedAovSource{&snapshot.dynamic->refraction, snapshot.dynamic}
-                                     : PathTracedAovSource{};
+            return snapshot ? PathTracedAovSource{&snapshot->refraction, snapshot}
+                            : PathTracedAovSource{};
         default:
             return {};
     }
@@ -599,7 +594,8 @@ PathTracedAovSource selectPathTracedImage(
 // resolution (robust to a resize race, same precedent as resolveOrbitPick) and needs no flip --
 // HdrImage row 0 is documented top, already matching cursor space's top-left origin.
 engine::debug::PixelProbeSample samplePixelProbe(
-    const engine::platform::Window& window, const engine::scene::PathTraceSnapshot& pathTraceSnapshot,
+    const engine::platform::Window& window,
+    const std::shared_ptr<const engine::scene::PathTraceResult>& pathTraceSnapshot,
     const std::shared_ptr<const engine::scene::RasterGBuffer>& rasterGBuffer,
     engine::debug::AovId aovId) {
     const auto [windowWidth, windowHeight] = window.windowSize();
@@ -640,7 +636,7 @@ engine::debug::PixelProbeSample samplePixelProbe(
     return {true, glm::vec4(pixel[0], pixel[1], pixel[2], pixel[3]) / 255.0F};
 }
 
-// Rebuilds pathTraceDisplayTexture only when the selected AOV, the channel-view isolation, or the driver's published result object actually changed -- recreating a GL texture (alloc + upload + mipmap) every frame just to redisplay the same image would violate this codebase's no-allocation-after-init convention for no reason. The driver publishes a fresh result object every completed pass, though, so while it's actively converging this does rebuild the texture up to once per rendered frame -- that per-frame cap (not a lower one) is deliberate: it is what makes newly-accumulated samples visible at all. channelViewToBake: normally app.channelView, isolating an R/G/B channel of `image` itself before upload -- except the HSV AOV, which passes 0 (no isolation here) and applies channel view to its own H/S/V output instead (see hsv_display.frag's uChannelView): isolating a source RGB channel first would broadcast it to grey, and grey always converts to H=0/S=0, destroying the very thing that AOV exists to show. owner: a strong ref to whichever PathTraceSnapshot object actually owns `image` (see PathTracedAovSource) -- comparing shared_ptr identity, not a raw pointer, since a raw pointer to a previous frame's already-freed result could in principle have its address reused by a later allocation (ABA); holding a real shared_ptr in app.pathTraceDisplayedOwner rules that out. For Depth specifically, also rescans `image` for its own max value into app.pathTraceDisplayedDepthMax on every rebuild -- presentFrame uses that as an auto-ranging display-exposure bound instead of Camera::farClip(), since farClip is a conservative ray tMax bound, not a proxy for the actual visible scene's depth extent.
+// Rebuilds pathTraceDisplayTexture only when the selected AOV, the channel-view isolation, or the driver's published result object actually changed -- recreating a GL texture (alloc + upload + mipmap) every frame just to redisplay the same image would violate this codebase's no-allocation-after-init convention for no reason. The driver publishes a fresh result object every completed pass, though, so while it's actively converging this does rebuild the texture up to once per rendered frame -- that per-frame cap (not a lower one) is deliberate: it is what makes newly-accumulated samples visible at all. channelViewToBake: normally app.channelView, isolating an R/G/B channel of `image` itself before upload -- except the HSV AOV, which passes 0 (no isolation here) and applies channel view to its own H/S/V output instead (see hsv_display.frag's uChannelView): isolating a source RGB channel first would broadcast it to grey, and grey always converts to H=0/S=0, destroying the very thing that AOV exists to show. owner: a strong ref to whichever published object actually owns `image` (see PathTracedAovSource) -- comparing shared_ptr identity, not a raw pointer, since a raw pointer to a previous frame's already-freed result could in principle have its address reused by a later allocation (ABA); holding a real shared_ptr in app.pathTraceDisplayedOwner rules that out. For Depth specifically, also rescans `image` for its own max value into app.pathTraceDisplayedDepthMax on every rebuild -- presentFrame uses that as an auto-ranging display-exposure bound instead of Camera::farClip(), since farClip is a conservative ray tMax bound, not a proxy for the actual visible scene's depth extent.
 void ensurePathTraceDisplayTexture(AppResources& app, const std::shared_ptr<const void>& owner,
                                     const engine::gfx::HdrImage& image, int channelViewToBake) {
     if (app.pathTraceDisplayTexture.has_value() && app.pathTraceDisplayedAov == app.aov &&
@@ -672,7 +668,8 @@ void clearToBlack(int winWidth, int winHeight) {
 }
 
 // Blits the path-traced buffer for the selected AOV through the shared OCIO/post-process path -- Beauty uses the user's LUT, everything else forces Raw (not scene-referred radiance, a display curve would distort them). Depth/BounceCount additionally get an exposure-based normalization since their raw range exceeds the default framebuffer's fixed-point [0,1] clamp -- see the exposureEv branch below.
-void presentFrame(AppResources& app, const engine::scene::PathTraceSnapshot& pathTraceSnapshot,
+void presentFrame(AppResources& app,
+                   const std::shared_ptr<const engine::scene::PathTraceResult>& pathTraceSnapshot,
                    int winWidth, int winHeight) {
     const auto aovId = static_cast<engine::debug::AovId>(app.aov);
 
@@ -681,12 +678,12 @@ void presentFrame(AppResources& app, const engine::scene::PathTraceSnapshot& pat
         aovId == engine::debug::AovId::Sobel || aovId == engine::debug::AovId::Gabor;
     if (isPostFilterAov) {
         // These are 2D image filters of the beauty image, not independent per-AOV buffers -- always read path-traced Beauty regardless of which of the four is selected. Needs a completed path-trace pass (unlike the rasterizer-backed AOVs below) since Beauty itself is light-transport output.
-        if (!pathTraceSnapshot.dynamic) {
+        if (!pathTraceSnapshot) {
             clearToBlack(winWidth, winHeight);
             return;
         }
         const bool isHsv = aovId == engine::debug::AovId::HSV;
-        ensurePathTraceDisplayTexture(app, pathTraceSnapshot.dynamic, pathTraceSnapshot.dynamic->beauty,
+        ensurePathTraceDisplayTexture(app, pathTraceSnapshot, pathTraceSnapshot->beauty,
                                        isHsv ? 0 : app.channelView);
         app.ocioTransform.setActiveLut(engine::gfx::OcioDisplayTransform::Lut::Raw);
         if (isHsv) {
@@ -772,7 +769,8 @@ void requestPathTraceIfTriggerChanged(AppResources& app, const engine::scene::Ca
 
 void updateHud(AppResources& app, const engine::platform::Window& window,
                const engine::scene::Camera& camera,
-               const engine::scene::PathTraceSnapshot& pathTraceSnapshot, int winWidth,
+               const std::shared_ptr<const engine::scene::PathTraceResult>& pathTraceSnapshot,
+               int winWidth,
                int winHeight) {
     const int accumulatedSamples =
         app.pathTraceDriver != nullptr ? app.pathTraceDriver->accumulatedSamples() : 0;
@@ -836,10 +834,9 @@ void renderFrame(engine::platform::Window& window, AppResources& app) {
 
     requestPathTraceIfTriggerChanged(app, camera, winWidth, winHeight);
 
-    // Held for the rest of this frame so the objects behind it stay valid even if the driver publishes a newer result mid-frame -- shared_ptrs, not a raw fetch. gbuffer/dynamic are two separately-published objects (see PathTraceSnapshot's doc comment); either being null means no pass has completed yet.
-    const engine::scene::PathTraceSnapshot pathTraceSnapshot =
-        app.pathTraceDriver != nullptr ? app.pathTraceDriver->latestResult()
-                                        : engine::scene::PathTraceSnapshot{};
+    // Held for the rest of this frame so the images behind it stay valid even if the driver publishes a newer result mid-frame -- a strong ref, not a raw fetch. Null until the first pass of the app's life completes.
+    const std::shared_ptr<const engine::scene::PathTraceResult> pathTraceSnapshot =
+        app.pathTraceDriver != nullptr ? app.pathTraceDriver->latestResult() : nullptr;
 
     resolveOrbitPick(window, app, camera);
 
