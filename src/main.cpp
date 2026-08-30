@@ -22,6 +22,7 @@
 #include "engine/config/profile_config.h"
 #include "engine/config/scene_config.h"
 #include "engine/debug/aov.h"
+#include "engine/debug/colormap.h"
 #include "engine/debug/frame_stats.h"
 #include "engine/debug/gpu_timer.h"
 #include "engine/debug/histogram.h"
@@ -176,15 +177,22 @@ struct AppResources {
     int uEdgeExposureLoc;
     int uHsvChannelViewLoc;
     int uHsvExposureLoc;
+    int uEdgeInvertLoc;
+    int uHsvInvertLoc;
 
     // HUD-editable UI/run state.
     int aov;
+    int previousAov;  // AovId to restore on a second 'Y' press; -1 means 'Y' hasn't been pressed since the last restore
     int channelView;
     engine::gfx::OcioDisplayTransform::Lut userLut;
     engine::debug::FramingOverlayState framingState;
     bool showSky;
     int envRotationDegrees;
     float envExposureStops;  // stops, not a multiplier; requestPathTrace does exp2()
+    bool invert;   // 1.0 - colour, applied to the final display-referred image -- the 'I' debug toggle
+    bool showHud;  // 'H' toggle; gates HudOverlay::draw only -- beginFrame/render stay unconditional so ImGui's frame pairing is never broken
+    // Chromatic aberration strength (0 = off), radial UV offset passed to OcioDisplayTransform::setAberration -- HUD slider only.
+    float aberrationStrength;
 
     // Async path-traced view, selected via the `aov` field (engine::debug::AovId, the HUD's AOV dropdown). pathTraceDriver runs continuously on its own background thread once constructed (main() constructs it after initializeApp() returns -- see path_trace_driver.h's constructor precondition on reference stability); requestTrace() is called only from renderFrame's requestPathTraceIfTriggerChanged, whenever lastPathTraceTrigger detects the camera/scene state renderPathTraced depends on has changed -- no manual trigger. unique_ptr, not a by-value optional: PathTraceDriver holds reference members and an owned std::jthread/std::mutex, so it's neither copyable nor movable -- a by-value optional<T> member would make that non-movability propagate to AppResources itself (optional<T>'s move ctor is only available when T's is), which would break initializeApp's return-by-value/RVO pattern every other member here relies on. A unique_ptr's own move just transfers ownership of the pointee's address, never touching PathTraceDriver's reference members, so AppResources stays movable and PathTraceDriver itself is never relocated in memory once constructed.
     engine::scene::PathTraceSettings pathTraceSettings;
@@ -251,6 +259,7 @@ struct EdgeFilterUniforms {
     int filterMode;
     int channelView;
     int exposure;
+    int invert;
 };
 
 // Sobel/Gabor's second pass (see edge_filter.frag): uHdrColor's texture unit and the Gabor kernel weights are both fixed for the whole run, set once here.
@@ -261,13 +270,15 @@ EdgeFilterUniforms setupEdgeFilterShader(const engine::gfx::ShaderProgram& edgeF
     GL_CALL(glUniform1fv(edgeFilterShader.uniformLocation("uGaborKernel"), 100, gaborKernel.data()));
     return EdgeFilterUniforms{edgeFilterShader.uniformLocation("uFilterMode"),
                                edgeFilterShader.uniformLocation("uChannelView"),
-                               edgeFilterShader.uniformLocation("uExposure")};
+                               edgeFilterShader.uniformLocation("uExposure"),
+                               edgeFilterShader.uniformLocation("uInvert")};
 }
 
 // The runtime-changing hsv-display uniforms, cached once rather than re-queried per frame.
 struct HsvDisplayUniforms {
     int channelView;
     int exposure;
+    int invert;
 };
 
 // hsv_display.frag's uHdrColor texture unit is fixed for the whole run, same convention as setupEdgeFilterShader above.
@@ -275,7 +286,8 @@ HsvDisplayUniforms setupHsvDisplayShader(const engine::gfx::ShaderProgram& hsvDi
     hsvDisplayShader.use();
     GL_CALL(glUniform1i(hsvDisplayShader.uniformLocation("uHdrColor"), 0));
     return HsvDisplayUniforms{hsvDisplayShader.uniformLocation("uChannelView"),
-                               hsvDisplayShader.uniformLocation("uExposure")};
+                               hsvDisplayShader.uniformLocation("uExposure"),
+                               hsvDisplayShader.uniformLocation("uInvert")};
 }
 
 // All one-time startup work: camera/model/shader/environment loading (nullopt on any failure -- matches the shader/model/OCIO all-or-nothing gate this replaces), Embree scene build, and cached uniform-location lookups for the shared edge-filter/HSV shaders. Doesn't wire input callbacks -- those capture a stable AppResources& and must be set up by the caller only after this returns (see main()), since a callback capturing a reference into an AppResources that's still about to be moved into its final std::optional storage would dangle.
@@ -386,8 +398,11 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         .uEdgeExposureLoc = edgeFilterUniforms.exposure,
         .uHsvChannelViewLoc = hsvUniforms.channelView,
         .uHsvExposureLoc = hsvUniforms.exposure,
+        .uEdgeInvertLoc = edgeFilterUniforms.invert,
+        .uHsvInvertLoc = hsvUniforms.invert,
         // aov selects which AOV the path tracer's snapshot supplies (see selectPathTracedImage); channelView isolates one R/G/B channel of whatever aov currently shows. userLut is the LUT 'L' cycles through -- kept separate from OcioDisplayTransform's active LUT because non-Beauty AOVs force Raw (see the LUT-select comment in presentFrame) and must not clobber the user's actual choice. Both aov and userLut start from profile.json rather than a fixed literal.
         .aov = profileConfig.defaultAov,
+        .previousAov = -1,
         .channelView = 0,
         .userLut = profileConfig.defaultLut,
         .framingState = engine::debug::FramingOverlayState{},
@@ -397,6 +412,9 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         .envRotationDegrees = 0,
         // HDRI Exposure slider, stops. requestPathTrace does exp2() -> path_tracer.cpp miss-ray sampleDirection.
         .envExposureStops = 0.0F,
+        .invert = false,
+        .showHud = true,
+        .aberrationStrength = 0.0F,
         .pathTraceSettings =
             engine::scene::PathTraceSettings{
                 .samplesPerPixel = profileConfig.samplesPerPixel,
@@ -438,9 +456,9 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
     };
 }
 
-// Debug-only: 'L' cycles the viewer LUT (sRGB -> Rec709 -> Raw -> sRGB -> ...), Raw being a genuine no-display-encode passthrough for direct encoded-vs-unencoded comparison. 'R'/'G'/'B' toggle isolating a channel of the active AOV (pressing the active one again turns it back off) -- reset moved to '0' to free these back up. 'K' toggles the centre-crosshair framing overlay. No general input-mapping system for these few keys is needed: WASD/QE need continuous per-frame state (Window::isKeyDown) rather than this edge-triggered callback, so this single slot still covers everything that's actually event-shaped. Wired up here, not inside initializeApp: every callback captures a reference into app, which must already be at its final, stable address (main()'s local, unwrapped from the optional initializeApp returned) -- capturing a reference during initializeApp would dangle the moment that AppResources is moved into its optional's storage.
+// Debug-only: 'L' cycles the viewer LUT (sRGB -> Rec709 -> Raw -> sRGB -> ...), Raw being a genuine no-display-encode passthrough for direct encoded-vs-unencoded comparison. 'R'/'G'/'B' toggle isolating a channel of the active AOV (pressing the active one again turns it back off) -- reset moved to '0' to free these back up. 'Y' toggles to the Luminance AOV and back to whatever was selected before. 'I' inverts the final display-referred colour. 'H' toggles the HUD. 'ESC' quits. No general input-mapping system for these few keys is needed: WASD/QE need continuous per-frame state (Window::isKeyDown) rather than this edge-triggered callback, so this single slot still covers everything that's actually event-shaped. Wired up here, not inside initializeApp: every callback captures a reference into app, which must already be at its final, stable address (main()'s local, unwrapped from the optional initializeApp returned) -- capturing a reference during initializeApp would dangle the moment that AppResources is moved into its optional's storage.
 void wireCallbacks(engine::platform::Window& window, AppResources& app) {
-    window.setKeyCallback([&app](int key, int action) {
+    window.setKeyCallback([&app, &window](int key, int action) {
         if (action != GLFW_PRESS) {
             return;
         }
@@ -458,8 +476,25 @@ void wireCallbacks(engine::platform::Window& window, AppResources& app) {
             app.channelView = app.channelView == 3 ? 0 : 3;
         } else if (key == GLFW_KEY_0) {
             app.debugCamera.resetToDefault();
-        } else if (key == GLFW_KEY_K) {
-            app.framingState.crosshair = !app.framingState.crosshair;
+        } else if (key == GLFW_KEY_Y) {
+            const int luminanceAov = static_cast<int>(engine::debug::AovId::Luminance);
+            if (app.aov == luminanceAov) {
+                // previousAov is only meaningful if this 'Y' press is undoing an earlier one -- Luminance
+                // reached any other way (e.g. the HUD dropdown) leaves it at the -1 sentinel, which isn't
+                // a valid AovId, so fall back to Beauty rather than handing presentFrame an index nothing selects.
+                app.aov = app.previousAov >= 0 ? app.previousAov
+                                                : static_cast<int>(engine::debug::AovId::Beauty);
+                app.previousAov = -1;
+            } else {
+                app.previousAov = app.aov;
+                app.aov = luminanceAov;
+            }
+        } else if (key == GLFW_KEY_I) {
+            app.invert = !app.invert;
+        } else if (key == GLFW_KEY_H) {
+            app.showHud = !app.showHud;
+        } else if (key == GLFW_KEY_ESCAPE) {
+            window.setShouldClose(true);
         }
     });
 
@@ -665,6 +700,36 @@ void ensurePathTraceDisplayTexture(AppResources& app, const std::shared_ptr<cons
         }
         app.pathTraceDisplayedDepthMax = maxDepth;
     }
+    // BounceCount is a mean-termination-depth scalar (R==G==B, see path_tracer.cpp's writeTexel call), not
+    // a colour -- mapped through Turbo here, on the CPU, before upload, rather than as a display-shader
+    // uniform: this function already only runs once per rebuilt pass (see the cache-key check above), so
+    // the map costs nothing extra per frame and needs no new uniform/texture unit.
+    if (app.aov == static_cast<int>(engine::debug::AovId::BounceCount)) {
+        const float maxBounceCount = static_cast<float>(app.pathTraceSettings.maxBounces) + 1.0F;
+        engine::gfx::HdrImage mapped;
+        mapped.width = image.width;
+        mapped.height = image.height;
+        mapped.rgba.resize(image.rgba.size());
+        for (int i = 0; i < image.width * image.height; ++i) {
+            const std::size_t idx = static_cast<std::size_t>(i) * 4;
+            const float t = image.rgba[idx] / maxBounceCount;
+            const glm::vec3 mappedColor = engine::debug::turbo(t);
+            mapped.rgba[idx + 0] = mappedColor.r;
+            mapped.rgba[idx + 1] = mappedColor.g;
+            mapped.rgba[idx + 2] = mappedColor.b;
+            mapped.rgba[idx + 3] = image.rgba[idx + 3];
+        }
+        if (app.pathTraceDisplayTexture.has_value()) {
+            app.pathTraceDisplayTexture->upload(mapped.width, mapped.height, mapped.rgba.data());
+        } else {
+            app.pathTraceDisplayTexture = engine::gfx::Texture::createFromFloatPixels(
+                mapped.width, mapped.height, mapped.rgba.data());
+        }
+        app.pathTraceDisplayedAov = app.aov;
+        app.pathTraceDisplayedOwner = owner;
+        app.pathTraceDisplayedGeneration = generation;
+        return;
+    }
     // Uploaded straight from the HdrImage: no row-reversed scratch copy, and no texture object churn -- fullscreen_triangle.vert now resolves the row-order convention, and Texture::upload reallocates only if the render resolution actually changed.
     if (app.pathTraceDisplayTexture.has_value()) {
         app.pathTraceDisplayTexture->upload(image.width, image.height, image.rgba.data());
@@ -685,7 +750,7 @@ void clearToBlack(int winWidth, int winHeight) {
     GL_CALL(glClear(GL_COLOR_BUFFER_BIT));
 }
 
-// Blits the path-traced buffer for the selected AOV through the shared OCIO/post-process path -- Beauty uses the user's LUT, everything else forces Raw (not scene-referred radiance, a display curve would distort them). Depth/BounceCount additionally get an exposure-based normalization since their raw range exceeds the default framebuffer's fixed-point [0,1] clamp -- see the exposureEv branch below.
+// Blits the path-traced buffer for the selected AOV through the shared OCIO/post-process path -- Beauty uses the user's LUT, everything else forces Raw (not scene-referred radiance, a display curve would distort them). Depth additionally gets an exposure-based normalization since its raw range exceeds the default framebuffer's fixed-point [0,1] clamp -- see the exposureEv branch below. BounceCount is already mapped into displayable [0,1] RGB (Turbo) by ensurePathTraceDisplayTexture, so it takes the unscaled passthrough case here, same as everything else.
 void presentFrame(AppResources& app,
                    const std::shared_ptr<const engine::scene::PathTraceResult>& pathTraceSnapshot,
                    int winWidth, int winHeight) {
@@ -709,6 +774,7 @@ void presentFrame(AppResources& app,
             app.hsvDisplayShader.use();
             GL_CALL(glUniform1i(app.uHsvChannelViewLoc, app.channelView));
             GL_CALL(glUniform1f(app.uHsvExposureLoc, exposure));
+            GL_CALL(glUniform1i(app.uHsvInvertLoc, app.invert ? 1 : 0));
             app.postProcess.draw(app.pathTraceDisplayTexture->id(), app.hsvDisplayShader,
                                   {winWidth, winHeight});
         } else {
@@ -719,6 +785,7 @@ void presentFrame(AppResources& app,
             GL_CALL(glUniform1i(app.uFilterModeLoc, filterMode));
             GL_CALL(glUniform1i(app.uEdgeChannelViewLoc, app.channelView));
             GL_CALL(glUniform1f(app.uEdgeExposureLoc, exposure));
+            GL_CALL(glUniform1i(app.uEdgeInvertLoc, app.invert ? 1 : 0));
             app.postProcess.draw(app.pathTraceDisplayTexture->id(), app.edgeFilterShader,
                                   {winWidth, winHeight});
         }
@@ -736,20 +803,20 @@ void presentFrame(AppResources& app,
         // Beauty: photographic exposure. Depth: auto-ranged to the actual max depth visible in the
         // current buffer (see ensurePathTraceDisplayTexture) -- farClip is a conservative ray tMax
         // bound, not a proxy for the scene's real depth extent, and normalizing by it left real scenes
-        // (a small fraction of farClip) reading as black. BounceCount: normalized by its own provable
-        // upper bound (maxBounces+1), a realistically tight range so this stays a static divide. Both
-        // exist because the default framebuffer is fixed-point and clamps any raw value >= 1 to white
-        // otherwise. Everything else: unscaled passthrough.
+        // (a small fraction of farClip) reading as black. This exists because the default framebuffer is
+        // fixed-point and clamps any raw value >= 1 to white otherwise. Everything else (including
+        // BounceCount, already colormapped into [0,1] RGB): unscaled passthrough.
         float exposureEv = 0.0F;
         if (isBeauty) {
             exposureEv = app.debugCamera.relativeExposureEv();
         } else if (aovId == engine::debug::AovId::Depth) {
             exposureEv = -std::log2(std::max(app.pathTraceDisplayedDepthMax, 1e-4F));
-        } else if (aovId == engine::debug::AovId::BounceCount) {
-            exposureEv = -std::log2(static_cast<float>(app.pathTraceSettings.maxBounces) + 1.0F);
         }
         app.ocioTransform.setExposureEv(exposureEv);
         app.ocioTransform.setChannelView(app.channelView);
+        app.ocioTransform.setInvert(app.invert);
+        // Beauty only -- an artistic lens effect over the rendered image, not meaningful on a raw data AOV like Normal/Depth/Albedo.
+        app.ocioTransform.setAberration(isBeauty ? app.aberrationStrength : 0.0F);
         app.ocioTransform.bind();
         app.postProcess.draw(app.pathTraceDisplayTexture->id(), app.ocioTransform.activeShader(),
                               {winWidth, winHeight});
@@ -880,8 +947,11 @@ void updateHud(AppResources& app, const engine::platform::Window& window,
     float iso = app.debugCamera.iso();
     const engine::debug::PixelProbeSample pixelProbe = samplePixelProbe(
         window, pathTraceSnapshot, app.rasterGBuffer, static_cast<engine::debug::AovId>(app.aov));
-    app.hud.draw(hudFrameData, app.aov, focalLengthMm, aperture, shutterSeconds, iso, app.showSky,
-                 app.envRotationDegrees, app.envExposureStops, app.framingState, pixelProbe);
+    if (app.showHud) {
+        app.hud.draw(hudFrameData, app.aov, focalLengthMm, aperture, shutterSeconds, iso, app.showSky,
+                     app.envRotationDegrees, app.envExposureStops, app.aberrationStrength,
+                     app.framingState, pixelProbe);
+    }
     app.debugCamera.setFocalLengthMm(focalLengthMm);
     app.debugCamera.setAperture(aperture);
     app.debugCamera.setShutterSeconds(shutterSeconds);
