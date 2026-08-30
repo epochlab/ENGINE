@@ -133,14 +133,14 @@ Ordered quick → complex; items within **Large** are a strict dependency chain 
 
 - **JSON library** — replace the hand-rolled scanner (`json_scan.cpp`) with nlohmann/json; do first, every item below depends on it.
 - **scene.json as a CLI arg** — `main()` has no `argc`/`argv` (`main.cpp:864`); paths are hardcoded. Enables multi-scenario scenes.
-- **HDR path → scene.json** — out of `profile.json`'s `ProfileConfig::hdriPath`, into the scene it lights.
 - **Texture bit depth (16/32) via JSON** — hardcoded `GL_RGBA16F` today (`texture.cpp:45`); 32F ~doubles VRAM/buffer.
 - **Keybinds** (`main.cpp:390-427`, existing `L`/`R`/`G`/`B`/`0`/`K` pattern) — `Y` luminance toggle + restore-previous, `I` invert (1−colour), `H` HUD toggle (verify not already present), `ESC` quit.
-- **BounceCount AOV heatmap** — grayscale today (`path_tracer.cpp:286`); no colormap utility exists, write a small turbo/viridis LUT.
-- **Fix DirectDiffuse/DirectSpecular regression** — `bdecb41` made them physical/lit instead of delighted (base colour divided out); Albedo is unaffected. Recover the delighted view without reverting that commit's single-lobe-eval perf win.
+- **BounceCount AOV heatmap** — grayscale today (`path_tracer.cpp:286`); no colormap utility exists, write a small turbo/viridis/magma/spectral LUT.
+- **Fix DirectDiffuse/DirectSpecular regression** — `bdecb41` made them physical/lit instead of delighted (base colour divided out); Albedo is unaffected. Recover the delighted view without reverting that commit's single-lobe-eval perf win. Investigate first.
 - **Code-quality audit** — `rotateAboutY` (`environment_map.cpp:13`) → `glm::rotate`; `ShadingFrame::toLocal`/`toWorld` (`bsdf.h:26`) → `glm::mat3`. (BSDF math in `bsdf.cpp` — GGX/Smith/Fresnel/VNDF — is standard domain logic, not an offload candidate.)
 - **Chromatic aberration** — toggleable `PostProcessPass` filter over Beauty; no new render pass needed.
-- **Macbeth chart scene** — no area-light dependency, validates albedo/colour under existing IBL (needs CLI-arg item above).
+- **Expand terminal output (launch + loop)** — startup logs GL extensions/camera pose/model/BVH stats (`main.cpp:286-361`); no per-frame stats print during the interactive loop (`main.cpp:990`) — sample/pass/convergence stats reach only the HUD (`hud_overlay.cpp`), not stdout.
+- **Fix: mouse disappears on orbit** — `setCursorLocked(true)` (`window.cpp:112-113`) hides+disables the cursor on LMB-drag orbit (`main.cpp:520`), needed because orbit deltas are absolute `cursorPosition()` diffs (`main.cpp:485-489`) that require unbounded motion past screen edges. Fix without reintroducing edge-clamping. Investigate first.
 
 ### Moderate
 
@@ -153,11 +153,13 @@ Ordered quick → complex; items within **Large** are a strict dependency chain 
 - **Render-mode selector + adaptive tiling** — Single Sample / Progressive / Adaptive Tiling (today: the path tracer dispatches fixed 96x96 tiles and the rasterizer rows, both through `ThreadPool`; neither adapts to where the image is still noisy, and the mode is not selectable).
 - **Adaptive per-pixel sample budget** — variance-driven, builds on tiling above.
 - **Texture minification filtering (MIP-mapping)** — point/bilinear only today; grazing/distant surfaces alias.
+- **Camera film-back preset drop-down** — `Camera::FilmBack` (`camera.h:13-16`) is one fixed `{widthMm, heightMm}` from `profile.json:5`. JSON-defined preset list (Alexa XT, IMAX, Medium Format, 5D, Leica M11, Red, 35mm, 70mm); `ImGui::Combo` in HUD, existing pattern at `hud_overlay.cpp:297`.
+- **Photometric calibration** — tie radiometric output to real photometric units (lux/candela/lumen) so `ev100()` (`camera.h:54-56`) and light intensities can be checked against a light meter instead of eyeballed. Complements the Macbeth chart scene (§4 Large item 2).
 
 ### Large — strict dependency order
 
 1. **Global illumination** — area lights + shadow rays to them. ReSTIR (Bitterli et al. 2020) follows once multiple area lights exist. Ray-traced AO replaces today's baked-texture AO AOV (§3). Caustics do not fall out of this: unidirectional path tracing structurally cannot sample specular-diffuse-specular paths regardless of light count — that needs (4).
-2. **Cornell box + per-material showcase** — blocked on (1): needs an emissive panel, only IBL exists today. Showcase: mirror/rough conductor, smooth/rough dielectric (both implemented), subsurface once (3) lands.
+2. **Cornell box + per-material showcase** — blocked on (1): needs an emissive panel, only IBL exists today. Showcase: mirror/rough conductor, smooth/rough dielectric (both implemented), subsurface once (3) lands. + **Macbeth chart scene** — no area-light dependency, validates albedo/colour under existing IBL (needs CLI-arg item above).
 3. **Volumetric & subsurface transport** — participating media + BSSRDF/random-walk subsurface. Blocked: the transmissive multiple-scattering lobe is non-reciprocal (`f(wo→wi) ≠ f(wi→wo)`, `bsdf.cpp`), needs reworking first (`tools/bsdf_validate.cpp`'s `checkTransmissionReciprocity`).
 4. **Bidirectional path tracing with MIS (caustics)** — light-subpath/eye-subpath vertex connection (Veach & Guibas 1995; Veach 1997); the transport algorithm caustics need, since unidirectional path tracing (1) cannot produce them at all. Blocked on (1) + (3)'s reciprocity fix, since connection needs BSDF agreement in both directions.
 5. **Spectral upgrade** — per-wavelength transport, hero-wavelength sampling (Wilkie et al. 2014), spectral dispersion. Likely offline-only given sample-budget cost.
