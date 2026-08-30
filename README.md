@@ -81,7 +81,7 @@ The render thread blits whichever AOV is selected through OCIO's display transfo
 | Memory HUD | Live RAM readout plus GPU allocation tracked at alloc/free (the path-traced display texture is the only GPU allocation left — OCIO uses zero LUT textures) | Surfaces a memory regression immediately, not after VRAM exhaustion |
 | Scene stats | Object/triangle/point counts, viewport resolution | Scene-complexity readout |
 | Debug camera controls | WASD/QE fly, R reset, LMB-drag orbit around a pivot read directly from the path tracer's own G-buffer (world-space hit position + hit mask at its centre pixel) | Interactive navigation without hand-editing camera parameters between runs |
-| Camera framing overlays | Centre crosshair ('K'), drawn on the foreground overlay over the viewport | Composition aid that never contaminates the AOV buffers being debugged |
+| Camera framing overlays | Centre crosshair, always on, drawn on the foreground overlay over the viewport | Composition aid that never contaminates the AOV buffers being debugged |
 | AOV selector | Dropdown across the full AOV set (§3), plus R/G/B channel-isolation hotkeys | Isolates one signal at a time for debugging |
 | Live histogram | Per-channel (R/G/B) histogram of the currently displayed image | Catches exposure/clipping and colour-space bugs a single still frame can hide |
 | glTF loading | cgltf; per-primitive vertices baked to world-space triangles/shading data at load time, materials' textures decoded once to `HdrImage` | Standard interchange format; nothing GPU-resident is needed once the CPU Embree scene/shading data exists |
@@ -136,7 +136,6 @@ Ordered quick → complex; items within **Large** are a strict dependency chain 
 - **JSON library** — replace the hand-rolled scanner (`json_scan.cpp`) with nlohmann/json; do first, every item below depends on it.
 - **scene.json as a CLI arg** — `main()` has no `argc`/`argv` (`main.cpp:864`); paths are hardcoded. Enables multi-scenario scenes.
 - **Texture bit depth (16/32) via JSON** — hardcoded `GL_RGBA16F` today (`texture.cpp:45`); 32F ~doubles VRAM/buffer.
-- **Keybinds** (`main.cpp:390-427`, existing `L`/`R`/`G`/`B`/`0`/`K` pattern) — `Y` luminance toggle + restore-previous, `I` invert (1−colour), `H` HUD toggle (verify not already present), `ESC` quit.
 - **BounceCount AOV heatmap** — grayscale today (`path_tracer.cpp:286`); no colormap utility exists, write a small turbo/viridis/magma/spectral LUT.
 - **Fix DirectDiffuse/DirectSpecular regression** — `bdecb41` made them physical/lit instead of delighted (base colour divided out); Albedo is unaffected. Recover the delighted view without reverting that commit's single-lobe-eval perf win. Investigate first.
 - **Code-quality audit** — `rotateAboutY` (`environment_map.cpp:13`) → `glm::rotate`; `ShadingFrame::toLocal`/`toWorld` (`bsdf.h:26`) → `glm::mat3`. (BSDF math in `bsdf.cpp` — GGX/Smith/Fresnel/VNDF — is standard domain logic, not an offload candidate.)
