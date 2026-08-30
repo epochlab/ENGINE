@@ -34,6 +34,9 @@ constexpr const char* kApplyChannelViewGlsl =
     "    else if (uChannelView == 2) { hdrColor = vec3(hdrColor.g); }\n"
     "    else if (uChannelView == 3) { hdrColor = vec3(hdrColor.b); }\n";
 
+// 1.0 - rgb, applied to the final display-referred colour (after the display curve/Raw passthrough, before dither).
+constexpr const char* kInvertGlsl = "uniform bool uInvert;\n";
+
 // Triangular-PDF dither before the default framebuffer's 8-bit fixed-point quantization -- without it, smooth dark gradients in a converged (Monte Carlo noise no longer masking anything) render band visibly. Two independent uniform draws from a screen-space hash, subtracted for a triangular distribution in [-1/255, 1/255]. Deliberately static per pixel, not time-varying: this targets a converged image, not motion, so no frame/time uniform is threaded in for it.
 constexpr const char* kDitherGlsl =
     "float ditherRand(vec2 co) { return fract(sin(dot(co, vec2(12.9898, 78.233))) * 43758.5453); }\n"
@@ -60,14 +63,16 @@ std::string buildFragmentSource(const std::string& ocioShaderText, const std::st
         << "out vec4 fragColor;\n\n"
         << "uniform sampler2D uHdrColor;\n"
         << "uniform float uExposure;\n"
-        << kChannelViewGlsl << "\n"
+        << kChannelViewGlsl << kInvertGlsl << "\n"
         << kDitherGlsl
         << ocioShaderText << "\n"
         << "void main() {\n"
         << "    vec3 hdrColor = texture(uHdrColor, vUv).rgb;\n"
         << kApplyChannelViewGlsl
         << "    vec4 exposed = vec4(hdrColor * uExposure, 1.0);\n"
-        << "    fragColor = vec4(" << functionName << "(exposed).rgb + ditherOffset(vUv), 1.0);\n"
+        << "    vec3 displayColor = " << functionName << "(exposed).rgb;\n"
+        << "    if (uInvert) { displayColor = 1.0 - displayColor; }\n"
+        << "    fragColor = vec4(displayColor + ditherOffset(vUv), 1.0);\n"
         << "}\n";
     return src.str();
 }
@@ -79,11 +84,13 @@ std::string buildRawFragmentSource() {
                        "out vec4 fragColor;\n\n"
                        "uniform sampler2D uHdrColor;\n"
                        "uniform float uExposure;\n") +
-           kChannelViewGlsl + kDitherGlsl +
+           kChannelViewGlsl + kInvertGlsl + kDitherGlsl +
            "\nvoid main() {\n"
            "    vec3 hdrColor = texture(uHdrColor, vUv).rgb;\n" +
            kApplyChannelViewGlsl +
-           "    fragColor = vec4(hdrColor * uExposure + ditherOffset(vUv), 1.0);\n"
+           "    vec3 displayColor = hdrColor * uExposure;\n"
+           "    if (uInvert) { displayColor = 1.0 - displayColor; }\n"
+           "    fragColor = vec4(displayColor + ditherOffset(vUv), 1.0);\n"
            "}\n";
 }
 
@@ -162,23 +169,30 @@ OcioDisplayTransform::OcioDisplayTransform(ShaderProgram rawShader, ShaderProgra
       rec709ExposureLoc_(rec709Shader_.uniformLocation("uExposure")),
       rawChannelViewLoc_(rawShader_.uniformLocation("uChannelView")),
       srgbChannelViewLoc_(srgbShader_.uniformLocation("uChannelView")),
-      rec709ChannelViewLoc_(rec709Shader_.uniformLocation("uChannelView")) {}
+      rec709ChannelViewLoc_(rec709Shader_.uniformLocation("uChannelView")),
+      rawInvertLoc_(rawShader_.uniformLocation("uInvert")),
+      srgbInvertLoc_(srgbShader_.uniformLocation("uInvert")),
+      rec709InvertLoc_(rec709Shader_.uniformLocation("uInvert")) {}
 
 // Not wrapped in GL_CALL: runs every frame.
 void OcioDisplayTransform::bind() const {
     const ShaderProgram& shader = activeShader();
     int exposureLoc = rawExposureLoc_;
     int channelViewLoc = rawChannelViewLoc_;
+    int invertLoc = rawInvertLoc_;
     if (activeLut_ == Lut::SRGB) {
         exposureLoc = srgbExposureLoc_;
         channelViewLoc = srgbChannelViewLoc_;
+        invertLoc = srgbInvertLoc_;
     } else if (activeLut_ == Lut::Rec709) {
         exposureLoc = rec709ExposureLoc_;
         channelViewLoc = rec709ChannelViewLoc_;
+        invertLoc = rec709InvertLoc_;
     }
     shader.use();
     glUniform1f(exposureLoc, std::pow(2.0F, exposureEv_));
     glUniform1i(channelViewLoc, channelView_);
+    glUniform1i(invertLoc, invert_ ? 1 : 0);
 }
 
 }  // namespace engine::gfx
