@@ -22,6 +22,7 @@
 #include "engine/config/profile_config.h"
 #include "engine/config/scene_config.h"
 #include "engine/debug/aov.h"
+#include "engine/debug/colormap.h"
 #include "engine/debug/frame_stats.h"
 #include "engine/debug/gpu_timer.h"
 #include "engine/debug/histogram.h"
@@ -665,6 +666,36 @@ void ensurePathTraceDisplayTexture(AppResources& app, const std::shared_ptr<cons
         }
         app.pathTraceDisplayedDepthMax = maxDepth;
     }
+    // BounceCount is a mean-termination-depth scalar (R==G==B, see path_tracer.cpp's writeTexel call), not
+    // a colour -- mapped through Turbo here, on the CPU, before upload, rather than as a display-shader
+    // uniform: this function already only runs once per rebuilt pass (see the cache-key check above), so
+    // the map costs nothing extra per frame and needs no new uniform/texture unit.
+    if (app.aov == static_cast<int>(engine::debug::AovId::BounceCount)) {
+        const float maxBounceCount = static_cast<float>(app.pathTraceSettings.maxBounces) + 1.0F;
+        engine::gfx::HdrImage mapped;
+        mapped.width = image.width;
+        mapped.height = image.height;
+        mapped.rgba.resize(image.rgba.size());
+        for (int i = 0; i < image.width * image.height; ++i) {
+            const std::size_t idx = static_cast<std::size_t>(i) * 4;
+            const float t = image.rgba[idx] / maxBounceCount;
+            const glm::vec3 mappedColor = engine::debug::turbo(t);
+            mapped.rgba[idx + 0] = mappedColor.r;
+            mapped.rgba[idx + 1] = mappedColor.g;
+            mapped.rgba[idx + 2] = mappedColor.b;
+            mapped.rgba[idx + 3] = image.rgba[idx + 3];
+        }
+        if (app.pathTraceDisplayTexture.has_value()) {
+            app.pathTraceDisplayTexture->upload(mapped.width, mapped.height, mapped.rgba.data());
+        } else {
+            app.pathTraceDisplayTexture = engine::gfx::Texture::createFromFloatPixels(
+                mapped.width, mapped.height, mapped.rgba.data());
+        }
+        app.pathTraceDisplayedAov = app.aov;
+        app.pathTraceDisplayedOwner = owner;
+        app.pathTraceDisplayedGeneration = generation;
+        return;
+    }
     // Uploaded straight from the HdrImage: no row-reversed scratch copy, and no texture object churn -- fullscreen_triangle.vert now resolves the row-order convention, and Texture::upload reallocates only if the render resolution actually changed.
     if (app.pathTraceDisplayTexture.has_value()) {
         app.pathTraceDisplayTexture->upload(image.width, image.height, image.rgba.data());
@@ -685,7 +716,7 @@ void clearToBlack(int winWidth, int winHeight) {
     GL_CALL(glClear(GL_COLOR_BUFFER_BIT));
 }
 
-// Blits the path-traced buffer for the selected AOV through the shared OCIO/post-process path -- Beauty uses the user's LUT, everything else forces Raw (not scene-referred radiance, a display curve would distort them). Depth/BounceCount additionally get an exposure-based normalization since their raw range exceeds the default framebuffer's fixed-point [0,1] clamp -- see the exposureEv branch below.
+// Blits the path-traced buffer for the selected AOV through the shared OCIO/post-process path -- Beauty uses the user's LUT, everything else forces Raw (not scene-referred radiance, a display curve would distort them). Depth additionally gets an exposure-based normalization since its raw range exceeds the default framebuffer's fixed-point [0,1] clamp -- see the exposureEv branch below. BounceCount is already mapped into displayable [0,1] RGB (Turbo) by ensurePathTraceDisplayTexture, so it takes the unscaled passthrough case here, same as everything else.
 void presentFrame(AppResources& app,
                    const std::shared_ptr<const engine::scene::PathTraceResult>& pathTraceSnapshot,
                    int winWidth, int winHeight) {
@@ -736,17 +767,14 @@ void presentFrame(AppResources& app,
         // Beauty: photographic exposure. Depth: auto-ranged to the actual max depth visible in the
         // current buffer (see ensurePathTraceDisplayTexture) -- farClip is a conservative ray tMax
         // bound, not a proxy for the scene's real depth extent, and normalizing by it left real scenes
-        // (a small fraction of farClip) reading as black. BounceCount: normalized by its own provable
-        // upper bound (maxBounces+1), a realistically tight range so this stays a static divide. Both
-        // exist because the default framebuffer is fixed-point and clamps any raw value >= 1 to white
-        // otherwise. Everything else: unscaled passthrough.
+        // (a small fraction of farClip) reading as black. This exists because the default framebuffer is
+        // fixed-point and clamps any raw value >= 1 to white otherwise. Everything else (including
+        // BounceCount, already colormapped into [0,1] RGB): unscaled passthrough.
         float exposureEv = 0.0F;
         if (isBeauty) {
             exposureEv = app.debugCamera.relativeExposureEv();
         } else if (aovId == engine::debug::AovId::Depth) {
             exposureEv = -std::log2(std::max(app.pathTraceDisplayedDepthMax, 1e-4F));
-        } else if (aovId == engine::debug::AovId::BounceCount) {
-            exposureEv = -std::log2(static_cast<float>(app.pathTraceSettings.maxBounces) + 1.0F);
         }
         app.ocioTransform.setExposureEv(exposureEv);
         app.ocioTransform.setChannelView(app.channelView);
