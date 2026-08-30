@@ -8,8 +8,8 @@
 #include "engine/scene/embree_accel.h"
 #include "engine/scene/gltf_loader.h"
 #include "engine/scene/path_tracer.h"
-#include "engine/scene/row_thread_pool.h"
 #include "engine/scene/shading_scene.h"
+#include "engine/scene/thread_pool.h"
 
 namespace engine::scene {
 
@@ -35,12 +35,12 @@ struct RasterGBuffer {
     std::uint64_t generation = 0;
 };
 
-// Row-parallel (RowThreadPool, dispatched over rows -- each worker owns disjoint rows, so no synchronization is needed on the shared z-buffer/output images) edge-function rasterization (Pineda 1988) with a single near-plane Sutherland-Hodgman clip per triangle. Runs synchronously on the render thread, so these AOVs are correct on the frame a rasterizer-backed AOV is selected; Beauty and the light-transport AOVs are untouched, still converging asynchronously through PathTraceDriver. threadPool: owned by the caller and reused across calls, same convention as renderPathTraced's own parameter.
+// Row-parallel (ThreadPool, dispatched over rows -- each worker owns disjoint rows, so no synchronization is needed on the shared z-buffer/output images) edge-function rasterization (Pineda 1988) with a single near-plane Sutherland-Hodgman clip per triangle. Runs synchronously on the render thread, so these AOVs are correct on the frame a rasterizer-backed AOV is selected; Beauty and the light-transport AOVs are untouched, still converging asynchronously through PathTraceDriver. threadPool: owned by the caller and reused across calls, same convention as renderPathTraced's own parameter.
 // out: owned by the caller and reused across calls, like threadPool. Its 15 images are reallocated only when width/height change and are otherwise cleared per row inside the parallel loop -- the same bytes the old per-call makeImage zeroing touched, but written in parallel, in the row about to be overwritten, instead of as 15 sequential full-image memsets beforehand. At 2048x1152 that allocate-and-zero was 566 MB per call.
 void renderRasterGBuffer(const Camera& camera, const EmbreeAccel& accel,
                           const std::vector<ShadingTriangle>& shadingTriangles,
                           const std::vector<MeshInstance>& instances,
                           const PathTraceSettings& settings, int width, int height,
-                          RowThreadPool& threadPool, RasterGBuffer& out);
+                          ThreadPool& threadPool, RasterGBuffer& out);
 
 }  // namespace engine::scene

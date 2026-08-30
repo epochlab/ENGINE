@@ -89,7 +89,7 @@ add_executable(engine
     src/scene/path_trace_driver.cpp
     src/scene/rasterizer.cpp
     src/scene/ray_types.cpp
-    src/scene/row_thread_pool.cpp
+    src/scene/thread_pool.cpp
     src/scene/sampler.cpp
     src/scene/shading_scene.cpp
     src/config/json_scan.cpp
@@ -162,7 +162,7 @@ endif()
 add_executable(rasterizer_validate tools/rasterizer_validate.cpp src/scene/rasterizer.cpp
                src/scene/gbuffer_shading.cpp src/scene/embree_accel.cpp src/scene/ray_types.cpp
                src/scene/shading_scene.cpp src/scene/bsdf.cpp src/scene/sampler.cpp
-               src/scene/camera.cpp src/scene/row_thread_pool.cpp src/gfx/hdr_image.cpp)
+               src/scene/camera.cpp src/scene/thread_pool.cpp src/gfx/hdr_image.cpp)
 target_include_directories(rasterizer_validate PRIVATE include)
 target_compile_options(rasterizer_validate PRIVATE -Wall -Wextra -Werror -march=native)
 target_link_libraries(rasterizer_validate PRIVATE glm::glm embree OpenEXR::OpenEXR Imath::Imath)
@@ -173,7 +173,7 @@ endif()
 add_executable(integrator_validate tools/integrator_validate.cpp src/scene/path_tracer.cpp
                src/scene/gbuffer_shading.cpp src/scene/embree_accel.cpp src/scene/ray_types.cpp
                src/scene/shading_scene.cpp src/scene/bsdf.cpp src/scene/sampler.cpp
-               src/scene/environment_map.cpp src/scene/camera.cpp src/scene/row_thread_pool.cpp
+               src/scene/environment_map.cpp src/scene/camera.cpp src/scene/thread_pool.cpp
                src/gfx/hdr_image.cpp)
 target_include_directories(integrator_validate PRIVATE include)
 target_compile_options(integrator_validate PRIVATE -Wall -Wextra -Werror -march=native)
@@ -186,7 +186,7 @@ endif()
 add_executable(raster_bench tools/raster_bench.cpp src/scene/rasterizer.cpp
                src/scene/gbuffer_shading.cpp src/scene/embree_accel.cpp src/scene/ray_types.cpp
                src/scene/shading_scene.cpp src/scene/bsdf.cpp src/scene/sampler.cpp
-               src/scene/camera.cpp src/scene/row_thread_pool.cpp src/gfx/hdr_image.cpp)
+               src/scene/camera.cpp src/scene/thread_pool.cpp src/gfx/hdr_image.cpp)
 target_include_directories(raster_bench PRIVATE include)
 target_compile_options(raster_bench PRIVATE -Wall -Wextra -Werror -march=native)
 target_link_libraries(raster_bench PRIVATE glm::glm embree OpenEXR::OpenEXR Imath::Imath)

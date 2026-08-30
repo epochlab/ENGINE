@@ -285,7 +285,7 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                        float envRotationRadians, bool showSky, float envExposure,
                        const PathTraceSettings& settings, std::uint32_t runSeed,
                        const std::atomic<std::uint64_t>& generation,
-                       std::uint64_t requestedGeneration, RowThreadPool& threadPool,
+                       std::uint64_t requestedGeneration, ThreadPool& threadPool,
                        PathTraceResult& out) {
     const float aspect = static_cast<float>(width) / static_cast<float>(height);
     // Constant for the whole pass, so it is built once here rather than per primary ray: the aspect-taking primaryRay rebuilds it every call, which at samplesPerPixel rays per pixel is millions of identical reconstructions per pass. rasterizer.cpp already hoists it the same way.
