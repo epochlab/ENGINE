@@ -66,7 +66,7 @@ private:
     // Camera has no default constructor, so this can't be a plain Request -- std::nullopt until the first requestTrace() call, which is fine: driverLoop never reads it before generation_ (whose first bump happens in the same requestTrace call, under the same lock) has gone non-zero.
     std::optional<Request> pendingRequest_;
 
-    // Bumped by requestTrace, polled lock-free by both the driver's dispatch loop and (via renderPathTraced's cancellation parameter) every in-flight pass's row workers.
+    // Bumped by requestTrace, polled lock-free by both the driver's dispatch loop and (via renderPathTraced's cancellation parameter) every in-flight pass's tile workers.
     std::atomic<std::uint64_t> generation_{0};
     std::atomic<int> accumulatedSamples_{0};
     std::atomic<double> lastPassSeconds_{0.0};
@@ -78,7 +78,7 @@ private:
     // Driver-thread-only rotation of buffer sets, allocated on first use and reused for the process's life -- renderPathTraced writes into one of these instead of allocating 8 fresh images per pass. Four, because up to three can be pinned at once: the mean the driver just published, the frame-local snapshot the render thread holds for the duration of a frame, and the older result app.pathTraceDisplayedOwner still holds because the display texture was built from it. The fourth is the one being written.
     std::array<std::shared_ptr<PathTraceResult>, 4> bufferPool_;
 
-    // Persistent row-parallel dispatch for renderPathTraced, reused across every pass -- see RowThreadPool's own doc comment. Declared before thread_ so it's fully constructed (and its workers parked and ready) before driverLoop starts, and outlives every renderPathTraced call driverLoop makes (destroyed only after thread_ has stopped and joined).
+    // Persistent parallel dispatch for renderPathTraced and its accumulate step, reused across every pass -- see RowThreadPool's own doc comment. Declared before thread_ so it's fully constructed (and its workers parked and ready) before driverLoop starts, and outlives every renderPathTraced call driverLoop makes (destroyed only after thread_ has stopped and joined).
     RowThreadPool threadPool_;
 
     // Declared last: constructed last (starts driverLoop only once every member above exists), destroyed first (std::jthread's destructor requests a stop and joins before any member above -- or, per the constructor's own precondition, the objects accel_/shadingTriangles_/instances_/environmentMap_ reference -- could be invalidated by outer teardown).

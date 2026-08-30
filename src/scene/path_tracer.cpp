@@ -1,11 +1,13 @@
 #include "engine/scene/path_tracer.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <limits>
 #include <optional>
+#include <vector>
 
 #include "engine/scene/bsdf.h"
 #include "engine/scene/gbuffer_shading.h"
@@ -17,6 +19,44 @@ namespace engine::scene {
 namespace {
 
 constexpr float kRayEpsilon = 1e-4F;
+
+// Blackman-Harris at Arnold's default 1.5px radius: support wider than one pixel, so neighbouring footprints overlap and each sample reconstructs several pixels instead of only the one it was drawn in -- which is where nearly all of a reconstruction filter's benefit over the 1px box comes from. Non-negative everywhere, so no pixel can end up with a zero or negative total weight and no ringing appears around highlights.
+constexpr float kFilterRadius = 1.5F;
+constexpr int kFilterExtent = 1;  // how many pixels either side of a sample its splat can reach: a sample sits at most 1.0 past its own pixel's far centre, so a destination two pixels away is at least kFilterRadius off and weighs exactly zero
+constexpr int kFilterTableSize = 64;
+// Square destination tiles, each owned outright by one worker: splatting crosses pixel boundaries, so the row-disjoint invariant the rasterizer still relies on cannot hold here. Size trades halo waste against load-balancing granularity -- the halo re-traces (size+2*kFilterExtent)^2/size^2 of a tile, 4.2% here against 6.3% at 64, while doubling to 128 quarters the number of work items a small render has to spread across its workers. 96 and 128 measured indistinguishable at 1080p; 64 measurably worse.
+constexpr int kTileSize = 96;
+// Per-tile accumulator lanes: beauty.rgb, termination bounce, shadow, then the five transport buckets' rgb -- the scalars take one lane each and are broadcast to RGB at write-out, matching writeTexel's convention.
+constexpr int kSampleLanes = 20;
+constexpr int kTileLanes = kSampleLanes + 1;  // plus the per-pixel filter weight the lanes above are normalised by
+
+// Sampled at |x| = i/(kFilterTableSize-1) * kFilterRadius and read back by truncating lookup, the same table trick PBRT uses: the filter is smooth over 1.5px, and this replaces three cos() per tap on the renderer's hottest inner loop.
+std::array<float, kFilterTableSize> buildFilterTable() {
+    constexpr float kA0 = 0.35875F;
+    constexpr float kA1 = 0.48829F;
+    constexpr float kA2 = 0.14128F;
+    constexpr float kA3 = 0.01168F;
+    constexpr float kPi = 3.14159265F;
+    std::array<float, kFilterTableSize> table{};
+    for (int i = 0; i < kFilterTableSize; ++i) {
+        // Blackman-Harris is defined over [0,1]; the window's own centre is t = 0.5, so a sample at |x| = 0 maps there and one at the radius maps to the (effectively zero) end of the window.
+        const float t = 0.5F + (0.5F * static_cast<float>(i) / static_cast<float>(kFilterTableSize - 1));
+        table[static_cast<std::size_t>(i)] = kA0 - (kA1 * std::cos(2.0F * kPi * t)) +
+                                              (kA2 * std::cos(4.0F * kPi * t)) -
+                                              (kA3 * std::cos(6.0F * kPi * t));
+    }
+    return table;
+}
+
+const std::array<float, kFilterTableSize> kFilterTable = buildFilterTable();
+
+float filterWeight(float distance) {
+    const float t = std::abs(distance) / kFilterRadius;
+    if (t >= 1.0F) {
+        return 0.0F;
+    }
+    return kFilterTable[static_cast<std::size_t>(t * static_cast<float>(kFilterTableSize - 1))];
+}
 
 struct TraceResult {
     glm::vec3 radiance;
@@ -248,56 +288,103 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                        std::uint64_t requestedGeneration, RowThreadPool& threadPool,
                        PathTraceResult& out) {
     const float aspect = static_cast<float>(width) / static_cast<float>(height);
-    const float sppInv = 1.0F / static_cast<float>(settings.samplesPerPixel);
+    const int tilesX = (width + kTileSize - 1) / kTileSize;
+    const int tilesY = (height + kTileSize - 1) / kTileSize;
 
-    const auto renderRow = [&](int y) {
-        for (int x = 0; x < width; ++x) {
-            glm::vec3 colorAccum(0.0F);
-            float bounceAccum = 0.0F;
-            float shadowAccum = 0.0F;
-            glm::vec3 directDiffuseAccum(0.0F);
-            glm::vec3 indirectDiffuseAccum(0.0F);
-            glm::vec3 directSpecularAccum(0.0F);
-            glm::vec3 indirectSpecularAccum(0.0F);
-            glm::vec3 refractionAccum(0.0F);
-            for (int s = 0; s < settings.samplesPerPixel; ++s) {
-                Sampler sampler(x, y, s, runSeed);
-                const glm::vec2 jitter = sampler.next2D();
-                const float ndcX =
-                    (((static_cast<float>(x) + jitter.x) / static_cast<float>(width)) * 2.0F) - 1.0F;
-                // HdrImage row 0 is the top (EXR/glTF convention); NDC +Y is up -- flip.
-                const float ndcY =
-                    1.0F -
-                    (((static_cast<float>(y) + jitter.y) / static_cast<float>(height)) * 2.0F);
-                const Ray primary = camera.primaryRay(ndcX, ndcY, aspect);
-                const TraceResult trace = tracePath(primary, accel, shadingTriangles, instances,
-                                                     environmentMap, envRotationRadians, showSky,
-                                                     envExposure, settings, sampler);
-                colorAccum += trace.radiance;
-                bounceAccum += static_cast<float>(trace.terminationBounce);
-                shadowAccum += trace.shadow;
-                directDiffuseAccum += trace.directDiffuse;
-                indirectDiffuseAccum += trace.indirectDiffuse;
-                directSpecularAccum += trace.directSpecular;
-                indirectSpecularAccum += trace.indirectSpecular;
-                refractionAccum += trace.refraction;
+    // One worker owns every output pixel of one tile, and traces every pixel within the filter radius of it -- the kFilterExtent-wide halo, whose samples are therefore traced twice, once by each of the two tiles they splat into. Sampler is seeded per (x, y, s, runSeed), so both tiles compute the identical sample; the cost is ~13% more rays at this tile size, and what it buys is that no splat ever crosses into another worker's pixels, so the whole pass needs no locks, no atomics and no merge phase.
+    const auto renderTile = [&](int tileIndex) {
+        const int tileX0 = (tileIndex % tilesX) * kTileSize;
+        const int tileY0 = (tileIndex / tilesX) * kTileSize;
+        const int tileX1 = std::min(tileX0 + kTileSize, width);
+        const int tileY1 = std::min(tileY0 + kTileSize, height);
+
+        // Reused for the life of the worker thread, so a pass allocates nothing: sized for a full tile even at the image edge, which keeps the row stride a constant kTileSize.
+        thread_local std::vector<float> accumulator;
+        accumulator.assign(static_cast<std::size_t>(kTileSize) * kTileSize * kTileLanes, 0.0F);
+
+        for (int y = std::max(tileY0 - kFilterExtent, 0);
+             y < std::min(tileY1 + kFilterExtent, height); ++y) {
+            for (int x = std::max(tileX0 - kFilterExtent, 0);
+                 x < std::min(tileX1 + kFilterExtent, width); ++x) {
+                for (int s = 0; s < settings.samplesPerPixel; ++s) {
+                    Sampler sampler(x, y, s, runSeed);
+                    const glm::vec2 jitter = sampler.next2D();
+                    const float filmX = static_cast<float>(x) + jitter.x;
+                    const float filmY = static_cast<float>(y) + jitter.y;
+                    const float ndcX = ((filmX / static_cast<float>(width)) * 2.0F) - 1.0F;
+                    // HdrImage row 0 is the top (EXR/glTF convention); NDC +Y is up -- flip.
+                    const float ndcY = 1.0F - ((filmY / static_cast<float>(height)) * 2.0F);
+                    const Ray primary = camera.primaryRay(ndcX, ndcY, aspect);
+                    const TraceResult trace = tracePath(primary, accel, shadingTriangles, instances,
+                                                         environmentMap, envRotationRadians, showSky,
+                                                         envExposure, settings, sampler);
+                    const std::array<float, kSampleLanes> values{
+                        trace.radiance.x,          trace.radiance.y,
+                        trace.radiance.z,          static_cast<float>(trace.terminationBounce),
+                        trace.shadow,              trace.directDiffuse.x,
+                        trace.directDiffuse.y,     trace.directDiffuse.z,
+                        trace.indirectDiffuse.x,   trace.indirectDiffuse.y,
+                        trace.indirectDiffuse.z,   trace.directSpecular.x,
+                        trace.directSpecular.y,    trace.directSpecular.z,
+                        trace.indirectSpecular.x,  trace.indirectSpecular.y,
+                        trace.indirectSpecular.z,  trace.refraction.x,
+                        trace.refraction.y,        trace.refraction.z};
+
+                    // Clipped to this tile: the taps falling outside it belong to a neighbouring tile, which traces this same sample itself rather than receiving it.
+                    const int splatX0 = std::max(tileX0, static_cast<int>(std::ceil(filmX - 0.5F - kFilterRadius)));
+                    const int splatX1 = std::min(tileX1 - 1, static_cast<int>(std::floor(filmX - 0.5F + kFilterRadius)));
+                    const int splatY0 = std::max(tileY0, static_cast<int>(std::ceil(filmY - 0.5F - kFilterRadius)));
+                    const int splatY1 = std::min(tileY1 - 1, static_cast<int>(std::floor(filmY - 0.5F + kFilterRadius)));
+                    for (int splatY = splatY0; splatY <= splatY1; ++splatY) {
+                        // Separable: the 2D weight is the product of the two 1D lookups, so a row's own factor is hoisted out of the inner loop.
+                        const float weightY = filterWeight(filmY - (static_cast<float>(splatY) + 0.5F));
+                        if (weightY <= 0.0F) {
+                            continue;
+                        }
+                        for (int splatX = splatX0; splatX <= splatX1; ++splatX) {
+                            const float weight =
+                                weightY * filterWeight(filmX - (static_cast<float>(splatX) + 0.5F));
+                            if (weight <= 0.0F) {
+                                continue;
+                            }
+                            float* lanes =
+                                accumulator.data() +
+                                ((static_cast<std::size_t>(splatY - tileY0) * kTileSize) +
+                                 static_cast<std::size_t>(splatX - tileX0)) * kTileLanes;
+                            for (std::size_t lane = 0; lane < kSampleLanes; ++lane) {
+                                lanes[lane] += weight * values[lane];
+                            }
+                            lanes[kSampleLanes] += weight;
+                        }
+                    }
+                }
             }
-            writeTexel(out.beauty, x, y, colorAccum * sppInv);
-            writeTexel(out.bounceHeatmap, x, y, glm::vec3(bounceAccum * sppInv));
-            writeTexel(out.shadow, x, y, glm::vec3(shadowAccum * sppInv));
-            writeTexel(out.directDiffuse, x, y, directDiffuseAccum * sppInv);
-            writeTexel(out.indirectDiffuse, x, y, indirectDiffuseAccum * sppInv);
-            writeTexel(out.directSpecular, x, y, directSpecularAccum * sppInv);
-            writeTexel(out.indirectSpecular, x, y, indirectSpecularAccum * sppInv);
-            writeTexel(out.refraction, x, y, refractionAccum * sppInv);
+        }
+
+        for (int y = tileY0; y < tileY1; ++y) {
+            for (int x = tileX0; x < tileX1; ++x) {
+                const float* lanes = accumulator.data() +
+                                      ((static_cast<std::size_t>(y - tileY0) * kTileSize) +
+                                       static_cast<std::size_t>(x - tileX0)) * kTileLanes;
+                // Always positive: a pixel's own samples land within half a pixel of its centre, well inside the 1.5px support, and samplesPerPixel is at least 1.
+                const float invWeight = 1.0F / lanes[kSampleLanes];
+                writeTexel(out.beauty, x, y, glm::vec3(lanes[0], lanes[1], lanes[2]) * invWeight);
+                writeTexel(out.bounceHeatmap, x, y, glm::vec3(lanes[3] * invWeight));
+                writeTexel(out.shadow, x, y, glm::vec3(lanes[4] * invWeight));
+                writeTexel(out.directDiffuse, x, y, glm::vec3(lanes[5], lanes[6], lanes[7]) * invWeight);
+                writeTexel(out.indirectDiffuse, x, y, glm::vec3(lanes[8], lanes[9], lanes[10]) * invWeight);
+                writeTexel(out.directSpecular, x, y, glm::vec3(lanes[11], lanes[12], lanes[13]) * invWeight);
+                writeTexel(out.indirectSpecular, x, y, glm::vec3(lanes[14], lanes[15], lanes[16]) * invWeight);
+                writeTexel(out.refraction, x, y, glm::vec3(lanes[17], lanes[18], lanes[19]) * invWeight);
+            }
         }
     };
 
-    threadPool.parallelForRows(height, [&renderRow, &generation, requestedGeneration](int y) {
+    threadPool.parallelFor(tilesX * tilesY, [&renderTile, &generation, requestedGeneration](int tileIndex) {
         if (generation.load(std::memory_order_relaxed) != requestedGeneration) {
             return;  // stale -- caller discards this pass's result entirely
         }
-        renderRow(y);
+        renderTile(tileIndex);
     });
 }
 

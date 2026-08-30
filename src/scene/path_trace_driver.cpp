@@ -26,7 +26,7 @@ void accumulateMean(PathTraceResult& sample, const PathTraceResult& previousMean
         &previousMean.indirectSpecular, &previousMean.refraction};
     const float invN = 1.0F / static_cast<float>(n);
     const auto rowFloats = static_cast<std::size_t>(sample.beauty.width) * 4;
-    threadPool.parallelForRows(sample.beauty.height, [&](int y) {
+    threadPool.parallelFor(sample.beauty.height, [&](int y) {
         const std::size_t begin = static_cast<std::size_t>(y) * rowFloats;
         for (std::size_t image = 0; image < destinations.size(); ++image) {
             float* destination = destinations[image]->rgba.data();
