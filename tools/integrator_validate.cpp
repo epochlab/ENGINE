@@ -228,11 +228,13 @@ engine::scene::PathTraceResult renderPass(const QuadScene& scene, const Environm
                                            const PathTraceSettings& settings, EmbreeAccel& accel,
                                            engine::scene::RowThreadPool& pool, bool showSky) {
     const std::atomic<std::uint64_t> generation{1};
-    return engine::scene::renderPathTraced(makeCamera(), accel, scene.shadingTriangles,
-                                            scene.instances, env, kImageSize, kImageSize,
-                                            /*envRotationRadians=*/0.0F, showSky,
-                                            /*envExposure=*/1.0F, settings, /*runSeed=*/7U,
-                                            generation, /*requestedGeneration=*/1U, pool);
+    engine::scene::PathTraceResult result =
+        engine::scene::makePathTraceResult(kImageSize, kImageSize);
+    engine::scene::renderPathTraced(makeCamera(), accel, scene.shadingTriangles, scene.instances, env,
+                                     kImageSize, kImageSize, /*envRotationRadians=*/0.0F, showSky,
+                                     /*envExposure=*/1.0F, settings, /*runSeed=*/7U, generation,
+                                     /*requestedGeneration=*/1U, pool, result);
+    return result;
 }
 
 // Centre-region mean radiance of one pass.

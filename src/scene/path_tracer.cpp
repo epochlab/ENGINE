@@ -231,19 +231,22 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
 
 }  // namespace
 
-PathTraceResult renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
-                                  const std::vector<ShadingTriangle>& shadingTriangles,
-                                  const std::vector<MeshInstance>& instances,
-                                  const EnvironmentMap& environmentMap, int width, int height,
-                                  float envRotationRadians, bool showSky, float envExposure,
-                                  const PathTraceSettings& settings, std::uint32_t runSeed,
-                                  const std::atomic<std::uint64_t>& generation,
-                                  std::uint64_t requestedGeneration, RowThreadPool& threadPool) {
+PathTraceResult makePathTraceResult(int width, int height) {
     // 8 fields (beauty/bounceHeatmap/shadow + 5 transport-component AOVs) -- see PathTraceResult's declaration order in path_tracer.h, which this positional init must match.
-    PathTraceResult result{makeImage(width, height), makeImage(width, height),
-                            makeImage(width, height), makeImage(width, height),
-                            makeImage(width, height), makeImage(width, height),
-                            makeImage(width, height), makeImage(width, height)};
+    return {makeImage(width, height), makeImage(width, height), makeImage(width, height),
+            makeImage(width, height), makeImage(width, height), makeImage(width, height),
+            makeImage(width, height), makeImage(width, height)};
+}
+
+void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
+                       const std::vector<ShadingTriangle>& shadingTriangles,
+                       const std::vector<MeshInstance>& instances,
+                       const EnvironmentMap& environmentMap, int width, int height,
+                       float envRotationRadians, bool showSky, float envExposure,
+                       const PathTraceSettings& settings, std::uint32_t runSeed,
+                       const std::atomic<std::uint64_t>& generation,
+                       std::uint64_t requestedGeneration, RowThreadPool& threadPool,
+                       PathTraceResult& out) {
     const float aspect = static_cast<float>(width) / static_cast<float>(height);
     const float sppInv = 1.0F / static_cast<float>(settings.samplesPerPixel);
 
@@ -279,14 +282,14 @@ PathTraceResult renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                 indirectSpecularAccum += trace.indirectSpecular;
                 refractionAccum += trace.refraction;
             }
-            writeTexel(result.beauty, x, y, colorAccum * sppInv);
-            writeTexel(result.bounceHeatmap, x, y, glm::vec3(bounceAccum * sppInv));
-            writeTexel(result.shadow, x, y, glm::vec3(shadowAccum * sppInv));
-            writeTexel(result.directDiffuse, x, y, directDiffuseAccum * sppInv);
-            writeTexel(result.indirectDiffuse, x, y, indirectDiffuseAccum * sppInv);
-            writeTexel(result.directSpecular, x, y, directSpecularAccum * sppInv);
-            writeTexel(result.indirectSpecular, x, y, indirectSpecularAccum * sppInv);
-            writeTexel(result.refraction, x, y, refractionAccum * sppInv);
+            writeTexel(out.beauty, x, y, colorAccum * sppInv);
+            writeTexel(out.bounceHeatmap, x, y, glm::vec3(bounceAccum * sppInv));
+            writeTexel(out.shadow, x, y, glm::vec3(shadowAccum * sppInv));
+            writeTexel(out.directDiffuse, x, y, directDiffuseAccum * sppInv);
+            writeTexel(out.indirectDiffuse, x, y, indirectDiffuseAccum * sppInv);
+            writeTexel(out.directSpecular, x, y, directSpecularAccum * sppInv);
+            writeTexel(out.indirectSpecular, x, y, indirectSpecularAccum * sppInv);
+            writeTexel(out.refraction, x, y, refractionAccum * sppInv);
         }
     };
 
@@ -296,8 +299,6 @@ PathTraceResult renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
         }
         renderRow(y);
     });
-
-    return result;
 }
 
 }  // namespace engine::scene
