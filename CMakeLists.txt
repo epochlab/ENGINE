@@ -182,6 +182,18 @@ if(IPO_SUPPORTED)
     set_target_properties(integrator_validate PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
 endif()
 
+# Timing harness for the rasterizer, not a correctness gate -- deliberately absent from the add_test loop below (a benchmark's pass/fail is a human reading a number, and it would make `ctest` as slow as its worst --triangles sweep). Same source list and -march=native/IPO flags as rasterizer_validate, so it times the exact codegen that ships.
+add_executable(raster_bench tools/raster_bench.cpp src/scene/rasterizer.cpp
+               src/scene/gbuffer_shading.cpp src/scene/embree_accel.cpp src/scene/ray_types.cpp
+               src/scene/shading_scene.cpp src/scene/bsdf.cpp src/scene/sampler.cpp
+               src/scene/camera.cpp src/scene/row_thread_pool.cpp src/gfx/hdr_image.cpp)
+target_include_directories(raster_bench PRIVATE include)
+target_compile_options(raster_bench PRIVATE -Wall -Wextra -Werror -march=native)
+target_link_libraries(raster_bench PRIVATE glm::glm embree OpenEXR::OpenEXR Imath::Imath)
+if(IPO_SUPPORTED)
+    set_target_properties(raster_bench PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
+endif()
+
 # All five correctness tools run under `ctest --test-dir build`. Previously they were buildable but
 # nothing ran them, so a regression only surfaced if someone remembered to invoke them by hand.
 enable_testing()
