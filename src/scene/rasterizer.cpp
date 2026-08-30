@@ -66,6 +66,24 @@ float edgeFunction(const ScreenVertex& a, const ScreenVertex& b, float px, float
     return ((b.sx - a.sx) * (py - a.sy)) - ((b.sy - a.sy) * (px - a.sx));
 }
 
+// Barycentric coverage of one pixel centre against a sub-triangle. Shared by the depth pass and the shading pass rather than duplicated: identical source expressions guarantee identical floating-point contraction at both call sites, so the barycentrics the shading pass recomputes for a winner are bit-for-bit the ones the depth pass chose it on.
+struct Coverage {
+    bool covered;
+    float b0;
+    float b1;
+    float b2;
+};
+
+Coverage coverPixel(const RasterSubTriangle& st, float px, float py) {
+    const float w0 = edgeFunction(st.v1, st.v2, px, py);
+    const float w1 = edgeFunction(st.v2, st.v0, px, py);
+    const float w2 = edgeFunction(st.v0, st.v1, px, py);
+    if (w0 < 0.0F || w1 < 0.0F || w2 < 0.0F) {
+        return Coverage{false, 0.0F, 0.0F, 0.0F};
+    }
+    return Coverage{true, w0 * st.invArea, w1 * st.invArea, w2 * st.invArea};
+}
+
 // Single-plane Sutherland-Hodgman clip against viewZ >= nearClip -- one plane adds at most one vertex, so `out` never needs more than 4 slots; fixed 3-iteration loop (one per input edge) gives a provable bound. Returns the clipped vertex count (0 if fully behind the near plane).
 int clipNearPlane(const std::array<ClipVertex, 3>& in, const glm::vec3& camPos,
                    const glm::vec3& forward, float nearClip, std::array<ClipVertex, 4>& out) {
@@ -312,6 +330,79 @@ void shadePixel(RasterGBuffer& result, int x, int y, float viewZ, float origU, f
     writeTexel(result.iorAov, x, y, glm::vec3(settings.ior));
 }
 
+// Pass one of two: resolves visibility for the row without shading anything, recording each pixel's depth and the sub-triangle index that owns it. Splitting this out is what bounds shading to one evaluation per visible pixel -- the single-pass form shaded on every depth improvement, so a pixel behind N nearer-in-list surfaces paid N full shades (8 bilinear fetches, a shading frame and 15 texel writes each) to keep one.
+// Keeps the single-pass tie-break exactly: `>=` rejects equal depth, so the first sub-triangle in row order still wins a tie, and row order is the sub-triangle list order buildRowBuckets preserves.
+void depthPassRow(int y, const std::vector<RasterSubTriangle>& subTriangles,
+                   const RowBuckets& rowBuckets, float* zRow, int* winnerRow) {
+    const float py = static_cast<float>(y) + 0.5F;
+    const std::size_t rowEnd = rowBuckets.offsets[static_cast<std::size_t>(y) + 1];
+    for (std::size_t k = rowBuckets.offsets[static_cast<std::size_t>(y)]; k < rowEnd; ++k) {
+        const int index = rowBuckets.indices[k];
+        const RasterSubTriangle& st = subTriangles[static_cast<std::size_t>(index)];
+        for (int x = st.minX; x <= st.maxX; ++x) {
+            const Coverage cov = coverPixel(st, static_cast<float>(x) + 0.5F, py);
+            if (!cov.covered) {
+                continue;
+            }
+            const float viewZ =
+                1.0F / ((cov.b0 * st.v0.invZ) + (cov.b1 * st.v1.invZ) + (cov.b2 * st.v2.invZ));
+            if (viewZ >= zRow[x]) {
+                continue;
+            }
+            zRow[x] = viewZ;
+            winnerRow[x] = index;
+        }
+    }
+}
+
+// Pass two of two: shades each covered pixel exactly once from the winner the depth pass recorded. Walks the row in x order rather than in triangle order, so the 15 AOV writes advance linearly through each image instead of scattering across it.
+// viewZ is read back from the depth buffer rather than recomputed: it is the value this same winner stored, so reading it is both cheaper and exact where a recomputation would only be exact by argument.
+void shadeRow(RasterGBuffer& result, int y, int width, const std::vector<RasterSubTriangle>& subTriangles,
+               const std::vector<ShadingTriangle>& shadingTriangles,
+               const std::vector<MeshInstance>& instances, const PathTraceSettings& settings,
+               const glm::vec3& camPos, const float* zRow, const int* winnerRow) {
+    const float py = static_cast<float>(y) + 0.5F;
+    for (int x = 0; x < width; ++x) {
+        if (winnerRow[x] < 0) {
+            continue;
+        }
+        const RasterSubTriangle& st = subTriangles[static_cast<std::size_t>(winnerRow[x])];
+        const Coverage cov = coverPixel(st, static_cast<float>(x) + 0.5F, py);
+        const float viewZ = zRow[x];
+        const float origU = ((cov.b0 * st.v0.origU * st.v0.invZ) + (cov.b1 * st.v1.origU * st.v1.invZ) +
+                             (cov.b2 * st.v2.origU * st.v2.invZ)) *
+                            viewZ;
+        const float origV = ((cov.b0 * st.v0.origV * st.v0.invZ) + (cov.b1 * st.v1.origV * st.v1.invZ) +
+                             (cov.b2 * st.v2.origV * st.v2.invZ)) *
+                            viewZ;
+        const ShadingTriangle& triangle = shadingTriangles[static_cast<std::size_t>(st.triangleIndex)];
+        const Material& material = instances[static_cast<std::size_t>(triangle.instanceIndex)].material;
+        shadePixel(result, x, y, viewZ, origU, origV, triangle, material, settings, camPos, st.v0, st.v1,
+                   st.v2);
+    }
+}
+
+// Bounding-box edges: real line segments z-tested against the row's now-finalized depth (real geometry occludes them) but never written back to it, so box edges never occlude each other -- all 12 show unless real mesh blocks them. Drawn into the same wireframe AOV as the mesh edges, in yellow, taking precedence over white where both apply.
+void drawBoxEdgesRow(RasterGBuffer& result, int y, const std::vector<RasterLineSegment>& boxEdges,
+                      const float* zRow) {
+    for (const RasterLineSegment& seg : boxEdges) {
+        if (y < seg.minY || y > seg.maxY) {
+            continue;
+        }
+        for (int x = seg.minX; x <= seg.maxX; ++x) {
+            const glm::vec2 p(static_cast<float>(x) + 0.5F, static_cast<float>(y) + 0.5F);
+            const LineProximity prox = nearLineSegmentPx(p, seg.p0, seg.p1, kLineThicknessPx);
+            if (!prox.near) {
+                continue;
+            }
+            const float viewZ = 1.0F / glm::mix(seg.invZ0, seg.invZ1, prox.t);
+            if (viewZ <= zRow[x]) {
+                writeTexel(result.wireframe, x, y, kBoundingBoxColor);
+            }
+        }
+    }
+}
+
 // Every AOV image in one place, so the reallocation and the per-row clear below cannot disagree about which fields exist -- adding an AOV to RasterGBuffer without adding it here leaves it uncleared, which this array's fixed size catches at compile time.
 std::array<engine::gfx::HdrImage*, 15> aovImages(RasterGBuffer& g) {
     return {&g.iorAov, &g.depth,    &g.worldPos, &g.uv,      &g.normal,
@@ -340,7 +431,10 @@ void renderRasterGBuffer(const Camera& camera, const EmbreeAccel& accel,
     const RowBuckets rowBuckets = buildRowBuckets(subTriangles, height);
     const AabbBounds sceneBounds = accel.sceneBounds();
     const std::vector<RasterLineSegment> boxEdges = buildBoxEdges(camera, sceneBounds, width, height);
-    std::vector<float> zbuffer(static_cast<std::size_t>(width) * static_cast<std::size_t>(height));
+    const std::size_t pixelCount = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+    std::vector<float> zbuffer(pixelCount);
+    // The depth pass's other output: which sub-triangle owns each pixel, -1 for uncovered. 4 bytes per pixel, sized like the z-buffer because both are written by whichever worker owns the row.
+    std::vector<int> winners(pixelCount);
 
     const glm::vec3 camPos = camera.position();
 
@@ -351,71 +445,18 @@ void renderRasterGBuffer(const Camera& camera, const EmbreeAccel& accel,
             float* row = image->rgba.data() + (rowStart * 4);
             std::fill(row, row + (static_cast<std::size_t>(width) * 4), 0.0F);
         }
+        float* zRow = zbuffer.data() + rowStart;
+        int* winnerRow = winners.data() + rowStart;
+        std::fill(zRow, zRow + width, std::numeric_limits<float>::max());
+        std::fill(winnerRow, winnerRow + width, -1);
         for (int x = 0; x < width; ++x) {
-            zbuffer[rowStart + static_cast<std::size_t>(x)] = std::numeric_limits<float>::max();
             writeTexel(result.iorAov, x, y, glm::vec3(-1.0F));
         }
 
-        const std::size_t rowEnd = rowBuckets.offsets[static_cast<std::size_t>(y) + 1];
-        for (std::size_t k = rowBuckets.offsets[static_cast<std::size_t>(y)]; k < rowEnd; ++k) {
-            const RasterSubTriangle& st =
-                subTriangles[static_cast<std::size_t>(rowBuckets.indices[k])];
-            for (int x = st.minX; x <= st.maxX; ++x) {
-                const float px = static_cast<float>(x) + 0.5F;
-                const float py = static_cast<float>(y) + 0.5F;
-                const float w0 = edgeFunction(st.v1, st.v2, px, py);
-                const float w1 = edgeFunction(st.v2, st.v0, px, py);
-                const float w2 = edgeFunction(st.v0, st.v1, px, py);
-                if (w0 < 0.0F || w1 < 0.0F || w2 < 0.0F) {
-                    continue;
-                }
-                const float b0 = w0 * st.invArea;
-                const float b1 = w1 * st.invArea;
-                const float b2 = w2 * st.invArea;
-                const float invZ = (b0 * st.v0.invZ) + (b1 * st.v1.invZ) + (b2 * st.v2.invZ);
-                const float viewZ = 1.0F / invZ;
-
-                const std::size_t idx =
-                    (static_cast<std::size_t>(y) * static_cast<std::size_t>(width)) + static_cast<std::size_t>(x);
-                if (viewZ >= zbuffer[idx]) {
-                    continue;
-                }
-                zbuffer[idx] = viewZ;
-
-                const float origU = ((b0 * st.v0.origU * st.v0.invZ) + (b1 * st.v1.origU * st.v1.invZ) +
-                                      (b2 * st.v2.origU * st.v2.invZ)) *
-                                     viewZ;
-                const float origV = ((b0 * st.v0.origV * st.v0.invZ) + (b1 * st.v1.origV * st.v1.invZ) +
-                                      (b2 * st.v2.origV * st.v2.invZ)) *
-                                     viewZ;
-
-                const ShadingTriangle& triangle = shadingTriangles[static_cast<std::size_t>(st.triangleIndex)];
-                const Material& material = instances[static_cast<std::size_t>(triangle.instanceIndex)].material;
-                shadePixel(result, x, y, viewZ, origU, origV, triangle, material, settings, camPos, st.v0,
-                           st.v1, st.v2);
-            }
-        }
-
-        // Bounding-box edges: real line segments z-tested against the row's now-finalized zbuffer (real geometry occludes them) but never written back to it, so box edges never occlude each other -- all 12 show unless real mesh blocks them. Drawn into the same wireframe AOV as the mesh edges above, in yellow, taking precedence over white where both apply.
-        for (const RasterLineSegment& seg : boxEdges) {
-            if (y < seg.minY || y > seg.maxY) {
-                continue;
-            }
-            for (int x = seg.minX; x <= seg.maxX; ++x) {
-                const glm::vec2 p(static_cast<float>(x) + 0.5F, static_cast<float>(y) + 0.5F);
-                const LineProximity prox = nearLineSegmentPx(p, seg.p0, seg.p1, kLineThicknessPx);
-                if (!prox.near) {
-                    continue;
-                }
-                const float invZ = glm::mix(seg.invZ0, seg.invZ1, prox.t);
-                const float viewZ = 1.0F / invZ;
-                const std::size_t idx =
-                    (static_cast<std::size_t>(y) * static_cast<std::size_t>(width)) + static_cast<std::size_t>(x);
-                if (viewZ <= zbuffer[idx]) {
-                    writeTexel(result.wireframe, x, y, kBoundingBoxColor);
-                }
-            }
-        }
+        depthPassRow(y, subTriangles, rowBuckets, zRow, winnerRow);
+        shadeRow(result, y, width, subTriangles, shadingTriangles, instances, settings, camPos, zRow,
+                 winnerRow);
+        drawBoxEdgesRow(result, y, boxEdges, zRow);
     };
 
     threadPool.parallelFor(height, renderRow);
