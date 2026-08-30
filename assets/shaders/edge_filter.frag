@@ -7,6 +7,7 @@ uniform int uFilterMode;      // 0=Sobel 1=Gabor 2=Luminance passthrough (no nei
 uniform float uGaborKernel[100];  // 4 orientations x 5x5 taps, see main.cpp's buildGaborKernel
 uniform int uChannelView;     // 0=off 1=R 2=G 3=B -- isolation was previously baked into the uploaded texels by a CPU copy of the whole image; as a uniform, toggling it costs nothing and needs no re-upload
 uniform float uExposure;     // pow(2, relativeExposureEv()) -- same multiplier Beauty itself displays at (OcioDisplayTransform::bind); applied per-tap in sampleLuminance so Sobel/Gabor's gradient of an already-exposed signal scales by the same factor as Beauty, rather than staying frozen at unity gain
+uniform bool uInvert;        // 1.0 - value, applied to the final output colour -- the 'I' debug toggle
 
 out vec4 fragColor;
 
@@ -65,5 +66,9 @@ void main() {
     float value = uFilterMode == 2   ? sampleLuminance(vUv, texel, vec2(0.0))
                   : uFilterMode == 1 ? gabor(texel)
                                      : sobel(texel);
-    fragColor = vec4(vec3(clamp(value, 0.0, 1.0)), 1.0);
+    float outValue = clamp(value, 0.0, 1.0);
+    if (uInvert) {
+        outValue = 1.0 - outValue;
+    }
+    fragColor = vec4(vec3(outValue), 1.0);
 }
