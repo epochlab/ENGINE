@@ -27,6 +27,9 @@ struct ProfileConfig {
     std::string hdriPath;  // environment map, relative to ASSET_ROOT_DIR
     int windowWidth;
     int windowHeight;
+    // Fraction of the framebuffer the path tracer and rasterizer actually render at, upscaled to the window by the display blit's GL_LINEAR filter. On a Retina display a 1024x576 window is a 2048x1152 framebuffer, so 1.0 traces 4x the paths the window implies. renderScale applies once the camera settles, interactiveRenderScale while it is moving -- the standard progressive-renderer trade of resolution for latency during interaction. Both in (0,1].
+    float renderScale;
+    float interactiveRenderScale;
     // Index into engine::debug::AovId / kAovNames (aov.h) (0 = Beauty).
     int defaultAov;
     engine::gfx::OcioDisplayTransform::Lut defaultLut;

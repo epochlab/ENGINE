@@ -49,6 +49,9 @@ std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
     const std::optional<std::string> hdriPath = json::findString(*text, "hdriPath");
     const std::optional<double> windowWidth = json::findNumber(*text, "windowWidth");
     const std::optional<double> windowHeight = json::findNumber(*text, "windowHeight");
+    const std::optional<double> renderScale = json::findNumber(*text, "renderScale");
+    const std::optional<double> interactiveRenderScale =
+        json::findNumber(*text, "interactiveRenderScale");
     const std::optional<double> defaultAov = json::findNumber(*text, "defaultAOV");
     const std::optional<std::string> defaultLutName = json::findString(*text, "defaultLUT");
     const std::optional<engine::gfx::OcioDisplayTransform::Lut> defaultLut =
@@ -62,7 +65,8 @@ std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
     if (!position || !yawDegrees || !pitchDegrees || !filmBackWidthMm || !filmBackHeightMm ||
         !focalLengthMm || !nearClip || !farClip || !aperture || !shutterSeconds || !iso ||
         !flySpeed || !orbitSensitivity || !hdriPath.has_value() || !windowWidth.has_value() ||
-        !windowHeight.has_value() || !defaultAov.has_value() || !defaultLut.has_value() ||
+        !windowHeight.has_value() || !renderScale.has_value() ||
+        !interactiveRenderScale.has_value() || !defaultAov.has_value() || !defaultLut.has_value() ||
         !samplesPerPixel.has_value() || !maxBounces.has_value() ||
         !russianRouletteStartBounce.has_value() || !maxSamples.has_value()) {
         std::cerr << "loadProfileConfig: " << path << " is missing one or more required fields\n";
@@ -73,6 +77,13 @@ std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
         *shutterSeconds <= 0.0 || *iso <= 0.0) {
         std::cerr << "loadProfileConfig: " << path
                    << " has a non-positive filmBack/focalLengthMm/aperture/shutterSeconds/iso\n";
+        return std::nullopt;
+    }
+    // Bounded at (0,1] rather than merely positive: above 1 would render above the framebuffer and hand the display blit a downscale it has no filter for, and at or below 0 the render target collapses.
+    if (*renderScale <= 0.0 || *renderScale > 1.0 || *interactiveRenderScale <= 0.0 ||
+        *interactiveRenderScale > 1.0) {
+        std::cerr << "loadProfileConfig: " << path
+                   << " has a renderScale/interactiveRenderScale outside (0,1]\n";
         return std::nullopt;
     }
 
@@ -93,6 +104,8 @@ std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
         *hdriPath,
         static_cast<int>(*windowWidth),
         static_cast<int>(*windowHeight),
+        static_cast<float>(*renderScale),
+        static_cast<float>(*interactiveRenderScale),
         static_cast<int>(*defaultAov),
         *defaultLut,
         static_cast<int>(*samplesPerPixel),
