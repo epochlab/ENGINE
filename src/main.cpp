@@ -9,7 +9,6 @@
 #include <optional>
 #include <string>
 #include <utility>
-#include <vector>
 
 // GLEW before GLFW — see gl_debug.cpp for why.
 #include <GL/glew.h>
@@ -508,20 +507,6 @@ void resolveOrbitPick(engine::platform::Window& window, AppResources& app,
     app.lastCursorY = cursorY;
 }
 
-// HdrImage's row 0 is documented as the image's top (EXR/glTF convention, hdr_image.h); GL texture v=0 samples the first uploaded row, and fullscreen_triangle.vert's vUv places v=0 at the bottom of the window. Row-reversing here -- only for this fixed-blit display path, never for material or environment HdrImages sampled via mesh UVs / the equirect formula (environment_map.cpp), which already agree with row-0-top by construction -- makes the uploaded buffer's first row the image's bottom row, matching every other texture this same blit displays.
-std::vector<float> flipRowsForDisplay(const engine::gfx::HdrImage& image) {
-    std::vector<float> flipped(image.rgba.size());
-    const std::size_t rowFloats = static_cast<std::size_t>(image.width) * 4;
-    for (int y = 0; y < image.height; ++y) {
-        const std::size_t src = static_cast<std::size_t>(y) * rowFloats;
-        const std::size_t dst = static_cast<std::size_t>(image.height - 1 - y) * rowFloats;
-        for (std::size_t i = 0; i < rowFloats; ++i) {
-            flipped[dst + i] = image.rgba[src + i];
-        }
-    }
-    return flipped;
-}
-
 // Bundles the HdrImage a given AOV should display with a type-erased strong ref to whichever published object -- the driver's PathTraceResult or the synchronous RasterGBuffer -- actually owns it. That ref both keeps the owning object alive and gives ensurePathTraceDisplayTexture an ABA-safe cache-key identity: a raw pointer to it could, in principle, be freed and have a later unrelated shared_ptr allocation reuse the same address; holding a real shared_ptr can't.
 struct PathTracedAovSource {
     const engine::gfx::HdrImage* image = nullptr;
@@ -650,7 +635,7 @@ engine::debug::PixelProbeSample samplePixelProbe(
     return {true, glm::vec4(pixel[0], pixel[1], pixel[2], pixel[3]) / 255.0F};
 }
 
-// Rebuilds pathTraceDisplayTexture only when the selected AOV or the published object that owns the image actually changed -- recreating a GL texture (alloc + upload + mipmap) every frame just to redisplay the same image would violate this codebase's no-allocation-after-init convention for no reason. The driver publishes a fresh result object every completed pass, though, so while it's actively converging this does rebuild the texture up to once per rendered frame -- that per-frame cap (not a lower one) is deliberate: it is what makes newly-accumulated samples visible at all. Channel view is deliberately absent from that key: it is a shader uniform now, so isolating a channel changes nothing about the texels and must not force a rebuild. owner: a strong ref to whichever published object actually owns `image` (see PathTracedAovSource) -- comparing shared_ptr identity, not a raw pointer, since a raw pointer to a previous frame's already-freed result could in principle have its address reused by a later allocation (ABA); holding a real shared_ptr in app.pathTraceDisplayedOwner rules that out. For Depth specifically, also rescans `image` for its own max value into app.pathTraceDisplayedDepthMax on every rebuild -- presentFrame uses that as an auto-ranging display-exposure bound instead of Camera::farClip(), since farClip is a conservative ray tMax bound, not a proxy for the actual visible scene's depth extent.
+// Re-uploads pathTraceDisplayTexture only when the selected AOV or the published object that owns the image actually changed -- re-sending 33 MB over PCIe every frame just to redisplay texels the GPU already holds would violate this codebase's no-work-per-frame-without-a-reason convention. The upload itself no longer destroys and recreates the texture object (Texture::upload). The driver publishes a fresh result object every completed pass, though, so while it's actively converging this does rebuild the texture up to once per rendered frame -- that per-frame cap (not a lower one) is deliberate: it is what makes newly-accumulated samples visible at all. Channel view is deliberately absent from that key: it is a shader uniform now, so isolating a channel changes nothing about the texels and must not force a rebuild. owner: a strong ref to whichever published object actually owns `image` (see PathTracedAovSource) -- comparing shared_ptr identity, not a raw pointer, since a raw pointer to a previous frame's already-freed result could in principle have its address reused by a later allocation (ABA); holding a real shared_ptr in app.pathTraceDisplayedOwner rules that out. For Depth specifically, also rescans `image` for its own max value into app.pathTraceDisplayedDepthMax on every rebuild -- presentFrame uses that as an auto-ranging display-exposure bound instead of Camera::farClip(), since farClip is a conservative ray tMax bound, not a proxy for the actual visible scene's depth extent.
 void ensurePathTraceDisplayTexture(AppResources& app, const std::shared_ptr<const void>& owner,
                                     const engine::gfx::HdrImage& image, std::uint64_t generation) {
     if (app.pathTraceDisplayTexture.has_value() && app.pathTraceDisplayedAov == app.aov &&
@@ -664,9 +649,13 @@ void ensurePathTraceDisplayTexture(AppResources& app, const std::shared_ptr<cons
         }
         app.pathTraceDisplayedDepthMax = maxDepth;
     }
-    const std::vector<float> flipped = flipRowsForDisplay(image);
-    app.pathTraceDisplayTexture =
-        engine::gfx::Texture::createFromFloatPixels(image.width, image.height, flipped.data());
+    // Uploaded straight from the HdrImage: no row-reversed scratch copy, and no texture object churn -- fullscreen_triangle.vert now resolves the row-order convention, and Texture::upload reallocates only if the render resolution actually changed.
+    if (app.pathTraceDisplayTexture.has_value()) {
+        app.pathTraceDisplayTexture->upload(image.width, image.height, image.rgba.data());
+    } else {
+        app.pathTraceDisplayTexture =
+            engine::gfx::Texture::createFromFloatPixels(image.width, image.height, image.rgba.data());
+    }
     app.pathTraceDisplayedAov = app.aov;
     app.pathTraceDisplayedOwner = owner;
     app.pathTraceDisplayedGeneration = generation;
