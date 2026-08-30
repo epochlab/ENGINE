@@ -45,7 +45,7 @@
 #include "engine/scene/path_trace_driver.h"
 #include "engine/scene/path_tracer.h"
 #include "engine/scene/rasterizer.h"
-#include "engine/scene/row_thread_pool.h"
+#include "engine/scene/thread_pool.h"
 
 namespace {
 
@@ -197,8 +197,8 @@ struct AppResources {
     float interactiveRenderScale;
     std::chrono::steady_clock::time_point lastInputChange;
 
-    // Synchronous per-frame CPU rasterizer for the 15 primary-hit-only G-buffer AOVs (rasterizer.h) -- their only producer, decoupled from PathTraceDriver's async convergence loop. unique_ptr for the same reason as pathTraceDriver: RowThreadPool's copy/move are deleted (owns worker threads), so a by-value member would break AppResources's movability.
-    std::unique_ptr<engine::scene::RowThreadPool> rasterThreadPool;
+    // Synchronous per-frame CPU rasterizer for the 15 primary-hit-only G-buffer AOVs (rasterizer.h) -- their only producer, decoupled from PathTraceDriver's async convergence loop. unique_ptr for the same reason as pathTraceDriver: ThreadPool's copy/move are deleted (owns worker threads), so a by-value member would break AppResources's movability.
+    std::unique_ptr<engine::scene::ThreadPool> rasterThreadPool;
     // Allocated once and rendered into in place (rasterizer.h), never republished -- its `generation` field, not its address, is what tells one render from the next. Refreshed synchronously in requestPathTraceIfTriggerChanged whenever a rasterizer-backed AOV is selected and an input changed; generation stays 0 while only light-transport AOVs are ever shown, because then it never runs at all.
     std::shared_ptr<engine::scene::RasterGBuffer> rasterGBuffer;
 
@@ -407,7 +407,7 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         .renderScale = profileConfig.renderScale,
         .interactiveRenderScale = profileConfig.interactiveRenderScale,
         .lastInputChange = std::chrono::steady_clock::time_point{},
-        .rasterThreadPool = std::make_unique<engine::scene::RowThreadPool>(),
+        .rasterThreadPool = std::make_unique<engine::scene::ThreadPool>(),
         .rasterGBuffer = std::make_shared<engine::scene::RasterGBuffer>(),
         .orbitPickRequested = false,
         .lastCursorX = 0.0,
@@ -773,6 +773,8 @@ void requestPathTraceIfTriggerChanged(AppResources& app, const engine::scene::Ca
 
     const int renderWidth = scaledExtent(fbWidth, current.renderScale);
     const int renderHeight = scaledExtent(fbHeight, current.renderScale);
+    // Park the driver whenever the selected AOV is one it does not produce. Without this it keeps accumulating passes of an image no longer on screen, on every core, for as long as a rasterizer AOV stays selected -- competing with the rasterizer the render thread is running synchronously right here.
+    app.pathTraceDriver->setSuspended(!needsLightTransport);
     if (needsLightTransport) {
         requestPathTrace(app, camera, renderWidth, renderHeight);
     }

@@ -1,15 +1,15 @@
-#include "engine/scene/row_thread_pool.h"
+#include "engine/scene/thread_pool.h"
 
 namespace engine::scene {
 
-RowThreadPool::RowThreadPool(unsigned int threadCount) {
+ThreadPool::ThreadPool(unsigned int threadCount) {
     workers_.reserve(threadCount);
     for (unsigned int i = 0; i < threadCount; ++i) {
         workers_.emplace_back([this] { workerLoop(); });
     }
 }
 
-RowThreadPool::~RowThreadPool() {
+ThreadPool::~ThreadPool() {
     {
         const std::lock_guard<std::mutex> lock(mutex_);
         shuttingDown_ = true;
@@ -21,7 +21,7 @@ RowThreadPool::~RowThreadPool() {
     }
 }
 
-void RowThreadPool::parallelFor(int count, const std::function<void(int)>& fn) {
+void ThreadPool::parallelFor(int count, const std::function<void(int)>& fn) {
     if (count <= 0) {
         return;
     }
@@ -39,7 +39,7 @@ void RowThreadPool::parallelFor(int count, const std::function<void(int)>& fn) {
     fn_ = nullptr;
 }
 
-void RowThreadPool::workerLoop() {
+void ThreadPool::workerLoop() {
     std::uint64_t lastEpoch = 0;
     while (true) {
         std::unique_lock<std::mutex> lock(mutex_);

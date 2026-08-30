@@ -23,8 +23,8 @@
 #include "engine/scene/path_tracer.h"
 #include "engine/scene/rasterizer.h"
 #include "engine/scene/ray_types.h"
-#include "engine/scene/row_thread_pool.h"
 #include "engine/scene/shading_scene.h"
+#include "engine/scene/thread_pool.h"
 
 namespace {
 
@@ -216,7 +216,7 @@ int main(int argc, char** argv) {
     settings.metallicFactor = 0.2F;
     settings.roughnessFactor = 1.0F;
 
-    RowThreadPool threadPool;
+    ThreadPool threadPool;
     // One buffer for the whole run, matching how the app owns it: renderRasterGBuffer reuses it in place, so the timed frames measure steady-state cost with no allocation in them.
     RasterGBuffer gbuffer;
     // Discarded warm-up pass, absorbing the costs that happen once rather than per frame: spinning up and parking the pool's workers, and the buffer's only allocation.

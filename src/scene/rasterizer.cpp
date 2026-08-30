@@ -170,7 +170,7 @@ void pushSubTriangle(ScreenVertex v0, ScreenVertex v1, ScreenVertex v2, int tria
 // Clips/projects/winding-normalizes every triangle once per call, in parallel over chunks of the triangle list -- cheap per-triangle math, but at a few million triangles doing it on one thread is a frame-rate ceiling by itself. Each chunk appends to its own vector, so the appends need no synchronization, and the chunks are concatenated in order afterwards: the result is the identical sequence a sequential build produces, which matters because the z-test below is first-writer-wins at exactly equal depth.
 std::vector<RasterSubTriangle> buildSubTriangles(const Camera& camera,
                                                   const std::vector<ShadingTriangle>& shadingTriangles,
-                                                  int width, int height, RowThreadPool& threadPool) {
+                                                  int width, int height, ThreadPool& threadPool) {
     const glm::vec3 camPos = camera.position();
     const Camera::ViewBasis basis = camera.viewBasis(static_cast<float>(width) / static_cast<float>(height));
 
@@ -416,7 +416,7 @@ void renderRasterGBuffer(const Camera& camera, const EmbreeAccel& accel,
                           const std::vector<ShadingTriangle>& shadingTriangles,
                           const std::vector<MeshInstance>& instances,
                           const PathTraceSettings& settings, int width, int height,
-                          RowThreadPool& threadPool, RasterGBuffer& result) {
+                          ThreadPool& threadPool, RasterGBuffer& result) {
     const std::array<engine::gfx::HdrImage*, 15> images = aovImages(result);
     // Reallocated only on a resolution change; every other call reuses the storage and relies on renderRow's clear. makeImage's own zeroing is redundant against that clear but runs once per resize, not once per frame.
     if (result.depth.width != width || result.depth.height != height) {

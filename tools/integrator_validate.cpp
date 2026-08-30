@@ -33,8 +33,8 @@
 #include "engine/scene/environment_map.h"
 #include "engine/scene/gltf_loader.h"
 #include "engine/scene/path_tracer.h"
-#include "engine/scene/row_thread_pool.h"
 #include "engine/scene/shading_scene.h"
+#include "engine/scene/thread_pool.h"
 
 namespace {
 
@@ -226,7 +226,7 @@ float referenceLo(const BsdfParams& params, const glm::vec3& wo, int sampleCount
 // Runs one full renderPathTraced pass over the quad scene. showSky gates only the primary ray's own miss, so turning it off zeroes the background term the transport buckets deliberately exclude.
 engine::scene::PathTraceResult renderPass(const QuadScene& scene, const EnvironmentMap& env,
                                            const PathTraceSettings& settings, EmbreeAccel& accel,
-                                           engine::scene::RowThreadPool& pool, bool showSky) {
+                                           engine::scene::ThreadPool& pool, bool showSky) {
     const std::atomic<std::uint64_t> generation{1};
     engine::scene::PathTraceResult result =
         engine::scene::makePathTraceResult(kImageSize, kImageSize);
@@ -239,7 +239,7 @@ engine::scene::PathTraceResult renderPass(const QuadScene& scene, const Environm
 
 // Centre-region mean radiance of one pass.
 float renderCentre(const QuadScene& scene, const EnvironmentMap& env, const PathTraceSettings& settings,
-                    EmbreeAccel& accel, engine::scene::RowThreadPool& pool) {
+                    EmbreeAccel& accel, engine::scene::ThreadPool& pool) {
     const glm::vec3 mean = centreMean(renderPass(scene, env, settings, accel, pool, true).beauty);
     return std::max({mean.x, mean.y, mean.z});
 }
@@ -266,7 +266,7 @@ bool runCases() {
     constexpr int kReferenceSamples = 400000;
 
     const EnvironmentMap env = makeUniformEnvironment();
-    engine::scene::RowThreadPool pool;
+    engine::scene::ThreadPool pool;
     std::mt19937 referenceRng(99);
     bool ok = true;
 
@@ -347,7 +347,7 @@ bool checkTransmissiveSlab() {
     const std::array<float, 5> roughnesses = {0.02F, 0.05F, 0.4F, 0.7F, 1.0F};
 
     const EnvironmentMap env = makeUniformEnvironment();
-    engine::scene::RowThreadPool pool;
+    engine::scene::ThreadPool pool;
     bool ok = true;
 
     std::cout << "integrator_validate: white non-absorbing slab, uniform L0=1 (1.0 = invisible)\n";
@@ -408,7 +408,7 @@ bool checkTransportPartition() {
     }};
 
     const EnvironmentMap env = makeUniformEnvironment();
-    engine::scene::RowThreadPool pool;
+    engine::scene::ThreadPool pool;
     bool ok = true;
 
     std::cout << "integrator_validate: transport buckets partition beauty (showSky off)\n";

@@ -14,7 +14,7 @@ constexpr std::chrono::milliseconds kIdlePollInterval{5};
 
 // Incremental running mean, out of place: newMean = previousMean + (sample - previousMean)/n, computed in the freshly rendered pass buffer so the published set is only ever READ. That is what lets the publish below be a pointer assignment instead of the whole-image copy it used to hold resultMutex_ for, and what keeps a render thread holding the previous set from seeing a half-updated image. Running mean rather than a running sum: no separate sum buffer, and the result is always already display-ready with no final division. Row-parallel over the same pool the pass just finished with, which is otherwise idle at this moment.
 void accumulateMean(PathTraceResult& sample, const PathTraceResult& previousMean, int n,
-                     RowThreadPool& threadPool) {
+                     ThreadPool& threadPool) {
     const std::array<engine::gfx::HdrImage*, 8> destinations{
         &sample.beauty,          &sample.bounceHeatmap,    &sample.shadow,
         &sample.directDiffuse,   &sample.indirectDiffuse,  &sample.directSpecular,
@@ -58,6 +58,14 @@ void PathTraceDriver::requestTrace(const Request& request) {
     generation_.fetch_add(1, std::memory_order_relaxed);
 }
 
+void PathTraceDriver::setSuspended(bool suspended) {
+    // Only the false -> true edge bumps: cancelling once is enough, and bumping on every frame that stays suspended would keep the driver churning through generations it is not running anyway.
+    const bool wasSuspended = suspended_.exchange(suspended, std::memory_order_relaxed);
+    if (suspended && !wasSuspended) {
+        generation_.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
 std::shared_ptr<const PathTraceResult> PathTraceDriver::latestResult() const {
     const std::lock_guard<std::mutex> lock(resultMutex_);
     return result_;
@@ -85,7 +93,7 @@ void PathTraceDriver::driverLoop(std::stop_token stopToken) {
 
     while (!stopToken.stop_requested()) {
         const std::uint64_t requestedGeneration = generation_.load(std::memory_order_relaxed);
-        if (requestedGeneration == 0) {
+        if (requestedGeneration == 0 || suspended_.load(std::memory_order_relaxed)) {
             std::this_thread::sleep_for(kIdlePollInterval);
             continue;
         }

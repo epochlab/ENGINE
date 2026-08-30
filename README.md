@@ -150,7 +150,7 @@ Ordered quick → complex; items within **Large** are a strict dependency chain 
   3. *Per-material factors.* `Material` holds six textures and nothing else, so `metallic_factor`, `roughness_factor`, `base_color_factor`, `ior` and `transmission_factor` are parsed by cgltf and discarded — every material in the scene shares one global set from `material.json`, and **a scene containing a metal object and a plastic object cannot be represented**. Move them onto `Material` and demote `MaterialConfig` to a global override layer. Also deletes `extrasTextureIndex` (`gltf_loader.cpp:35`), the hand-rolled substring scanner that exists only because roughness/specular/bump were hand-authored into glTF `extras`.
 - **Frustum/backface culling** — skip `buildSubTriangles`'s per-frame full-scene walk (`rasterizer.cpp:153,274`) and the equivalent Embree traversal when out of view.
 - **Low-discrepancy sampler upgrade** — Sobol / hash-based Owen scrambling (Burley 2020, §5), replacing randomized Halton (`sampler.cpp`).
-- **Tiling + render-mode selector** — Single Sample / Progressive / Adaptive Tiling (today: row-based `RowThreadPool`, no tiling).
+- **Render-mode selector + adaptive tiling** — Single Sample / Progressive / Adaptive Tiling (today: the path tracer dispatches fixed 96x96 tiles and the rasterizer rows, both through `ThreadPool`; neither adapts to where the image is still noisy, and the mode is not selectable).
 - **Adaptive per-pixel sample budget** — variance-driven, builds on tiling above.
 - **Texture minification filtering (MIP-mapping)** — point/bilinear only today; grazing/distant surfaces alias.
 

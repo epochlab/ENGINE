@@ -18,8 +18,8 @@
 #include "engine/scene/gltf_loader.h"
 #include "engine/scene/rasterizer.h"
 #include "engine/scene/ray_types.h"
-#include "engine/scene/row_thread_pool.h"
 #include "engine/scene/shading_scene.h"
+#include "engine/scene/thread_pool.h"
 
 namespace {
 
@@ -126,7 +126,7 @@ int checkFields(const std::vector<FieldCheck>& fields, int x, int y, const char*
 bool checkPose(const char* poseName, const Camera& camera, const EmbreeAccel& accel,
                const std::vector<ShadingTriangle>& shadingTriangles,
                const std::vector<MeshInstance>& instances, const PathTraceSettings& settings,
-               RowThreadPool& threadPool) {
+               ThreadPool& threadPool) {
     RasterGBuffer raster;
     renderRasterGBuffer(camera, accel, shadingTriangles, instances, settings, kWidth, kHeight, threadPool, raster);
     const float aspect = static_cast<float>(kWidth) / static_cast<float>(kHeight);
@@ -254,7 +254,7 @@ int countBoundingBoxPixels(const RasterGBuffer& raster) {
 }
 
 // Regression check: box edges are real line segments z-tested against scene geometry, so a solid occluder in front of the box should hide edges behind it. Case 1: two tiny (non-occluding) corner markers define the box -- all 12 edges eligible. Case 2: an occluder nearer than the box's near corner, same x/y extent as the marker (not larger -- it's part of the scene, so a larger extent would enlarge accel.sceneBounds() and test a different box). Tiny markers, not a filled quad, define the box corners: a filled quad would self-occlude in both cases.
-bool checkBoundingBoxOcclusion(RowThreadPool& threadPool) {
+bool checkBoundingBoxOcclusion(ThreadPool& threadPool) {
     const Camera::FilmBack filmBack{36.0F, 24.0F};
     const Camera camera(glm::vec3(0.0F), 0.0F, 0.0F, filmBack, 35.0F, 0.1F, 100.0F, 2.8F, 1.0F / 125.0F,
                         100.0F);
@@ -324,7 +324,7 @@ bool checkBoundingBoxOcclusion(RowThreadPool& threadPool) {
 bool checkWireframeSanity(const Camera& camera, const EmbreeAccel& accel,
                            const std::vector<ShadingTriangle>& shadingTriangles,
                            const std::vector<MeshInstance>& instances, const PathTraceSettings& settings,
-                           RowThreadPool& threadPool) {
+                           ThreadPool& threadPool) {
     RasterGBuffer raster;
     renderRasterGBuffer(camera, accel, shadingTriangles, instances, settings, kWidth, kHeight, threadPool, raster);
     int hitPixels = 0;
@@ -393,7 +393,7 @@ int main() {
     const Camera clipTest(glm::vec3(0.0F, 0.0F, 0.0F), 5.0F, 5.0F, filmBack, 35.0F, 5.0F, 100.0F, 2.8F,
                            1.0F / 125.0F, 100.0F);
 
-    RowThreadPool threadPool;
+    ThreadPool threadPool;
     bool ok = true;
     ok = checkPose("straightOn", straightOn, *accel, shadingTriangles, instances, settings, threadPool) && ok;
     ok = checkPose("angled", angled, *accel, shadingTriangles, instances, settings, threadPool) && ok;
