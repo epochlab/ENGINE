@@ -129,10 +129,10 @@ Ordered quick → complex; items within **Large** are a strict dependency chain 
 
 ### Quick
 
+- **Expand terminal output (launch + loop)** — startup logs GL extensions/camera pose/model/BVH stats (`main.cpp:286-361`); no per-frame stats print during the interactive loop (`main.cpp:990`) — sample/pass/convergence stats reach only the HUD (`hud_overlay.cpp`), not stdout.
 - **scene.json as a CLI arg** — `main()` has no `argc`/`argv` (`main.cpp:864`); paths are hardcoded. Enables multi-scenario scenes.
 - **Texture bit depth (16/32) via JSON** — hardcoded `GL_RGBA16F` today (`texture.cpp:45`); 32F ~doubles VRAM/buffer.
 - **Code-quality audit** — `rotateAboutY` (`environment_map.cpp:13`) → `glm::rotate`; `ShadingFrame::toLocal`/`toWorld` (`bsdf.h:26`) → `glm::mat3`. (BSDF math in `bsdf.cpp` — GGX/Smith/Fresnel/VNDF — is standard domain logic, not an offload candidate.)
-- **Expand terminal output (launch + loop)** — startup logs GL extensions/camera pose/model/BVH stats (`main.cpp:286-361`); no per-frame stats print during the interactive loop (`main.cpp:990`) — sample/pass/convergence stats reach only the HUD (`hud_overlay.cpp`), not stdout.
 
 ### Moderate
 
@@ -163,7 +163,6 @@ Ordered quick → complex; items within **Large** are a strict dependency chain 
 7. **GenAI diffusion channel** — img2img refinement AOV + raw latent/embedding output for HOST's cognitive pipeline. Needs (6)'s converged image.
 8. **Upscaling** — spatial/temporal supersampling (neural, Xiao et al. 2020, §5, or classical).
 9. **GPU ray-tracing backend** — Embree SYCL or CUDA-OptiX, to raise achievable sample budget beyond CPU Embree. Today's single-ray `rtcIntersect1`/`rtcOccluded1` calls and per-ray inline shading in `tracePath` (`path_tracer.cpp:77`) are the opposite of a wavefront/streaming GPU kernel design — this item is that rearchitecture, not just a backend swap.
-10. **Production-scale scene/asset pipeline** — out-of-core streaming, distributed rendering, real multi-asset scene graph (today: one glTF + one HDRI), on the scene-graph foundation under **Moderate**. Broader materials (layered BSDF, hair, cloth) need (3).
 
 ### Low priority
 
