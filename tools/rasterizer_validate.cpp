@@ -127,8 +127,8 @@ bool checkPose(const char* poseName, const Camera& camera, const EmbreeAccel& ac
                const std::vector<ShadingTriangle>& shadingTriangles,
                const std::vector<MeshInstance>& instances, const PathTraceSettings& settings,
                RowThreadPool& threadPool) {
-    const RasterGBuffer raster =
-        renderRasterGBuffer(camera, accel, shadingTriangles, instances, settings, kWidth, kHeight, threadPool);
+    RasterGBuffer raster;
+    renderRasterGBuffer(camera, accel, shadingTriangles, instances, settings, kWidth, kHeight, threadPool, raster);
     const float aspect = static_cast<float>(kWidth) / static_cast<float>(kHeight);
     const glm::vec3 camPos = camera.position();
     const glm::vec3 camForward = camera.forward();
@@ -286,8 +286,8 @@ bool checkBoundingBoxOcclusion(RowThreadPool& threadPool) {
             std::cerr << "rasterizer_validate: checkBoundingBoxOcclusion FAILED -- accel build (case 1)\n";
             return false;
         }
-        const RasterGBuffer raster =
-            renderRasterGBuffer(camera, *accel, scene, instances, settings, kWidth, kHeight, threadPool);
+        RasterGBuffer raster;
+        renderRasterGBuffer(camera, *accel, scene, instances, settings, kWidth, kHeight, threadPool, raster);
         const int unoccluded = countBoundingBoxPixels(raster);
         std::cout << "rasterizer_validate: boundingBox unoccluded -- " << unoccluded << " pixels\n";
         if (unoccluded == 0) {
@@ -305,9 +305,9 @@ bool checkBoundingBoxOcclusion(RowThreadPool& threadPool) {
             std::cerr << "rasterizer_validate: checkBoundingBoxOcclusion FAILED -- accel build (case 2)\n";
             return false;
         }
-        const RasterGBuffer occludedRaster = renderRasterGBuffer(camera, *occludedAccel, occludedScene,
-                                                                  instances, settings, kWidth, kHeight,
-                                                                  threadPool);
+        RasterGBuffer occludedRaster;
+        renderRasterGBuffer(camera, *occludedAccel, occludedScene, instances, settings, kWidth, kHeight,
+                             threadPool, occludedRaster);
         const int occluded = countBoundingBoxPixels(occludedRaster);
         std::cout << "rasterizer_validate: boundingBox occluded -- " << occluded << " pixels\n";
         if (occluded * 2 >= unoccluded) {
@@ -325,8 +325,8 @@ bool checkWireframeSanity(const Camera& camera, const EmbreeAccel& accel,
                            const std::vector<ShadingTriangle>& shadingTriangles,
                            const std::vector<MeshInstance>& instances, const PathTraceSettings& settings,
                            RowThreadPool& threadPool) {
-    const RasterGBuffer raster =
-        renderRasterGBuffer(camera, accel, shadingTriangles, instances, settings, kWidth, kHeight, threadPool);
+    RasterGBuffer raster;
+    renderRasterGBuffer(camera, accel, shadingTriangles, instances, settings, kWidth, kHeight, threadPool, raster);
     int hitPixels = 0;
     int wirePixels = 0;
     for (int y = 0; y < kHeight; ++y) {

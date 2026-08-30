@@ -258,18 +258,28 @@ void shadePixel(RasterGBuffer& result, int x, int y, float viewZ, float origU, f
     writeTexel(result.iorAov, x, y, glm::vec3(settings.ior));
 }
 
+// Every AOV image in one place, so the reallocation and the per-row clear below cannot disagree about which fields exist -- adding an AOV to RasterGBuffer without adding it here leaves it uncleared, which this array's fixed size catches at compile time.
+std::array<engine::gfx::HdrImage*, 15> aovImages(RasterGBuffer& g) {
+    return {&g.iorAov, &g.depth,    &g.worldPos, &g.uv,      &g.normal,
+            &g.geomNormal, &g.albedo, &g.metallic, &g.roughness, &g.tangent,
+            &g.objectId, &g.alpha,  &g.fresnel,  &g.ao,      &g.wireframe};
+}
+
 }  // namespace
 
-RasterGBuffer renderRasterGBuffer(const Camera& camera, const EmbreeAccel& accel,
-                                   const std::vector<ShadingTriangle>& shadingTriangles,
-                                   const std::vector<MeshInstance>& instances,
-                                   const PathTraceSettings& settings, int width, int height,
-                                   RowThreadPool& threadPool) {
-    RasterGBuffer result{makeImage(width, height), makeImage(width, height), makeImage(width, height),
-                          makeImage(width, height), makeImage(width, height), makeImage(width, height),
-                          makeImage(width, height), makeImage(width, height), makeImage(width, height),
-                          makeImage(width, height), makeImage(width, height), makeImage(width, height),
-                          makeImage(width, height), makeImage(width, height), makeImage(width, height)};
+void renderRasterGBuffer(const Camera& camera, const EmbreeAccel& accel,
+                          const std::vector<ShadingTriangle>& shadingTriangles,
+                          const std::vector<MeshInstance>& instances,
+                          const PathTraceSettings& settings, int width, int height,
+                          RowThreadPool& threadPool, RasterGBuffer& result) {
+    const std::array<engine::gfx::HdrImage*, 15> images = aovImages(result);
+    // Reallocated only on a resolution change; every other call reuses the storage and relies on renderRow's clear. makeImage's own zeroing is redundant against that clear but runs once per resize, not once per frame.
+    if (result.depth.width != width || result.depth.height != height) {
+        for (engine::gfx::HdrImage* image : images) {
+            *image = makeImage(width, height);
+        }
+    }
+    ++result.generation;
 
     const std::vector<RasterSubTriangle> subTriangles = buildSubTriangles(camera, shadingTriangles, width, height);
     const AabbBounds sceneBounds = accel.sceneBounds();
@@ -279,10 +289,14 @@ RasterGBuffer renderRasterGBuffer(const Camera& camera, const EmbreeAccel& accel
     const glm::vec3 camPos = camera.position();
 
     const auto renderRow = [&](int y) {
+        // Clearing this row of every AOV is what makes the buffers reusable across calls: the worker that is about to overwrite the row zeroes it first, in parallel and while it is already cache-warm, instead of 15 sequential full-image memsets before the dispatch. An uncovered pixel therefore still reads back zero (alpha 0, the miss test every consumer uses) exactly as a freshly allocated image did.
+        const std::size_t rowStart = static_cast<std::size_t>(y) * static_cast<std::size_t>(width);
+        for (engine::gfx::HdrImage* image : images) {
+            float* row = image->rgba.data() + (rowStart * 4);
+            std::fill(row, row + (static_cast<std::size_t>(width) * 4), 0.0F);
+        }
         for (int x = 0; x < width; ++x) {
-            const std::size_t idx = (static_cast<std::size_t>(y) * static_cast<std::size_t>(width)) +
-                                     static_cast<std::size_t>(x);
-            zbuffer[idx] = std::numeric_limits<float>::max();
+            zbuffer[rowStart + static_cast<std::size_t>(x)] = std::numeric_limits<float>::max();
             writeTexel(result.iorAov, x, y, glm::vec3(-1.0F));
         }
 
@@ -349,7 +363,6 @@ RasterGBuffer renderRasterGBuffer(const Camera& camera, const EmbreeAccel& accel
     };
 
     threadPool.parallelFor(height, renderRow);
-    return result;
 }
 
 }  // namespace engine::scene
