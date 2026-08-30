@@ -2,6 +2,8 @@
 
 *A CPU, unidirectional Monte Carlo path tracer with real-time progressive display: Embree-accelerated, stochastic BSDF sampling combined with environment-map NEE via MIS, converging interactively behind a thin OpenGL display/HUD layer.*
 
+![Sample render](sample.png)
+
 ## Build
 
 C++20, built with CMake. Currently developed against macOS only.
@@ -146,13 +148,16 @@ Ordered quick → complex; items within **Large** are a strict dependency chain 
 
 - **Scene-graph foundation** — three steps in strict order, the only ordered chain outside **Large**, and the prerequisite for (10) there.
   1. *Indexed geometry.* `gltf_loader.cpp:94-129` de-indexes every mesh into soup and stores positions twice — once in `Triangle` for Embree, once in `ShadingVertex.position` for shading — 184 B/tri, ~920 MB on a 5M-triangle asset. `rtcSetSharedGeometryBuffer` takes a byte stride, so Embree can read positions in place from the indexed shading vertices instead, deleting the `Triangle` array, keeping glTF's own index buffer rather than filling one with the identity sequence (`embree_accel.cpp:77-84`), and dropping the `reserve(size+1)` padding hack. ~5x smaller, and the traversal locality matters more than the footprint.
-  2. *Object instancing.* `RTC_GEOMETRY_TYPE_INSTANCE` over one scene per unique mesh, replacing today's single flattened geometry (`embree_accel.cpp:65`) and finally giving `MeshInstance::transform` (`gltf_loader.h:18`, stored and never read) a consumer. `Hit` gains `geomID`/`instID`. Needs (1)'s indexed layout.
+  2. *Object instancing.* `RTC_GEOMETRY_TYPE_INSTANCE` over one scene per unique mesh, replacing today's single flattened geometry (`embree_accel.cpp:65`) and finally giving `MeshInstance::transform` (`gltf_loader.h:18`, stored and never read) a consumer. `Hit` gains `geomID`/`instID`. Rays trace in object space against shared BVH leaves instead of the per-instance duplication today's flattened soup incurs. Needs (1)'s indexed layout.
   3. *Per-material factors.* `Material` holds six textures and nothing else, so `metallic_factor`, `roughness_factor`, `base_color_factor`, `ior` and `transmission_factor` are parsed by cgltf and discarded — every material in the scene shares one global set from `material.json`, and **a scene containing a metal object and a plastic object cannot be represented**. Move them onto `Material` and demote `MaterialConfig` to a global override layer. Also deletes `extrasTextureIndex` (`gltf_loader.cpp:35`), the hand-rolled substring scanner that exists only because roughness/specular/bump were hand-authored into glTF `extras`.
 - **Frustum/backface culling** — skip `buildSubTriangles`'s per-frame full-scene walk (`rasterizer.cpp:153,274`) and the equivalent Embree traversal when out of view.
 - **Low-discrepancy sampler upgrade** — Sobol / hash-based Owen scrambling (Burley 2020, §5), replacing randomized Halton (`sampler.cpp`).
 - **Render-mode selector + adaptive tiling** — Single Sample / Progressive / Adaptive Tiling (today: the path tracer dispatches fixed 96x96 tiles and the rasterizer rows, both through `ThreadPool`; neither adapts to where the image is still noisy, and the mode is not selectable).
-- **Adaptive per-pixel sample budget** — variance-driven, builds on tiling above.
-- **Texture minification filtering (MIP-mapping)** — point/bilinear only today; grazing/distant surfaces alias.
+- **Adaptive per-pixel sample budget** — variance-driven, builds on tiling above; `samplesPerPixel` (`profile.json`) is one fixed global today, no per-pixel allocation.
+- **Texture minification filtering (MIP-mapping)** — point/bilinear only today (`sampleBilinear`, `hdr_image.h:22`); grazing/distant surfaces alias. No mip chain exists to select from; needs ray differentials to pick a level per ray.
+- **Packet tracing** — `EmbreeAccel` calls `rtcIntersect1`/`rtcOccluded1` exclusively (`embree_accel.cpp:116,144`), single-ray only; no `rtcIntersect4/8/16` packet API.
+- **Ray reordering before shading** — the tile loop traces in raster order (`path_tracer.cpp:307-320`) with no Morton/direction coherence sort ahead of `tracePath` (`path_tracer.cpp:77`).
+- **Deferred/sorted shading by material** — `tracePath` (`path_tracer.cpp:77`) evaluates the BSDF inline per ray; no material-bucketed shading pass.
 - **Camera film-back preset drop-down** — `Camera::FilmBack` (`camera.h:13-16`) is one fixed `{widthMm, heightMm}` from `profile.json:5`. JSON-defined preset list (Alexa XT, IMAX, Medium Format, 5D, Leica M11, Red, 35mm, 70mm); `ImGui::Combo` in HUD, existing pattern at `hud_overlay.cpp:297`.
 - **Photometric calibration** — tie radiometric output to real photometric units (lux/candela/lumen) so `ev100()` (`camera.h:54-56`) and light intensities can be checked against a light meter instead of eyeballed. Complements the Macbeth chart scene (§4 Large item 2).
 
@@ -166,7 +171,7 @@ Ordered quick → complex; items within **Large** are a strict dependency chain 
 6. **Denoising** — needs (1)-(5) transport correctness first; denoising an incorrect image just smooths the error.
 7. **GenAI diffusion channel** — img2img refinement AOV + raw latent/embedding output for HOST's cognitive pipeline. Needs (6)'s converged image.
 8. **Upscaling** — spatial/temporal supersampling (neural, Xiao et al. 2020, §5, or classical).
-9. **GPU ray-tracing backend** — Embree SYCL or CUDA-OptiX, to raise achievable sample budget beyond CPU Embree.
+9. **GPU ray-tracing backend** — Embree SYCL or CUDA-OptiX, to raise achievable sample budget beyond CPU Embree. Today's single-ray `rtcIntersect1`/`rtcOccluded1` calls and per-ray inline shading in `tracePath` (`path_tracer.cpp:77`) are the opposite of a wavefront/streaming GPU kernel design — this item is that rearchitecture, not just a backend swap.
 10. **Production-scale scene/asset pipeline** — out-of-core streaming, distributed rendering, real multi-asset scene graph (today: one glTF + one HDRI), on the scene-graph foundation under **Moderate**. Broader materials (layered BSDF, hair, cloth) need (3).
 
 ### Low priority
