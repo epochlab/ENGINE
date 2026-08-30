@@ -133,6 +133,9 @@ Ordered quick → complex; items within **Large** are a strict dependency chain 
 - **scene.json as a CLI arg** — `main()` has no `argc`/`argv` (`main.cpp:864`); paths are hardcoded. Enables multi-scenario scenes.
 - **Texture bit depth (16/32) via JSON** — hardcoded `GL_RGBA16F` today (`texture.cpp:45`); 32F ~doubles VRAM/buffer.
 - **Code-quality audit** — `rotateAboutY` (`environment_map.cpp:13`) → `glm::rotate`; `ShadingFrame::toLocal`/`toWorld` (`bsdf.h:26`) → `glm::mat3`. (BSDF math in `bsdf.cpp` — GGX/Smith/Fresnel/VNDF — is standard domain logic, not an offload candidate.)
+- **Histogram: full-range fit + min/max readout** — `hud_overlay.cpp`'s curve (`smoothChannel`/`sharedPeak`, `:34-53,138-150`) normalizes by the max *interior bin count*, not the image's actual value range, so a spiky distribution can read well below the panel's full height (a live report of this reads "crushed vertically", not yet root-caused). Separately, `updateOverRangeStats` (`main.cpp:878-903`) reports one peak-multiple scalar (`app.overRangePeakMultiple`); replace with min/max.
+- **Downsampling only for Beauty + path-traced AOVs** — `app.histogram.update(...)` (`main.cpp:988`) downsamples the composited framebuffer unconditionally every capture interval, including while a rasterizer-backed AOV (Normal, Albedo, ...) is selected. Gate on the existing `aovNeedsLightTransport` predicate (`main.cpp:93`).
+- **Comment-style audit** — full pass over this repo's comments, commit messages, and PR descriptions against `notes/architect.md:109`'s "Efficient comments" rule (technically correct what/why, no wordwrap, no extra prose, token efficient).
 
 ### Moderate
 
