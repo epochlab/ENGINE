@@ -71,15 +71,15 @@ The render thread blits whichever AOV is selected through OCIO's display transfo
 | Feature | Mechanism | Role / why it matters |
 |---|---|---|
 | Camera / lens | Position/yaw/pitch, film-back + focal length → derived vertical FOV; pinhole primary rays derived directly from this basis | Geometric ground truth the ray-intersection/BSDF math is measured against |
-| Photographic exposure | EV100 from aperture/shutter/ISO (Filament/Frostbite calibration) | Physically meaningful brightness control, independent of arbitrary scene scaling |
+| Photographic exposure | EV100 from aperture/shutter/ISO, applied as a relative-stops delta against profile.json's default triple (Filament/Frostbite EV100 formula) | Familiar photographic controls for adjusting display brightness; not an absolute photometric quantity, since the scene isn't calibrated to real-world radiance |
 | OpenEXR linear pipeline | `HdrImage`/`loadExr`; all shading/compositing in linear light, OCIO display-encodes only at the final blit | Precondition for correct PBR colour math |
-| Tone-mapping / display transform | OCIO Display/View API (sRGB, Rec.709, Raw), cycled at runtime ('L') | Compresses unbounded HDR radiance into a displayable range without clipping |
+| Display transform | OCIO Display/View API (sRGB, Rec.709, Raw), cycled at runtime ('L') -- a colorimetric encode (sRGB / Rec.1886 OETF) only, no tone mapping | Scene-referred linear radiance throughout; values above 1.0 clip at the display by design, so lookdev sees clipping honestly rather than under a hidden filmic shoulder |
 | GPU/system readout | Device name, driver/API version, refresh rate, RAM at startup | Confirms the actual GPU/backend before a wrong-adapter bug masquerades as a render bug |
 | Frame-timing HUD | Ring buffer of recent frame times; rolling FPS/avg/min/max, GPU timer query around the post-process blit | Makes blit cost measurable frame to frame |
 | Memory HUD | Live RAM readout plus GPU allocation tracked at alloc/free (the path-traced display texture is the only GPU allocation left — OCIO uses zero LUT textures) | Surfaces a memory regression immediately, not after VRAM exhaustion |
 | Scene stats | Object/triangle/point counts, viewport resolution | Scene-complexity readout |
 | Debug camera controls | WASD/QE fly, R reset, LMB-drag orbit around a pivot read directly from the path tracer's own G-buffer (world-space hit position + hit mask at its centre pixel) | Interactive navigation without hand-editing camera parameters between runs |
-| Camera framing overlays | Letterbox mask, centre crosshair ('K'), 3×3 rule-of-thirds grid, drawn over the viewport | Composition aids that never contaminate the AOV buffers being debugged |
+| Camera framing overlays | Centre crosshair ('K'), drawn on the foreground overlay over the viewport | Composition aid that never contaminates the AOV buffers being debugged |
 | AOV selector | Dropdown across the full AOV set (§3), plus R/G/B channel-isolation hotkeys | Isolates one signal at a time for debugging |
 | Live histogram | Per-channel (R/G/B) histogram of the currently displayed image | Catches exposure/clipping and colour-space bugs a single still frame can hide |
 | glTF loading | cgltf; per-primitive vertices baked to world-space triangles/shading data at load time, materials' textures decoded once to `HdrImage` | Standard interchange format; nothing GPU-resident is needed once the CPU Embree scene/shading data exists |
@@ -110,13 +110,13 @@ Every AOV below is computed by the path tracer each pass, except: the 15 primary
 | Normal | Material | Shading (normal-mapped) normal at the primary hit | The normal actually used in shading |
 | GeomNormal | Material | Smooth interpolated vertex normal, before normal-mapping | Separates a bad normal map from a bad base mesh |
 | Albedo | Material | Base-colour texture sample at the primary hit | Isolates texture data from lighting |
-| Metallic | Material | Metallic factor (scalar only) | Debug material authoring independent of shading |
-| Roughness | Material | Roughness texture × factor, floored at 0.045 | Debug material authoring independent of shading |
+| Metallic | Material | Global metallic factor from `material.json` (`settings.metallicFactor`) — constant across the whole image; the engine has only one material config, not per-object metallic | Debug the configured global metallic value, not (yet) an authored per-material property |
+| Roughness | Material | Roughness texture × a global factor from `material.json`, floored at 0.045 — the texture varies per hit, the multiplying factor does not | Debug material authoring independent of shading |
 | Tangent | Material | Shading tangent basis at the primary hit | Debugs the tangent-space basis used for normal mapping |
 | ObjectID | Material | Per-instance index, false-coloured (`falseColorForId`) | Isolation mask for compositing/debugging |
 | AO | Material | Authored ambient-occlusion texture sample at the primary hit | Debug baked AO independent of lighting |
-| Fresnel | Transport | Schlick term at the primary hit's view angle | Debug grazing-angle reflectance behaviour in isolation |
-| IOR | Transport | Per-material dielectric IOR at the primary hit, -1 on a miss | Isolates the raw refractive-index input driving Fresnel/transmission |
+| Fresnel | Transport | Bare Schlick term at the primary hit's view angle from `f0` — simpler than shading's `mix(dielectric Fresnel, Schlick(f0), metallic)`, so it can disagree with what's actually rendered (e.g. reading near 1.0 from an unclamped specular texture where shading computes ~0.04 for a dielectric) | Debug grazing-angle reflectance behaviour in isolation; not a preview of the exact shading value |
+| IOR | Transport | Global dielectric IOR from `material.json` (`settings.ior`), -1 on a miss — constant across the whole image, not read per-material | Isolates the raw refractive-index input driving Fresnel/transmission |
 | BounceCount | Transport | Mean path termination depth across samples, per pixel | Debug Russian roulette/termination behaviour |
 | DirectDiffuse | Lighting | Diffuse-bucketed radiance from a path's first (bounce-0) surface, delighted (no base colour) | Isolates direct diffuse light arrival from the object's own texture |
 | IndirectDiffuse | Lighting | Diffuse-bucketed radiance from later bounces | Isolates indirect (bounced) diffuse contribution |
@@ -144,25 +144,28 @@ Ordered quick → complex; items within **Large** are a strict dependency chain 
 
 ### Moderate
 
-- **Object instancing** — `RTC_GEOMETRY_TYPE_INSTANCE`, replacing today's single flattened triangle-soup geometry (`embree_accel.cpp:65`).
+- **Scene-graph foundation** — three steps in strict order, the only ordered chain outside **Large**, and the prerequisite for (10) there.
+  1. *Indexed geometry.* `gltf_loader.cpp:94-129` de-indexes every mesh into soup and stores positions twice — once in `Triangle` for Embree, once in `ShadingVertex.position` for shading — 184 B/tri, ~920 MB on a 5M-triangle asset. `rtcSetSharedGeometryBuffer` takes a byte stride, so Embree can read positions in place from the indexed shading vertices instead, deleting the `Triangle` array, keeping glTF's own index buffer rather than filling one with the identity sequence (`embree_accel.cpp:77-84`), and dropping the `reserve(size+1)` padding hack. ~5x smaller, and the traversal locality matters more than the footprint.
+  2. *Object instancing.* `RTC_GEOMETRY_TYPE_INSTANCE` over one scene per unique mesh, replacing today's single flattened geometry (`embree_accel.cpp:65`) and finally giving `MeshInstance::transform` (`gltf_loader.h:18`, stored and never read) a consumer. `Hit` gains `geomID`/`instID`. Needs (1)'s indexed layout.
+  3. *Per-material factors.* `Material` holds six textures and nothing else, so `metallic_factor`, `roughness_factor`, `base_color_factor`, `ior` and `transmission_factor` are parsed by cgltf and discarded — every material in the scene shares one global set from `material.json`, and **a scene containing a metal object and a plastic object cannot be represented**. Move them onto `Material` and demote `MaterialConfig` to a global override layer. Also deletes `extrasTextureIndex` (`gltf_loader.cpp:35`), the hand-rolled substring scanner that exists only because roughness/specular/bump were hand-authored into glTF `extras`.
 - **Frustum/backface culling** — skip `buildSubTriangles`'s per-frame full-scene walk (`rasterizer.cpp:153,274`) and the equivalent Embree traversal when out of view.
 - **Low-discrepancy sampler upgrade** — Sobol / hash-based Owen scrambling (Burley 2020, §5), replacing randomized Halton (`sampler.cpp`).
-- **Tiling + render-mode selector** — Single Sample / Progressive / Adaptive Tiling (today: row-based `RowThreadPool`, no tiling).
+- **Render-mode selector + adaptive tiling** — Single Sample / Progressive / Adaptive Tiling (today: the path tracer dispatches fixed 96x96 tiles and the rasterizer rows, both through `ThreadPool`; neither adapts to where the image is still noisy, and the mode is not selectable).
 - **Adaptive per-pixel sample budget** — variance-driven, builds on tiling above.
 - **Texture minification filtering (MIP-mapping)** — point/bilinear only today; grazing/distant surfaces alias.
 
 ### Large — strict dependency order
 
-1. **Global illumination** — area lights + shadow rays to them; caustics emergent once they exist. ReSTIR (Bitterli et al. 2020) follows once multiple area lights exist. Ray-traced AO replaces today's baked-texture AO AOV (§3).
+1. **Global illumination** — area lights + shadow rays to them. ReSTIR (Bitterli et al. 2020) follows once multiple area lights exist. Ray-traced AO replaces today's baked-texture AO AOV (§3). Caustics do not fall out of this: unidirectional path tracing structurally cannot sample specular-diffuse-specular paths regardless of light count — that needs (4).
 2. **Cornell box + per-material showcase** — blocked on (1): needs an emissive panel, only IBL exists today. Showcase: mirror/rough conductor, smooth/rough dielectric (both implemented), subsurface once (3) lands.
 3. **Volumetric & subsurface transport** — participating media + BSSRDF/random-walk subsurface. Blocked: the transmissive multiple-scattering lobe is non-reciprocal (`f(wo→wi) ≠ f(wi→wo)`, `bsdf.cpp`), needs reworking first (`tools/bsdf_validate.cpp`'s `checkTransmissionReciprocity`).
-4. **Bidirectional path tracing with MIS (caustics)** — light-subpath/eye-subpath vertex connection (Veach & Guibas 1995; Veach 1997); the efficient version of the caustics (1) only produces as slow-converging noise. Blocked on (1) + (3)'s reciprocity fix, since connection needs BSDF agreement in both directions.
+4. **Bidirectional path tracing with MIS (caustics)** — light-subpath/eye-subpath vertex connection (Veach & Guibas 1995; Veach 1997); the transport algorithm caustics need, since unidirectional path tracing (1) cannot produce them at all. Blocked on (1) + (3)'s reciprocity fix, since connection needs BSDF agreement in both directions.
 5. **Spectral upgrade** — per-wavelength transport, hero-wavelength sampling (Wilkie et al. 2014), spectral dispersion. Likely offline-only given sample-budget cost.
 6. **Denoising** — needs (1)-(5) transport correctness first; denoising an incorrect image just smooths the error.
 7. **GenAI diffusion channel** — img2img refinement AOV + raw latent/embedding output for HOST's cognitive pipeline. Needs (6)'s converged image.
 8. **Upscaling** — spatial/temporal supersampling (neural, Xiao et al. 2020, §5, or classical).
 9. **GPU ray-tracing backend** — Embree SYCL or CUDA-OptiX, to raise achievable sample budget beyond CPU Embree.
-10. **Production-scale scene/asset pipeline** — out-of-core streaming, distributed rendering, real multi-asset scene graph (today: one glTF + one HDRI). Broader materials (layered BSDF, hair, cloth) need (3).
+10. **Production-scale scene/asset pipeline** — out-of-core streaming, distributed rendering, real multi-asset scene graph (today: one glTF + one HDRI), on the scene-graph foundation under **Moderate**. Broader materials (layered BSDF, hair, cloth) need (3).
 
 ### Low priority
 

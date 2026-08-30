@@ -52,10 +52,8 @@ public:
 
     // EV100 delta vs profile.json defaults. Fed to OcioDisplayTransform::setExposureEv() (display-stage pow(2,ev), not baked into radiance -- scene isn't photometrically calibrated, no retrace needed).
     [[nodiscard]] float relativeExposureEv() const {
-        const float defaultEv100 = std::log2((defaultAperture_ * defaultAperture_) /
-                                              defaultShutterSeconds_ * (100.0F / defaultIso_));
-        const float currentEv100 =
-            std::log2((aperture_ * aperture_) / shutterSeconds_ * (100.0F / iso_));
+        const float defaultEv100 = Camera::ev100(defaultAperture_, defaultShutterSeconds_, defaultIso_);
+        const float currentEv100 = Camera::ev100(aperture_, shutterSeconds_, iso_);
         return defaultEv100 - currentEv100;
     }
 
