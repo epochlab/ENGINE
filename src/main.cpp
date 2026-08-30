@@ -164,12 +164,18 @@ struct AppResources {
     engine::debug::FrameStats frameStats;
     engine::debug::GpuTimer postTimer;
     engine::debug::Histogram histogram;
+    // Companion to histogram, computed separately (see updateOverRangeStats) since Histogram bins the post-display-transform, post-8-bit-clamp framebuffer and cannot tell 1.01 from 100.0 -- both saturate bin 255 identically. Gated at the same capture interval, not scanned every frame.
+    int overRangeFrameCounter = 0;
+    float overRangeFraction = 0.0F;
+    float overRangePeakMultiple = 0.0F;
     engine::scene::DebugCameraController debugCamera;
     engine::debug::GpuInfo gpuInfo;
 
     int uFilterModeLoc;
     int uEdgeChannelViewLoc;
+    int uEdgeExposureLoc;
     int uHsvChannelViewLoc;
+    int uHsvExposureLoc;
 
     // HUD-editable UI/run state.
     int aov;
@@ -240,10 +246,11 @@ std::optional<RequiredShaders> loadShaders() {
     };
 }
 
-// The two edge-filter uniforms that change at runtime, cached once rather than re-queried per frame.
+// The runtime-changing edge-filter uniforms, cached once rather than re-queried per frame.
 struct EdgeFilterUniforms {
     int filterMode;
     int channelView;
+    int exposure;
 };
 
 // Sobel/Gabor's second pass (see edge_filter.frag): uHdrColor's texture unit and the Gabor kernel weights are both fixed for the whole run, set once here.
@@ -253,14 +260,22 @@ EdgeFilterUniforms setupEdgeFilterShader(const engine::gfx::ShaderProgram& edgeF
     const std::array<float, 100> gaborKernel = buildGaborKernel();
     GL_CALL(glUniform1fv(edgeFilterShader.uniformLocation("uGaborKernel"), 100, gaborKernel.data()));
     return EdgeFilterUniforms{edgeFilterShader.uniformLocation("uFilterMode"),
-                               edgeFilterShader.uniformLocation("uChannelView")};
+                               edgeFilterShader.uniformLocation("uChannelView"),
+                               edgeFilterShader.uniformLocation("uExposure")};
 }
 
-// hsv_display.frag's uHdrColor texture unit is fixed for the whole run, same convention as setupEdgeFilterShader above. Returns uChannelView's cached location.
-int setupHsvDisplayShader(const engine::gfx::ShaderProgram& hsvDisplayShader) {
+// The runtime-changing hsv-display uniforms, cached once rather than re-queried per frame.
+struct HsvDisplayUniforms {
+    int channelView;
+    int exposure;
+};
+
+// hsv_display.frag's uHdrColor texture unit is fixed for the whole run, same convention as setupEdgeFilterShader above.
+HsvDisplayUniforms setupHsvDisplayShader(const engine::gfx::ShaderProgram& hsvDisplayShader) {
     hsvDisplayShader.use();
     GL_CALL(glUniform1i(hsvDisplayShader.uniformLocation("uHdrColor"), 0));
-    return hsvDisplayShader.uniformLocation("uChannelView");
+    return HsvDisplayUniforms{hsvDisplayShader.uniformLocation("uChannelView"),
+                               hsvDisplayShader.uniformLocation("uExposure")};
 }
 
 // All one-time startup work: camera/model/shader/environment loading (nullopt on any failure -- matches the shader/model/OCIO all-or-nothing gate this replaces), Embree scene build, and cached uniform-location lookups for the shared edge-filter/HSV shaders. Doesn't wire input callbacks -- those capture a stable AppResources& and must be set up by the caller only after this returns (see main()), since a callback capturing a reference into an AppResources that's still about to be moved into its final std::optional storage would dangle.
@@ -274,7 +289,7 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
               << engine::debug::gpuTimerQueryAvailable() << '\n';
     const engine::debug::GpuInfo gpuInfo = engine::debug::queryGpuInfo();
 
-    // exposure()/ev100() are logged but not render-path-consumed yet: no scene-referred exposure multiply exists, only OCIO's display-encode step.
+    // ev100() is logged but not render-path-consumed directly: DebugCameraController::relativeExposureEv() derives the display-stage multiplier from it (OcioDisplayTransform), not this log line.
     engine::scene::DebugCameraController debugCamera(
         profileConfig.position, profileConfig.yawDegrees, profileConfig.pitchDegrees,
         profileConfig.filmBack, profileConfig.focalLengthMm, profileConfig.nearClip,
@@ -286,8 +301,7 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         const glm::vec3 camPos = initialCamera.position();
         std::cout << "Camera: position=(" << camPos.x << ", " << camPos.y << ", " << camPos.z
                   << ") verticalFov=" << glm::degrees(initialCamera.verticalFovRadians())
-                  << " deg ev100=" << initialCamera.ev100()
-                  << " exposure=" << initialCamera.exposure() << '\n';
+                  << " deg ev100=" << initialCamera.ev100() << '\n';
     }
 
     // Scene-level placement (scene.json position/rotationDegrees), order X,Y,Z.
@@ -349,7 +363,7 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
               << std::flush;
 
     const EdgeFilterUniforms edgeFilterUniforms = setupEdgeFilterShader(shaders->edgeFilterShader);
-    const int uHsvChannelViewLoc = setupHsvDisplayShader(shaders->hsvDisplayShader);
+    const HsvDisplayUniforms hsvUniforms = setupHsvDisplayShader(shaders->hsvDisplayShader);
 
     return AppResources{
         .edgeFilterShader = std::move(shaders->edgeFilterShader),
@@ -369,7 +383,9 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         .gpuInfo = gpuInfo,
         .uFilterModeLoc = edgeFilterUniforms.filterMode,
         .uEdgeChannelViewLoc = edgeFilterUniforms.channelView,
-        .uHsvChannelViewLoc = uHsvChannelViewLoc,
+        .uEdgeExposureLoc = edgeFilterUniforms.exposure,
+        .uHsvChannelViewLoc = hsvUniforms.channelView,
+        .uHsvExposureLoc = hsvUniforms.exposure,
         // aov selects which AOV the path tracer's snapshot supplies (see selectPathTracedImage); channelView isolates one R/G/B channel of whatever aov currently shows. userLut is the LUT 'L' cycles through -- kept separate from OcioDisplayTransform's active LUT because non-Beauty AOVs force Raw (see the LUT-select comment in presentFrame) and must not clobber the user's actual choice. Both aov and userLut start from profile.json rather than a fixed literal.
         .aov = profileConfig.defaultAov,
         .channelView = 0,
@@ -687,9 +703,12 @@ void presentFrame(AppResources& app,
         const bool isHsv = aovId == engine::debug::AovId::HSV;
         ensurePathTraceDisplayTexture(app, pathTraceSnapshot, pathTraceSnapshot->beauty, 0);
         app.ocioTransform.setActiveLut(engine::gfx::OcioDisplayTransform::Lut::Raw);
+        // Same multiplier Beauty itself displays at (OcioDisplayTransform::bind) -- these four AOVs previously bypassed OCIO entirely and stayed frozen at unity gain regardless of the exposure slider.
+        const float exposure = std::pow(2.0F, app.debugCamera.relativeExposureEv());
         if (isHsv) {
             app.hsvDisplayShader.use();
             GL_CALL(glUniform1i(app.uHsvChannelViewLoc, app.channelView));
+            GL_CALL(glUniform1f(app.uHsvExposureLoc, exposure));
             app.postProcess.draw(app.pathTraceDisplayTexture->id(), app.hsvDisplayShader,
                                   {winWidth, winHeight});
         } else {
@@ -699,6 +718,7 @@ void presentFrame(AppResources& app,
                                                                             : 2;  // Luminance passthrough
             GL_CALL(glUniform1i(app.uFilterModeLoc, filterMode));
             GL_CALL(glUniform1i(app.uEdgeChannelViewLoc, app.channelView));
+            GL_CALL(glUniform1f(app.uEdgeExposureLoc, exposure));
             app.postProcess.draw(app.pathTraceDisplayTexture->id(), app.edgeFilterShader,
                                   {winWidth, winHeight});
         }
@@ -787,6 +807,34 @@ void requestPathTraceIfTriggerChanged(AppResources& app, const engine::scene::Ca
     app.lastPathTraceTrigger = current;
 }
 
+// Fraction of texels that would clip at the display encode, plus the peak such value as a multiple of display range -- e.g. "3.2%, peak 47.8x". Computed from the pre-display-transform HdrImage (full float, in hand already) rather than the composited framebuffer Histogram reads, since B1's colorimetric-only display transform means anything above 1.0 clips with no tone-mapped rolloff to cushion it, and the on-screen histogram alone cannot distinguish "just barely over" from "wildly over" -- both pin bin 255 identically. Gated at Histogram's own capture interval rather than scanned every frame, matching this codebase's no-work-per-frame-without-a-reason convention (a multi-megapixel float scan is not free).
+void updateOverRangeStats(AppResources& app,
+                           const std::shared_ptr<const engine::scene::PathTraceResult>& pathTraceSnapshot) {
+    ++app.overRangeFrameCounter;
+    if (app.overRangeFrameCounter % engine::debug::Histogram::kCaptureIntervalFrames != 0) {
+        return;
+    }
+    if (!pathTraceSnapshot) {
+        app.overRangeFraction = 0.0F;
+        app.overRangePeakMultiple = 0.0F;
+        return;
+    }
+    const engine::gfx::HdrImage& beauty = pathTraceSnapshot->beauty;
+    const float exposure = std::pow(2.0F, app.debugCamera.relativeExposureEv());
+    const int texelCount = beauty.width * beauty.height;
+    int overCount = 0;
+    float peak = 0.0F;
+    for (int i = 0; i < texelCount; ++i) {
+        const std::size_t idx = static_cast<std::size_t>(i) * 4;
+        const float maxChannel = std::max({beauty.rgba[idx + 0], beauty.rgba[idx + 1], beauty.rgba[idx + 2]}) *
+                                  exposure;
+        overCount += maxChannel > 1.0F ? 1 : 0;
+        peak = std::max(peak, maxChannel);
+    }
+    app.overRangeFraction = texelCount > 0 ? static_cast<float>(overCount) / static_cast<float>(texelCount) : 0.0F;
+    app.overRangePeakMultiple = peak;
+}
+
 void updateHud(AppResources& app, const engine::platform::Window& window,
                const engine::scene::Camera& camera,
                const std::shared_ptr<const engine::scene::PathTraceResult>& pathTraceSnapshot,
@@ -822,6 +870,8 @@ void updateHud(AppResources& app, const engine::platform::Window& window,
         app.debugCamera.isOrbiting(),
         app.histogram,
         pathTracedStatus,
+        app.overRangeFraction,
+        app.overRangePeakMultiple,
     };
     // Round-tripped through locals so the HUD's sliders can bind plain float&s, same as aov -- DebugCameraController is the authoritative owner, read before draw() and written back after.
     float focalLengthMm = app.debugCamera.focalLengthMm();
@@ -866,6 +916,7 @@ void renderFrame(engine::platform::Window& window, AppResources& app) {
 
     // Captured after the composited image lands in the default framebuffer, before the HUD draws on top of it.
     app.histogram.update(winWidth, winHeight);
+    updateOverRangeStats(app, pathTraceSnapshot);
 
     const auto now = std::chrono::steady_clock::now();
     if (now - app.lastRamSample >= std::chrono::milliseconds(250)) {
