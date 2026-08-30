@@ -21,6 +21,7 @@ public:
     Window& operator=(Window&& other) noexcept;
 
     [[nodiscard]] bool shouldClose() const;
+    void setShouldClose(bool shouldClose);
     void pollEvents() const;
     void swapBuffers() const;
 
