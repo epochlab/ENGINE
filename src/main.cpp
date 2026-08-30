@@ -182,7 +182,6 @@ struct AppResources {
 
     // HUD-editable UI/run state.
     int aov;
-    int previousAov;  // AovId to restore on a second 'Y' press; -1 means 'Y' hasn't been pressed since the last restore
     int channelView;
     engine::gfx::OcioDisplayTransform::Lut userLut;
     engine::debug::FramingOverlayState framingState;
@@ -402,7 +401,6 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         .uHsvInvertLoc = hsvUniforms.invert,
         // aov selects which AOV the path tracer's snapshot supplies (see selectPathTracedImage); channelView isolates one R/G/B channel of whatever aov currently shows. userLut is the LUT 'L' cycles through -- kept separate from OcioDisplayTransform's active LUT because non-Beauty AOVs force Raw (see the LUT-select comment in presentFrame) and must not clobber the user's actual choice. Both aov and userLut start from profile.json rather than a fixed literal.
         .aov = profileConfig.defaultAov,
-        .previousAov = -1,
         .channelView = 0,
         .userLut = profileConfig.defaultLut,
         .framingState = engine::debug::FramingOverlayState{},
@@ -456,7 +454,7 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
     };
 }
 
-// Debug-only: 'L' cycles the viewer LUT (sRGB -> Rec709 -> Raw -> sRGB -> ...), Raw being a genuine no-display-encode passthrough for direct encoded-vs-unencoded comparison. 'R'/'G'/'B' toggle isolating a channel of the active AOV (pressing the active one again turns it back off) -- reset moved to '0' to free these back up. 'Y' toggles to the Luminance AOV and back to whatever was selected before. 'I' inverts the final display-referred colour. 'H' toggles the HUD. 'ESC' quits. No general input-mapping system for these few keys is needed: WASD/QE need continuous per-frame state (Window::isKeyDown) rather than this edge-triggered callback, so this single slot still covers everything that's actually event-shaped. Wired up here, not inside initializeApp: every callback captures a reference into app, which must already be at its final, stable address (main()'s local, unwrapped from the optional initializeApp returned) -- capturing a reference during initializeApp would dangle the moment that AppResources is moved into its optional's storage.
+// Debug-only: 'L' cycles the viewer LUT (sRGB -> Rec709 -> Raw -> sRGB -> ...), Raw being a genuine no-display-encode passthrough for direct encoded-vs-unencoded comparison. 'R'/'G'/'B' toggle isolating a channel of the active AOV (pressing the active one again turns it back off) -- reset moved to '0' to free these back up. 'I' inverts the final display-referred colour. 'H' toggles the HUD. 'ESC' quits. No general input-mapping system for these few keys is needed: WASD/QE need continuous per-frame state (Window::isKeyDown) rather than this edge-triggered callback, so this single slot still covers everything that's actually event-shaped. Wired up here, not inside initializeApp: every callback captures a reference into app, which must already be at its final, stable address (main()'s local, unwrapped from the optional initializeApp returned) -- capturing a reference during initializeApp would dangle the moment that AppResources is moved into its optional's storage.
 void wireCallbacks(engine::platform::Window& window, AppResources& app) {
     window.setKeyCallback([&app, &window](int key, int action) {
         if (action != GLFW_PRESS) {
@@ -476,19 +474,6 @@ void wireCallbacks(engine::platform::Window& window, AppResources& app) {
             app.channelView = app.channelView == 3 ? 0 : 3;
         } else if (key == GLFW_KEY_0) {
             app.debugCamera.resetToDefault();
-        } else if (key == GLFW_KEY_Y) {
-            const int luminanceAov = static_cast<int>(engine::debug::AovId::Luminance);
-            if (app.aov == luminanceAov) {
-                // previousAov is only meaningful if this 'Y' press is undoing an earlier one -- Luminance
-                // reached any other way (e.g. the HUD dropdown) leaves it at the -1 sentinel, which isn't
-                // a valid AovId, so fall back to Beauty rather than handing presentFrame an index nothing selects.
-                app.aov = app.previousAov >= 0 ? app.previousAov
-                                                : static_cast<int>(engine::debug::AovId::Beauty);
-                app.previousAov = -1;
-            } else {
-                app.previousAov = app.aov;
-                app.aov = luminanceAov;
-            }
         } else if (key == GLFW_KEY_I) {
             app.invert = !app.invert;
         } else if (key == GLFW_KEY_H) {
