@@ -169,6 +169,7 @@ struct AppResources {
     engine::debug::GpuInfo gpuInfo;
 
     int uFilterModeLoc;
+    int uEdgeChannelViewLoc;
     int uHsvChannelViewLoc;
 
     // HUD-editable UI/run state.
@@ -186,12 +187,11 @@ struct AppResources {
     std::unique_ptr<engine::scene::PathTraceDriver> pathTraceDriver;
     std::optional<engine::gfx::Texture> pathTraceDisplayTexture;
     int pathTraceDisplayedAov;  // which AovId pathTraceDisplayTexture currently holds, -1 = none yet
-    int pathTraceDisplayedChannelView;  // which channelView pathTraceDisplayTexture was isolated for, -1 = none yet
+    // Max raw Depth value seen in the last rebuilt pathTraceDisplayTexture -- see ensurePathTraceDisplayTexture; only meaningful/updated when aov==Depth.
+    float pathTraceDisplayedDepthMax;
     std::uint64_t pathTraceDisplayedGeneration;  // which RasterGBuffer generation the texture holds; 0 when it was built from a PathTraceResult instead
     // Strong ref (kept alive, not just an identity pointer) to whichever published object -- PathTraceResult or RasterGBuffer -- pathTraceDisplayTexture currently reflects; see ensurePathTraceDisplayTexture.
     std::shared_ptr<const void> pathTraceDisplayedOwner;
-    // Max raw Depth value seen in the last rebuilt pathTraceDisplayTexture -- see ensurePathTraceDisplayTexture; only meaningful/updated when aov==Depth.
-    float pathTraceDisplayedDepthMax;
     PathTraceTriggerState lastPathTraceTrigger;  // sentinel-initialized, see its own doc comment
     // Render resolution as a fraction of the framebuffer: renderScale once settled, interactiveRenderScale while any input is changing (profile_config.h). lastInputChange is the timer the promotion between them is measured against.
     float renderScale;
@@ -241,13 +241,20 @@ std::optional<RequiredShaders> loadShaders() {
     };
 }
 
-// Sobel/Gabor's second pass (see edge_filter.frag): uHdrColor's texture unit and the Gabor kernel weights are both fixed for the whole run, set once here. Returns uFilterMode's cached location.
-int setupEdgeFilterShader(const engine::gfx::ShaderProgram& edgeFilterShader) {
+// The two edge-filter uniforms that change at runtime, cached once rather than re-queried per frame.
+struct EdgeFilterUniforms {
+    int filterMode;
+    int channelView;
+};
+
+// Sobel/Gabor's second pass (see edge_filter.frag): uHdrColor's texture unit and the Gabor kernel weights are both fixed for the whole run, set once here.
+EdgeFilterUniforms setupEdgeFilterShader(const engine::gfx::ShaderProgram& edgeFilterShader) {
     edgeFilterShader.use();
     GL_CALL(glUniform1i(edgeFilterShader.uniformLocation("uHdrColor"), 0));
     const std::array<float, 100> gaborKernel = buildGaborKernel();
     GL_CALL(glUniform1fv(edgeFilterShader.uniformLocation("uGaborKernel"), 100, gaborKernel.data()));
-    return edgeFilterShader.uniformLocation("uFilterMode");
+    return EdgeFilterUniforms{edgeFilterShader.uniformLocation("uFilterMode"),
+                               edgeFilterShader.uniformLocation("uChannelView")};
 }
 
 // hsv_display.frag's uHdrColor texture unit is fixed for the whole run, same convention as setupEdgeFilterShader above. Returns uChannelView's cached location.
@@ -342,7 +349,7 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
               << accelBuildMs << " ms\n"
               << std::flush;
 
-    const int uFilterModeLoc = setupEdgeFilterShader(shaders->edgeFilterShader);
+    const EdgeFilterUniforms edgeFilterUniforms = setupEdgeFilterShader(shaders->edgeFilterShader);
     const int uHsvChannelViewLoc = setupHsvDisplayShader(shaders->hsvDisplayShader);
 
     return AppResources{
@@ -361,7 +368,8 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         .histogram = std::move(histogram),
         .debugCamera = std::move(debugCamera),
         .gpuInfo = gpuInfo,
-        .uFilterModeLoc = uFilterModeLoc,
+        .uFilterModeLoc = edgeFilterUniforms.filterMode,
+        .uEdgeChannelViewLoc = edgeFilterUniforms.channelView,
         .uHsvChannelViewLoc = uHsvChannelViewLoc,
         // aov selects which AOV the path tracer's snapshot supplies (see selectPathTracedImage); channelView isolates one R/G/B channel of whatever aov currently shows. userLut is the LUT 'L' cycles through -- kept separate from OcioDisplayTransform's active LUT because non-Beauty AOVs force Raw (see the LUT-select comment in presentFrame) and must not clobber the user's actual choice. Both aov and userLut start from profile.json rather than a fixed literal.
         .aov = profileConfig.defaultAov,
@@ -393,10 +401,9 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         .pathTraceDriver = nullptr,
         .pathTraceDisplayTexture = std::nullopt,
         .pathTraceDisplayedAov = -1,
-        .pathTraceDisplayedChannelView = -1,
+        .pathTraceDisplayedDepthMax = 0.0F,
         .pathTraceDisplayedGeneration = 0,
         .pathTraceDisplayedOwner = nullptr,
-        .pathTraceDisplayedDepthMax = 0.0F,
         .lastPathTraceTrigger = PathTraceTriggerState{},
         .renderScale = profileConfig.renderScale,
         .interactiveRenderScale = profileConfig.interactiveRenderScale,
@@ -501,8 +508,8 @@ void resolveOrbitPick(engine::platform::Window& window, AppResources& app,
     app.lastCursorY = cursorY;
 }
 
-// HdrImage's row 0 is documented as the image's top (EXR/glTF convention, hdr_image.h); GL texture v=0 samples the first uploaded row, and fullscreen_triangle.vert's vUv places v=0 at the bottom of the window. Row-reversing here -- only for this fixed-blit display path, never for material or environment HdrImages sampled via mesh UVs / the equirect formula (environment_map.cpp), which already agree with row-0-top by construction -- makes the uploaded buffer's first row the image's bottom row, matching every other texture this same blit displays. channelView isolates one R/G/B channel (broadcast to grey) -- folded into this same per-pixel copy rather than a separate shader pass, since the path-traced display texture is a direct CPU-image upload with no shader pass of its own to apply it in.
-std::vector<float> flipRowsForDisplay(const engine::gfx::HdrImage& image, int channelView) {
+// HdrImage's row 0 is documented as the image's top (EXR/glTF convention, hdr_image.h); GL texture v=0 samples the first uploaded row, and fullscreen_triangle.vert's vUv places v=0 at the bottom of the window. Row-reversing here -- only for this fixed-blit display path, never for material or environment HdrImages sampled via mesh UVs / the equirect formula (environment_map.cpp), which already agree with row-0-top by construction -- makes the uploaded buffer's first row the image's bottom row, matching every other texture this same blit displays.
+std::vector<float> flipRowsForDisplay(const engine::gfx::HdrImage& image) {
     std::vector<float> flipped(image.rgba.size());
     const std::size_t rowFloats = static_cast<std::size_t>(image.width) * 4;
     for (int y = 0; y < image.height; ++y) {
@@ -510,14 +517,6 @@ std::vector<float> flipRowsForDisplay(const engine::gfx::HdrImage& image, int ch
         const std::size_t dst = static_cast<std::size_t>(image.height - 1 - y) * rowFloats;
         for (std::size_t i = 0; i < rowFloats; ++i) {
             flipped[dst + i] = image.rgba[src + i];
-        }
-        if (channelView >= 1 && channelView <= 3) {
-            for (std::size_t px = 0; px < rowFloats; px += 4) {
-                const float isolated = flipped[dst + px + static_cast<std::size_t>(channelView - 1)];
-                flipped[dst + px + 0] = isolated;
-                flipped[dst + px + 1] = isolated;
-                flipped[dst + px + 2] = isolated;
-            }
         }
     }
     return flipped;
@@ -651,12 +650,10 @@ engine::debug::PixelProbeSample samplePixelProbe(
     return {true, glm::vec4(pixel[0], pixel[1], pixel[2], pixel[3]) / 255.0F};
 }
 
-// Rebuilds pathTraceDisplayTexture only when the selected AOV, the channel-view isolation, or the driver's published result object actually changed -- recreating a GL texture (alloc + upload + mipmap) every frame just to redisplay the same image would violate this codebase's no-allocation-after-init convention for no reason. The driver publishes a fresh result object every completed pass, though, so while it's actively converging this does rebuild the texture up to once per rendered frame -- that per-frame cap (not a lower one) is deliberate: it is what makes newly-accumulated samples visible at all. channelViewToBake: normally app.channelView, isolating an R/G/B channel of `image` itself before upload -- except the HSV AOV, which passes 0 (no isolation here) and applies channel view to its own H/S/V output instead (see hsv_display.frag's uChannelView): isolating a source RGB channel first would broadcast it to grey, and grey always converts to H=0/S=0, destroying the very thing that AOV exists to show. owner: a strong ref to whichever published object actually owns `image` (see PathTracedAovSource) -- comparing shared_ptr identity, not a raw pointer, since a raw pointer to a previous frame's already-freed result could in principle have its address reused by a later allocation (ABA); holding a real shared_ptr in app.pathTraceDisplayedOwner rules that out. For Depth specifically, also rescans `image` for its own max value into app.pathTraceDisplayedDepthMax on every rebuild -- presentFrame uses that as an auto-ranging display-exposure bound instead of Camera::farClip(), since farClip is a conservative ray tMax bound, not a proxy for the actual visible scene's depth extent.
+// Rebuilds pathTraceDisplayTexture only when the selected AOV or the published object that owns the image actually changed -- recreating a GL texture (alloc + upload + mipmap) every frame just to redisplay the same image would violate this codebase's no-allocation-after-init convention for no reason. The driver publishes a fresh result object every completed pass, though, so while it's actively converging this does rebuild the texture up to once per rendered frame -- that per-frame cap (not a lower one) is deliberate: it is what makes newly-accumulated samples visible at all. Channel view is deliberately absent from that key: it is a shader uniform now, so isolating a channel changes nothing about the texels and must not force a rebuild. owner: a strong ref to whichever published object actually owns `image` (see PathTracedAovSource) -- comparing shared_ptr identity, not a raw pointer, since a raw pointer to a previous frame's already-freed result could in principle have its address reused by a later allocation (ABA); holding a real shared_ptr in app.pathTraceDisplayedOwner rules that out. For Depth specifically, also rescans `image` for its own max value into app.pathTraceDisplayedDepthMax on every rebuild -- presentFrame uses that as an auto-ranging display-exposure bound instead of Camera::farClip(), since farClip is a conservative ray tMax bound, not a proxy for the actual visible scene's depth extent.
 void ensurePathTraceDisplayTexture(AppResources& app, const std::shared_ptr<const void>& owner,
-                                    const engine::gfx::HdrImage& image, int channelViewToBake,
-                                    std::uint64_t generation) {
+                                    const engine::gfx::HdrImage& image, std::uint64_t generation) {
     if (app.pathTraceDisplayTexture.has_value() && app.pathTraceDisplayedAov == app.aov &&
-        app.pathTraceDisplayedChannelView == channelViewToBake &&
         app.pathTraceDisplayedOwner == owner && app.pathTraceDisplayedGeneration == generation) {
         return;
     }
@@ -667,11 +664,10 @@ void ensurePathTraceDisplayTexture(AppResources& app, const std::shared_ptr<cons
         }
         app.pathTraceDisplayedDepthMax = maxDepth;
     }
-    const std::vector<float> flipped = flipRowsForDisplay(image, channelViewToBake);
+    const std::vector<float> flipped = flipRowsForDisplay(image);
     app.pathTraceDisplayTexture =
         engine::gfx::Texture::createFromFloatPixels(image.width, image.height, flipped.data());
     app.pathTraceDisplayedAov = app.aov;
-    app.pathTraceDisplayedChannelView = channelViewToBake;
     app.pathTraceDisplayedOwner = owner;
     app.pathTraceDisplayedGeneration = generation;
 }
@@ -700,8 +696,7 @@ void presentFrame(AppResources& app,
             return;
         }
         const bool isHsv = aovId == engine::debug::AovId::HSV;
-        ensurePathTraceDisplayTexture(app, pathTraceSnapshot, pathTraceSnapshot->beauty,
-                                       isHsv ? 0 : app.channelView, 0);
+        ensurePathTraceDisplayTexture(app, pathTraceSnapshot, pathTraceSnapshot->beauty, 0);
         app.ocioTransform.setActiveLut(engine::gfx::OcioDisplayTransform::Lut::Raw);
         if (isHsv) {
             app.hsvDisplayShader.use();
@@ -714,6 +709,7 @@ void presentFrame(AppResources& app,
                                     : aovId == engine::debug::AovId::Sobel ? 0
                                                                             : 2;  // Luminance passthrough
             GL_CALL(glUniform1i(app.uFilterModeLoc, filterMode));
+            GL_CALL(glUniform1i(app.uEdgeChannelViewLoc, app.channelView));
             app.postProcess.draw(app.pathTraceDisplayTexture->id(), app.edgeFilterShader,
                                   {winWidth, winHeight});
         }
@@ -724,7 +720,7 @@ void presentFrame(AppResources& app,
         selectPathTracedImage(pathTraceSnapshot, app.rasterGBuffer, aovId);
     if (pathTracedSource.image != nullptr) {
         ensurePathTraceDisplayTexture(app, pathTracedSource.owner, *pathTracedSource.image,
-                                       app.channelView, pathTracedSource.generation);
+                                       pathTracedSource.generation);
         const bool isBeauty = aovId == engine::debug::AovId::Beauty;
         app.ocioTransform.setActiveLut(isBeauty ? app.userLut
                                                  : engine::gfx::OcioDisplayTransform::Lut::Raw);
@@ -744,6 +740,7 @@ void presentFrame(AppResources& app,
             exposureEv = -std::log2(static_cast<float>(app.pathTraceSettings.maxBounces) + 1.0F);
         }
         app.ocioTransform.setExposureEv(exposureEv);
+        app.ocioTransform.setChannelView(app.channelView);
         app.ocioTransform.bind();
         app.postProcess.draw(app.pathTraceDisplayTexture->id(), app.ocioTransform.activeShader(),
                               {winWidth, winHeight});
