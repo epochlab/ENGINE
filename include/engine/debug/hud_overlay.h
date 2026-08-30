@@ -19,7 +19,7 @@ struct GpuInfo;
 class FrameStats;
 class Histogram;
 
-// Toggle for the centre-crosshair framing overlay — owned by main.cpp and flipped by its 'K' hotkey (not a HUD checkbox), then read here read-only to decide whether to draw it.
+// Toggle for the centre-crosshair framing overlay — owned by main.cpp (no runtime toggle; defaults on), then read here read-only to decide whether to draw it.
 struct FramingOverlayState {
     bool crosshair = true;
 };

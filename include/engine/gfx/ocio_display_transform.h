@@ -23,6 +23,9 @@ public:
     // 0 = off, 1/2/3 = isolate R/G/B (broadcast to grey), applied to the sampled texels before exposure. Uploaded by bind() alongside exposure, so switching channels is a uniform write rather than the full CPU re-copy and texture re-create it used to force.
     void setChannelView(int channelView) { channelView_ = channelView; }
 
+    // 1.0 - rgb, applied to the final display-referred colour (after the display curve/Raw passthrough, before dither) -- the 'I' debug toggle.
+    void setInvert(bool invert) { invert_ = invert; }
+
     [[nodiscard]] const ShaderProgram& activeShader() const {
         switch (activeLut_) {
             case Lut::SRGB:
@@ -51,9 +54,13 @@ private:
     int rawChannelViewLoc_;
     int srgbChannelViewLoc_;
     int rec709ChannelViewLoc_;
+    int rawInvertLoc_;
+    int srgbInvertLoc_;
+    int rec709InvertLoc_;
     Lut activeLut_ = Lut::SRGB;
     float exposureEv_ = 0.0F;
     int channelView_ = 0;
+    bool invert_ = false;
 };
 
 }  // namespace engine::gfx
