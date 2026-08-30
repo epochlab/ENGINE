@@ -63,6 +63,7 @@ set(IMGUI_SOURCES
     ${IMGUI_DIR}/backends/imgui_impl_opengl3.cpp)
 
 set(CGLTF_DIR ${CMAKE_SOURCE_DIR}/third_party/cgltf)
+set(JSON_DIR ${CMAKE_SOURCE_DIR}/third_party)
 
 # Vendored code: not ours to fix (imgui_impl_glfw.cpp pulls in Apple's ApplicationServices.h via GLFW's native-handle header, which warns against itself; cgltf_impl.cpp is C99 with implicit conversions -Wall/-Wextra flags). Built as a separate OBJECT library, not just a per-source COMPILE_OPTIONS/CXX_CLANG_TIDY override on the engine target: CXX_CLANG_TIDY is a target-level-only property in CMake (no working per-source override), so the only way to keep clang-tidy off vendored sources is to put them on a target that never has the property set at all.
 add_library(vendored_no_tidy OBJECT ${IMGUI_SOURCES} src/scene/cgltf_impl.cpp)
@@ -92,7 +93,6 @@ add_executable(engine
     src/scene/thread_pool.cpp
     src/scene/sampler.cpp
     src/scene/shading_scene.cpp
-    src/config/json_scan.cpp
     src/config/material_config.cpp
     src/config/profile_config.cpp
     src/config/scene_config.cpp
@@ -103,7 +103,7 @@ add_executable(engine
     src/debug/histogram.cpp
     src/debug/hud_overlay.cpp
     $<TARGET_OBJECTS:vendored_no_tidy>)
-target_include_directories(engine PRIVATE include ${IMGUI_DIR} ${IMGUI_DIR}/backends ${CGLTF_DIR})
+target_include_directories(engine PRIVATE include ${IMGUI_DIR} ${IMGUI_DIR}/backends ${CGLTF_DIR} ${JSON_DIR})
 target_compile_definitions(engine PRIVATE
     GL_SILENCE_DEPRECATION
     ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets")
