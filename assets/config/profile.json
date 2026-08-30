@@ -14,6 +14,8 @@
     "hdriPath": "textures/republiqueHDR_2k.exr",
     "windowWidth": 1024,
     "windowHeight": 576,
+    "renderScale": 1.0,
+    "interactiveRenderScale": 0.5,
     "defaultAOV": 0,
     "defaultLUT": "sRGB",
     "samplesPerPixel": 1,

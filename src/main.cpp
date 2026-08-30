@@ -111,8 +111,8 @@ bool aovNeedsLightTransport(engine::debug::AovId aov) {
     }
 }
 
-// Snapshot of every input renderPathTraced's result actually depends on -- compared frame to frame (see requestPathTraceIfTriggerChanged) to decide whether to hand PathTraceDriver a fresh request. envRotationDegrees defaults to the sentinel -1 (never a real value, since the HUD clamps it to [0,359]) specifically so the very first comparison always mismatches, giving the path-traced view a live result from the first rendered frame with no separate startup-trace call needed. needsLightTransport is folded in (not just checked ad hoc) so switching the AOV dropdown into a light-transport AOV registers as a trigger change even with a static camera -- otherwise Beauty would show a stale result until the next camera move.
-struct PathTraceTriggerState {
+// Snapshot of every input renderPathTraced's result actually depends on except the resolution it renders at -- compared frame to frame (see requestPathTraceIfTriggerChanged) to decide whether to hand PathTraceDriver a fresh request. envRotationDegrees defaults to the sentinel -1 (never a real value, since the HUD clamps it to [0,359]) specifically so the very first comparison always mismatches, giving the path-traced view a live result from the first rendered frame with no separate startup-trace call needed. needsLightTransport is folded in (not just checked ad hoc) so switching the AOV dropdown into a light-transport AOV registers as a trigger change even with a static camera -- otherwise Beauty would show a stale result until the next camera move.
+struct PathTraceInputState {
     glm::vec3 cameraPosition{0.0F};
     float cameraYawDegrees = 0.0F;
     float cameraPitchDegrees = 0.0F;
@@ -120,12 +120,31 @@ struct PathTraceTriggerState {
     int envRotationDegrees = -1;
     bool showSky = false;
     float envExposureStops = 0.0F;
-    int winWidth = 0;
-    int winHeight = 0;
+    int fbWidth = 0;
+    int fbHeight = 0;
     bool needsLightTransport = true;
+
+    bool operator==(const PathTraceInputState&) const = default;
+};
+
+// The inputs plus the scale they are currently being rendered at. Split in two because renderScale is *derived* from whether the inputs changed (requestPathTraceIfTriggerChanged): folding it into one struct would make the settle-time promotion to full resolution read as fresh interaction on the next frame, re-arming the timer it just satisfied and pinning the renderer at the interactive scale forever. The outer comparison is still what dispatches, so promoting the scale re-requests through the existing generation mechanism with no separate path.
+struct PathTraceTriggerState {
+    PathTraceInputState input;
+    float renderScale = 0.0F;  // sentinel, never a real value: profile_config.h bounds it to (0,1]
 
     bool operator==(const PathTraceTriggerState&) const = default;
 };
+
+// Seconds of no input change before the renderer promotes itself back to full renderScale -- long enough that the momentary gaps between mouse-drag events during an orbit do not each trigger a full-resolution restart, short enough to feel immediate when the camera actually stops.
+constexpr double kInteractiveSettleSeconds = 0.25;
+
+// max(1) so a non-empty framebuffer never scales to a zero-pixel render target; a genuinely empty one (minimized window) stays 0 and is skipped by the caller's own guard, exactly as before.
+int scaledExtent(int framebufferExtent, float scale) {
+    if (framebufferExtent <= 0) {
+        return 0;
+    }
+    return std::max(1, static_cast<int>(std::lround(static_cast<float>(framebufferExtent) * scale)));
+}
 
 // Everything the render loop touches every frame, plus the one-time-computed state (cached uniform locations, Embree scene) that must stay alive for the run's duration. A pure aggregate (no user-declared constructors) so initializeApp can return it by value via designated initializers -- each RAII member's own move constructor (already verified elsewhere to correctly transfer GL handles/tracked byte counts) handles the actual transfer.
 struct AppResources {
@@ -171,6 +190,10 @@ struct AppResources {
     // Max raw Depth value seen in the last rebuilt pathTraceDisplayTexture -- see ensurePathTraceDisplayTexture; only meaningful/updated when aov==Depth.
     float pathTraceDisplayedDepthMax;
     PathTraceTriggerState lastPathTraceTrigger;  // sentinel-initialized, see its own doc comment
+    // Render resolution as a fraction of the framebuffer: renderScale once settled, interactiveRenderScale while any input is changing (profile_config.h). lastInputChange is the timer the promotion between them is measured against.
+    float renderScale;
+    float interactiveRenderScale;
+    std::chrono::steady_clock::time_point lastInputChange;
 
     // Synchronous per-frame CPU rasterizer for the 15 primary-hit-only G-buffer AOVs (rasterizer.h) -- their only producer, decoupled from PathTraceDriver's async convergence loop. unique_ptr for the same reason as pathTraceDriver: RowThreadPool's copy/move are deleted (owns worker threads), so a by-value member would break AppResources's movability.
     std::unique_ptr<engine::scene::RowThreadPool> rasterThreadPool;
@@ -371,6 +394,9 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         .pathTraceDisplayedOwner = nullptr,
         .pathTraceDisplayedDepthMax = 0.0F,
         .lastPathTraceTrigger = PathTraceTriggerState{},
+        .renderScale = profileConfig.renderScale,
+        .interactiveRenderScale = profileConfig.interactiveRenderScale,
+        .lastInputChange = std::chrono::steady_clock::time_point{},
         .rasterThreadPool = std::make_unique<engine::scene::RowThreadPool>(),
         .rasterGBuffer = nullptr,
         .orbitPickRequested = false,
@@ -745,24 +771,37 @@ void requestPathTrace(AppResources& app, const engine::scene::Camera& camera, in
 }
 
 // Called once per rendered frame. Re-traces on any input that would actually change the image -- not a fixed timer -- so the path-traced view stays live without retracing every frame the camera happens to sit still. Because DebugCameraController's fly/orbit controls update every frame a key/mouse-drag is held, this does mean a fresh (progressive-accumulation-reset) request fires on almost every frame for the duration of any camera interaction -- accepted: async execution (PathTraceDriver) keeps that from blocking the UI, it just converges more slowly while the camera is moving, matching how every interactive path tracer (Cycles' viewport, Brigade) behaves. Only actually fires while the selected AOV needs light transport (aovNeedsLightTransport) -- restarting full Embree+BSDF accumulation every frame for an AOV nobody can see (Wireframe, Depth, ...) would just burn CPU competing with the rasterizer's own thread pool for no visible benefit; any accumulation already in flight from before the switch still finishes on its own.
+// Both the path trace and the rasterization run at renderScale/interactiveRenderScale of the framebuffer rather than at the framebuffer itself (profile_config.h), dropping to the interactive scale on any input change and promoting back kInteractiveSettleSeconds after the last one. The promotion needs no separate code path: it changes the trigger, and a changed trigger is already what dispatches. The display blit upscales for free -- glViewport targets the framebuffer and the display texture samples GL_LINEAR -- so nothing downstream is aware of the resolution the image arrived at.
 // Also refreshes app.rasterGBuffer synchronously on the same trigger, on the calling (render) thread -- unlike the path-traced request, this blocks briefly rather than handing off to a background driver, since the point of the rasterizer is a same-frame update for its 15 AOVs (rasterizer.h); cheap enough (no lighting/BSDF, just projection and texture sampling) that running it on every trigger change, including every frame of camera interaction, is the intended usage -- unconditional on the AOV, unlike the path-trace request, so orbit-pick/pixel-probe/instant-AOV-switching stay correct no matter what's currently displayed.
 void requestPathTraceIfTriggerChanged(AppResources& app, const engine::scene::Camera& camera,
-                                       int winWidth, int winHeight) {
+                                       int fbWidth, int fbHeight,
+                                       std::chrono::steady_clock::time_point now) {
     const bool needsLightTransport = aovNeedsLightTransport(static_cast<engine::debug::AovId>(app.aov));
-    const PathTraceTriggerState current{
+    const PathTraceInputState input{
         camera.position(),       app.debugCamera.yawDegrees(), app.debugCamera.pitchDegrees(),
         app.debugCamera.focalLengthMm(), app.envRotationDegrees, app.showSky, app.envExposureStops,
-        winWidth,                winHeight,                    needsLightTransport};
+        fbWidth,                 fbHeight,                     needsLightTransport};
+
+    // Interaction is a change in anything the image depends on other than the resolution it renders at -- compared against the inputs alone, so the scale promotion below cannot re-arm the timer that produced it.
+    if (input != app.lastPathTraceTrigger.input) {
+        app.lastInputChange = now;
+    }
+    const bool settled =
+        std::chrono::duration<double>(now - app.lastInputChange).count() >= kInteractiveSettleSeconds;
+    const PathTraceTriggerState current{input, settled ? app.renderScale : app.interactiveRenderScale};
     if (current == app.lastPathTraceTrigger) {
         return;
     }
+
+    const int renderWidth = scaledExtent(fbWidth, current.renderScale);
+    const int renderHeight = scaledExtent(fbHeight, current.renderScale);
     if (needsLightTransport) {
-        requestPathTrace(app, camera, winWidth, winHeight);
+        requestPathTrace(app, camera, renderWidth, renderHeight);
     }
-    if (winWidth > 0 && winHeight > 0) {
+    if (renderWidth > 0 && renderHeight > 0) {
         app.rasterGBuffer = std::make_shared<const engine::scene::RasterGBuffer>(engine::scene::renderRasterGBuffer(
             camera, app.sceneAccel, app.stumpModel.shadingTriangles, app.stumpModel.instances,
-            app.pathTraceSettings, winWidth, winHeight, *app.rasterThreadPool));
+            app.pathTraceSettings, renderWidth, renderHeight, *app.rasterThreadPool));
     }
     app.lastPathTraceTrigger = current;
 }
@@ -832,7 +871,7 @@ void renderFrame(engine::platform::Window& window, AppResources& app) {
     const engine::scene::Camera camera = updateCamera(window, app, dtSeconds);
     const auto [winWidth, winHeight] = window.framebufferSize();
 
-    requestPathTraceIfTriggerChanged(app, camera, winWidth, winHeight);
+    requestPathTraceIfTriggerChanged(app, camera, winWidth, winHeight, frameNow);
 
     // Held for the rest of this frame so the images behind it stay valid even if the driver publishes a newer result mid-frame -- a strong ref, not a raw fetch. Null until the first pass of the app's life completes.
     const std::shared_ptr<const engine::scene::PathTraceResult> pathTraceSnapshot =
