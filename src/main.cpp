@@ -191,6 +191,8 @@ struct AppResources {
     float envExposureStops;  // stops, not a multiplier; requestPathTrace does exp2()
     bool invert;   // 1.0 - colour, applied to the final display-referred image -- the 'I' debug toggle
     bool showHud;  // 'H' toggle; gates HudOverlay::draw only -- beginFrame/render stay unconditional so ImGui's frame pairing is never broken
+    // Chromatic aberration strength (0 = off), radial UV offset passed to OcioDisplayTransform::setAberration -- HUD slider only.
+    float aberrationStrength;
 
     // Async path-traced view, selected via the `aov` field (engine::debug::AovId, the HUD's AOV dropdown). pathTraceDriver runs continuously on its own background thread once constructed (main() constructs it after initializeApp() returns -- see path_trace_driver.h's constructor precondition on reference stability); requestTrace() is called only from renderFrame's requestPathTraceIfTriggerChanged, whenever lastPathTraceTrigger detects the camera/scene state renderPathTraced depends on has changed -- no manual trigger. unique_ptr, not a by-value optional: PathTraceDriver holds reference members and an owned std::jthread/std::mutex, so it's neither copyable nor movable -- a by-value optional<T> member would make that non-movability propagate to AppResources itself (optional<T>'s move ctor is only available when T's is), which would break initializeApp's return-by-value/RVO pattern every other member here relies on. A unique_ptr's own move just transfers ownership of the pointee's address, never touching PathTraceDriver's reference members, so AppResources stays movable and PathTraceDriver itself is never relocated in memory once constructed.
     engine::scene::PathTraceSettings pathTraceSettings;
@@ -412,6 +414,7 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         .envExposureStops = 0.0F,
         .invert = false,
         .showHud = true,
+        .aberrationStrength = 0.0F,
         .pathTraceSettings =
             engine::scene::PathTraceSettings{
                 .samplesPerPixel = profileConfig.samplesPerPixel,
@@ -812,6 +815,8 @@ void presentFrame(AppResources& app,
         app.ocioTransform.setExposureEv(exposureEv);
         app.ocioTransform.setChannelView(app.channelView);
         app.ocioTransform.setInvert(app.invert);
+        // Beauty only -- an artistic lens effect over the rendered image, not meaningful on a raw data AOV like Normal/Depth/Albedo.
+        app.ocioTransform.setAberration(isBeauty ? app.aberrationStrength : 0.0F);
         app.ocioTransform.bind();
         app.postProcess.draw(app.pathTraceDisplayTexture->id(), app.ocioTransform.activeShader(),
                               {winWidth, winHeight});
@@ -944,7 +949,8 @@ void updateHud(AppResources& app, const engine::platform::Window& window,
         window, pathTraceSnapshot, app.rasterGBuffer, static_cast<engine::debug::AovId>(app.aov));
     if (app.showHud) {
         app.hud.draw(hudFrameData, app.aov, focalLengthMm, aperture, shutterSeconds, iso, app.showSky,
-                     app.envRotationDegrees, app.envExposureStops, app.framingState, pixelProbe);
+                     app.envRotationDegrees, app.envExposureStops, app.aberrationStrength,
+                     app.framingState, pixelProbe);
     }
     app.debugCamera.setFocalLengthMm(focalLengthMm);
     app.debugCamera.setAperture(aperture);
