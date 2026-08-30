@@ -40,14 +40,14 @@ void PathTraceDriver::requestTrace(const Request& request) {
     generation_.fetch_add(1, std::memory_order_relaxed);
 }
 
-PathTraceSnapshot PathTraceDriver::latestResult() const {
+std::shared_ptr<const PathTraceResult> PathTraceDriver::latestResult() const {
     const std::lock_guard<std::mutex> lock(resultMutex_);
-    return PathTraceSnapshot{gbuffer_, dynamic_};
+    return result_;
 }
 
 // Runs until destruction (jthread's stop token), picking up the latest requested state whenever its generation changes and otherwise repeatedly re-tracing the same request, accumulating each pass into a running mean that converges over time. A pass superseded mid-flight (renderPathTraced's own generation check, polled once per row) is discarded whole, never partially merged.
 void PathTraceDriver::driverLoop(std::stop_token stopToken) {
-    PathTraceDynamic accumulator{};
+    PathTraceResult accumulator{};
     std::optional<Request> activeRequest;
     std::uint64_t activeGeneration = 0;  // 0 == no request handled yet; requestTrace's first bump makes generation_ 1
 
@@ -91,21 +91,8 @@ void PathTraceDriver::driverLoop(std::stop_token stopToken) {
         }
 
         const int n = accumulatedSamples_.fetch_add(1, std::memory_order_relaxed) + 1;
-        std::shared_ptr<const PathTraceGBuffer> newGBuffer;  // only set on n==1, published below
         if (n == 1) {
-            // First pass of this generation: the G-buffer fields are primary-hit-only quantities that don't benefit from averaging across passes (see PathTraceGBuffer's doc comment) -- take them as-is, split out, and publish once; they're never rebuilt again this generation.
-            newGBuffer = std::make_shared<const PathTraceGBuffer>(PathTraceGBuffer{
-                std::move(pass.iorAov), std::move(pass.depth), std::move(pass.worldPos),
-                std::move(pass.uv), std::move(pass.normal), std::move(pass.geomNormal),
-                std::move(pass.albedo), std::move(pass.metallic), std::move(pass.roughness),
-                std::move(pass.tangent), std::move(pass.objectId), std::move(pass.alpha),
-                std::move(pass.fresnel), std::move(pass.ao)});
-            accumulator = PathTraceDynamic{
-                std::move(pass.beauty),         std::move(pass.bounceHeatmap),
-                std::move(pass.shadow),
-                std::move(pass.directDiffuse),  std::move(pass.indirectDiffuse),
-                std::move(pass.directSpecular), std::move(pass.indirectSpecular),
-                std::move(pass.refraction)};
+            accumulator = std::move(pass);  // first pass of this generation: the running mean of one sample is that sample
         } else {
             accumulateInPlace(accumulator.beauty, pass.beauty, n);
             accumulateInPlace(accumulator.bounceHeatmap, pass.bounceHeatmap, n);
@@ -123,10 +110,7 @@ void PathTraceDriver::driverLoop(std::stop_token stopToken) {
 
         {
             const std::lock_guard<std::mutex> lock(resultMutex_);
-            if (newGBuffer) {
-                gbuffer_ = std::move(newGBuffer);
-            }
-            dynamic_ = std::make_shared<const PathTraceDynamic>(accumulator);
+            result_ = std::make_shared<const PathTraceResult>(accumulator);
         }
     }
 }

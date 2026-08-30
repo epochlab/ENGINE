@@ -30,6 +30,25 @@ struct CdfSample {
     int index;
     float fraction;  // [0,1) position within the selected bin
 };
+// The integer texel a direction falls in -- the piecewise-constant cell the marginal/conditional CDFs are built over -- plus that row's sin(theta) for the solid-angle Jacobian. Shared by pdf() and sampleDirectionNearest() so the NEE estimator's f and its pdf can never describe different texels.
+struct EquirectTexel {
+    int x;
+    int y;
+    float sinTheta;
+};
+
+EquirectTexel equirectTexelOf(const engine::gfx::HdrImage& image, const glm::vec3& direction,
+                               float envRotationRadians) {
+    const glm::vec3 rotated = rotateAboutY(direction, -envRotationRadians);
+    const float theta = std::acos(glm::clamp(rotated.y, -1.0F, 1.0F));
+    const float phi = std::atan2(rotated.x, rotated.z);
+    const float uCoord = (phi / (2.0F * glm::pi<float>())) + 0.5F;
+    const float v = theta / glm::pi<float>();
+    return {std::clamp(static_cast<int>(uCoord * static_cast<float>(image.width)), 0, image.width - 1),
+            std::clamp(static_cast<int>(v * static_cast<float>(image.height)), 0, image.height - 1),
+            std::max(std::sin(theta), 1e-6F)};
+}
+
 CdfSample invertCdf(const float* cdf, int count, float u) {
     // upper_bound finds the first entry > u; the bin just before it is the one u falls into. cdf[0]==0 is never > u (u>=0) and searching it is harmless, so no need to special-case it out.
     const float* it = std::upper_bound(cdf, cdf + count + 1, u);
@@ -126,26 +145,28 @@ EnvironmentMap::EnvSample EnvironmentMap::importanceSampleDirection(glm::vec2 u,
     return {direction, std::max(pdfSolidAngle, 1e-8F)};
 }
 
+glm::vec3 EnvironmentMap::sampleDirectionNearest(const glm::vec3& direction,
+                                                  float envRotationRadians) const {
+    const EquirectTexel texel = equirectTexelOf(image_, direction, envRotationRadians);
+    const std::size_t idx = ((static_cast<std::size_t>(texel.y) * static_cast<std::size_t>(image_.width)) +
+                              static_cast<std::size_t>(texel.x)) *
+                             4;
+    return {image_.rgba[idx + 0], image_.rgba[idx + 1], image_.rgba[idx + 2]};
+}
+
 float EnvironmentMap::pdf(const glm::vec3& direction, float envRotationRadians) const {
     const int width = image_.width;
     const int height = image_.height;
-    const glm::vec3 rotated = rotateAboutY(direction, -envRotationRadians);
-    const float theta = std::acos(glm::clamp(rotated.y, -1.0F, 1.0F));
-    const float phi = std::atan2(rotated.x, rotated.z);
-    const float uCoord = (phi / (2.0F * glm::pi<float>())) + 0.5F;
-    const float v = theta / glm::pi<float>();
-
-    const int y = std::clamp(static_cast<int>(v * static_cast<float>(height)), 0, height - 1);
-    const int x = std::clamp(static_cast<int>(uCoord * static_cast<float>(width)), 0, width - 1);
+    const EquirectTexel texel = equirectTexelOf(image_, direction, envRotationRadians);
     const float* row =
-        &conditionalCdf_[static_cast<std::size_t>(y) * (static_cast<std::size_t>(width) + 1)];
+        &conditionalCdf_[static_cast<std::size_t>(texel.y) * (static_cast<std::size_t>(width) + 1)];
 
-    const float pdfV = (marginalCdf_[static_cast<std::size_t>(y) + 1] - marginalCdf_[static_cast<std::size_t>(y)]) *
+    const float pdfV = (marginalCdf_[static_cast<std::size_t>(texel.y) + 1] -
+                         marginalCdf_[static_cast<std::size_t>(texel.y)]) *
                         static_cast<float>(height);
-    const float pdfU = (row[x + 1] - row[x]) * static_cast<float>(width);
-    const float sinTheta = std::max(std::sin(theta), 1e-6F);
+    const float pdfU = (row[texel.x + 1] - row[texel.x]) * static_cast<float>(width);
     const float pdfSolidAngle =
-        (pdfU * pdfV) / std::max(2.0F * glm::pi<float>() * glm::pi<float>() * sinTheta, 1e-6F);
+        (pdfU * pdfV) / std::max(2.0F * glm::pi<float>() * glm::pi<float>() * texel.sinTheta, 1e-6F);
     return std::max(pdfSolidAngle, 1e-8F);
 }
 

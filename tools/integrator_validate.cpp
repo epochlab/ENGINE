@@ -1,0 +1,486 @@
+// Standalone correctness check for path_tracer.cpp's INTEGRATOR (renderPathTraced/tracePath), as distinct from bsdf_validate.cpp/nee_validate.cpp which exercise the BSDF and the MIS weighting in isolation and never run a real trace. Same standalone-CLI convention: no test framework, non-zero exit on failure.
+//
+// Reference configuration: one large unoccluded quad under a uniform-radiance (L0=1) environment. Because nothing else is in the scene, every ray leaving the surface reaches the environment directly -- there is NO indirect light -- so the converged radiance is exactly the single-scatter direct lighting, Lo(wo) = integral over the hemisphere of evaluateBsdf(wo,wi)*cos(wi) dwi, the same analytic quantity nee_validate.cpp's referenceLo computes.
+//
+// Two invariants follow, and they catch different classes of integrator bug than a BSDF-level furnace test can:
+//
+//   1. DEPTH INVARIANCE. With no indirect light, maxBounces=0 and maxBounces=1 must produce the SAME image. A depth cap that drops the terminal BSDF-sampled ray breaks this: at maxBounces=0 the ray built at bounce 0 is never intersected, so NEE's MIS weight (lightPdf^2/(lightPdf^2+bsdfPdf^2)) is never complemented by the BSDF-sampling half and the surface renders too dark, while maxBounces=1 traces that ray at bounce 1 and is complete. The gap is exactly bsdfPdf^2/(bsdfPdf^2+lightPdf^2) of the direct lighting -- large on a glossy surface.
+//
+//   2. ABSOLUTE AGREEMENT with the analytic reference, which no self-consistency check between two renderer settings can give on its own.
+//
+// Russian roulette is exercised as a third case: it reweights by 1/p on survival, so an RR-enabled render must return the same answer as an RR-disabled one. RR lives in tracePath, so this is the only place it can be tested.
+//
+// Note: Material/MeshInstance are plain data (six HdrImage members and a mat4) and need no GL context -- an earlier comment in nee_validate.cpp claimed otherwise, which is why the suite had no integrator-level test until now.
+
+#include <array>
+#include <atomic>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+#include <iostream>
+#include <optional>
+#include <random>
+#include <string>
+#include <vector>
+
+#include <glm/glm.hpp>
+
+#include "engine/gfx/hdr_image.h"
+#include "engine/scene/bsdf.h"
+#include "engine/scene/camera.h"
+#include "engine/scene/embree_accel.h"
+#include "engine/scene/environment_map.h"
+#include "engine/scene/gltf_loader.h"
+#include "engine/scene/path_tracer.h"
+#include "engine/scene/row_thread_pool.h"
+#include "engine/scene/shading_scene.h"
+
+namespace {
+
+using engine::scene::BsdfParams;
+using engine::scene::Camera;
+using engine::scene::EmbreeAccel;
+using engine::scene::EnvironmentMap;
+using engine::scene::MeshInstance;
+using engine::scene::PathTraceSettings;
+using engine::scene::ShadingTriangle;
+using engine::scene::ShadingVertex;
+using engine::scene::Triangle;
+
+constexpr float kPi = 3.14159265F;
+
+// Quad half-extent: large enough that every primary ray in the narrow test FOV lands on it, so no pixel sees the environment directly and the measured value is purely surface radiance.
+constexpr float kQuadExtent = 1000.0F;
+// Narrow FOV (200mm on a 36x24 gate, ~6.9 degrees vertical) so every pixel's view direction is within a fraction of a degree of the quad normal -- lets one analytic reference at wo = the normal stand for the whole probed region.
+constexpr float kFocalLengthMm = 200.0F;
+constexpr int kImageSize = 16;
+constexpr int kSamplesPerPixel = 512;
+
+engine::gfx::HdrImage makeConstantTexture(glm::vec3 rgb) {
+    engine::gfx::HdrImage image;
+    image.width = 1;
+    image.height = 1;
+    image.rgba = {rgb.x, rgb.y, rgb.z, 1.0F};
+    return image;
+}
+
+// 1x1 textures carrying the neutral values resolveBsdfParams/buildShadingFrame expect: a flat tangent-space normal (0.5,0.5,1), the requested roughness in .r, and f0 in the specular slot. bumpStrength is set to 0 in the settings below, so the bump texture's value is irrelevant.
+engine::scene::Material makeMaterial(float roughness, glm::vec3 f0) {
+    return engine::scene::Material{
+        makeConstantTexture(glm::vec3(1.0F)),                  // baseColor -- white, worst case
+        makeConstantTexture(glm::vec3(0.5F, 0.5F, 1.0F)),      // normal -- flat
+        makeConstantTexture(glm::vec3(0.5F)),                  // bump -- unused, bumpStrength 0
+        makeConstantTexture(glm::vec3(roughness)),             // roughness
+        makeConstantTexture(f0),                               // specular -> f0
+        makeConstantTexture(glm::vec3(1.0F)),                  // AO -- unoccluded
+    };
+}
+
+// One quad in the z=0 plane facing +Z, wound counter-clockwise as seen from +Z so geometricNormalOf gives (0,0,1). The camera sits at +Z looking down -Z (yaw=0/pitch=0, this codebase's default orientation), so the centre pixel's view direction is exactly the surface normal.
+struct QuadScene {
+    std::vector<Triangle> worldTriangles;
+    std::vector<ShadingTriangle> shadingTriangles;
+    std::vector<MeshInstance> instances;
+};
+
+QuadScene makeQuadScene(float roughness, glm::vec3 f0) {
+    const glm::vec3 normal(0.0F, 0.0F, 1.0F);
+    const glm::vec4 tangent(1.0F, 0.0F, 0.0F, 1.0F);
+    const auto vertex = [&](float x, float y) {
+        return ShadingVertex{glm::vec3(x, y, 0.0F), normal, glm::vec2(0.5F, 0.5F), tangent};
+    };
+    const ShadingVertex v0 = vertex(-kQuadExtent, -kQuadExtent);
+    const ShadingVertex v1 = vertex(kQuadExtent, -kQuadExtent);
+    const ShadingVertex v2 = vertex(kQuadExtent, kQuadExtent);
+    const ShadingVertex v3 = vertex(-kQuadExtent, kQuadExtent);
+
+    QuadScene scene;
+    scene.worldTriangles = {Triangle{v0.position, v1.position, v2.position},
+                             Triangle{v0.position, v2.position, v3.position}};
+    scene.shadingTriangles = {ShadingTriangle{v0, v1, v2, 0}, ShadingTriangle{v0, v2, v3, 0}};
+    scene.instances = {MeshInstance{makeMaterial(roughness, f0), glm::mat4(1.0F)}};
+    return scene;
+}
+
+// Two parallel quads with OPPOSING geometric normals -- the front facing the camera at +Z, the back facing
+// away at -Z. A camera ray therefore enters at the front face (woLocal.z > 0) and leaves at the back
+// (woLocal.z < 0), which is the only configuration that exercises bsdf.cpp's exiting side and the far-side
+// NEE guard. A single quad cannot: it is entered from the front and every hit reads as entering.
+QuadScene makeSlabScene(float roughness, glm::vec3 f0, float thickness) {
+    const glm::vec4 tangent(1.0F, 0.0F, 0.0F, 1.0F);
+    const auto vertex = [&](float x, float y, float z, float nz) {
+        return ShadingVertex{glm::vec3(x, y, z), glm::vec3(0.0F, 0.0F, nz), glm::vec2(0.5F, 0.5F),
+                              tangent};
+    };
+    // Front wound counter-clockwise as seen from +Z, back clockwise, so geometricNormalOf gives +Z and -Z.
+    const ShadingVertex fv0 = vertex(-kQuadExtent, -kQuadExtent, 0.0F, 1.0F);
+    const ShadingVertex fv1 = vertex(kQuadExtent, -kQuadExtent, 0.0F, 1.0F);
+    const ShadingVertex fv2 = vertex(kQuadExtent, kQuadExtent, 0.0F, 1.0F);
+    const ShadingVertex fv3 = vertex(-kQuadExtent, kQuadExtent, 0.0F, 1.0F);
+    const ShadingVertex bv0 = vertex(-kQuadExtent, -kQuadExtent, -thickness, -1.0F);
+    const ShadingVertex bv1 = vertex(-kQuadExtent, kQuadExtent, -thickness, -1.0F);
+    const ShadingVertex bv2 = vertex(kQuadExtent, kQuadExtent, -thickness, -1.0F);
+    const ShadingVertex bv3 = vertex(kQuadExtent, -kQuadExtent, -thickness, -1.0F);
+
+    QuadScene scene;
+    scene.worldTriangles = {Triangle{fv0.position, fv1.position, fv2.position},
+                             Triangle{fv0.position, fv2.position, fv3.position},
+                             Triangle{bv0.position, bv1.position, bv2.position},
+                             Triangle{bv0.position, bv2.position, bv3.position}};
+    scene.shadingTriangles = {ShadingTriangle{fv0, fv1, fv2, 0}, ShadingTriangle{fv0, fv2, fv3, 0},
+                               ShadingTriangle{bv0, bv1, bv2, 0}, ShadingTriangle{bv0, bv2, bv3, 0}};
+    scene.instances = {MeshInstance{makeMaterial(roughness, f0), glm::mat4(1.0F)}};
+    return scene;
+}
+
+// The quad above plus an opaque wall at x=1 facing -X, the only scene here where a NON-transmissive path
+// reaches a second surface: the wall sits outside the narrow view frustum (primary rays land within
+// |x| < 0.31 at z=0) so it is never primary-visible, but it catches the floor's +X-going bounce rays, and
+// NEE fires there at bounce >= 1 -- which is the only way anything reaches the Indirect buckets.
+QuadScene makeCornerScene(float roughness, glm::vec3 f0) {
+    QuadScene scene = makeQuadScene(roughness, f0);
+    const glm::vec3 wallNormal(-1.0F, 0.0F, 0.0F);
+    const glm::vec4 wallTangent(0.0F, 1.0F, 0.0F, 1.0F);
+    const auto vertex = [&](float y, float z) {
+        return ShadingVertex{glm::vec3(1.0F, y, z), wallNormal, glm::vec2(0.5F, 0.5F), wallTangent};
+    };
+    // Wound so geometricNormalOf gives -X, i.e. facing back across the floor rather than away from it.
+    const ShadingVertex w0 = vertex(-kQuadExtent, 0.0F);
+    const ShadingVertex w1 = vertex(kQuadExtent, 0.0F);
+    const ShadingVertex w2 = vertex(kQuadExtent, kQuadExtent);
+    const ShadingVertex w3 = vertex(-kQuadExtent, kQuadExtent);
+
+    scene.worldTriangles.push_back(Triangle{w0.position, w3.position, w2.position});
+    scene.worldTriangles.push_back(Triangle{w0.position, w2.position, w1.position});
+    scene.shadingTriangles.push_back(ShadingTriangle{w0, w3, w2, 0});
+    scene.shadingTriangles.push_back(ShadingTriangle{w0, w2, w1, 0});
+    return scene;
+}
+
+EnvironmentMap makeUniformEnvironment() {
+    engine::gfx::HdrImage image;
+    image.width = 64;
+    image.height = 32;
+    image.rgba.assign(static_cast<std::size_t>(image.width) * static_cast<std::size_t>(image.height) * 4,
+                       1.0F);
+    return EnvironmentMap(std::move(image));
+}
+
+// Only `metallic` travels through PathTraceSettings; roughness and f0 reach the renderer through the
+// material's 1x1 roughness and specular textures, which resolveBsdfParams samples (gbuffer_shading.cpp).
+PathTraceSettings makeSettings(int maxBounces, int rrStartBounce, float metallic,
+                               float transmission = 0.0F) {
+    PathTraceSettings settings{};
+    settings.samplesPerPixel = kSamplesPerPixel;
+    settings.maxBounces = maxBounces;
+    settings.russianRouletteStartBounce = rrStartBounce;
+    settings.bumpStrength = 0.0F;
+    settings.roughnessMin = 0.0F;
+    settings.roughnessMax = 1.0F;
+    settings.diffuseColour = glm::vec3(1.0F);
+    settings.ior = 1.5F;
+    settings.transmissionFactor = transmission;
+    settings.metallicFactor = metallic;
+    settings.roughnessFactor = 1.0F;
+    return settings;
+}
+
+Camera makeCamera() {
+    return Camera(glm::vec3(0.0F, 0.0F, 5.0F), 0.0F, 0.0F, Camera::FilmBack{36.0F, 24.0F},
+                   kFocalLengthMm, 0.01F, 1000.0F, 2.8F, 1.0F / 125.0F, 100.0F);
+}
+
+// Mean radiance over the centre 4x4 block -- averaging several pixels tightens the estimate without widening the view-direction spread enough to matter at this FOV.
+glm::vec3 centreMean(const engine::gfx::HdrImage& image) {
+    glm::vec3 sum(0.0F);
+    int count = 0;
+    for (int y = (kImageSize / 2) - 2; y < (kImageSize / 2) + 2; ++y) {
+        for (int x = (kImageSize / 2) - 2; x < (kImageSize / 2) + 2; ++x) {
+            const std::size_t idx =
+                ((static_cast<std::size_t>(y) * static_cast<std::size_t>(image.width)) +
+                 static_cast<std::size_t>(x)) *
+                4;
+            sum += glm::vec3(image.rgba[idx + 0], image.rgba[idx + 1], image.rgba[idx + 2]);
+            ++count;
+        }
+    }
+    return sum / static_cast<float>(count);
+}
+
+// Independent ground truth, identical in form to nee_validate.cpp's referenceLo: Lo(wo) = integral over the hemisphere of evaluateBsdf(wo,wi)*wi.z dwi, with L0=1. Uniform-hemisphere Monte Carlo, so it under-samples a sharp GGX peak -- callers restrict the tight comparison to roughness values where it converges.
+float referenceLo(const BsdfParams& params, const glm::vec3& wo, int sampleCount, std::mt19937& rng) {
+    std::uniform_real_distribution<float> unit(0.0F, 1.0F);
+    constexpr float kUniformPdf = 1.0F / (2.0F * kPi);
+    glm::vec3 accum(0.0F);
+    for (int i = 0; i < sampleCount; ++i) {
+        const float cosTheta = unit(rng);
+        const float sinTheta = std::sqrt(std::max(0.0F, 1.0F - (cosTheta * cosTheta)));
+        const float phi = 2.0F * kPi * unit(rng);
+        const glm::vec3 wi(sinTheta * std::cos(phi), sinTheta * std::sin(phi), cosTheta);
+        accum += engine::scene::evaluateBsdf(params, wo, wi) * wi.z / kUniformPdf;
+    }
+    return std::max({accum.x, accum.y, accum.z}) / static_cast<float>(sampleCount);
+}
+
+// Runs one full renderPathTraced pass over the quad scene. showSky gates only the primary ray's own miss, so turning it off zeroes the background term the transport buckets deliberately exclude.
+engine::scene::PathTraceResult renderPass(const QuadScene& scene, const EnvironmentMap& env,
+                                           const PathTraceSettings& settings, EmbreeAccel& accel,
+                                           engine::scene::RowThreadPool& pool, bool showSky) {
+    const std::atomic<std::uint64_t> generation{1};
+    return engine::scene::renderPathTraced(makeCamera(), accel, scene.shadingTriangles,
+                                            scene.instances, env, kImageSize, kImageSize,
+                                            /*envRotationRadians=*/0.0F, showSky,
+                                            /*envExposure=*/1.0F, settings, /*runSeed=*/7U,
+                                            generation, /*requestedGeneration=*/1U, pool);
+}
+
+// Centre-region mean radiance of one pass.
+float renderCentre(const QuadScene& scene, const EnvironmentMap& env, const PathTraceSettings& settings,
+                    EmbreeAccel& accel, engine::scene::RowThreadPool& pool) {
+    const glm::vec3 mean = centreMean(renderPass(scene, env, settings, accel, pool, true).beauty);
+    return std::max({mean.x, mean.y, mean.z});
+}
+
+struct Case {
+    const char* name;
+    float roughness;
+    float metallic;
+    glm::vec3 f0;
+};
+
+bool runCases() {
+    // Roughness restricted to values where the uniform-hemisphere reference converges (same limitation nee_validate.cpp documents for its own tight two-sided check); a sharp low-roughness lobe biases the reference low and would produce false failures.
+    const std::array<Case, 4> cases{{
+        {"diffuse (metallic 0, rough 1.0)", 1.0F, 0.0F, glm::vec3(0.04F)},
+        {"glossy dielectric (rough 0.35)", 0.35F, 0.0F, glm::vec3(0.04F)},
+        {"rough conductor (rough 0.5)", 0.5F, 1.0F, glm::vec3(1.0F)},
+        {"rough conductor (rough 0.25)", 0.25F, 1.0F, glm::vec3(1.0F)},
+    }};
+
+    // Depth invariance is exact up to Monte Carlo noise, so it gets the tighter bound. Absolute agreement is looser: the uniform-hemisphere reference converges slowly, and single-scatter GGX legitimately loses energy at high roughness (Heitz et al. 2016), which the renderer reproduces faithfully and the reference does not correct for -- both sides compute the same single-scatter BSDF, so they agree, but only to within the reference's own noise.
+    constexpr float kDepthInvarianceTolerance = 0.02F;
+    constexpr float kReferenceTolerance = 0.06F;
+    constexpr int kReferenceSamples = 400000;
+
+    const EnvironmentMap env = makeUniformEnvironment();
+    engine::scene::RowThreadPool pool;
+    std::mt19937 referenceRng(99);
+    bool ok = true;
+
+    std::cout << "integrator_validate: quad under uniform L0=1 environment, wo = surface normal\n";
+    std::cout << "  case                              maxB=0    maxB=1    RR on    reference\n";
+
+    for (const Case& testCase : cases) {
+        const QuadScene scene = makeQuadScene(testCase.roughness, testCase.f0);
+        std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
+        if (!accel.has_value()) {
+            std::cerr << "integrator_validate: FAILED to build Embree scene for " << testCase.name << '\n';
+            return false;
+        }
+
+        // rrStartBounce far above maxBounces disables Russian roulette for the first two renders, so depth invariance is measured without RR's extra variance folded in.
+        const float loDepth0 = renderCentre(
+            scene, env, makeSettings(0, 999, testCase.metallic),
+            *accel, pool);
+        const float loDepth1 = renderCentre(
+            scene, env, makeSettings(1, 999, testCase.metallic),
+            *accel, pool);
+        // RR from bounce 0, same scene: reweighting by 1/p must leave the expectation unchanged.
+        const float loRoulette = renderCentre(
+            scene, env, makeSettings(1, 0, testCase.metallic),
+            *accel, pool);
+
+        const BsdfParams params{glm::vec3(1.0F), testCase.metallic, testCase.roughness, testCase.f0,
+                                 1.5F, 0.0F};
+        const float reference = referenceLo(params, glm::vec3(0.0F, 0.0F, 1.0F), kReferenceSamples,
+                                             referenceRng);
+
+        std::cout << "  " << testCase.name;
+        for (std::size_t pad = std::string(testCase.name).size(); pad < 34; ++pad) {
+            std::cout << ' ';
+        }
+        std::cout << loDepth0 << "  " << loDepth1 << "  " << loRoulette << "  " << reference << '\n';
+
+        const float scale = std::max(reference, 0.05F);
+        if (std::fabs(loDepth0 - loDepth1) > kDepthInvarianceTolerance * scale) {
+            std::cerr << "integrator_validate: FAILED depth invariance at " << testCase.name
+                      << " -- maxBounces=0 gave " << loDepth0 << ", maxBounces=1 gave " << loDepth1
+                      << ". With no indirect light these must match; a gap means the terminal "
+                         "BSDF-sampled ray is not being traced, so NEE's MIS weight is never "
+                         "complemented.\n";
+            ok = false;
+        }
+        if (std::fabs(loRoulette - loDepth1) > kDepthInvarianceTolerance * scale) {
+            std::cerr << "integrator_validate: FAILED Russian roulette invariance at " << testCase.name
+                      << " -- RR on gave " << loRoulette << ", RR off gave " << loDepth1
+                      << ". RR reweights by 1/p and must not change the expectation.\n";
+            ok = false;
+        }
+        if (std::fabs(loDepth1 - reference) > kReferenceTolerance * scale) {
+            std::cerr << "integrator_validate: FAILED reference agreement at " << testCase.name
+                      << " -- rendered " << loDepth1 << ", analytic " << reference << '\n';
+            ok = false;
+        }
+    }
+    return ok;
+}
+
+// A white, non-absorbing dielectric slab in a uniform L0=1 environment is INVISIBLE: the camera must read
+// exactly 1.0 through it. Every photon entering the front face leaves somewhere, and the non-symmetric
+// eta^2 radiance compression applied on entering is undone on exiting, so the round trip is lossless.
+//
+// This is the only case in the suite that reaches a transmissive EXITING vertex, and it is what gates the
+// far-side NEE guard against the miss branch's MIS weight. Weighting a rough transmission sample at 1.0
+// (correct only for a delta lobe) while NEE also evaluates the transmission lobe toward the same
+// directions double-counts their overlap, and reads above 1.0 here. Both bounds matter: the same test
+// catches a transmissive vertex that loses energy instead.
+bool checkTransmissiveSlab() {
+    // Enough depth for internally reflected paths to converge; truncation only ever darkens.
+    constexpr int kSlabBounces = 12;
+    constexpr float kThickness = 0.5F;
+    constexpr float kTolerance = 0.03F;
+    // 0.02 is below bsdf.cpp's smooth-roughness threshold, so it exercises the delta transmission path;
+    // the rest take the Walter lobe.
+    const std::array<float, 5> roughnesses = {0.02F, 0.05F, 0.4F, 0.7F, 1.0F};
+
+    const EnvironmentMap env = makeUniformEnvironment();
+    engine::scene::RowThreadPool pool;
+    bool ok = true;
+
+    std::cout << "integrator_validate: white non-absorbing slab, uniform L0=1 (1.0 = invisible)\n";
+    for (float roughness : roughnesses) {
+        const QuadScene scene = makeSlabScene(roughness, glm::vec3(0.04F), kThickness);
+        std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
+        if (!accel.has_value()) {
+            std::cerr << "integrator_validate: FAILED to build Embree slab scene\n";
+            return false;
+        }
+        const float lo = renderCentre(
+            scene, env, makeSettings(kSlabBounces, 999, /*metallic=*/0.0F, /*transmission=*/1.0F),
+            *accel, pool);
+        std::cout << "  roughness " << roughness << "   Lo " << lo << '\n';
+        if (std::fabs(lo - 1.0F) > kTolerance) {
+            std::cerr << "integrator_validate: FAILED slab transparency at roughness=" << roughness
+                      << " -- rendered " << lo
+                      << ", expected 1.0. A white non-absorbing slab must neither add nor remove "
+                         "energy; above 1.0 means NEE and the BSDF-sampled miss are double-counting "
+                         "the transmission lobe, below means a transmissive vertex is losing energy.\n";
+            ok = false;
+        }
+    }
+    return ok;
+}
+
+// The five transport buckets are a PARTITION of beauty, not a set of related-looking images: with the
+// background term zeroed (showSky off), DirectDiffuse + IndirectDiffuse + DirectSpecular +
+// IndirectSpecular + Refraction must equal Beauty at every pixel, to float error. Every radiance
+// contribution tracePath adds is written to exactly one bucket at its own physical value, so any gap here
+// means a contribution was bucketed twice, dropped, or rescaled -- which is exactly what the previous
+// delighted buckets did by construction (they stripped baseColor at bounce 0 only, leaving direct and
+// indirect in different units and neither summing to anything).
+//
+// The slab rows carry the load: a single quad reaches only the Direct buckets, while the slab's internal
+// reflections populate Indirect and Refraction and exercise the transmissive exiting vertex.
+bool checkTransportPartition() {
+    // Relative to beauty, since the absolute scale differs by case; float error over kSamplesPerPixel
+    // accumulations of ~1e-3 each is orders of magnitude below this.
+    constexpr float kTolerance = 1e-4F;
+
+    enum class Geometry { Quad, Corner, Slab };
+    struct PartitionCase {
+        const char* name;
+        Geometry geometry;
+        float roughness;
+        float metallic;
+        float transmission;
+        int maxBounces;
+    };
+    const std::array<PartitionCase, 6> cases{{
+        {"quad diffuse (rough 1.0)", Geometry::Quad, 1.0F, 0.0F, 0.0F, 1},
+        {"quad glossy dielectric (rough 0.35)", Geometry::Quad, 0.35F, 0.0F, 0.0F, 1},
+        {"quad rough conductor (rough 0.5)", Geometry::Quad, 0.5F, 1.0F, 0.0F, 2},
+        {"corner diffuse (rough 1.0)", Geometry::Corner, 1.0F, 0.0F, 0.0F, 4},
+        {"slab smooth glass (rough 0.02)", Geometry::Slab, 0.02F, 0.0F, 1.0F, 8},
+        {"slab rough glass (rough 0.4)", Geometry::Slab, 0.4F, 0.0F, 1.0F, 8},
+    }};
+
+    const EnvironmentMap env = makeUniformEnvironment();
+    engine::scene::RowThreadPool pool;
+    bool ok = true;
+
+    std::cout << "integrator_validate: transport buckets partition beauty (showSky off)\n";
+    for (const PartitionCase& testCase : cases) {
+        const QuadScene scene =
+            testCase.geometry == Geometry::Slab
+                ? makeSlabScene(testCase.roughness, glm::vec3(0.04F), 0.5F)
+                : testCase.geometry == Geometry::Corner
+                      ? makeCornerScene(testCase.roughness, glm::vec3(0.04F))
+                      : makeQuadScene(testCase.roughness, glm::vec3(0.04F));
+        std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
+        if (!accel.has_value()) {
+            std::cerr << "integrator_validate: FAILED to build Embree scene for " << testCase.name << '\n';
+            return false;
+        }
+        const engine::scene::PathTraceResult result = renderPass(
+            scene, env,
+            makeSettings(testCase.maxBounces, 999, testCase.metallic, testCase.transmission), *accel,
+            pool, /*showSky=*/false);
+
+        float worstGap = 0.0F;
+        float worstBeauty = 0.0F;
+        float maxIndirect = 0.0F;
+        for (std::size_t i = 0; i < result.beauty.rgba.size(); i += 4) {
+            for (std::size_t c = 0; c < 3; ++c) {
+                const float beauty = result.beauty.rgba[i + c];
+                const float sum = result.directDiffuse.rgba[i + c] + result.indirectDiffuse.rgba[i + c] +
+                                   result.directSpecular.rgba[i + c] +
+                                   result.indirectSpecular.rgba[i + c] + result.refraction.rgba[i + c];
+                const float gap = std::fabs(beauty - sum) / std::max(std::fabs(beauty), 1e-3F);
+                if (gap > worstGap) {
+                    worstGap = gap;
+                    worstBeauty = beauty;
+                }
+                maxIndirect = std::max({maxIndirect, result.indirectDiffuse.rgba[i + c],
+                                         result.indirectSpecular.rgba[i + c]});
+            }
+        }
+
+        std::cout << "  " << testCase.name;
+        for (std::size_t pad = std::string(testCase.name).size(); pad < 38; ++pad) {
+            std::cout << ' ';
+        }
+        std::cout << "worst relative gap " << worstGap << "   max indirect " << maxIndirect << '\n';
+        // A flat quad's continuation ray always escapes at bounce 1 (Direct) and the slab's every multi-vertex path is transmission-sticky (Refraction), so without the corner the two Indirect buckets are identically zero in every case and the identity guards nothing about them.
+        if (testCase.geometry == Geometry::Corner && maxIndirect <= 0.0F) {
+            std::cerr << "integrator_validate: FAILED transport partition coverage -- the corner scene "
+                         "produced no Indirect bucket energy, so the identity below is not testing "
+                         "them. Check that the wall is being hit by bounce rays.\n";
+            ok = false;
+        }
+        if (worstGap > kTolerance) {
+            std::cerr << "integrator_validate: FAILED transport partition at " << testCase.name
+                      << " -- worst pixel is off by " << (worstGap * 100.0F) << "% of its beauty value "
+                      << worstBeauty
+                      << ". The five buckets must sum to beauty exactly once the background term is "
+                         "zeroed; a gap means a contribution is unbucketed, double-bucketed or "
+                         "rescaled.\n";
+            ok = false;
+        }
+    }
+    return ok;
+}
+
+}  // namespace
+
+int main() {
+    const bool casesOk = runCases();
+    const bool slabOk = checkTransmissiveSlab();
+    const bool partitionOk = checkTransportPartition();
+    if (!casesOk || !slabOk || !partitionOk) {
+        std::cerr << "integrator_validate: FAILED\n";
+        return EXIT_FAILURE;
+    }
+    std::cout << "integrator_validate: PASSED\n";
+    return EXIT_SUCCESS;
+}
