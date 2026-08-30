@@ -69,7 +69,8 @@ glm::vec4 tangentFor(const glm::vec3& normal) {
     return glm::vec4(glm::normalize(glm::cross(up, normal)), 1.0F);
 }
 
-// `layers` screen-filling shells at increasing depth, each holding an equal share of the triangle budget -- a pixel therefore accumulates ~`layers` depth records, which is the quantity C12's depth prepass trades against. Per-shell triangle radius is derived from that shell's frustum cross-section so every shell covers the screen once regardless of triangle count: raising --triangles shrinks triangles rather than piling up overdraw, keeping the two axes independent.
+// `layers` screen-filling shells, each holding an equal share of the triangle budget. Per-shell triangle radius is derived from that shell's frustum cross-section so every shell covers the screen once regardless of triangle count: raising --triangles shrinks triangles rather than piling up overdraw, keeping the two axes independent.
+// Emitted furthest shell first, so every shell improves the depth record and a pixel accumulates `layers` of them -- the quantity a depth prepass trades against. Submission order, not shell count, is what decides that: nearest-first would have every deeper shell rejected on arrival by the z-test, leaving one record per pixel however high --layers goes. This is therefore the worst case; an unsorted real scene averages the harmonic number of records (~2.7 at 8 shells), and a front-to-back one none at all.
 std::vector<ShadingTriangle> makeLayeredTriangles(const Options& options, const Camera& camera) {
     const float aspect = static_cast<float>(options.width) / static_cast<float>(options.height);
     const Camera::ViewBasis basis = camera.viewBasis(aspect);
@@ -80,13 +81,13 @@ std::vector<ShadingTriangle> makeLayeredTriangles(const Options& options, const 
 
     std::vector<ShadingTriangle> triangles;
     triangles.reserve(static_cast<std::size_t>(options.triangleCount));
-    for (int layer = 0; layer < options.layers; ++layer) {
+    for (int layer = options.layers - 1; layer >= 0; --layer) {
         const float depth = kNearestLayerZ + (static_cast<float>(layer) * kLayerSpacing);
         const float halfWidth = depth * basis.halfWidth * kLayerCoverage;
         const float halfHeight = depth * basis.halfHeight * kLayerCoverage;
         // Circumradius giving `perLayer` triangles a combined area of ~1.3x the cross-section: an equilateral triangle of circumradius r has area (3*sqrt(3)/4)r^2.
         const float radius = std::sqrt((4.0F * halfWidth * halfHeight) / static_cast<float>(perLayer));
-        // The last layer absorbs the integer-division remainder so the total matches --triangles exactly.
+        // The furthest shell (layer layers-1, emitted first) absorbs the integer-division remainder so the total matches --triangles exactly.
         const int count = layer == options.layers - 1
                               ? options.triangleCount - (perLayer * (options.layers - 1))
                               : perLayer;
