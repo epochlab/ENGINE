@@ -59,11 +59,11 @@ Ray Camera::primaryRay(const ViewBasis& basis, float ndcX, float ndcY) const {
 }
 
 float Camera::ev100() const {
-    return std::log2((aperture_ * aperture_) / shutterSeconds_ * (100.0F / iso_));
+    return ev100(aperture_, shutterSeconds_, iso_);
 }
 
-float Camera::exposure() const {
-    return 1.0F / (std::pow(2.0F, ev100()) * 1.2F);
+float Camera::ev100(float aperture, float shutterSeconds, float iso) {
+    return std::log2((aperture * aperture) / shutterSeconds * (100.0F / iso));
 }
 
 }  // namespace engine::scene

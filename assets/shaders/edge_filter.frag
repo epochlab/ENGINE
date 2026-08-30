@@ -6,13 +6,14 @@ uniform sampler2D uHdrColor;  // the path tracer's Beauty image (real RGB)
 uniform int uFilterMode;      // 0=Sobel 1=Gabor 2=Luminance passthrough (no neighborhood filter -- see main())
 uniform float uGaborKernel[100];  // 4 orientations x 5x5 taps, see main.cpp's buildGaborKernel
 uniform int uChannelView;     // 0=off 1=R 2=G 3=B -- isolation was previously baked into the uploaded texels by a CPU copy of the whole image; as a uniform, toggling it costs nothing and needs no re-upload
+uniform float uExposure;     // pow(2, relativeExposureEv()) -- same multiplier Beauty itself displays at (OcioDisplayTransform::bind); applied per-tap in sampleLuminance so Sobel/Gabor's gradient of an already-exposed signal scales by the same factor as Beauty, rather than staying frozen at unity gain
 
 out vec4 fragColor;
 
 // Rec.709 luminance. Not just texture(...).r: uHdrColor is real RGB, where .r alone would isolate the red channel, not luminance.
 // Channel isolation applies here, before the dot, exactly where the CPU-side bake used to sit in the pipeline. Isolating broadcasts the channel to grey and the Rec.709 weights sum to 1, so the dot then returns that channel unchanged -- the previous behaviour reproduced exactly, not approximated.
 float sampleLuminance(vec2 uv, vec2 texel, vec2 offset) {
-    vec3 color = texture(uHdrColor, uv + offset * texel).rgb;
+    vec3 color = texture(uHdrColor, uv + offset * texel).rgb * uExposure;
     if (uChannelView == 1) {
         color = vec3(color.r);
     } else if (uChannelView == 2) {

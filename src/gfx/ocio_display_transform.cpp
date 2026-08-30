@@ -34,6 +34,13 @@ constexpr const char* kApplyChannelViewGlsl =
     "    else if (uChannelView == 2) { hdrColor = vec3(hdrColor.g); }\n"
     "    else if (uChannelView == 3) { hdrColor = vec3(hdrColor.b); }\n";
 
+// Triangular-PDF dither before the default framebuffer's 8-bit fixed-point quantization -- without it, smooth dark gradients in a converged (Monte Carlo noise no longer masking anything) render band visibly. Two independent uniform draws from a screen-space hash, subtracted for a triangular distribution in [-1/255, 1/255]. Deliberately static per pixel, not time-varying: this targets a converged image, not motion, so no frame/time uniform is threaded in for it.
+constexpr const char* kDitherGlsl =
+    "float ditherRand(vec2 co) { return fract(sin(dot(co, vec2(12.9898, 78.233))) * 43758.5453); }\n"
+    "vec3 ditherOffset(vec2 uv) {\n"
+    "    return vec3((ditherRand(uv) - ditherRand(uv + vec2(0.618, 0.618))) / 255.0);\n"
+    "}\n";
+
 std::optional<std::string> readFile(const std::string& path) {
     const std::ifstream file(path);
     if (!file) {
@@ -54,12 +61,13 @@ std::string buildFragmentSource(const std::string& ocioShaderText, const std::st
         << "uniform sampler2D uHdrColor;\n"
         << "uniform float uExposure;\n"
         << kChannelViewGlsl << "\n"
+        << kDitherGlsl
         << ocioShaderText << "\n"
         << "void main() {\n"
         << "    vec3 hdrColor = texture(uHdrColor, vUv).rgb;\n"
         << kApplyChannelViewGlsl
         << "    vec4 exposed = vec4(hdrColor * uExposure, 1.0);\n"
-        << "    fragColor = vec4(" << functionName << "(exposed).rgb, 1.0);\n"
+        << "    fragColor = vec4(" << functionName << "(exposed).rgb + ditherOffset(vUv), 1.0);\n"
         << "}\n";
     return src.str();
 }
@@ -71,11 +79,11 @@ std::string buildRawFragmentSource() {
                        "out vec4 fragColor;\n\n"
                        "uniform sampler2D uHdrColor;\n"
                        "uniform float uExposure;\n") +
-           kChannelViewGlsl +
+           kChannelViewGlsl + kDitherGlsl +
            "\nvoid main() {\n"
            "    vec3 hdrColor = texture(uHdrColor, vUv).rgb;\n" +
            kApplyChannelViewGlsl +
-           "    fragColor = vec4(hdrColor * uExposure, 1.0);\n"
+           "    fragColor = vec4(hdrColor * uExposure + ditherOffset(vUv), 1.0);\n"
            "}\n";
 }
 

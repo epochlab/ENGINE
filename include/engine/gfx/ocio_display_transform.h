@@ -17,7 +17,7 @@ public:
     void setActiveLut(Lut lut) { activeLut_ = lut; }
     [[nodiscard]] Lut activeLut() const { return activeLut_; }
 
-    // ev is a photographic stops adjustment; the GPU multiplier applied before the display curve (or, in Raw mode, before direct output) is pow(2, ev). See camera.h's ev100()/exposure() model and main.cpp for why this isn't currently seeded from Camera::exposure().
+    // ev is a photographic stops adjustment; the GPU multiplier applied before the display curve (or, in Raw mode, before direct output) is pow(2, ev). Seeded from DebugCameraController::relativeExposureEv() (main.cpp), a relative-stops delta against profile.json's default aperture/shutter/ISO -- not an absolute photometric quantity, since the scene isn't calibrated to real-world radiance.
     void setExposureEv(float ev) { exposureEv_ = ev; }
 
     // 0 = off, 1/2/3 = isolate R/G/B (broadcast to grey), applied to the sampled texels before exposure. Uploaded by bind() alongside exposure, so switching channels is a uniform write rather than the full CPU re-copy and texture re-create it used to force.

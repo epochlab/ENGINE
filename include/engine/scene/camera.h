@@ -15,7 +15,7 @@ public:
         float heightMm;
     };
 
-    // yawDegrees/pitchDegrees are authored in degrees (more ergonomic at call sites than radians); converted once here and stored as radians, since every consumer (the Euler-to-forward-vector trig) needs radians. aperture is an f-number (e.g. 2.8 for f/2.8), shutterSeconds is the exposure time (e.g. 1/125), iso is sensor sensitivity — the standard photographic exposure triangle, feeding ev100()/exposure() below.
+    // yawDegrees/pitchDegrees are authored in degrees (more ergonomic at call sites than radians); converted once here and stored as radians, since every consumer (the Euler-to-forward-vector trig) needs radians. aperture is an f-number (e.g. 2.8 for f/2.8), shutterSeconds is the exposure time (e.g. 1/125), iso is sensor sensitivity — the standard photographic exposure triangle, feeding ev100() below.
     Camera(const glm::vec3& position, float yawDegrees, float pitchDegrees, FilmBack filmBack,
            float focalLengthMm, float nearClip, float farClip, float aperture,
            float shutterSeconds, float iso);
@@ -51,11 +51,9 @@ public:
     // Same ray, from a basis the caller already built. The aspect-taking overload rebuilds the basis on every call -- two sin, two cos, an atan, a tan, two normalize and two cross -- which is constant across a whole render pass; this is what lets a per-pixel loop hoist that out and pay it once.
     [[nodiscard]] Ray primaryRay(const ViewBasis& basis, float ndcX, float ndcY) const;
 
-    // Standard photographic exposure value at ISO 100 (log2 scale): log2(aperture^2 / shutterSeconds * (100/iso)).
+    // Standard photographic exposure value at ISO 100 (log2 scale): log2(aperture^2 / shutterSeconds * (100/iso)). The static overload is the single definition of the formula, callable without a full Camera -- DebugCameraController::relativeExposureEv() needs it against two different (aperture, shutterSeconds, iso) triples (current vs. profile.json default) and holds no persistent Camera of its own.
     [[nodiscard]] float ev100() const;
-
-    // Linear scene-radiance multiplier derived from ev100() (the Filament/Frostbite EV100 calibration convention), ready to apply before the OCIO display transform.
-    [[nodiscard]] float exposure() const;
+    [[nodiscard]] static float ev100(float aperture, float shutterSeconds, float iso);
 
 private:
     glm::vec3 position_;

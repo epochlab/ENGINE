@@ -71,9 +71,9 @@ The render thread blits whichever AOV is selected through OCIO's display transfo
 | Feature | Mechanism | Role / why it matters |
 |---|---|---|
 | Camera / lens | Position/yaw/pitch, film-back + focal length → derived vertical FOV; pinhole primary rays derived directly from this basis | Geometric ground truth the ray-intersection/BSDF math is measured against |
-| Photographic exposure | EV100 from aperture/shutter/ISO (Filament/Frostbite calibration) | Physically meaningful brightness control, independent of arbitrary scene scaling |
+| Photographic exposure | EV100 from aperture/shutter/ISO, applied as a relative-stops delta against profile.json's default triple (Filament/Frostbite EV100 formula) | Familiar photographic controls for adjusting display brightness; not an absolute photometric quantity, since the scene isn't calibrated to real-world radiance |
 | OpenEXR linear pipeline | `HdrImage`/`loadExr`; all shading/compositing in linear light, OCIO display-encodes only at the final blit | Precondition for correct PBR colour math |
-| Tone-mapping / display transform | OCIO Display/View API (sRGB, Rec.709, Raw), cycled at runtime ('L') | Compresses unbounded HDR radiance into a displayable range without clipping |
+| Display transform | OCIO Display/View API (sRGB, Rec.709, Raw), cycled at runtime ('L') -- a colorimetric encode (sRGB / Rec.1886 OETF) only, no tone mapping | Scene-referred linear radiance throughout; values above 1.0 clip at the display by design, so lookdev sees clipping honestly rather than under a hidden filmic shoulder |
 | GPU/system readout | Device name, driver/API version, refresh rate, RAM at startup | Confirms the actual GPU/backend before a wrong-adapter bug masquerades as a render bug |
 | Frame-timing HUD | Ring buffer of recent frame times; rolling FPS/avg/min/max, GPU timer query around the post-process blit | Makes blit cost measurable frame to frame |
 | Memory HUD | Live RAM readout plus GPU allocation tracked at alloc/free (the path-traced display texture is the only GPU allocation left — OCIO uses zero LUT textures) | Surfaces a memory regression immediately, not after VRAM exhaustion |

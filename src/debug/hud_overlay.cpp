@@ -200,8 +200,9 @@ void drawRgbHistogram(ImDrawList* drawList, ImVec2 origin, float histogramWidth,
     }
 }
 
-// Renders the current AOV's per-channel histogram. Width matches the panel's content width so it lines up with every other section.
-void drawHistogramPanel(const std::array<std::array<std::uint32_t, 256>, 3>& bins) {
+// Renders the current AOV's per-channel histogram. Width matches the panel's content width so it lines up with every other section. overRangeFraction/overRangePeakMultiple are the histogram's blind spot made visible: it bins the post-display-transform, post-8-bit-clamp framebuffer, where 1.01 and 100.0 both pin bin 255 identically -- these two numbers come from the pre-display-transform float image instead (see main.cpp's updateOverRangeStats).
+void drawHistogramPanel(const std::array<std::array<std::uint32_t, 256>, 3>& bins,
+                         float overRangeFraction, float overRangePeakMultiple) {
     ImGui::TextColored(kCyan, "Histogram");
 
     const float histogramWidth = ImGui::GetContentRegionAvail().x;
@@ -218,6 +219,7 @@ void drawHistogramPanel(const std::array<std::array<std::uint32_t, 256>, 3>& bin
 
     drawList->AddRect(origin, boxMax, IM_COL32(60, 60, 60, 180));
     ImGui::Dummy(ImVec2(histogramWidth, kHistogramHeight));
+    ImGui::Text("Over-range: %.1f%%, peak %.1fx", overRangeFraction * 100.0F, overRangePeakMultiple);
 }
 
 // Centre crosshair framing overlay — drawn on the foreground draw list, over the whole viewport, independent of the ##hud panel, so it never contaminates the AOV buffers being debugged.
@@ -446,7 +448,7 @@ void HudOverlay::draw(const HudFrameData& frame, int& aov, float& focalLengthMm,
     drawViewportAndSceneSection(frame);
 
     if (frame.histogram.hasData()) {
-        drawHistogramPanel(frame.histogram.bins());
+        drawHistogramPanel(frame.histogram.bins(), frame.overRangeFraction, frame.overRangePeakMultiple);
         ImGui::Separator();
     }
 
