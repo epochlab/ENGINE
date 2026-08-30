@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <memory>
 #include <mutex>
@@ -54,6 +55,7 @@ public:
 
 private:
     void driverLoop(std::stop_token stopToken);
+    std::shared_ptr<PathTraceResult> acquireFreeBuffer(int width, int height);
 
     const EmbreeAccel& accel_;
     const std::vector<ShadingTriangle>& shadingTriangles_;
@@ -72,6 +74,9 @@ private:
     // Republished on every completed pass, guarded by resultMutex_ against latestResult()'s render-thread read.
     mutable std::mutex resultMutex_;
     std::shared_ptr<const PathTraceResult> result_;
+
+    // Driver-thread-only rotation of buffer sets, allocated on first use and reused for the process's life -- renderPathTraced writes into one of these instead of allocating 8 fresh images per pass. Four, because up to three can be pinned at once: the mean the driver just published, the frame-local snapshot the render thread holds for the duration of a frame, and the older result app.pathTraceDisplayedOwner still holds because the display texture was built from it. The fourth is the one being written.
+    std::array<std::shared_ptr<PathTraceResult>, 4> bufferPool_;
 
     // Persistent row-parallel dispatch for renderPathTraced, reused across every pass -- see RowThreadPool's own doc comment. Declared before thread_ so it's fully constructed (and its workers parked and ready) before driverLoop starts, and outlives every renderPathTraced call driverLoop makes (destroyed only after thread_ has stopped and joined).
     RowThreadPool threadPool_;
