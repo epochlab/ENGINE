@@ -81,7 +81,7 @@ The render thread blits whichever AOV is selected through OCIO's display transfo
 | Memory HUD | Live RAM readout plus GPU allocation tracked at alloc/free (the path-traced display texture is the only GPU allocation left — OCIO uses zero LUT textures) | Surfaces a memory regression immediately, not after VRAM exhaustion |
 | Scene stats | Object/triangle/point counts, viewport resolution | Scene-complexity readout |
 | Debug camera controls | WASD/QE fly, R reset, LMB-drag orbit around a pivot read directly from the path tracer's own G-buffer (world-space hit position + hit mask at its centre pixel) | Interactive navigation without hand-editing camera parameters between runs |
-| Camera framing overlays | Centre crosshair ('K'), drawn on the foreground overlay over the viewport | Composition aid that never contaminates the AOV buffers being debugged |
+| Camera framing overlays | Centre crosshair, always on, drawn on the foreground overlay over the viewport | Composition aid that never contaminates the AOV buffers being debugged |
 | AOV selector | Dropdown across the full AOV set (§3), plus R/G/B channel-isolation hotkeys | Isolates one signal at a time for debugging |
 | Live histogram | Per-channel (R/G/B) histogram of the currently displayed image | Catches exposure/clipping and colour-space bugs a single still frame can hide |
 | glTF loading | cgltf; per-primitive vertices baked to world-space triangles/shading data at load time, materials' textures decoded once to `HdrImage` | Standard interchange format; nothing GPU-resident is needed once the CPU Embree scene/shading data exists |
