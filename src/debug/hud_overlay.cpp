@@ -298,9 +298,9 @@ void drawAovSection(int& aov) {
     ImGui::Separator();
 }
 
-// pos/rot/filmback/clip: read-only text. focalLength/aperture/shutter/iso: editable sliders.
+// pos/rot/filmback/clip: read-only text. focalLength/aperture/shutter/iso/aberrationStrength: editable sliders.
 void drawCameraSection(const HudFrameData& frame, float& focalLengthMm, float& aperture,
-                        float& shutterSeconds, float& iso) {
+                        float& shutterSeconds, float& iso, float& aberrationStrength) {
     ImGui::TextColored(kCyan, "Camera");
     const glm::vec3 camPos = frame.camera.position();
     ImGui::Text("pos  x %.2f  y %.2f  z %.2f", camPos.x, camPos.y, camPos.z);
@@ -320,6 +320,9 @@ void drawCameraSection(const HudFrameData& frame, float& focalLengthMm, float& a
                         "Shutter  %.4f s", ImGuiSliderFlags_Logarithmic);
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
     ImGui::SliderFloat("##iso", &iso, 50.0F, 6400.0F, "ISO  %.0f", ImGuiSliderFlags_Logarithmic);
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+    // Beauty only (main.cpp zeroes this for every other AOV) -- range picked so the full slider sweep stays a subtle-to-strong lens effect, not an unreadable smear.
+    ImGui::SliderFloat("##aberrationStrength", &aberrationStrength, 0.0F, 0.05F, "Aberration  %.3f");
     ImGui::Separator();
 }
 
@@ -432,8 +435,8 @@ void HudOverlay::beginFrame() const {
 
 void HudOverlay::draw(const HudFrameData& frame, int& aov, float& focalLengthMm, float& aperture,
                        float& shutterSeconds, float& iso, bool& showSky, int& envRotationDegrees,
-                       float& envExposureStops, const FramingOverlayState& framing,
-                       const PixelProbeSample& pixelProbe) const {
+                       float& envExposureStops, float& aberrationStrength,
+                       const FramingOverlayState& framing, const PixelProbeSample& pixelProbe) const {
     ImGui::SetNextWindowPos(ImVec2(8, 8), ImGuiCond_Always);
     constexpr ImGuiWindowFlags flags =
         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
@@ -453,7 +456,7 @@ void HudOverlay::draw(const HudFrameData& frame, int& aov, float& focalLengthMm,
     }
 
     drawAovSection(aov);
-    drawCameraSection(frame, focalLengthMm, aperture, shutterSeconds, iso);
+    drawCameraSection(frame, focalLengthMm, aperture, shutterSeconds, iso, aberrationStrength);
     drawHdriSection(showSky, envRotationDegrees, envExposureStops);
 
     ImGui::End();
