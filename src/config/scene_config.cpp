@@ -1,37 +1,37 @@
 #include "engine/config/scene_config.h"
 
+#include <fstream>
 #include <iostream>
 
-#include "json_scan.h"
+#include <nlohmann/json.hpp>
+
+#include "json_glm.h"
 
 namespace engine::config {
 
 std::optional<SceneConfig> loadSceneConfig(const std::string& path) {
-    const std::optional<std::string> text = json::readFile(path);
-    if (!text.has_value()) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
         std::cerr << "loadSceneConfig: could not read " << path << '\n';
         return std::nullopt;
     }
 
-    const std::optional<std::string> gltfPath = json::findString(*text, "gltfPath");
-    const std::optional<std::string> texturePath = json::findString(*text, "texturePath");
-    const std::optional<std::string> materialPath = json::findString(*text, "materialPath");
-    const std::optional<glm::vec3> position = json::findVec3(*text, "position");
-    const std::optional<glm::vec3> rotationDegrees = json::findVec3(*text, "rotationDegrees");
+    try {
+        nlohmann::json j;
+        file >> j;
 
-    if (!gltfPath.has_value() || !texturePath.has_value() || !materialPath.has_value() ||
-        !position.has_value() || !rotationDegrees.has_value()) {
-        std::cerr << "loadSceneConfig: " << path << " is missing one or more required fields\n";
+        return SceneConfig{
+            j.at("gltfPath").get<std::string>(),
+            j.at("texturePath").get<std::string>(),
+            j.at("materialPath").get<std::string>(),
+            j.at("position").get<glm::vec3>(),
+            j.at("rotationDegrees").get<glm::vec3>(),
+            j.at("hdriPath").get<std::string>(),
+        };
+    } catch (const nlohmann::json::exception& e) {
+        std::cerr << "loadSceneConfig: " << path << ": " << e.what() << '\n';
         return std::nullopt;
     }
-
-    return SceneConfig{
-        *gltfPath,
-        *texturePath,
-        *materialPath,
-        *position,
-        *rotationDegrees,
-    };
 }
 
 }  // namespace engine::config

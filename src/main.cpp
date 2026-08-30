@@ -343,7 +343,7 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
     std::optional<RequiredShaders> shaders = loadShaders();
     // Decoded once here (not via a texture-upload helper): the path tracer is the only consumer, sampling this CPU HdrImage directly, with no GPU upload step in between.
     std::optional<engine::gfx::HdrImage> environmentImage =
-        engine::gfx::loadExr(std::string(ASSET_ROOT_DIR) + "/" + profileConfig.hdriPath);
+        engine::gfx::loadExr(std::string(ASSET_ROOT_DIR) + "/" + sceneConfig.hdriPath);
 
     if (!shaders || !stumpModel || !environmentImage) {
         std::cerr << "main: shader compile/link, model load, or environment map load failed, "
