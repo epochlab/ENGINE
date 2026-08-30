@@ -25,6 +25,15 @@ constexpr const char* kBuiltinConfigName = "cg-config-v1.0.0_aces-v1.3_ocio-v2.1
 constexpr const char* kSceneColorSpace = "Linear Rec.709 (sRGB)";
 constexpr const char* kView = "Un-tone-mapped";
 
+// Channel isolation, applied to the sampled texels before exposure and the display curve -- the exact pipeline position the CPU-side bake occupied, so the displayed result is unchanged. As a uniform it costs no re-upload, which is the point: it previously forced a full re-copy and re-create of the display texture on every R/G/B keypress.
+constexpr const char* kChannelViewGlsl =
+    "uniform int uChannelView;\n";
+
+constexpr const char* kApplyChannelViewGlsl =
+    "    if (uChannelView == 1) { hdrColor = vec3(hdrColor.r); }\n"
+    "    else if (uChannelView == 2) { hdrColor = vec3(hdrColor.g); }\n"
+    "    else if (uChannelView == 3) { hdrColor = vec3(hdrColor.b); }\n";
+
 std::optional<std::string> readFile(const std::string& path) {
     const std::ifstream file(path);
     if (!file) {
@@ -43,10 +52,12 @@ std::string buildFragmentSource(const std::string& ocioShaderText, const std::st
         << "in vec2 vUv;\n"
         << "out vec4 fragColor;\n\n"
         << "uniform sampler2D uHdrColor;\n"
-        << "uniform float uExposure;\n\n"
+        << "uniform float uExposure;\n"
+        << kChannelViewGlsl << "\n"
         << ocioShaderText << "\n"
         << "void main() {\n"
         << "    vec3 hdrColor = texture(uHdrColor, vUv).rgb;\n"
+        << kApplyChannelViewGlsl
         << "    vec4 exposed = vec4(hdrColor * uExposure, 1.0);\n"
         << "    fragColor = vec4(" << functionName << "(exposed).rgb, 1.0);\n"
         << "}\n";
@@ -55,13 +66,15 @@ std::string buildFragmentSource(const std::string& ocioShaderText, const std::st
 
 // No OCIO involved at all: exposure applied, then output directly with no display encode — lets 'L' cycle to a genuine unencoded state for direct comparison against the two LUTs, rather than only ever toggling between two encoded curves.
 std::string buildRawFragmentSource() {
-    return "#version 410 core\n\n"
-           "in vec2 vUv;\n"
-           "out vec4 fragColor;\n\n"
-           "uniform sampler2D uHdrColor;\n"
-           "uniform float uExposure;\n\n"
-           "void main() {\n"
-           "    vec3 hdrColor = texture(uHdrColor, vUv).rgb;\n"
+    return std::string("#version 410 core\n\n"
+                       "in vec2 vUv;\n"
+                       "out vec4 fragColor;\n\n"
+                       "uniform sampler2D uHdrColor;\n"
+                       "uniform float uExposure;\n") +
+           kChannelViewGlsl +
+           "\nvoid main() {\n"
+           "    vec3 hdrColor = texture(uHdrColor, vUv).rgb;\n" +
+           kApplyChannelViewGlsl +
            "    fragColor = vec4(hdrColor * uExposure, 1.0);\n"
            "}\n";
 }
@@ -138,19 +151,26 @@ OcioDisplayTransform::OcioDisplayTransform(ShaderProgram rawShader, ShaderProgra
       rec709Shader_(std::move(rec709Shader)),
       rawExposureLoc_(rawShader_.uniformLocation("uExposure")),
       srgbExposureLoc_(srgbShader_.uniformLocation("uExposure")),
-      rec709ExposureLoc_(rec709Shader_.uniformLocation("uExposure")) {}
+      rec709ExposureLoc_(rec709Shader_.uniformLocation("uExposure")),
+      rawChannelViewLoc_(rawShader_.uniformLocation("uChannelView")),
+      srgbChannelViewLoc_(srgbShader_.uniformLocation("uChannelView")),
+      rec709ChannelViewLoc_(rec709Shader_.uniformLocation("uChannelView")) {}
 
 // Not wrapped in GL_CALL: runs every frame.
 void OcioDisplayTransform::bind() const {
     const ShaderProgram& shader = activeShader();
     int exposureLoc = rawExposureLoc_;
+    int channelViewLoc = rawChannelViewLoc_;
     if (activeLut_ == Lut::SRGB) {
         exposureLoc = srgbExposureLoc_;
+        channelViewLoc = srgbChannelViewLoc_;
     } else if (activeLut_ == Lut::Rec709) {
         exposureLoc = rec709ExposureLoc_;
+        channelViewLoc = rec709ChannelViewLoc_;
     }
     shader.use();
     glUniform1f(exposureLoc, std::pow(2.0F, exposureEv_));
+    glUniform1i(channelViewLoc, channelView_);
 }
 
 }  // namespace engine::gfx
