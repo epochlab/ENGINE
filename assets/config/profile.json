@@ -1,7 +1,11 @@
 {
+    "windowWidth": 1024,
+    "windowHeight": 576,
+
     "position": [0.0, 0.15, 5.0],
     "yawDegrees": 0.0,
     "pitchDegrees": 0.0,
+
     "filmBack": { "widthMm": 23.76, "heightMm": 13.37 },
     "focalLengthMm": 70.0,
     "nearClip": 0.1,
@@ -9,15 +13,15 @@
     "aperture": 2.8,
     "shutterSeconds": 0.008,
     "iso": 400.0,
+
     "flySpeedMetersPerSecond": 1.0,
     "orbitSensitivityDegPerPixel": 0.25,
-    "hdriPath": "textures/republiqueHDR_2k.exr",
-    "windowWidth": 1024,
-    "windowHeight": 576,
+
     "renderScale": 1.0,
     "interactiveRenderScale": 0.1,
     "defaultAOV": 0,
     "defaultLUT": "sRGB",
+
     "samplesPerPixel": 1,
     "maxBounces": 1,
     "russianRouletteStartBounce": 3,

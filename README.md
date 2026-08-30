@@ -133,7 +133,6 @@ Ordered quick → complex; items within **Large** are a strict dependency chain 
 
 ### Quick
 
-- **JSON library** — replace the hand-rolled scanner (`json_scan.cpp`) with nlohmann/json; do first, every item below depends on it.
 - **scene.json as a CLI arg** — `main()` has no `argc`/`argv` (`main.cpp:864`); paths are hardcoded. Enables multi-scenario scenes.
 - **Texture bit depth (16/32) via JSON** — hardcoded `GL_RGBA16F` today (`texture.cpp:45`); 32F ~doubles VRAM/buffer.
 - **Keybinds** (`main.cpp:441-464`, existing `L`/`R`/`G`/`B`/`0`/`K` pattern) — `Y` luminance toggle + restore-previous, `I` invert (1−colour), `H` HUD toggle (verify not already present), `ESC` quit.
