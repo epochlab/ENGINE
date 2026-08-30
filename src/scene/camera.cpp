@@ -49,7 +49,10 @@ Camera::ViewBasis Camera::viewBasis(float aspect) const {
 }
 
 Ray Camera::primaryRay(float ndcX, float ndcY, float aspect) const {
-    const ViewBasis basis = viewBasis(aspect);
+    return primaryRay(viewBasis(aspect), ndcX, ndcY);
+}
+
+Ray Camera::primaryRay(const ViewBasis& basis, float ndcX, float ndcY) const {
     const glm::vec3 dir = glm::normalize(basis.forward + (ndcX * basis.halfWidth * basis.right) +
                                           (ndcY * basis.halfHeight * basis.up));
     return Ray{position_, dir, nearClip_, farClip_};

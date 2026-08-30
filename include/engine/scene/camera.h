@@ -48,6 +48,9 @@ public:
     // Pinhole primary ray for a point in normalized device coordinates (ndcX/ndcY in [-1,1], +Y up). tMin/tMax are nearClip()/farClip().
     [[nodiscard]] Ray primaryRay(float ndcX, float ndcY, float aspect) const;
 
+    // Same ray, from a basis the caller already built. The aspect-taking overload rebuilds the basis on every call -- two sin, two cos, an atan, a tan, two normalize and two cross -- which is constant across a whole render pass; this is what lets a per-pixel loop hoist that out and pay it once.
+    [[nodiscard]] Ray primaryRay(const ViewBasis& basis, float ndcX, float ndcY) const;
+
     // Standard photographic exposure value at ISO 100 (log2 scale): log2(aperture^2 / shutterSeconds * (100/iso)).
     [[nodiscard]] float ev100() const;
 

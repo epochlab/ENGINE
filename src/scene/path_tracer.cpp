@@ -288,6 +288,8 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                        std::uint64_t requestedGeneration, RowThreadPool& threadPool,
                        PathTraceResult& out) {
     const float aspect = static_cast<float>(width) / static_cast<float>(height);
+    // Constant for the whole pass, so it is built once here rather than per primary ray: the aspect-taking primaryRay rebuilds it every call, which at samplesPerPixel rays per pixel is millions of identical reconstructions per pass. rasterizer.cpp already hoists it the same way.
+    const Camera::ViewBasis basis = camera.viewBasis(aspect);
     const int tilesX = (width + kTileSize - 1) / kTileSize;
     const int tilesY = (height + kTileSize - 1) / kTileSize;
 
@@ -314,7 +316,7 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                     const float ndcX = ((filmX / static_cast<float>(width)) * 2.0F) - 1.0F;
                     // HdrImage row 0 is the top (EXR/glTF convention); NDC +Y is up -- flip.
                     const float ndcY = 1.0F - ((filmY / static_cast<float>(height)) * 2.0F);
-                    const Ray primary = camera.primaryRay(ndcX, ndcY, aspect);
+                    const Ray primary = camera.primaryRay(basis, ndcX, ndcY);
                     const TraceResult trace = tracePath(primary, accel, shadingTriangles, instances,
                                                          environmentMap, envRotationRadians, showSky,
                                                          envExposure, settings, sampler);
