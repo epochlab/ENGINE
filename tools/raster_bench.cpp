@@ -216,11 +216,13 @@ int main(int argc, char** argv) {
     settings.roughnessFactor = 1.0F;
 
     RowThreadPool threadPool;
-    // Discarded warm-up pass, spinning up and parking the pool's workers -- the only startup cost that does not recur. The 15 makeImage allocations and their zero-fill DO recur on every timed frame by design: that per-frame cost is a property of the code under test, not an artifact of measuring it.
-    const RasterGBuffer warmup = renderRasterGBuffer(camera, *accel, shadingTriangles, instances,
-                                                      settings, options->width, options->height, threadPool);
-    if (warmup.depth.width != options->width) {
-        std::cerr << "raster_bench: warm-up produced a " << warmup.depth.width << "px-wide buffer\n";
+    // One buffer for the whole run, matching how the app owns it: renderRasterGBuffer reuses it in place, so the timed frames measure steady-state cost with no allocation in them.
+    RasterGBuffer gbuffer;
+    // Discarded warm-up pass, absorbing the costs that happen once rather than per frame: spinning up and parking the pool's workers, and the buffer's only allocation.
+    renderRasterGBuffer(camera, *accel, shadingTriangles, instances, settings, options->width,
+                         options->height, threadPool, gbuffer);
+    if (gbuffer.depth.width != options->width) {
+        std::cerr << "raster_bench: warm-up produced a " << gbuffer.depth.width << "px-wide buffer\n";
         return EXIT_FAILURE;
     }
 
@@ -228,12 +230,12 @@ int main(int argc, char** argv) {
     milliseconds.reserve(static_cast<std::size_t>(options->frames));
     for (int frame = 0; frame < options->frames; ++frame) {
         const auto start = std::chrono::steady_clock::now();
-        const RasterGBuffer result = renderRasterGBuffer(camera, *accel, shadingTriangles, instances,
-                                                          settings, options->width, options->height, threadPool);
+        renderRasterGBuffer(camera, *accel, shadingTriangles, instances, settings, options->width,
+                             options->height, threadPool, gbuffer);
         const auto end = std::chrono::steady_clock::now();
         milliseconds.push_back(std::chrono::duration<double, std::milli>(end - start).count());
         // Reading one texel keeps the optimizer from treating the whole call as dead; the result is otherwise unused.
-        if (!std::isfinite(result.depth.rgba[0])) {
+        if (!std::isfinite(gbuffer.depth.rgba[0])) {
             std::cerr << "raster_bench: non-finite depth at texel 0\n";
             return EXIT_FAILURE;
         }
