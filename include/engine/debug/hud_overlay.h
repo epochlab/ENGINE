@@ -19,7 +19,7 @@ struct GpuInfo;
 class FrameStats;
 class Histogram;
 
-// Toggle for the centre-crosshair framing overlay — owned by main.cpp and flipped by its 'K' hotkey (not a HUD checkbox), then read here read-only to decide whether to draw it.
+// Toggle for the centre-crosshair framing overlay — owned by main.cpp (no runtime toggle; defaults on), then read here read-only to decide whether to draw it.
 struct FramingOverlayState {
     bool crosshair = true;
 };
@@ -75,10 +75,10 @@ public:
     // Call after window.pollEvents(), before any GL draw calls.
     void beginFrame() const;
 
-    // Call after beginFrame(), before render(). aov/focalLengthMm/aperture/shutterSeconds/iso/showSky/envRotationDegrees/envExposureStops are widget-bound out-params (Camera/HDRI sections). envExposureStops is EV; main.cpp's requestPathTrace does exp2(). pixelProbe is read-only, rendered bottom-right. framing.crosshair gates the centre-crosshair foreground overlay.
+    // Call after beginFrame(), before render(). aov/focalLengthMm/aperture/shutterSeconds/iso/showSky/envRotationDegrees/envExposureStops/aberrationStrength are widget-bound out-params (Camera/HDRI/AOV sections). envExposureStops is EV; main.cpp's requestPathTrace does exp2(). pixelProbe is read-only, rendered bottom-right. framing.crosshair gates the centre-crosshair foreground overlay.
     void draw(const HudFrameData& frame, int& aov, float& focalLengthMm, float& aperture,
               float& shutterSeconds, float& iso, bool& showSky, int& envRotationDegrees,
-              float& envExposureStops, const FramingOverlayState& framing,
+              float& envExposureStops, float& aberrationStrength, const FramingOverlayState& framing,
               const PixelProbeSample& pixelProbe) const;
 
     // ImGui::Render + backend draw-data submit. Call after the post-process blit, before window.swapBuffers().
