@@ -2,6 +2,8 @@
 
 *A CPU, unidirectional Monte Carlo path tracer with real-time progressive display: Embree-accelerated, stochastic BSDF sampling combined with environment-map NEE via MIS, converging interactively behind a thin OpenGL display/HUD layer.*
 
+![Sample render](sample.png)
+
 ## Build
 
 C++20, built with CMake. Currently developed against macOS only.
