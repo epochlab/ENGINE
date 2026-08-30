@@ -37,6 +37,21 @@ constexpr const char* kApplyChannelViewGlsl =
 // 1.0 - rgb, applied to the final display-referred colour (after the display curve/Raw passthrough, before dither).
 constexpr const char* kInvertGlsl = "uniform bool uInvert;\n";
 
+// Radial per-channel UV offset, 0 = off: R pulled toward centre, B pushed away, G unchanged -- the classic
+// lens-chromatic-aberration look, strongest toward the frame edges since it scales with distance from
+// centre. A post-process effect over Beauty only (main.cpp zeroes this for every other AOV), so it lives
+// at the one place both LUTs and Raw already sample uHdrColor, rather than as a separate render pass.
+constexpr const char* kAberrationGlsl =
+    "uniform float uAberration;\n"
+    "vec3 sampleAberrated(vec2 uv) {\n"
+    "    vec2 dir = uv - vec2(0.5);\n"
+    "    vec3 color;\n"
+    "    color.r = texture(uHdrColor, uv - dir * uAberration).r;\n"
+    "    color.g = texture(uHdrColor, uv).g;\n"
+    "    color.b = texture(uHdrColor, uv + dir * uAberration).b;\n"
+    "    return color;\n"
+    "}\n";
+
 // Triangular-PDF dither before the default framebuffer's 8-bit fixed-point quantization -- without it, smooth dark gradients in a converged (Monte Carlo noise no longer masking anything) render band visibly. Two independent uniform draws from a screen-space hash, subtracted for a triangular distribution in [-1/255, 1/255]. Deliberately static per pixel, not time-varying: this targets a converged image, not motion, so no frame/time uniform is threaded in for it.
 constexpr const char* kDitherGlsl =
     "float ditherRand(vec2 co) { return fract(sin(dot(co, vec2(12.9898, 78.233))) * 43758.5453); }\n"
@@ -63,11 +78,11 @@ std::string buildFragmentSource(const std::string& ocioShaderText, const std::st
         << "out vec4 fragColor;\n\n"
         << "uniform sampler2D uHdrColor;\n"
         << "uniform float uExposure;\n"
-        << kChannelViewGlsl << kInvertGlsl << "\n"
+        << kChannelViewGlsl << kInvertGlsl << kAberrationGlsl << "\n"
         << kDitherGlsl
         << ocioShaderText << "\n"
         << "void main() {\n"
-        << "    vec3 hdrColor = texture(uHdrColor, vUv).rgb;\n"
+        << "    vec3 hdrColor = sampleAberrated(vUv);\n"
         << kApplyChannelViewGlsl
         << "    vec4 exposed = vec4(hdrColor * uExposure, 1.0);\n"
         << "    vec3 displayColor = " << functionName << "(exposed).rgb;\n"
@@ -84,9 +99,9 @@ std::string buildRawFragmentSource() {
                        "out vec4 fragColor;\n\n"
                        "uniform sampler2D uHdrColor;\n"
                        "uniform float uExposure;\n") +
-           kChannelViewGlsl + kInvertGlsl + kDitherGlsl +
+           kChannelViewGlsl + kInvertGlsl + kAberrationGlsl + kDitherGlsl +
            "\nvoid main() {\n"
-           "    vec3 hdrColor = texture(uHdrColor, vUv).rgb;\n" +
+           "    vec3 hdrColor = sampleAberrated(vUv);\n" +
            kApplyChannelViewGlsl +
            "    vec3 displayColor = hdrColor * uExposure;\n"
            "    if (uInvert) { displayColor = 1.0 - displayColor; }\n"
@@ -172,7 +187,10 @@ OcioDisplayTransform::OcioDisplayTransform(ShaderProgram rawShader, ShaderProgra
       rec709ChannelViewLoc_(rec709Shader_.uniformLocation("uChannelView")),
       rawInvertLoc_(rawShader_.uniformLocation("uInvert")),
       srgbInvertLoc_(srgbShader_.uniformLocation("uInvert")),
-      rec709InvertLoc_(rec709Shader_.uniformLocation("uInvert")) {}
+      rec709InvertLoc_(rec709Shader_.uniformLocation("uInvert")),
+      rawAberrationLoc_(rawShader_.uniformLocation("uAberration")),
+      srgbAberrationLoc_(srgbShader_.uniformLocation("uAberration")),
+      rec709AberrationLoc_(rec709Shader_.uniformLocation("uAberration")) {}
 
 // Not wrapped in GL_CALL: runs every frame.
 void OcioDisplayTransform::bind() const {
@@ -180,19 +198,23 @@ void OcioDisplayTransform::bind() const {
     int exposureLoc = rawExposureLoc_;
     int channelViewLoc = rawChannelViewLoc_;
     int invertLoc = rawInvertLoc_;
+    int aberrationLoc = rawAberrationLoc_;
     if (activeLut_ == Lut::SRGB) {
         exposureLoc = srgbExposureLoc_;
         channelViewLoc = srgbChannelViewLoc_;
         invertLoc = srgbInvertLoc_;
+        aberrationLoc = srgbAberrationLoc_;
     } else if (activeLut_ == Lut::Rec709) {
         exposureLoc = rec709ExposureLoc_;
         channelViewLoc = rec709ChannelViewLoc_;
         invertLoc = rec709InvertLoc_;
+        aberrationLoc = rec709AberrationLoc_;
     }
     shader.use();
     glUniform1f(exposureLoc, std::pow(2.0F, exposureEv_));
     glUniform1i(channelViewLoc, channelView_);
     glUniform1i(invertLoc, invert_ ? 1 : 0);
+    glUniform1f(aberrationLoc, aberration_);
 }
 
 }  // namespace engine::gfx

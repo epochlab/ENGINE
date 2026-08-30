@@ -138,7 +138,6 @@ Ordered quick → complex; items within **Large** are a strict dependency chain 
 - **Texture bit depth (16/32) via JSON** — hardcoded `GL_RGBA16F` today (`texture.cpp:45`); 32F ~doubles VRAM/buffer.
 - **Fix DirectDiffuse/DirectSpecular regression** — `bdecb41` made them physical/lit instead of delighted (base colour divided out); Albedo is unaffected. Recover the delighted view without reverting that commit's single-lobe-eval perf win. Investigate first.
 - **Code-quality audit** — `rotateAboutY` (`environment_map.cpp:13`) → `glm::rotate`; `ShadingFrame::toLocal`/`toWorld` (`bsdf.h:26`) → `glm::mat3`. (BSDF math in `bsdf.cpp` — GGX/Smith/Fresnel/VNDF — is standard domain logic, not an offload candidate.)
-- **Chromatic aberration** — toggleable `PostProcessPass` filter over Beauty; no new render pass needed.
 - **Expand terminal output (launch + loop)** — startup logs GL extensions/camera pose/model/BVH stats (`main.cpp:286-361`); no per-frame stats print during the interactive loop (`main.cpp:990`) — sample/pass/convergence stats reach only the HUD (`hud_overlay.cpp`), not stdout.
 - **Fix: mouse disappears on orbit** — `setCursorLocked(true)` (`window.cpp:112-113`) hides+disables the cursor on LMB-drag orbit (`main.cpp:520`), needed because orbit deltas are absolute `cursorPosition()` diffs (`main.cpp:485-489`) that require unbounded motion past screen edges. Fix without reintroducing edge-clamping. Investigate first.
 

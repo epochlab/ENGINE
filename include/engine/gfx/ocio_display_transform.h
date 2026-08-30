@@ -26,6 +26,9 @@ public:
     // 1.0 - rgb, applied to the final display-referred colour (after the display curve/Raw passthrough, before dither) -- the 'I' debug toggle.
     void setInvert(bool invert) { invert_ = invert; }
 
+    // 0 = off. Radial per-channel UV offset (R pulled toward centre, B pushed away, G unchanged) applied at the texture fetch, before channel isolation/exposure/the display curve. Caller (main.cpp) is expected to pass 0 for any AOV other than Beauty.
+    void setAberration(float aberration) { aberration_ = aberration; }
+
     [[nodiscard]] const ShaderProgram& activeShader() const {
         switch (activeLut_) {
             case Lut::SRGB:
@@ -57,10 +60,14 @@ private:
     int rawInvertLoc_;
     int srgbInvertLoc_;
     int rec709InvertLoc_;
+    int rawAberrationLoc_;
+    int srgbAberrationLoc_;
+    int rec709AberrationLoc_;
     Lut activeLut_ = Lut::SRGB;
     float exposureEv_ = 0.0F;
     int channelView_ = 0;
     bool invert_ = false;
+    float aberration_ = 0.0F;
 };
 
 }  // namespace engine::gfx
