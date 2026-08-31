@@ -68,6 +68,7 @@ set(JSON_DIR ${CMAKE_SOURCE_DIR}/third_party)
 # Vendored code: not ours to fix (imgui_impl_glfw.cpp pulls in Apple's ApplicationServices.h via GLFW's native-handle header, which warns against itself; cgltf_impl.cpp is C99 with implicit conversions -Wall/-Wextra flags). Built as a separate OBJECT library, not just a per-source COMPILE_OPTIONS/CXX_CLANG_TIDY override on the engine target: CXX_CLANG_TIDY is a target-level-only property in CMake (no working per-source override), so the only way to keep clang-tidy off vendored sources is to put them on a target that never has the property set at all.
 add_library(vendored_no_tidy OBJECT ${IMGUI_SOURCES} src/scene/cgltf_impl.cpp)
 target_include_directories(vendored_no_tidy PRIVATE ${IMGUI_DIR} ${IMGUI_DIR}/backends ${CGLTF_DIR})
+target_link_libraries(vendored_no_tidy PRIVATE glfw)
 target_compile_options(vendored_no_tidy PRIVATE -w)
 
 add_executable(engine
