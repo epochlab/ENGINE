@@ -53,6 +53,43 @@ void smoothChannel(const std::array<std::uint32_t, 256>& channelBins, std::uint3
     }
 }
 
+// Rescales an already-smoothed curve so its own true maximum reaches 1.0 -- smoothChannel's averaging can only pull values down from the raw-count peak they were normalized against, never back up, so without this the rendered curve's real maximum silently ends up short of the panel's full height for anything but a flat-topped distribution.
+void rescaleToUnitPeak(std::array<float, 256>& curve) {
+    float maxValue = 0.0F;
+    for (const float value : curve) {
+        maxValue = std::max(maxValue, value);
+    }
+    if (maxValue < 1e-6F) {
+        return;
+    }
+    for (float& value : curve) {
+        value /= maxValue;
+    }
+}
+
+// Same idea across every active channel at once, using their combined maximum -- so the tallest channel reaches full height and the others keep their correct height relative to it (sharedPeak's whole point), rather than each independently rescaling to its own max.
+void rescaleToUnitPeak(std::array<std::array<float, 256>, 3>& curves, const std::array<bool, 3>& active) {
+    float maxValue = 0.0F;
+    for (int c = 0; c < 3; ++c) {
+        if (!active[static_cast<std::size_t>(c)]) {
+            continue;
+        }
+        for (const float value : curves[static_cast<std::size_t>(c)]) {
+            maxValue = std::max(maxValue, value);
+        }
+    }
+    if (maxValue < 1e-6F) {
+        return;
+    }
+    for (int c = 0; c < 3; ++c) {
+        if (active[static_cast<std::size_t>(c)]) {
+            for (float& value : curves[static_cast<std::size_t>(c)]) {
+                value /= maxValue;
+            }
+        }
+    }
+}
+
 bool isGrayscale(const std::array<std::array<std::uint32_t, 256>, 3>& bins) {
     for (int bin = 0; bin < 256; ++bin) {
         if (bins[0][static_cast<std::size_t>(bin)] != bins[1][static_cast<std::size_t>(bin)] ||
@@ -114,6 +151,7 @@ void drawGrayscaleHistogram(ImDrawList* drawList, ImVec2 origin, float histogram
             peak = std::max(peak, bins[0][static_cast<std::size_t>(bin)]);
         }
         smoothChannel(bins[0], peak, heights);
+        rescaleToUnitPeak(heights);
     }
     drawHistogramCurve(drawList, origin, histogramWidth, heights, IM_COL32(180, 180, 180, 130),
                         IM_COL32(220, 220, 220, 220));
@@ -163,6 +201,7 @@ void drawRgbHistogram(ImDrawList* drawList, ImVec2 origin, float histogramWidth,
                           heights[static_cast<std::size_t>(c)]);
         }
     }
+    rescaleToUnitPeak(heights, active);
 
     // B, G, R -- R topmost -- then the shared overlap curve last.
     if (active[2]) {
