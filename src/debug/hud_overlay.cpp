@@ -1,6 +1,6 @@
 #include "engine/debug/hud_overlay.h"
 
-// GLEW before GLFW — see gl_debug.cpp for why.
+// GLEW before GLFW: see gl_debug.cpp for why.
 #include <GL/glew.h>
 #include <GLFW/glfw3.h>
 
@@ -261,7 +261,7 @@ void drawHistogramPanel(const std::array<std::array<std::uint32_t, 256>, 3>& bin
     ImGui::Text("Over-range: %.1f%%, peak %.1fx", overRangeFraction * 100.0F, overRangePeakMultiple);
 }
 
-// Centre crosshair framing overlay — drawn on the foreground draw list, over the whole viewport, independent of the ##hud panel, so it never contaminates the AOV buffers being debugged.
+// Centre crosshair framing overlay: drawn on the foreground draw list, over the whole viewport, independent of the ##hud panel, so it never contaminates the AOV buffers being debugged.
 void drawFramingOverlays(const FramingOverlayState& state, ImVec2 displaySize) {
     if (!state.crosshair) {
         return;

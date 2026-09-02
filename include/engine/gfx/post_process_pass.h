@@ -6,7 +6,7 @@ namespace engine::gfx {
 
 class ShaderProgram;
 
-// Draws a fullscreen triangle (gl_VertexID trick, no VBO) into the default framebuffer, sampling an HDR color texture through whatever display shader is passed in. Owns exactly one attribute-less VAO, created once — Apple's core-profile driver requires *some* VAO bound for any draw call, even with zero vertex attributes.
+// Draws a fullscreen triangle (gl_VertexID trick, no VBO) into the default framebuffer, sampling an HDR color texture through whatever display shader is passed in. Owns exactly one attribute-less VAO, created once: Apple's core-profile driver requires *some* VAO bound for any draw call, even with zero vertex attributes.
 class PostProcessPass {
 public:
     PostProcessPass();

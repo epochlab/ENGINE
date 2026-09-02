@@ -10,7 +10,7 @@ bool khrDebugAvailable();
 
 }  // namespace engine::gfx
 
-// Wraps a GL call with an error check in debug builds only, avoiding per-frame glGetError() overhead in Release. NDEBUG is CMake's own Debug/Release signal (Release defines it, Debug doesn't) — no project-specific macro needed.
+// Wraps a GL call with an error check in debug builds only, avoiding per-frame glGetError() overhead in Release. NDEBUG is CMake's own Debug/Release signal (Release defines it, Debug doesn't); no project-specific macro needed.
 #ifndef NDEBUG
 #define GL_CALL(x)                                    \
     do {                                               \

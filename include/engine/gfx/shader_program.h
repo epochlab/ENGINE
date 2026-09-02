@@ -15,7 +15,7 @@ public:
     ShaderProgram(ShaderProgram&& other) noexcept;
     ShaderProgram& operator=(ShaderProgram&& other) noexcept;
 
-    // Reads both files, then delegates to loadFromSource — the two entry points share one compile/link/error-check implementation.
+    // Reads both files, then delegates to loadFromSource: the two entry points share one compile/link/error-check implementation.
     static std::optional<ShaderProgram> loadFromFiles(const std::string& vertPath,
                                                         const std::string& fragPath);
 
