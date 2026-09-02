@@ -23,11 +23,11 @@ struct PathTraceSettings {
     float rrMinProb = 0.05F;  // floor: stops a near-zero-throughput path being killed with near-certainty
     // Ceiling of exactly 1.0: a path carrying full throughput must never be terminated. Any lower caps survival for no gain -- it saves a fraction of deep-path tracing and pays for it with variance costing more than that fraction in extra samples.
     float rrMaxProb = 1.0F;
-    // Sourced from MaterialConfig/material.json -- see resolveRoughness/buildShadingFrame (path_tracer.cpp).
+    // Sourced from SceneConfig::material/scene.json's material block -- see resolveRoughness/buildShadingFrame (path_tracer.cpp).
     float bumpStrength;
     float roughnessMin;
     float roughnessMax;
-    // Global material override, sourced from MaterialConfig/material.json -- see resolveBsdfParams (path_tracer.cpp).
+    // Global material override, sourced from SceneConfig::material/scene.json's material block -- see resolveBsdfParams (path_tracer.cpp).
     glm::vec3 diffuseColour;
     float ior;
     float transmissionFactor;

@@ -38,7 +38,13 @@ std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
         nlohmann::json j;
         file >> j;
 
-        const std::string defaultLutName = j.at("defaultLUT").get<std::string>();
+        const nlohmann::json& window = j.at("window");
+        const nlohmann::json& camera = j.at("camera");
+        const nlohmann::json& controls = j.at("controls");
+        const nlohmann::json& render = j.at("render");
+        const nlohmann::json& pathTracer = j.at("pathTracer");
+
+        const std::string defaultLutName = render.at("defaultLUT").get<std::string>();
         const std::optional<engine::gfx::OcioDisplayTransform::Lut> defaultLut =
             parseLut(defaultLutName);
         if (!defaultLut.has_value()) {
@@ -47,29 +53,29 @@ std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
             return std::nullopt;
         }
 
-        const int windowWidth = j.at("windowWidth").get<int>();
-        const int windowHeight = j.at("windowHeight").get<int>();
-        const glm::vec3 position = j.at("position").get<glm::vec3>();
-        const float yawDegrees = j.at("yawDegrees").get<float>();
-        const float pitchDegrees = j.at("pitchDegrees").get<float>();
-        const nlohmann::json& filmBackJson = j.at("filmBack");
+        const int windowWidth = window.at("width").get<int>();
+        const int windowHeight = window.at("height").get<int>();
+        const glm::vec3 position = camera.at("position").get<glm::vec3>();
+        const float yawDegrees = camera.at("yawDegrees").get<float>();
+        const float pitchDegrees = camera.at("pitchDegrees").get<float>();
+        const nlohmann::json& filmBackJson = camera.at("filmBack");
         const engine::scene::Camera::FilmBack filmBack{filmBackJson.at("widthMm").get<float>(),
                                                          filmBackJson.at("heightMm").get<float>()};
-        const float focalLengthMm = j.at("focalLengthMm").get<float>();
-        const float nearClip = j.at("nearClip").get<float>();
-        const float farClip = j.at("farClip").get<float>();
-        const float aperture = j.at("aperture").get<float>();
-        const float shutterSeconds = j.at("shutterSeconds").get<float>();
-        const float iso = j.at("iso").get<float>();
-        const float flySpeed = j.at("flySpeedMetersPerSecond").get<float>();
-        const float orbitSensitivity = j.at("orbitSensitivityDegPerPixel").get<float>();
-        const float renderScale = j.at("renderScale").get<float>();
-        const float interactiveRenderScale = j.at("interactiveRenderScale").get<float>();
-        const int defaultAov = j.at("defaultAOV").get<int>();
-        const int samplesPerPixel = j.at("samplesPerPixel").get<int>();
-        const int maxBounces = j.at("maxBounces").get<int>();
-        const int russianRouletteStartBounce = j.at("russianRouletteStartBounce").get<int>();
-        const int maxSamples = j.at("maxSamples").get<int>();
+        const float focalLengthMm = camera.at("focalLengthMm").get<float>();
+        const float nearClip = camera.at("nearClip").get<float>();
+        const float farClip = camera.at("farClip").get<float>();
+        const float aperture = camera.at("aperture").get<float>();
+        const float shutterSeconds = camera.at("shutterSeconds").get<float>();
+        const float iso = camera.at("iso").get<float>();
+        const float flySpeed = controls.at("flySpeedMetersPerSecond").get<float>();
+        const float orbitSensitivity = controls.at("orbitSensitivityDegPerPixel").get<float>();
+        const float renderScale = render.at("renderScale").get<float>();
+        const float interactiveRenderScale = render.at("interactiveRenderScale").get<float>();
+        const int defaultAov = render.at("defaultAOV").get<int>();
+        const int samplesPerPixel = pathTracer.at("samplesPerPixel").get<int>();
+        const int maxBounces = pathTracer.at("maxBounces").get<int>();
+        const int russianRouletteStartBounce = pathTracer.at("russianRouletteStartBounce").get<int>();
+        const int maxSamples = pathTracer.at("maxSamples").get<int>();
 
         // These feed Camera::verticalFovRadians()/ev100() as denominators or bases of a physically meaningful quantity -- a zero/negative value would silently produce inf/NaN there instead of failing at this asset-load boundary.
         if (filmBack.heightMm <= 0.0F || focalLengthMm <= 0.0F || aperture <= 0.0F ||
@@ -87,28 +93,38 @@ std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
         }
 
         return ProfileConfig{
-            windowWidth,
-            windowHeight,
-            position,
-            yawDegrees,
-            pitchDegrees,
-            filmBack,
-            focalLengthMm,
-            nearClip,
-            farClip,
-            aperture,
-            shutterSeconds,
-            iso,
-            flySpeed,
-            orbitSensitivity,
-            renderScale,
-            interactiveRenderScale,
-            defaultAov,
-            *defaultLut,
-            samplesPerPixel,
-            maxBounces,
-            russianRouletteStartBounce,
-            maxSamples,
+            WindowConfig{
+                windowWidth,
+                windowHeight,
+            },
+            CameraConfig{
+                position,
+                yawDegrees,
+                pitchDegrees,
+                filmBack,
+                focalLengthMm,
+                nearClip,
+                farClip,
+                aperture,
+                shutterSeconds,
+                iso,
+            },
+            ControlsConfig{
+                flySpeed,
+                orbitSensitivity,
+            },
+            RenderConfig{
+                renderScale,
+                interactiveRenderScale,
+                defaultAov,
+                *defaultLut,
+            },
+            PathTracerConfig{
+                samplesPerPixel,
+                maxBounces,
+                russianRouletteStartBounce,
+                maxSamples,
+            },
         };
     } catch (const nlohmann::json::exception& e) {
         std::cerr << "loadProfileConfig: " << path << ": " << e.what() << '\n';
