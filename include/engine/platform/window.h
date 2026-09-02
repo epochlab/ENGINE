@@ -9,7 +9,7 @@ struct GLFWwindow;
 
 namespace engine::platform {
 
-// Owns a single GLFWwindow and its OpenGL 4.1 core, forward-compatible context. glfwInit()/glfwSetErrorCallback()/glfwTerminate() bracket every Window's lifetime but are the caller's responsibility (main.cpp) — a Window represents one window, not the GLFW library instance.
+// Owns a single GLFWwindow and its OpenGL 4.1 core, forward-compatible context. glfwInit()/glfwSetErrorCallback()/glfwTerminate() bracket every Window's lifetime but are the caller's responsibility (main.cpp): a Window represents one window, not the GLFW library instance.
 class Window {
 public:
     Window(int width, int height, const std::string& title);
@@ -25,16 +25,16 @@ public:
     void pollEvents() const;
     void swapBuffers() const;
 
-    // For backends that need the raw GLFW handle (e.g. ImGui's GLFW backend) — everything else should use the typed accessors above.
+    // For backends that need the raw GLFW handle (e.g. ImGui's GLFW backend); everything else should use the typed accessors above.
     [[nodiscard]] GLFWwindow* nativeHandle() const noexcept { return window_; }
 
-    // {width, height} in framebuffer pixels (glfwGetFramebufferSize), not screen points — the two differ by 2x on Retina displays. Queried fresh each call, not cached from a resize event.
+    // {width, height} in framebuffer pixels (glfwGetFramebufferSize), not screen points: the two differ by 2x on Retina displays. Queried fresh each call, not cached from a resize event.
     [[nodiscard]] std::pair<int, int> framebufferSize() const;
 
     // {width, height} in screen points (glfwGetWindowSize), same units as cursorPosition(). Use to scale cursor into framebufferSize()/image pixel space; don't divide cursorPosition() by framebufferSize() directly.
     [[nodiscard]] std::pair<int, int> windowSize() const;
 
-    // Invoked on GLFW's key event (GLFW_PRESS/GLFW_RELEASE/GLFW_REPEAT). Scancode/mods aren't forwarded — no consumer needs them. Single callback slot, shared by every edge-triggered hotkey; WASD/QE need continuous per-frame state instead, so they use isKeyDown() below.
+    // Invoked on GLFW's key event (GLFW_PRESS/GLFW_RELEASE/GLFW_REPEAT). Scancode/mods aren't forwarded: no consumer needs them. Single callback slot, shared by every edge-triggered hotkey; WASD/QE need continuous per-frame state instead, so they use isKeyDown() below.
     using KeyCallback = std::function<void(int key, int action)>;
     void setKeyCallback(KeyCallback callback);
 
