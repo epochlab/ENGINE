@@ -18,7 +18,6 @@
 #include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
-#include "engine/config/material_config.h"
 #include "engine/config/profile_config.h"
 #include "engine/config/scene_config.h"
 #include "engine/debug/aov.h"
@@ -292,7 +291,6 @@ HsvDisplayUniforms setupHsvDisplayShader(const engine::gfx::ShaderProgram& hsvDi
 // All one-time startup work: camera/model/shader/environment loading (nullopt on any failure -- matches the shader/model/OCIO all-or-nothing gate this replaces), Embree scene build, and cached uniform-location lookups for the shared edge-filter/HSV shaders. Doesn't wire input callbacks -- those capture a stable AppResources& and must be set up by the caller only after this returns (see main()), since a callback capturing a reference into an AppResources that's still about to be moved into its final std::optional storage would dangle.
 std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sceneConfig,
                                            const engine::config::ProfileConfig& profileConfig,
-                                           const engine::config::MaterialConfig& materialConfig,
                                            engine::platform::Window& window) {
     std::cout << "GL_KHR_debug available: " << std::boolalpha << engine::gfx::khrDebugAvailable()
               << '\n';
@@ -302,11 +300,13 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
 
     // ev100() is logged but not render-path-consumed directly: DebugCameraController::relativeExposureEv() derives the display-stage multiplier from it (OcioDisplayTransform), not this log line.
     engine::scene::DebugCameraController debugCamera(
-        profileConfig.position, profileConfig.yawDegrees, profileConfig.pitchDegrees,
-        profileConfig.filmBack, profileConfig.focalLengthMm, profileConfig.nearClip,
-        profileConfig.farClip, profileConfig.aperture, profileConfig.shutterSeconds,
-        profileConfig.iso, profileConfig.flySpeedMetersPerSecond,
-        profileConfig.orbitSensitivityDegPerPixel);
+        profileConfig.camera.position, profileConfig.camera.yawDegrees,
+        profileConfig.camera.pitchDegrees, profileConfig.camera.filmBack,
+        profileConfig.camera.focalLengthMm, profileConfig.camera.nearClip,
+        profileConfig.camera.farClip, profileConfig.camera.aperture,
+        profileConfig.camera.shutterSeconds, profileConfig.camera.iso,
+        profileConfig.controls.flySpeedMetersPerSecond,
+        profileConfig.controls.orbitSensitivityDegPerPixel);
     {
         const engine::scene::Camera initialCamera = debugCamera.snapshot();
         const glm::vec3 camPos = initialCamera.position();
@@ -315,17 +315,17 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
                   << " deg ev100=" << initialCamera.ev100() << '\n';
     }
 
-    // Scene-level placement (scene.json position/rotationDegrees), order X,Y,Z.
+    // Scene-level placement (scene.json model.position/model.rotationDegrees), order X,Y,Z.
     const glm::mat4 sceneTransform =
-        glm::translate(glm::mat4(1.0F), sceneConfig.position) *
-        glm::rotate(glm::mat4(1.0F), glm::radians(sceneConfig.rotationDegrees.z), glm::vec3(0.0F, 0.0F, 1.0F)) *
-        glm::rotate(glm::mat4(1.0F), glm::radians(sceneConfig.rotationDegrees.y), glm::vec3(0.0F, 1.0F, 0.0F)) *
-        glm::rotate(glm::mat4(1.0F), glm::radians(sceneConfig.rotationDegrees.x), glm::vec3(1.0F, 0.0F, 0.0F));
+        glm::translate(glm::mat4(1.0F), sceneConfig.model.position) *
+        glm::rotate(glm::mat4(1.0F), glm::radians(sceneConfig.model.rotationDegrees.z), glm::vec3(0.0F, 0.0F, 1.0F)) *
+        glm::rotate(glm::mat4(1.0F), glm::radians(sceneConfig.model.rotationDegrees.y), glm::vec3(0.0F, 1.0F, 0.0F)) *
+        glm::rotate(glm::mat4(1.0F), glm::radians(sceneConfig.model.rotationDegrees.x), glm::vec3(1.0F, 0.0F, 0.0F));
 
     const auto loadStart = std::chrono::steady_clock::now();
     std::optional<engine::scene::LoadedModel> stumpModel = engine::scene::loadGltf(
-        std::string(ASSET_ROOT_DIR) + "/" + sceneConfig.gltfPath, sceneTransform,
-        std::string(ASSET_ROOT_DIR) + "/" + sceneConfig.texturePath);
+        std::string(ASSET_ROOT_DIR) + "/" + sceneConfig.model.gltfPath, sceneTransform,
+        std::string(ASSET_ROOT_DIR) + "/" + sceneConfig.model.texturePath);
     const double loadMs =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - loadStart)
             .count();
@@ -342,7 +342,7 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
     std::optional<RequiredShaders> shaders = loadShaders();
     // Decoded once here (not via a texture-upload helper): the path tracer is the only consumer, sampling this CPU HdrImage directly, with no GPU upload step in between.
     std::optional<engine::gfx::HdrImage> environmentImage =
-        engine::gfx::loadExr(std::string(ASSET_ROOT_DIR) + "/" + sceneConfig.hdriPath);
+        engine::gfx::loadExr(std::string(ASSET_ROOT_DIR) + "/" + sceneConfig.environment.hdriPath);
 
     if (!shaders || !stumpModel || !environmentImage) {
         std::cerr << "main: shader compile/link, model load, or environment map load failed, "
@@ -400,9 +400,9 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         .uEdgeInvertLoc = edgeFilterUniforms.invert,
         .uHsvInvertLoc = hsvUniforms.invert,
         // aov selects which AOV the path tracer's snapshot supplies (see selectPathTracedImage); channelView isolates one R/G/B channel of whatever aov currently shows. userLut is the LUT 'L' cycles through -- kept separate from OcioDisplayTransform's active LUT because non-Beauty AOVs force Raw (see the LUT-select comment in presentFrame) and must not clobber the user's actual choice. Both aov and userLut start from profile.json rather than a fixed literal.
-        .aov = profileConfig.defaultAov,
+        .aov = profileConfig.render.defaultAov,
         .channelView = 0,
-        .userLut = profileConfig.defaultLut,
+        .userLut = profileConfig.render.defaultLut,
         .framingState = engine::debug::FramingOverlayState{},
         // "Show/Hide Background" HDRI-section checkbox -- off by default; only takes visible effect for the Beauty AOV, see presentFrame.
         .showSky = false,
@@ -415,19 +415,19 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         .aberrationStrength = 0.0F,
         .pathTraceSettings =
             engine::scene::PathTraceSettings{
-                .samplesPerPixel = profileConfig.samplesPerPixel,
-                .maxBounces = profileConfig.maxBounces,
-                .russianRouletteStartBounce = profileConfig.russianRouletteStartBounce,
-                .bumpStrength = materialConfig.bumpStrength,
-                .roughnessMin = materialConfig.roughnessMin,
-                .roughnessMax = materialConfig.roughnessMax,
-                .diffuseColour = materialConfig.diffuseColour,
-                .ior = materialConfig.ior,
-                .transmissionFactor = materialConfig.transmissionFactor,
-                .metallicFactor = materialConfig.metallicFactor,
-                .roughnessFactor = materialConfig.roughnessFactor,
+                .samplesPerPixel = profileConfig.pathTracer.samplesPerPixel,
+                .maxBounces = profileConfig.pathTracer.maxBounces,
+                .russianRouletteStartBounce = profileConfig.pathTracer.russianRouletteStartBounce,
+                .bumpStrength = sceneConfig.material.bumpStrength,
+                .roughnessMin = sceneConfig.material.roughnessMin,
+                .roughnessMax = sceneConfig.material.roughnessMax,
+                .diffuseColour = sceneConfig.material.diffuseColour,
+                .ior = sceneConfig.material.ior,
+                .transmissionFactor = sceneConfig.material.transmissionFactor,
+                .metallicFactor = sceneConfig.material.metallicFactor,
+                .roughnessFactor = sceneConfig.material.roughnessFactor,
             },
-        .maxSamples = profileConfig.maxSamples,
+        .maxSamples = profileConfig.pathTracer.maxSamples,
         // Constructed in main() right after initializeApp() returns -- see path_trace_driver.h's constructor precondition (its reference members must bind to sceneAccel/environmentMap/stumpModel at their final, permanent address, which this designated-initializer expression, still local-variable-based and one AppResources move away from that address, cannot yet guarantee).
         .pathTraceDriver = nullptr,
         .pathTraceDisplayTexture = std::nullopt,
@@ -436,8 +436,8 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         .pathTraceDisplayedGeneration = 0,
         .pathTraceDisplayedOwner = nullptr,
         .lastPathTraceTrigger = PathTraceTriggerState{},
-        .renderScale = profileConfig.renderScale,
-        .interactiveRenderScale = profileConfig.interactiveRenderScale,
+        .renderScale = profileConfig.render.renderScale,
+        .interactiveRenderScale = profileConfig.render.interactiveRenderScale,
         .lastInputChange = std::chrono::steady_clock::time_point{},
         .rasterThreadPool = std::make_unique<engine::scene::ThreadPool>(),
         .rasterGBuffer = std::make_shared<engine::scene::RasterGBuffer>(),
@@ -995,23 +995,18 @@ int main() {
 
     int exitCode = EXIT_SUCCESS;
     {
-        // Config is pure file I/O with no GL dependency, but profile.json's window size must be known before Window is constructed, so it's loaded first, before any GLFW/GL object exists. All three files hard-fail identically on missing or malformed: this is user-editable input where a load failure is a real, expected-to-happen event, not an internal invariant, so it's surfaced immediately rather than defaulted around -- matching the shader/model/OCIO all-or-nothing gate inside initializeApp.
+        // Config is pure file I/O with no GL dependency, but profile.json's window size must be known before Window is constructed, so it's loaded first, before any GLFW/GL object exists. Both files hard-fail identically on missing or malformed: this is user-editable input where a load failure is a real, expected-to-happen event, not an internal invariant, so it's surfaced immediately rather than defaulted around -- matching the shader/model/OCIO all-or-nothing gate inside initializeApp.
         std::optional<engine::config::SceneConfig> sceneConfig =
             engine::config::loadSceneConfig(ASSET_ROOT_DIR "/config/scene.json");
         std::optional<engine::config::ProfileConfig> profileConfig =
             engine::config::loadProfileConfig(ASSET_ROOT_DIR "/config/profile.json");
-        std::optional<engine::config::MaterialConfig> materialConfig =
-            sceneConfig.has_value()
-                ? engine::config::loadMaterialConfig(std::string(ASSET_ROOT_DIR) + "/" +
-                                                      sceneConfig->materialPath)
-                : std::nullopt;
 
-        if (!sceneConfig || !profileConfig || !materialConfig) {
-            std::cerr << "main: scene/profile/material config load failed, aborting startup\n";
+        if (!sceneConfig || !profileConfig) {
+            std::cerr << "main: scene/profile config load failed, aborting startup\n";
             exitCode = EXIT_FAILURE;
         } else {
             // Window construction creates the GL 4.1 core/fwd-compat context and makes it current; fatal failure inside it exits the process directly (see window.cpp) since nothing recoverable exists yet.
-            engine::platform::Window window(profileConfig->windowWidth, profileConfig->windowHeight,
+            engine::platform::Window window(profileConfig->window.width, profileConfig->window.height,
                                              "ENGINE");
 
             glewExperimental = GL_TRUE;
@@ -1029,7 +1024,7 @@ int main() {
                 glfwSwapInterval(1);
 
                 std::optional<AppResources> app =
-                    initializeApp(*sceneConfig, *profileConfig, *materialConfig, window);
+                    initializeApp(*sceneConfig, *profileConfig, window);
                 if (!app) {
                     exitCode = EXIT_FAILURE;
                 } else {

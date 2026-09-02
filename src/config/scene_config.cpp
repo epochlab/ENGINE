@@ -20,13 +20,30 @@ std::optional<SceneConfig> loadSceneConfig(const std::string& path) {
         nlohmann::json j;
         file >> j;
 
+        const nlohmann::json& model = j.at("model");
+        const nlohmann::json& environment = j.at("environment");
+        const nlohmann::json& material = j.at("material");
+
         return SceneConfig{
-            j.at("gltfPath").get<std::string>(),
-            j.at("texturePath").get<std::string>(),
-            j.at("materialPath").get<std::string>(),
-            j.at("position").get<glm::vec3>(),
-            j.at("rotationDegrees").get<glm::vec3>(),
-            j.at("hdriPath").get<std::string>(),
+            ModelConfig{
+                model.at("gltfPath").get<std::string>(),
+                model.at("texturePath").get<std::string>(),
+                model.at("position").get<glm::vec3>(),
+                model.at("rotationDegrees").get<glm::vec3>(),
+            },
+            EnvironmentConfig{
+                environment.at("hdriPath").get<std::string>(),
+            },
+            MaterialConfig{
+                material.at("bumpStrength").get<float>(),
+                material.at("roughnessMin").get<float>(),
+                material.at("roughnessMax").get<float>(),
+                material.at("diffuseColour").get<glm::vec3>(),
+                material.at("ior").get<float>(),
+                material.at("transmissionFactor").get<float>(),
+                material.at("metallicFactor").get<float>(),
+                material.at("roughnessFactor").get<float>(),
+            },
         };
     } catch (const nlohmann::json::exception& e) {
         std::cerr << "loadSceneConfig: " << path << ": " << e.what() << '\n';
