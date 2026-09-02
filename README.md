@@ -1,6 +1,6 @@
 # Physically based path tracer
 
-*A CPU, unidirectional brute force Monte-Carlo path tracer with real-time progressive display: Embree-accelerated, stochastic BSDF sampling combined with environment-map NEE via MIS, converging interactively behind a thin OpenGL display/HUD layer.*
+*A CPU, unidirectional brute-force Monte Carlo path tracer with real-time progressive display: Embree-accelerated, stochastic BSDF sampling combined with environment-map NEE via MIS, behind a thin OpenGL display/HUD layer.*
 
 ![Sample render](sample.png)
 
@@ -29,7 +29,7 @@ cmake -B build
 cmake --build build
 ```
 
-This produces seven targets:
+This produces nine targets:
 
 - `build/engine`: the path tracer
 - `build/test_pattern`: EXR calibration-pattern generator (`tools/test_pattern.cpp`)
@@ -38,6 +38,8 @@ This produces seven targets:
 - `build/bsdf_validate`: headless BSDF pdf-normalization and furnace-test check (`tools/bsdf_validate.cpp`)
 - `build/nee_validate`: headless NEE/MIS unbiasedness check against a brute-force reference (`tools/nee_validate.cpp`)
 - `build/rasterizer_validate`: headless CPU-rasterizer-vs-Embree G-buffer correctness check (`tools/rasterizer_validate.cpp`)
+- `build/integrator_validate`: headless full-integrator depth-invariance and transport-partition correctness check (`tools/integrator_validate.cpp`)
+- `build/raster_bench`: rasterizer timing harness, not run under `ctest` (`tools/raster_bench.cpp`)
 
 `-Wall -Wextra -Werror` gates every target. If `clang-tidy` is installed, it also runs on every compile of `engine`'s own sources (see `.clang-tidy`); if `cppcheck` is installed, `cmake --build build --target cppcheck` runs it over `src/`. Both are skipped, not required, if not installed.
 
@@ -132,8 +134,6 @@ Ordered quick → complex; items within **Large** are a strict dependency chain 
 - **Expand terminal output (launch + loop)**: startup logs GL extensions/camera pose/model/BVH stats (`main.cpp:286-361`); no per-frame stats print during the interactive loop (`main.cpp:990`); sample/pass/convergence stats reach only the HUD (`hud_overlay.cpp`), not stdout.
 - **scene.json as a CLI arg**: `main()` has no `argc`/`argv` (`main.cpp:864`); paths are hardcoded. Enables multi-scenario scenes.
 - **Texture bit depth (16/32) via JSON**: hardcoded `GL_RGBA16F` today (`texture.cpp:45`); 32F ~doubles VRAM/buffer.
-- **Code-quality audit**: `rotateAboutY` (`environment_map.cpp:13`) → `glm::rotate`; `ShadingFrame::toLocal`/`toWorld` (`bsdf.h:26`) → `glm::mat3`. (BSDF math in `bsdf.cpp`, GGX/Smith/Fresnel/VNDF, is standard domain logic, not an offload candidate.)
-- **Comment-style audit**: full pass over this repo's comments, commit messages, and PR descriptions against `notes/architect.md:109`'s "Efficient comments" rule (technically correct what/why, no multiline split, no extra prose, token efficient).
 - **Screen capture to PNG**: dump the composited, LUT-applied Beauty framebuffer (`glReadPixels`, precedent at `main.cpp:670`) before `app.hud.render()` (`main.cpp:944`) so HUD, crosshair (`hud_overlay.cpp:266`), and the pixel probe panel (`hud_overlay.cpp:381`) are excluded. No PNG encoder in the tree yet (`third_party/imgui`'s is unrelated); needs one added.
 
 ### Moderate
@@ -151,7 +151,7 @@ Ordered quick → complex; items within **Large** are a strict dependency chain 
 - **Photometric calibration**: tie radiometric output to real photometric units (lux/candela/lumen) so `ev100()` (`camera.h:54-56`) and light intensities can be checked against a light meter instead of eyeballed. Complements the Macbeth chart scene (§4 Large item 1).
 - **Optic flow AOV**: per-pixel motion vectors, appended to `AovId` (`aov.h:7-40`). No scene-graph animation yet (§4 Moderate item 14), camera-only motion over static geometry, so this is reprojecting `WorldPos` (§3) through the previous frame's camera transform, not true motion capture. That state doesn't exist: `Camera` (`camera.h:10`) exposes only current `position()` (`camera.h:23`), no stored prior-frame matrix; needs one new persisted matrix, no new ray/sample work.
 - **Contact sheet export (grid of every AOV)**: tile thumbnails of all 27 `AovId` (`aov.h:7-40`) at once, vs. the HUD's single `ImGui::Combo` (`hud_overlay.cpp:336`) feeding one `pathTraceDisplayTexture` blit (`presentFrame`, `main.cpp:739`). Same mutual-exclusion blocker as the delighted-view item above: `aovNeedsLightTransport` (`main.cpp:93-108`) partitions the 27 into 12 light-transport / 15 rasterizer AOVs, only one side fresh per frame; needs that gating relaxed, not just N reads of one cached buffer.
-- **Scene-graph foundation**: three steps in strict order, the only ordered chain outside **Large**, and the prerequisite for (10) there.
+- **Scene-graph foundation**: three steps in strict order, the only ordered chain outside **Large**, and the prerequisite for Motion blur (§4 Low priority item 1).
   1. *Indexed geometry.* `gltf_loader.cpp:94-129` de-indexes every mesh into soup and stores positions twice (once in `Triangle` for Embree, once in `ShadingVertex.position` for shading), 184 B/tri, ~920 MB on a 5M-triangle asset. `rtcSetSharedGeometryBuffer` takes a byte stride, so Embree can read positions in place from the indexed shading vertices instead, deleting the `Triangle` array, keeping glTF's own index buffer rather than filling one with the identity sequence (`embree_accel.cpp:77-84`), and dropping the `reserve(size+1)` padding hack. ~5x smaller, and the traversal locality matters more than the footprint.
   2. *Object instancing.* `RTC_GEOMETRY_TYPE_INSTANCE` over one scene per unique mesh, replacing today's single flattened geometry (`embree_accel.cpp:65`) and finally giving `MeshInstance::transform` (`gltf_loader.h:18`, stored and never read) a consumer. `Hit` gains `geomID`/`instID`. Rays trace in object space against shared BVH leaves instead of the per-instance duplication today's flattened soup incurs. Needs (1)'s indexed layout.
   3. *Per-material factors.* `Material` holds six textures and nothing else, so `metallic_factor`, `roughness_factor`, `base_color_factor`, `ior` and `transmission_factor` are parsed by cgltf and discarded: every material in the scene shares one global set from `material.json`, and **a scene containing a metal object and a plastic object cannot be represented**. Move them onto `Material` and demote `MaterialConfig` to a global override layer. Also deletes `extrasTextureIndex` (`gltf_loader.cpp:35`), the hand-rolled substring scanner that exists only because roughness/specular/bump were hand-authored into glTF `extras`.
@@ -170,9 +170,10 @@ Ordered quick → complex; items within **Large** are a strict dependency chain 
 
 ### Low priority
 
-1. **Motion blur**: blocked on (10)'s scene graph + Embree multi-timestep geometry.
+1. **Motion blur**: blocked on Scene-graph foundation's (§4 Moderate item 14) scene graph + Embree multi-timestep geometry.
 2. **Depth of field**: thin-lens sampling in `primaryRay` + focus distance; technically unblocked today, cheaper once adaptive sampling (above) lands.
 3. **Nuke-equivalent exposure/gamma control**: extend `OcioDisplayTransform` with live numeric control, beyond today's LUT cycling (`L`).
+4. **Code-quality audit**: `rotateAboutY` (`environment_map.cpp:13`) → `glm::rotate`; `ShadingFrame::toLocal`/`toWorld` (`bsdf.h:26`) → `glm::mat3`. (BSDF math in `bsdf.cpp`, GGX/Smith/Fresnel/VNDF, is standard domain logic, not an offload candidate.)
 
 ## 5. References
 
