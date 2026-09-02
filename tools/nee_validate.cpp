@@ -1,4 +1,9 @@
-// Standalone correctness check for path_tracer.cpp's NEE + MIS combination (Veach & Guibas 1995 power heuristic) against EnvironmentMap's importance sampling (environment_map.h). Exercises the exact estimator combination tracePath uses -- NEE via EnvironmentMap::importanceSampleDirection + evaluateBsdf/pdfBsdf, and the BSDF-sampled path's environment hit via sampleBsdf + EnvironmentMap::pdf, MIS-weighted by the power heuristic -- without needing scene geometry/a BVH/GPU resources (this tool needs no scene geometry at all -- integrator_validate.cpp covers the full renderPathTraced path, including the Material/MeshInstance construction an earlier version of this comment wrongly claimed required a live GL context; both are plain data). Reference: a flat, unoccluded surface under a uniform-radiance (L0=1) environment has an exactly computable outgoing radiance, Lo(wo) = integral over the hemisphere of evaluateBsdf(wo,wi)*cos(wi) dwi -- evaluated here via independent uniform-hemisphere Monte Carlo, same convention as furnace_test.cpp/bsdf_validate.cpp. The MIS-combined NEE+BSDF-sampling estimator (mirroring tracePath's single-bounce case exactly: no occluding geometry, so NEE's shadow ray and the BSDF-sampled continuation both always reach the environment) must converge to the same value -- a mismatch would indicate a double-counting or under-counting bug in the MIS weighting. Restricted to opaque materials (transmissionFactor=0): the delta transmission lobe has no continuous pdf, so it's structurally excluded from evaluateBsdf/NEE already and always takes MIS weight 1.0 on the BSDF-sampled side (see path_tracer.cpp) -- there's no double-counting question to test there, only in the two continuous lobes this check covers.
+// Standalone correctness check: path_tracer.cpp's NEE+MIS combination (Veach & Guibas 1995 power heuristic) against EnvironmentMap's importance sampling.
+// Exercises the exact estimator tracePath uses: NEE via importanceSampleDirection + evaluateBsdf/pdfBsdf, BSDF-sampled env hit via sampleBsdf + EnvironmentMap::pdf, MIS-weighted by the power heuristic.
+// Needs no scene geometry/BVH/GPU resources (integrator_validate.cpp covers the full renderPathTraced path, including Material/MeshInstance construction; both are plain data, no GL context required).
+// Reference: a flat unoccluded surface under a uniform-radiance (L0=1) environment has exact Lo(wo) = integral over the hemisphere of evaluateBsdf(wo,wi)*cos(wi) dwi, computed via independent uniform-hemisphere Monte Carlo (same convention as furnace_test.cpp/bsdf_validate.cpp).
+// The MIS-combined estimator mirrors tracePath's single-bounce case (no occlusion, so NEE's shadow ray and the BSDF-sampled continuation both always reach the environment) and must converge to the reference; a mismatch means a double- or under-counting bug in the MIS weighting.
+// Restricted to opaque materials (transmissionFactor=0): the delta transmission lobe has no continuous pdf, so it's excluded from evaluateBsdf/NEE and always takes MIS weight 1.0 on the BSDF-sampled side (path_tracer.cpp); no double-counting question there, only in the two continuous lobes this check covers.
 
 #include <array>
 #include <cmath>
@@ -98,7 +103,7 @@ bool checkEnvPdfConsistency() {
     return ok;
 }
 
-// Uniform-radiance (L0=1) equirect environment -- constant regardless of resolution, but a real image so EnvironmentMap's CDF machinery runs through its normal (non-degenerate) path rather than the all-black fallback.
+// Uniform-radiance (L0=1) equirect environment: constant regardless of resolution, but a real image so EnvironmentMap's CDF machinery runs its normal (non-degenerate) path, not the all-black fallback.
 EnvironmentMap makeUniformEnvironment() {
     engine::gfx::HdrImage image;
     image.width = 64;
@@ -119,7 +124,7 @@ float referenceLo(const BsdfParams& params, const glm::vec3& wo, int sampleCount
     return std::max({accum.x, accum.y, accum.z}) / static_cast<float>(sampleCount);
 }
 
-// MIS-combined NEE + BSDF-sampled estimator, mirroring path_tracer.cpp's tracePath exactly (power heuristic, no occlusion since there's no geometry here -- both strategies always reach the environment, matching a flat unoccluded surface).
+// MIS-combined NEE + BSDF-sampled estimator, mirroring path_tracer.cpp's tracePath exactly: power heuristic, no occlusion since there's no geometry here, so both strategies always reach the environment (matching a flat unoccluded surface).
 float misCombinedLo(const BsdfParams& params, const glm::vec3& wo, const EnvironmentMap& env,
                      int sampleCount, std::uint32_t seed) {
     glm::vec3 accum(0.0F);
@@ -157,7 +162,8 @@ float misCombinedLo(const BsdfParams& params, const glm::vec3& wo, const Environ
 bool checkMisAgreement() {
     constexpr int kSampleCount = 100000;
     constexpr float kTolerance = 0.05F;
-    // Excludes low roughness (e.g. 0.05): uniform-hemisphere sampling under-samples a sharp GGX peak there (same documented limitation as furnace_test.cpp/bsdf_validate.cpp), which biases this test's independent reference low -- those two files only ever check an upper bound for exactly this reason, but this test needs a tight two-sided equality (misCombined must match reference, not just stay under it), so it needs roughness values where the reference itself converges reliably.
+    // Excludes low roughness (e.g. 0.05): uniform-hemisphere sampling under-samples a sharp GGX peak there (same limitation as furnace_test.cpp/bsdf_validate.cpp), biasing the reference low.
+    // Those two files only check an upper bound for that reason; this test needs a tight two-sided equality, so it needs roughness values where the reference itself converges reliably.
     const std::array<float, 3> roughnesses = {0.25F, 0.5F, 1.0F};
     const std::array<float, 2> metallics = {0.0F, 1.0F};
     const std::array<float, 3> ndotVs = {0.2F, 0.6F, 1.0F};

@@ -92,7 +92,7 @@ std::string buildFragmentSource(const std::string& ocioShaderText, const std::st
     return src.str();
 }
 
-// No OCIO involved at all: exposure applied, then output directly with no display encode — lets 'L' cycle to a genuine unencoded state for direct comparison against the two LUTs, rather than only ever toggling between two encoded curves.
+// No OCIO involved at all: exposure applied, then output directly with no display encode. Lets 'L' cycle to a genuine unencoded state for direct comparison against the two LUTs, rather than only ever toggling between two encoded curves.
 std::string buildRawFragmentSource() {
     return std::string("#version 410 core\n\n"
                        "in vec2 vUv;\n"
@@ -109,7 +109,9 @@ std::string buildRawFragmentSource() {
            "}\n";
 }
 
-// Builds one LUT's fragment source via OCIO's real Display/View API (getProcessor(scene, display, view, direction)) using the "Un-tone-mapped" view — a genuine View entry on this config, not a colorspace-pair bypass. Both displays resolve to pure Matrix+Gamma OETF math (verified against OCIO's own source + empirical testing): no LUT ops, no filmic tone-mapping. OCIO::Exception here means our own config/display/view/style names are wrong — an internal defect, not recoverable input — so it exits immediately like Window/HudOverlay do for unrecoverable configuration errors, rather than threading optional through callers.
+// Builds one LUT's fragment source via OCIO's real Display/View API (getProcessor(scene, display, view, direction)) using the "Un-tone-mapped" view, a genuine View entry on this config, not a colorspace-pair bypass.
+// Both displays resolve to pure Matrix+Gamma OETF math (verified against OCIO's own source + empirical testing): no LUT ops, no filmic tone-mapping.
+// OCIO::Exception here means our own config/display/view/style names are wrong (an internal defect, not recoverable input), so it exits immediately like Window/HudOverlay do for unrecoverable configuration errors, rather than threading optional through callers.
 std::string buildOcioFragmentSource(const char* display, const char* functionName) {
     try {
         const OCIO::ConstConfigRcPtr config = OCIO::Config::CreateFromBuiltinConfig(kBuiltinConfigName);
@@ -127,7 +129,7 @@ std::string buildOcioFragmentSource(const char* display, const char* functionNam
             std::cerr << "OcioDisplayTransform: " << display
                       << " processor unexpectedly requires LUT textures ("
                       << shaderDesc->getNumTextures() << " 1D/2D, " << shaderDesc->getNum3DTextures()
-                      << " 3D) — design assumption broken, aborting\n";
+                      << " 3D): design assumption broken, aborting\n";
             std::exit(EXIT_FAILURE);
         }
 

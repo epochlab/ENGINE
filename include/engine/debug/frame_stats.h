@@ -5,7 +5,7 @@
 
 namespace engine::debug {
 
-// Fixed-size ring buffer of recent frame times (ms). 120 entries is a sparkline-width choice (~2s at 60fps), not a precision one — fps()/avgMs()/minMs()/maxMs() scan the whole buffer each call, cheap at this size, so no running-aggregate bookkeeping is needed.
+// Fixed-size ring buffer of recent frame times (ms). 120 entries is a sparkline-width choice (~2s at 60fps), not a precision one: fps()/avgMs()/minMs()/maxMs() scan the whole buffer each call, cheap at this size, so no running-aggregate bookkeeping is needed.
 class FrameStats {
 public:
     static constexpr int kHistoryLength = 120;

@@ -6,12 +6,12 @@
 
 namespace engine::gfx {
 
-// Owns three display shaders — sRGB LUT, Rec.1886/Rec.709 LUT, and a raw (unencoded) passthrough — compiled once at startup, switched at runtime via the debug 'L' key (cycles sRGB -> Rec709 -> Raw). Holds no OCIO::Const*RcPtr members: Config/Processor/GpuShaderDesc are only needed transiently in create() to generate GLSL text. No custom move semantics needed either — ShaderProgram is already move-only, and the rest are trivial scalars.
+// Owns three display shaders: sRGB LUT, Rec.1886/Rec.709 LUT, and a raw (unencoded) passthrough. Compiled once at startup, switched at runtime via the debug 'L' key (cycles sRGB -> Rec709 -> Raw). Holds no OCIO::Const*RcPtr members: Config/Processor/GpuShaderDesc are only needed transiently in create() to generate GLSL text. No custom move semantics needed either: ShaderProgram is already move-only, and the rest are trivial scalars.
 class OcioDisplayTransform {
 public:
     enum class Lut { Raw, SRGB, Rec709 };
 
-    // Builds all three shaders (see ocio_display_transform.cpp for the verified OCIO construction). Returns nullopt only on a GLSL compile/link failure (ShaderProgram's own recoverable-failure contract). An OCIO::Exception instead means this code is querying OCIO's fixed built-in registry incorrectly — an internal defect — and exits immediately, matching Window/HudOverlay's precedent.
+    // Builds all three shaders (see ocio_display_transform.cpp for the verified OCIO construction). Returns nullopt only on a GLSL compile/link failure (ShaderProgram's own recoverable-failure contract). An OCIO::Exception instead means this code is querying OCIO's fixed built-in registry incorrectly (an internal defect), and exits immediately, matching Window/HudOverlay's precedent.
     [[nodiscard]] static std::optional<OcioDisplayTransform> create();
 
     void setActiveLut(Lut lut) { activeLut_ = lut; }

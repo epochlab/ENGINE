@@ -29,7 +29,7 @@ public:
         return bins_;
     }
 
-    // False until the first full capture+bin cycle has completed — callers should skip drawing until then.
+    // False until the first full capture+bin cycle has completed: callers should skip drawing until then.
     [[nodiscard]] bool hasData() const { return hasData_; }
 
 private:

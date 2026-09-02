@@ -10,7 +10,7 @@
 #include <string>
 #include <utility>
 
-// GLEW before GLFW — see gl_debug.cpp for why.
+// GLEW before GLFW: see gl_debug.cpp for why.
 #include <GL/glew.h>
 #include <GLFW/glfw3.h>
 
@@ -617,17 +617,10 @@ PathTracedAovSource selectPathTracedImage(
     }
 }
 
-// Bottom-right HUD probe: Beauty and the post-filter AOVs (HSV/Luminance/Sobel/Gabor, which have no
-// independent buffer of their own -- see presentFrame's isPostFilterAov) read back the literal
-// composited, OCIO-display-transformed pixel from framebuffer 0, since that IS the value being shown.
-// Every other AOV instead samples its own raw HdrImage texel directly (sampleTexel, full float
-// precision, no display-exposure/8-bit-quantization involved) so the readout is in that AOV's native
-// units (metres for Depth, bounce count for BounceCount, etc.) regardless of how it's displayed.
-// cursorPosition()/windowSize() are screen points; the framebuffer path scales by framebufferSize()
-// (not windowSize() directly -- wrong by DPI factor on Retina) and flips Y (GL's origin is
-// bottom-left, cursor's is top-left). The raw-texel path instead scales by the sampled image's own
-// resolution (robust to a resize race, same precedent as resolveOrbitPick) and needs no flip --
-// HdrImage row 0 is documented top, already matching cursor space's top-left origin.
+// Bottom-right HUD probe: Beauty and the post-filter AOVs (HSV/Luminance/Sobel/Gabor, which have no independent buffer of their own, see presentFrame's isPostFilterAov) read back the literal composited, OCIO-display-transformed pixel from framebuffer 0, since that is the value being shown.
+// Every other AOV instead samples its own raw HdrImage texel directly (sampleTexel, full float precision, no display-exposure/8-bit-quantization involved) so the readout is in that AOV's native units (metres for Depth, bounce count for BounceCount, etc.) regardless of how it's displayed.
+// cursorPosition()/windowSize() are screen points; the framebuffer path scales by framebufferSize() (not windowSize() directly, wrong by DPI factor on Retina) and flips Y (GL's origin is bottom-left, cursor's is top-left).
+// The raw-texel path instead scales by the sampled image's own resolution (robust to a resize race, same precedent as resolveOrbitPick) and needs no flip: HdrImage row 0 is documented top, already matching cursor space's top-left origin.
 engine::debug::PixelProbeSample samplePixelProbe(
     const engine::platform::Window& window,
     const std::shared_ptr<const engine::scene::PathTraceResult>& pathTraceSnapshot,
@@ -671,7 +664,12 @@ engine::debug::PixelProbeSample samplePixelProbe(
     return {true, glm::vec4(pixel[0], pixel[1], pixel[2], pixel[3]) / 255.0F};
 }
 
-// Re-uploads pathTraceDisplayTexture only when the selected AOV or the published object that owns the image actually changed -- re-sending 33 MB over PCIe every frame just to redisplay texels the GPU already holds would violate this codebase's no-work-per-frame-without-a-reason convention. The upload itself no longer destroys and recreates the texture object (Texture::upload). The driver publishes a fresh result object every completed pass, though, so while it's actively converging this does rebuild the texture up to once per rendered frame -- that per-frame cap (not a lower one) is deliberate: it is what makes newly-accumulated samples visible at all. Channel view is deliberately absent from that key: it is a shader uniform now, so isolating a channel changes nothing about the texels and must not force a rebuild. owner: a strong ref to whichever published object actually owns `image` (see PathTracedAovSource) -- comparing shared_ptr identity, not a raw pointer, since a raw pointer to a previous frame's already-freed result could in principle have its address reused by a later allocation (ABA); holding a real shared_ptr in app.pathTraceDisplayedOwner rules that out. For Depth specifically, also rescans `image` for its own max value into app.pathTraceDisplayedDepthMax on every rebuild -- presentFrame uses that as an auto-ranging display-exposure bound instead of Camera::farClip(), since farClip is a conservative ray tMax bound, not a proxy for the actual visible scene's depth extent.
+// Re-uploads pathTraceDisplayTexture only when the selected AOV or the published object that owns the image actually changed: re-sending 33MB over PCIe every frame just to redisplay texels the GPU already holds would violate this codebase's no-work-per-frame-without-a-reason convention.
+// The upload itself no longer destroys and recreates the texture object (Texture::upload).
+// The driver publishes a fresh result object every completed pass, though, so while it's actively converging this does rebuild the texture up to once per rendered frame; that per-frame cap (not a lower one) is deliberate, it is what makes newly-accumulated samples visible at all.
+// Channel view is deliberately absent from that key: it is a shader uniform now, so isolating a channel changes nothing about the texels and must not force a rebuild.
+// owner: a strong ref to whichever published object actually owns `image` (see PathTracedAovSource), comparing shared_ptr identity, not a raw pointer, since a raw pointer to a previous frame's already-freed result could in principle have its address reused by a later allocation (ABA); holding a real shared_ptr in app.pathTraceDisplayedOwner rules that out.
+// For Depth specifically, also rescans `image` for its own max value into app.pathTraceDisplayedDepthMax on every rebuild: presentFrame uses that as an auto-ranging display-exposure bound instead of Camera::farClip(), since farClip is a conservative ray tMax bound, not a proxy for the actual visible scene's depth extent.
 void ensurePathTraceDisplayTexture(AppResources& app, const std::shared_ptr<const void>& owner,
                                     const engine::gfx::HdrImage& image, std::uint64_t generation) {
     if (app.pathTraceDisplayTexture.has_value() && app.pathTraceDisplayedAov == app.aov &&
@@ -685,10 +683,8 @@ void ensurePathTraceDisplayTexture(AppResources& app, const std::shared_ptr<cons
         }
         app.pathTraceDisplayedDepthMax = maxDepth;
     }
-    // BounceCount is a mean-termination-depth scalar (R==G==B, see path_tracer.cpp's writeTexel call), not
-    // a colour -- mapped through Turbo here, on the CPU, before upload, rather than as a display-shader
-    // uniform: this function already only runs once per rebuilt pass (see the cache-key check above), so
-    // the map costs nothing extra per frame and needs no new uniform/texture unit.
+    // BounceCount is a mean-termination-depth scalar (R==G==B, see path_tracer.cpp's writeTexel call), not a colour, mapped through Turbo here, on the CPU, before upload, rather than as a display-shader uniform.
+    // This function already only runs once per rebuilt pass (see the cache-key check above), so the map costs nothing extra per frame and needs no new uniform/texture unit.
     if (app.aov == static_cast<int>(engine::debug::AovId::BounceCount)) {
         const float maxBounceCount = static_cast<float>(app.pathTraceSettings.maxBounces) + 1.0F;
         engine::gfx::HdrImage mapped;
@@ -785,12 +781,8 @@ void presentFrame(AppResources& app,
         const bool isBeauty = aovId == engine::debug::AovId::Beauty;
         app.ocioTransform.setActiveLut(isBeauty ? app.userLut
                                                  : engine::gfx::OcioDisplayTransform::Lut::Raw);
-        // Beauty: photographic exposure. Depth: auto-ranged to the actual max depth visible in the
-        // current buffer (see ensurePathTraceDisplayTexture) -- farClip is a conservative ray tMax
-        // bound, not a proxy for the scene's real depth extent, and normalizing by it left real scenes
-        // (a small fraction of farClip) reading as black. This exists because the default framebuffer is
-        // fixed-point and clamps any raw value >= 1 to white otherwise. Everything else (including
-        // BounceCount, already colormapped into [0,1] RGB): unscaled passthrough.
+        // Beauty: photographic exposure. Depth: auto-ranged to the actual max depth visible in the current buffer (see ensurePathTraceDisplayTexture); farClip is a conservative ray tMax bound, not a proxy for the scene's real depth extent, and normalizing by it left real scenes (a small fraction of farClip) reading as black.
+        // This exists because the default framebuffer is fixed-point and clamps any raw value >=1 to white otherwise. Everything else (including BounceCount, already colormapped into [0,1] RGB): unscaled passthrough.
         float exposureEv = 0.0F;
         if (isBeauty) {
             exposureEv = app.debugCamera.relativeExposureEv();
@@ -819,9 +811,15 @@ void requestPathTrace(AppResources& app, const engine::scene::Camera& camera, in
         app.showSky, std::exp2(app.envExposureStops), app.pathTraceSettings, app.maxSamples});
 }
 
-// Called once per rendered frame. Re-traces on any input that would actually change the image -- not a fixed timer -- so the path-traced view stays live without retracing every frame the camera happens to sit still. Because DebugCameraController's fly/orbit controls update every frame a key/mouse-drag is held, this does mean a fresh (progressive-accumulation-reset) request fires on almost every frame for the duration of any camera interaction -- accepted: async execution (PathTraceDriver) keeps that from blocking the UI, it just converges more slowly while the camera is moving, matching how every interactive path tracer (Cycles' viewport, Brigade) behaves. Only actually fires while the selected AOV needs light transport (aovNeedsLightTransport) -- restarting full Embree+BSDF accumulation every frame for an AOV nobody can see (Wireframe, Depth, ...) would just burn CPU competing with the rasterizer's own thread pool for no visible benefit; any accumulation already in flight from before the switch still finishes on its own.
-// Both the path trace and the rasterization run at renderScale/interactiveRenderScale of the framebuffer rather than at the framebuffer itself (profile_config.h), dropping to the interactive scale on any input change and promoting back kInteractiveSettleSeconds after the last one. The promotion needs no separate code path: it changes the trigger, and a changed trigger is already what dispatches. The display blit upscales for free -- glViewport targets the framebuffer and the display texture samples GL_LINEAR -- so nothing downstream is aware of the resolution the image arrived at.
-// Also refreshes app.rasterGBuffer synchronously on the same trigger, on the calling (render) thread -- unlike the path-traced request, this blocks briefly rather than handing off to a background driver, since the point of the rasterizer is a same-frame update for its 15 AOVs (rasterizer.h). Gated on one of those AOVs being selected, symmetrically with the path-trace request: it is not cheap (a full-screen shade, measured at ~150 ms per call at 2048x1152), and the three things that once justified running it unconditionally no longer need it -- orbit-pick now casts its own ray, the pixel probe only reaches these buffers for an AOV that is displaying them, and an AOV switch is itself a trigger change, so switching into a rasterizer AOV rasterizes on that same frame.
+// Called once per rendered frame. Re-traces on any input that would actually change the image, not a fixed timer, so the path-traced view stays live without retracing every frame the camera happens to sit still.
+// Because DebugCameraController's fly/orbit controls update every frame a key/mouse-drag is held, a fresh (progressive-accumulation-reset) request fires on almost every frame during camera interaction; accepted, since async execution (PathTraceDriver) keeps that from blocking the UI, it just converges more slowly while the camera moves, matching how every interactive path tracer (Cycles' viewport, Brigade) behaves.
+// Only actually fires while the selected AOV needs light transport (aovNeedsLightTransport): restarting full Embree+BSDF accumulation every frame for an AOV nobody can see (Wireframe, Depth, ...) would just burn CPU competing with the rasterizer's own thread pool for no visible benefit; any accumulation already in flight from before the switch still finishes on its own.
+// Both the path trace and the rasterization run at renderScale/interactiveRenderScale of the framebuffer rather than at the framebuffer itself (profile_config.h), dropping to the interactive scale on any input change and promoting back kInteractiveSettleSeconds after the last one.
+// The promotion needs no separate code path: it changes the trigger, and a changed trigger is already what dispatches.
+// The display blit upscales for free: glViewport targets the framebuffer and the display texture samples GL_LINEAR, so nothing downstream is aware of the resolution the image arrived at.
+// Also refreshes app.rasterGBuffer synchronously on the same trigger, on the calling (render) thread; unlike the path-traced request, this blocks briefly rather than handing off to a background driver, since the point of the rasterizer is a same-frame update for its 15 AOVs (rasterizer.h).
+// Gated on one of those AOVs being selected, symmetrically with the path-trace request: it is not cheap (a full-screen shade, measured at ~150ms per call at 2048x1152).
+// The three things that once justified running it unconditionally no longer need it: orbit-pick now casts its own ray, the pixel probe only reaches these buffers for an AOV that is displaying them, and an AOV switch is itself a trigger change, so switching into a rasterizer AOV rasterizes on that same frame.
 void requestPathTraceIfTriggerChanged(AppResources& app, const engine::scene::Camera& camera,
                                        int fbWidth, int fbHeight,
                                        std::chrono::steady_clock::time_point now) {

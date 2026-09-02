@@ -17,7 +17,7 @@ struct SceneConfig {
     std::string hdriPath;  // environment map, relative to ASSET_ROOT_DIR
 };
 
-// Reads and parses path. Returns nullopt and logs to stderr if the file is missing, unreadable, or any required field can't be found/parsed — this is user-editable input, not an internal invariant, so failure is expected to happen and is surfaced rather than defaulted around.
+// Reads and parses path. Returns nullopt and logs to stderr if the file is missing, unreadable, or any required field can't be found/parsed. User-editable input, not an internal invariant: failure is expected and surfaced rather than defaulted around.
 [[nodiscard]] std::optional<SceneConfig> loadSceneConfig(const std::string& path);
 
 }  // namespace engine::config

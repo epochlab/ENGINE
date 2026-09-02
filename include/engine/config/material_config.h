@@ -19,7 +19,7 @@ struct MaterialConfig {
     float roughnessFactor;         // multiplies the roughness texture sample, before roughnessMin/Max clamp
 };
 
-// Reads and parses path. Returns nullopt and logs to stderr if the file is missing, unreadable, or any required field can't be found/parsed — this is user-editable input, not an internal invariant, so failure is expected to happen and is surfaced rather than defaulted around.
+// Reads and parses path. Returns nullopt and logs to stderr if the file is missing, unreadable, or any required field can't be found/parsed. User-editable input, not an internal invariant: failure is expected and surfaced rather than defaulted around.
 [[nodiscard]] std::optional<MaterialConfig> loadMaterialConfig(const std::string& path);
 
 }  // namespace engine::config

@@ -1,6 +1,6 @@
 #include "engine/debug/system_info.h"
 
-// GLEW before GLFW — see gl_debug.cpp for why.
+// GLEW before GLFW: see gl_debug.cpp for why.
 #include <GL/glew.h>
 #include <GLFW/glfw3.h>
 

@@ -19,7 +19,7 @@ struct GpuInfo;
 class FrameStats;
 class Histogram;
 
-// Toggle for the centre-crosshair framing overlay — owned by main.cpp (no runtime toggle; defaults on), then read here read-only to decide whether to draw it.
+// Toggle for the centre-crosshair framing overlay, owned by main.cpp (no runtime toggle; defaults on), then read here read-only to decide whether to draw it.
 struct FramingOverlayState {
     bool crosshair = true;
 };
@@ -61,7 +61,7 @@ struct HudFrameData {
     float overRangePeakMultiple;
 };
 
-// Owns the ImGui context and GLFW/OpenGL3 backends for one window's lifetime, move-only like this codebase's other RAII wrappers. Composites the debug panel onto the final backbuffer, after the OCIO tonemap pass — never into the linear HDR FBO (this project runs with no driver-level sRGB framebuffer conversion; display encoding happens only in-shader).
+// Owns the ImGui context and GLFW/OpenGL3 backends for one window's lifetime, move-only like this codebase's other RAII wrappers. Composites the debug panel onto the final backbuffer, after the OCIO tonemap pass, never into the linear HDR FBO (this project runs with no driver-level sRGB framebuffer conversion; display encoding happens only in-shader).
 class HudOverlay {
 public:
     explicit HudOverlay(GLFWwindow* nativeHandle);
@@ -84,7 +84,7 @@ public:
     // ImGui::Render + backend draw-data submit. Call after the post-process blit, before window.swapBuffers().
     void render() const;
 
-    // True while ImGui wants mouse input (e.g. dragging a HUD widget) — callers should not interpret an LMB click as a scene interaction (orbit pivot pick) while this is true.
+    // True while ImGui wants mouse input (e.g. dragging a HUD widget); callers should not interpret an LMB click as a scene interaction (orbit pivot pick) while this is true.
     [[nodiscard]] bool wantsCaptureMouse() const;
 
 private:

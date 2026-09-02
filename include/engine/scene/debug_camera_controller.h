@@ -12,7 +12,7 @@ class Window;
 
 namespace engine::scene {
 
-// Mutable fly/orbit state that produces a fresh, immutable Camera each frame via snapshot() — Camera itself stays immutable by design (see its header); this is the debug camera its doc comment forward-references. Film back and clip planes are loaded once from profile.json and never mutated at runtime; pose (position/yaw/pitch), orbit state, focal length, and the exposure triangle (aperture/shutterSeconds/iso, editable live via the HUD's Camera section sliders) do change.
+// Mutable fly/orbit state that produces a fresh, immutable Camera each frame via snapshot(): Camera itself stays immutable by design (see its header); this is the debug camera its doc comment forward-references. Film back and clip planes are loaded once from profile.json and never mutated at runtime; pose (position/yaw/pitch), orbit state, focal length, and the exposure triangle (aperture/shutterSeconds/iso, editable live via the HUD's Camera section sliders) do change.
 class DebugCameraController {
 public:
     // position/yawDegrees/pitchDegrees become both the initial pose and the pose resetToDefault() restores; the remaining lens params are passed through unchanged to every snapshot()'d Camera.
@@ -21,10 +21,10 @@ public:
                            float farClip, float aperture, float shutterSeconds, float iso,
                            float flySpeedMetersPerSecond, float orbitSensitivityDegPerPixel);
 
-    // Builds an immutable Camera from the current pose. Call once per frame — this is the only point where a Camera value exists.
+    // Builds an immutable Camera from the current pose. Call once per frame: this is the only point where a Camera value exists.
     [[nodiscard]] Camera snapshot() const;
 
-    // Polls W/A/S/D/Q/E and moves position_ in the horizontal view plane (WASD) or along world-up (QE), scaled by dtSeconds and the configured fly speed. No-op while orbiting — fly and orbit are mutually exclusive input modes.
+    // Polls W/A/S/D/Q/E and moves position_ in the horizontal view plane (WASD) or along world-up (QE), scaled by dtSeconds and the configured fly speed. No-op while orbiting: fly and orbit are mutually exclusive input modes.
     void applyFlyInput(const engine::platform::Window& window, float dtSeconds);
 
     void beginOrbit(const glm::vec3& pivot);

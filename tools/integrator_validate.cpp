@@ -1,16 +1,10 @@
-// Standalone correctness check for path_tracer.cpp's INTEGRATOR (renderPathTraced/tracePath), as distinct from bsdf_validate.cpp/nee_validate.cpp which exercise the BSDF and the MIS weighting in isolation and never run a real trace. Same standalone-CLI convention: no test framework, non-zero exit on failure.
-//
-// Reference configuration: one large unoccluded quad under a uniform-radiance (L0=1) environment. Because nothing else is in the scene, every ray leaving the surface reaches the environment directly -- there is NO indirect light -- so the converged radiance is exactly the single-scatter direct lighting, Lo(wo) = integral over the hemisphere of evaluateBsdf(wo,wi)*cos(wi) dwi, the same analytic quantity nee_validate.cpp's referenceLo computes.
-//
-// Two invariants follow, and they catch different classes of integrator bug than a BSDF-level furnace test can:
-//
-//   1. DEPTH INVARIANCE. With no indirect light, maxBounces=0 and maxBounces=1 must produce the SAME image. A depth cap that drops the terminal BSDF-sampled ray breaks this: at maxBounces=0 the ray built at bounce 0 is never intersected, so NEE's MIS weight (lightPdf^2/(lightPdf^2+bsdfPdf^2)) is never complemented by the BSDF-sampling half and the surface renders too dark, while maxBounces=1 traces that ray at bounce 1 and is complete. The gap is exactly bsdfPdf^2/(bsdfPdf^2+lightPdf^2) of the direct lighting -- large on a glossy surface.
-//
-//   2. ABSOLUTE AGREEMENT with the analytic reference, which no self-consistency check between two renderer settings can give on its own.
-//
-// Russian roulette is exercised as a third case: it reweights by 1/p on survival, so an RR-enabled render must return the same answer as an RR-disabled one. RR lives in tracePath, so this is the only place it can be tested.
-//
-// Note: Material/MeshInstance are plain data (six HdrImage members and a mat4) and need no GL context -- an earlier comment in nee_validate.cpp claimed otherwise, which is why the suite had no integrator-level test until now.
+// Standalone correctness check for path_tracer.cpp's integrator (renderPathTraced/tracePath), distinct from bsdf_validate.cpp/nee_validate.cpp which exercise the BSDF and MIS weighting in isolation and never run a real trace. Same standalone-CLI convention: no test framework, non-zero exit on failure.
+// Reference configuration: one large unoccluded quad under a uniform-radiance (L0=1) environment. Nothing else is in the scene, so every ray leaving the surface reaches the environment directly (no indirect light), and the converged radiance is exactly the single-scatter direct lighting, Lo(wo) = integral over the hemisphere of evaluateBsdf(wo,wi)*cos(wi) dwi, the same quantity nee_validate.cpp's referenceLo computes.
+// Two invariants follow, catching different integrator bugs than a BSDF-level furnace test can:
+//   1. Depth invariance: with no indirect light, maxBounces=0 and maxBounces=1 must produce the same image. A depth cap dropping the terminal BSDF-sampled ray breaks this: at maxBounces=0 the ray built at bounce 0 is never intersected, so NEE's MIS weight (lightPdf^2/(lightPdf^2+bsdfPdf^2)) is never complemented by the BSDF-sampling half and the surface renders too dark, while maxBounces=1 traces that ray at bounce 1 and is complete; the gap is exactly bsdfPdf^2/(bsdfPdf^2+lightPdf^2) of the direct lighting, large on a glossy surface.
+//   2. Absolute agreement with the analytic reference, which no self-consistency check between two renderer settings can give on its own.
+// Russian roulette is exercised as a third case: it reweights by 1/p on survival, so an RR-enabled render must return the same answer as an RR-disabled one; RR lives in tracePath, so this is the only place it can be tested.
+// Material/MeshInstance are plain data (six HdrImage members and a mat4) and need no GL context: an earlier comment in nee_validate.cpp claimed otherwise, which is why this suite had no integrator-level test until now.
 
 #include <array>
 #include <atomic>
@@ -103,10 +97,7 @@ QuadScene makeQuadScene(float roughness, glm::vec3 f0) {
     return scene;
 }
 
-// Two parallel quads with OPPOSING geometric normals -- the front facing the camera at +Z, the back facing
-// away at -Z. A camera ray therefore enters at the front face (woLocal.z > 0) and leaves at the back
-// (woLocal.z < 0), which is the only configuration that exercises bsdf.cpp's exiting side and the far-side
-// NEE guard. A single quad cannot: it is entered from the front and every hit reads as entering.
+// Two parallel quads with opposing geometric normals: the front facing the camera at +Z, the back facing away at -Z. A camera ray enters at the front face (woLocal.z>0) and leaves at the back (woLocal.z<0), the only configuration that exercises bsdf.cpp's exiting side and the far-side NEE guard. A single quad cannot: it is entered from the front and every hit reads as entering.
 QuadScene makeSlabScene(float roughness, glm::vec3 f0, float thickness) {
     const glm::vec4 tangent(1.0F, 0.0F, 0.0F, 1.0F);
     const auto vertex = [&](float x, float y, float z, float nz) {
@@ -134,10 +125,7 @@ QuadScene makeSlabScene(float roughness, glm::vec3 f0, float thickness) {
     return scene;
 }
 
-// The quad above plus an opaque wall at x=1 facing -X, the only scene here where a NON-transmissive path
-// reaches a second surface: the wall sits outside the narrow view frustum (primary rays land within
-// |x| < 0.31 at z=0) so it is never primary-visible, but it catches the floor's +X-going bounce rays, and
-// NEE fires there at bounce >= 1 -- which is the only way anything reaches the Indirect buckets.
+// The quad above plus an opaque wall at x=1 facing -X, the only scene here where a non-transmissive path reaches a second surface: the wall sits outside the narrow view frustum (primary rays land within |x|<0.31 at z=0) so it is never primary-visible, but it catches the floor's +X-going bounce rays, and NEE fires there at bounce>=1, the only way anything reaches the Indirect buckets.
 QuadScene makeCornerScene(float roughness, glm::vec3 f0) {
     QuadScene scene = makeQuadScene(roughness, f0);
     const glm::vec3 wallNormal(-1.0F, 0.0F, 0.0F);
@@ -167,8 +155,7 @@ EnvironmentMap makeUniformEnvironment() {
     return EnvironmentMap(std::move(image));
 }
 
-// Only `metallic` travels through PathTraceSettings; roughness and f0 reach the renderer through the
-// material's 1x1 roughness and specular textures, which resolveBsdfParams samples (gbuffer_shading.cpp).
+// Only `metallic` travels through PathTraceSettings; roughness and f0 reach the renderer through the material's 1x1 roughness and specular textures, which resolveBsdfParams samples (gbuffer_shading.cpp).
 PathTraceSettings makeSettings(int maxBounces, int rrStartBounce, float metallic,
                                float transmission = 0.0F) {
     PathTraceSettings settings{};
@@ -328,22 +315,14 @@ bool runCases() {
     return ok;
 }
 
-// A white, non-absorbing dielectric slab in a uniform L0=1 environment is INVISIBLE: the camera must read
-// exactly 1.0 through it. Every photon entering the front face leaves somewhere, and the non-symmetric
-// eta^2 radiance compression applied on entering is undone on exiting, so the round trip is lossless.
-//
-// This is the only case in the suite that reaches a transmissive EXITING vertex, and it is what gates the
-// far-side NEE guard against the miss branch's MIS weight. Weighting a rough transmission sample at 1.0
-// (correct only for a delta lobe) while NEE also evaluates the transmission lobe toward the same
-// directions double-counts their overlap, and reads above 1.0 here. Both bounds matter: the same test
-// catches a transmissive vertex that loses energy instead.
+// A white, non-absorbing dielectric slab in a uniform L0=1 environment is invisible: the camera must read exactly 1.0 through it. Every photon entering the front face leaves somewhere, and the non-symmetric eta^2 radiance compression applied on entering is undone on exiting, so the round trip is lossless.
+// This is the only case in the suite that reaches a transmissive exiting vertex, gating the far-side NEE guard against the miss branch's MIS weight. Weighting a rough transmission sample at 1.0 (correct only for a delta lobe) while NEE also evaluates the transmission lobe toward the same directions double-counts their overlap, reading above 1.0 here. Both bounds matter: the same test catches a transmissive vertex that loses energy instead.
 bool checkTransmissiveSlab() {
     // Enough depth for internally reflected paths to converge; truncation only ever darkens.
     constexpr int kSlabBounces = 12;
     constexpr float kThickness = 0.5F;
     constexpr float kTolerance = 0.03F;
-    // 0.02 is below bsdf.cpp's smooth-roughness threshold, so it exercises the delta transmission path;
-    // the rest take the Walter lobe.
+    // 0.02 is below bsdf.cpp's smooth-roughness threshold, so it exercises the delta transmission path; the rest take the Walter lobe.
     const std::array<float, 5> roughnesses = {0.02F, 0.05F, 0.4F, 0.7F, 1.0F};
 
     const EnvironmentMap env = makeUniformEnvironment();
@@ -374,19 +353,11 @@ bool checkTransmissiveSlab() {
     return ok;
 }
 
-// The five transport buckets are a PARTITION of beauty, not a set of related-looking images: with the
-// background term zeroed (showSky off), DirectDiffuse + IndirectDiffuse + DirectSpecular +
-// IndirectSpecular + Refraction must equal Beauty at every pixel, to float error. Every radiance
-// contribution tracePath adds is written to exactly one bucket at its own physical value, so any gap here
-// means a contribution was bucketed twice, dropped, or rescaled -- which is exactly what the previous
-// delighted buckets did by construction (they stripped baseColor at bounce 0 only, leaving direct and
-// indirect in different units and neither summing to anything).
-//
-// The slab rows carry the load: a single quad reaches only the Direct buckets, while the slab's internal
-// reflections populate Indirect and Refraction and exercise the transmissive exiting vertex.
+// The five transport buckets are a partition of beauty, not a set of related-looking images: with the background term zeroed (showSky off), DirectDiffuse + IndirectDiffuse + DirectSpecular + IndirectSpecular + Refraction must equal Beauty at every pixel, to float error.
+// Every radiance contribution tracePath adds is written to exactly one bucket at its own physical value, so any gap means a contribution was bucketed twice, dropped, or rescaled, exactly what the previous delighted buckets did by construction (they stripped baseColor at bounce 0 only, leaving direct and indirect in different units and neither summing to anything).
+// The slab rows carry the load: a single quad reaches only the Direct buckets, while the slab's internal reflections populate Indirect and Refraction and exercise the transmissive exiting vertex.
 bool checkTransportPartition() {
-    // Relative to beauty, since the absolute scale differs by case; float error over kSamplesPerPixel
-    // accumulations of ~1e-3 each is orders of magnitude below this.
+    // Relative to beauty, since the absolute scale differs by case; float error over kSamplesPerPixel accumulations of ~1e-3 each is orders of magnitude below this.
     constexpr float kTolerance = 1e-4F;
 
     enum class Geometry { Quad, Corner, Slab };

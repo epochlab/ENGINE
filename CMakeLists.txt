@@ -4,7 +4,8 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# Single-config generators (Makefiles/Ninja) default to an unoptimized build if CMAKE_BUILD_TYPE is never set -- silently ~40x slower for CPU-bound work (measured: a 5M-triangle glTF load went from ~1.1s Release to 47s+ and still running, unoptimized). Multi-config generators (Xcode) ignore this and use CMAKE_CONFIGURATION_TYPES instead, hence the guard.
+# Single-config generators (Makefiles/Ninja) default to an unoptimized build if CMAKE_BUILD_TYPE is unset: silently ~40x slower (measured: a 5M-triangle glTF load went 1.1s Release vs 47s+ unoptimized).
+# Multi-config generators (Xcode) ignore this and use CMAKE_CONFIGURATION_TYPES instead, hence the guard.
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
@@ -51,7 +52,7 @@ endif()
 
 set(IMGUI_DIR ${CMAKE_SOURCE_DIR}/third_party/imgui)
 if(NOT EXISTS ${IMGUI_DIR}/imgui.cpp)
-    message(FATAL_ERROR "third_party/imgui is empty — run: git submodule update --init")
+    message(FATAL_ERROR "third_party/imgui is empty, run: git submodule update --init")
 endif()
 
 set(IMGUI_SOURCES
@@ -65,7 +66,8 @@ set(IMGUI_SOURCES
 set(CGLTF_DIR ${CMAKE_SOURCE_DIR}/third_party/cgltf)
 set(JSON_DIR ${CMAKE_SOURCE_DIR}/third_party)
 
-# Vendored code: not ours to fix (imgui_impl_glfw.cpp pulls in Apple's ApplicationServices.h via GLFW's native-handle header, which warns against itself; cgltf_impl.cpp is C99 with implicit conversions -Wall/-Wextra flags). Built as a separate OBJECT library, not just a per-source COMPILE_OPTIONS/CXX_CLANG_TIDY override on the engine target: CXX_CLANG_TIDY is a target-level-only property in CMake (no working per-source override), so the only way to keep clang-tidy off vendored sources is to put them on a target that never has the property set at all.
+# Vendored code, not ours to fix: imgui_impl_glfw.cpp pulls in Apple's ApplicationServices.h via GLFW's native-handle header, which warns against itself; cgltf_impl.cpp is C99 with implicit conversions that trip -Wall/-Wextra.
+# Built as a separate OBJECT library rather than a per-source override: CXX_CLANG_TIDY is target-level-only in CMake, so keeping clang-tidy off vendored sources requires a target that never sets the property.
 add_library(vendored_no_tidy OBJECT ${IMGUI_SOURCES} src/scene/cgltf_impl.cpp)
 target_include_directories(vendored_no_tidy PRIVATE ${IMGUI_DIR} ${IMGUI_DIR}/backends ${CGLTF_DIR})
 target_link_libraries(vendored_no_tidy PRIVATE glfw)
@@ -115,9 +117,7 @@ target_link_libraries(engine PRIVATE
 if(CLANG_TIDY_EXE)
     set_target_properties(engine PROPERTIES CXX_CLANG_TIDY "${CLANG_TIDY_COMMAND}")
 endif()
-# Free CPU speedup for the path tracer's hot loop (ray traversal, BSDF eval) -- pure codegen, no
-# behavior/quality change. No-op if the toolchain doesn't support IPO (mirrors the clang-tidy/cppcheck
-# no-op-if-absent pattern above).
+# Free codegen speedup for the path tracer's hot loop (ray traversal, BSDF eval), no behavior/quality change. No-op if the toolchain lacks IPO support, mirroring the clang-tidy/cppcheck no-op-if-absent pattern above.
 if(IPO_SUPPORTED)
     set_target_properties(engine PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
 endif()
@@ -132,9 +132,8 @@ add_executable(downsample tools/downsample.cpp)
 target_compile_options(downsample PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(downsample PRIVATE OpenEXR::OpenEXR Imath::Imath)
 
-# Headless correctness checks (Phase 4) -- no test framework exists in this repo yet, so these follow test_pattern/downsample's standalone-CLI convention: non-zero exit on failure.
-# -march=native/IPO mirror the engine target's flags (bsdf.cpp/embree_accel.cpp/etc. are compiled into both) so these
-# tools validate the exact codegen that ships, not a differently-optimized build of the same math.
+# Headless correctness checks (Phase 4): no test framework exists yet, so these follow test_pattern/downsample's standalone-CLI convention (non-zero exit on failure).
+# -march=native/IPO mirror the engine target's flags so these tools validate the exact codegen that ships, not a differently-optimized build of the same math.
 add_executable(embree_validate tools/embree_validate.cpp src/scene/embree_accel.cpp src/scene/ray_types.cpp)
 target_include_directories(embree_validate PRIVATE include)
 target_compile_options(embree_validate PRIVATE -Wall -Wextra -Werror -march=native)
@@ -183,7 +182,7 @@ if(IPO_SUPPORTED)
     set_target_properties(integrator_validate PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
 endif()
 
-# Timing harness for the rasterizer, not a correctness gate -- deliberately absent from the add_test loop below (a benchmark's pass/fail is a human reading a number, and it would make `ctest` as slow as its worst --triangles sweep). Same source list and -march=native/IPO flags as rasterizer_validate, so it times the exact codegen that ships.
+# Timing harness, not a correctness gate: deliberately absent from the add_test loop below (a benchmark's pass/fail is a human reading a number, and it would make ctest as slow as its worst --triangles sweep). Same sources and -march=native/IPO flags as rasterizer_validate, so it times the exact codegen that ships.
 add_executable(raster_bench tools/raster_bench.cpp src/scene/rasterizer.cpp
                src/scene/gbuffer_shading.cpp src/scene/embree_accel.cpp src/scene/ray_types.cpp
                src/scene/shading_scene.cpp src/scene/bsdf.cpp src/scene/sampler.cpp
@@ -195,8 +194,7 @@ if(IPO_SUPPORTED)
     set_target_properties(raster_bench PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
 endif()
 
-# All five correctness tools run under `ctest --test-dir build`. Previously they were buildable but
-# nothing ran them, so a regression only surfaced if someone remembered to invoke them by hand.
+# All five correctness tools run under `ctest --test-dir build`; previously buildable but unrun, so a regression only surfaced if someone remembered to invoke them by hand.
 enable_testing()
 foreach(validator embree_validate bsdf_validate nee_validate rasterizer_validate integrator_validate)
     add_test(NAME ${validator} COMMAND ${validator})
