@@ -1,0 +1,21 @@
+{
+    "model": {
+        "gltfPath": "geometry/cornell/cornell_v001.gltf",
+        "texturePath": "",
+        "position": [0.0, 0.0, 0.0],
+        "rotationDegrees": [0.0, 0.0, 0.0]
+    },
+    "environment": {
+        "hdriPath": "textures/republiqueHDR_2k.exr"
+    },
+    "material": {
+        "diffuseColour": [0.75, 0.75, 0.75],
+        "roughnessFactor": 0.5,
+        "roughnessMin": 0.045,
+        "roughnessMax": 1.0,
+        "metallicFactor": 0.0,
+        "transmissionFactor": 0.0,
+        "ior": 1.5,
+        "bumpStrength": 0.0
+    }
+}
