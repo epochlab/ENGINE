@@ -274,7 +274,7 @@ std::optional<Material> loadMaterialTextures(const cgltf_data* data, const cgltf
 // Builds one MeshInstance's Vertex/index arrays and Material from a single triangle primitive. Fails clearly (nullopt) rather than substituting a placeholder for a primitive this loader doesn't support (non-triangle mode, missing attributes). A material with no texture for a given slot -- or no material at all -- is not a failure: loadMaterialTextures substitutes a neutral default for that slot regardless, which for an absent material (kDefaultMaterial below) means every slot, reproducing glTF's own spec-defined default material.
 std::optional<MeshInstance> loadPrimitive(const cgltf_data* data, const cgltf_primitive& prim,
                                            const glm::mat4& transform, const std::string& dir,
-                                           int instanceIndex,
+                                           int instanceIndex, const std::string& name,
                                            std::vector<Triangle>& outWorldTriangles,
                                            std::vector<ShadingTriangle>& outShadingTriangles) {
     if (prim.type != cgltf_primitive_type_triangles) {
@@ -307,6 +307,7 @@ std::optional<MeshInstance> loadPrimitive(const cgltf_data* data, const cgltf_pr
     return MeshInstance{
         std::move(*material),
         transform,
+        name,
     };
 }
 
@@ -327,10 +328,11 @@ bool walkNodes(const cgltf_data* data, cgltf_node* const* nodes, cgltf_size coun
         const glm::mat4 world = parentTransform * localNodeTransform(node);
 
         if (node->mesh != nullptr) {
+            const std::string name = node->name != nullptr ? node->name : "";
             for (cgltf_size pi = 0; pi < node->mesh->primitives_count; ++pi) {
                 const int instanceIndex = static_cast<int>(instances.size());  // index this primitive's MeshInstance will get
                 std::optional<MeshInstance> instance =
-                    loadPrimitive(data, node->mesh->primitives[pi], world, dir, instanceIndex,
+                    loadPrimitive(data, node->mesh->primitives[pi], world, dir, instanceIndex, name,
                                   worldTriangles, shadingTriangles);
                 if (!instance.has_value()) {
                     return false;

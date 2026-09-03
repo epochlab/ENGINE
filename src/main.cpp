@@ -7,6 +7,7 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <map>
 #include <optional>
 #include <string>
 #include <utility>
@@ -195,6 +196,8 @@ struct AppResources {
 
     // Async path-traced view, selected via the `aov` field (engine::debug::AovId, the HUD's AOV dropdown). pathTraceDriver runs continuously on its own background thread once constructed (main() constructs it after initializeApp() returns -- see path_trace_driver.h's constructor precondition on reference stability); requestTrace() is called only from renderFrame's requestPathTraceIfTriggerChanged, whenever lastPathTraceTrigger detects the camera/scene state renderPathTraced depends on has changed -- no manual trigger. unique_ptr, not a by-value optional: PathTraceDriver holds reference members and an owned std::jthread/std::mutex, so it's neither copyable nor movable -- a by-value optional<T> member would make that non-movability propagate to AppResources itself (optional<T>'s move ctor is only available when T's is), which would break initializeApp's return-by-value/RVO pattern every other member here relies on. A unique_ptr's own move just transfers ownership of the pointee's address, never touching PathTraceDriver's reference members, so AppResources stays movable and PathTraceDriver itself is never relocated in memory once constructed.
     engine::scene::PathTraceSettings pathTraceSettings;
+    // Per-instance material fields, parallel-indexed with stumpModel.instances (ShadingTriangle::instanceIndex resolves into this) -- pathTraceSettings's 9 material fields copied per instance, overridden from sceneConfig.materialOverrides by MeshInstance::name where present. Renderer-only fields (samplesPerPixel/maxBounces/RR) are never read from these entries; see resolveBsdfParams/buildShadingFrame call sites in path_tracer.cpp/rasterizer.cpp.
+    std::vector<engine::scene::PathTraceSettings> perInstanceSettings;
     int maxSamples;  // accumulated-pass cap for PathTraceDriver; 0 = unbounded
     std::unique_ptr<engine::scene::PathTraceDriver> pathTraceDriver;
     std::optional<engine::gfx::Texture> pathTraceDisplayTexture;
@@ -353,6 +356,22 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         return std::nullopt;
     }
 
+    // Load each distinct override material once, keyed by its scene-config path (not by node name --
+    // several nodes may share one override path).
+    std::map<std::string, engine::config::MaterialConfig> overrideMaterialsByPath;
+    for (const auto& [nodeName, path] : sceneConfig.materialOverrides) {
+        if (overrideMaterialsByPath.contains(path)) {
+            continue;
+        }
+        std::optional<engine::config::MaterialConfig> overrideMaterial =
+            engine::config::loadMaterialConfig(std::string(ASSET_ROOT_DIR) + "/" + path);
+        if (!overrideMaterial) {
+            std::cerr << "main: materialOverrides entry '" << path << "' failed to load, aborting startup\n";
+            return std::nullopt;
+        }
+        overrideMaterialsByPath.emplace(path, std::move(*overrideMaterial));
+    }
+
     engine::gfx::PostProcessPass postProcess;
     engine::debug::HudOverlay hud(window.nativeHandle());
     engine::debug::FrameStats frameStats;
@@ -378,6 +397,45 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
 
     const EdgeFilterUniforms edgeFilterUniforms = setupEdgeFilterShader(shaders->edgeFilterShader);
     const HsvDisplayUniforms hsvUniforms = setupHsvDisplayShader(shaders->hsvDisplayShader);
+
+    const engine::scene::PathTraceSettings basePathTraceSettings{
+        .samplesPerPixel = profileConfig.pathTracer.samplesPerPixel,
+        .maxBounces = profileConfig.pathTracer.maxBounces,
+        .russianRouletteStartBounce = profileConfig.pathTracer.russianRouletteStartBounce,
+        .bumpStrength = materialConfig->bumpStrength,
+        .roughnessMin = materialConfig->roughnessMin,
+        .roughnessMax = materialConfig->roughnessMax,
+        .diffuseColour = materialConfig->diffuseColour,
+        .ior = materialConfig->ior,
+        .transmissionFactor = materialConfig->transmissionFactor,
+        .metallicFactor = materialConfig->metallicFactor,
+        .roughnessFactor = materialConfig->roughnessFactor,
+        .diffuseRoughness = materialConfig->diffuseRoughness,
+    };
+
+    // One entry per stumpModel->instances, in the same order -- ShadingTriangle::instanceIndex indexes
+    // both. Renderer-only fields (samplesPerPixel/maxBounces/RR) are always basePathTraceSettings's;
+    // only the 9 material fields vary per instance.
+    std::vector<engine::scene::PathTraceSettings> perInstanceSettings;
+    perInstanceSettings.reserve(stumpModel->instances.size());
+    for (const engine::scene::MeshInstance& instance : stumpModel->instances) {
+        engine::scene::PathTraceSettings settings = basePathTraceSettings;
+        if (const auto overrideIt = sceneConfig.materialOverrides.find(instance.name);
+            overrideIt != sceneConfig.materialOverrides.end()) {
+            const engine::config::MaterialConfig& overrideMaterial =
+                overrideMaterialsByPath.at(overrideIt->second);
+            settings.bumpStrength = overrideMaterial.bumpStrength;
+            settings.roughnessMin = overrideMaterial.roughnessMin;
+            settings.roughnessMax = overrideMaterial.roughnessMax;
+            settings.diffuseColour = overrideMaterial.diffuseColour;
+            settings.ior = overrideMaterial.ior;
+            settings.transmissionFactor = overrideMaterial.transmissionFactor;
+            settings.metallicFactor = overrideMaterial.metallicFactor;
+            settings.roughnessFactor = overrideMaterial.roughnessFactor;
+            settings.diffuseRoughness = overrideMaterial.diffuseRoughness;
+        }
+        perInstanceSettings.push_back(settings);
+    }
 
     return AppResources{
         .edgeFilterShader = std::move(shaders->edgeFilterShader),
@@ -416,21 +474,8 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         .invert = false,
         .showHud = true,
         .aberrationStrength = 0.0F,
-        .pathTraceSettings =
-            engine::scene::PathTraceSettings{
-                .samplesPerPixel = profileConfig.pathTracer.samplesPerPixel,
-                .maxBounces = profileConfig.pathTracer.maxBounces,
-                .russianRouletteStartBounce = profileConfig.pathTracer.russianRouletteStartBounce,
-                .bumpStrength = materialConfig->bumpStrength,
-                .roughnessMin = materialConfig->roughnessMin,
-                .roughnessMax = materialConfig->roughnessMax,
-                .diffuseColour = materialConfig->diffuseColour,
-                .ior = materialConfig->ior,
-                .transmissionFactor = materialConfig->transmissionFactor,
-                .metallicFactor = materialConfig->metallicFactor,
-                .roughnessFactor = materialConfig->roughnessFactor,
-                .diffuseRoughness = materialConfig->diffuseRoughness,
-            },
+        .pathTraceSettings = basePathTraceSettings,
+        .perInstanceSettings = std::move(perInstanceSettings),
         .maxSamples = profileConfig.pathTracer.maxSamples,
         // Constructed in main() right after initializeApp() returns -- see path_trace_driver.h's constructor precondition (its reference members must bind to sceneAccel/environmentMap/stumpModel at their final, permanent address, which this designated-initializer expression, still local-variable-based and one AppResources move away from that address, cannot yet guarantee).
         .pathTraceDriver = nullptr,
@@ -855,8 +900,9 @@ void requestPathTraceIfTriggerChanged(AppResources& app, const engine::scene::Ca
     // The complement of needsLightTransport is exactly the rasterizer's 15 AOVs: aovNeedsLightTransport covers 12 of AovId::Count's 27 and selectPathTracedImage routes the other 15 here, so the two sets partition the enum and no AOV needs neither producer. On Beauty -- the default -- the rasterizer now does not run at all, where before it rasterized the full framebuffer on the render thread every frame of camera interaction to produce 15 images nobody was looking at.
     if (!needsLightTransport && renderWidth > 0 && renderHeight > 0) {
         engine::scene::renderRasterGBuffer(camera, app.sceneAccel, app.stumpModel.shadingTriangles,
-                                            app.stumpModel.instances, app.pathTraceSettings, renderWidth,
-                                            renderHeight, *app.rasterThreadPool, *app.rasterGBuffer);
+                                            app.stumpModel.instances, app.perInstanceSettings,
+                                            renderWidth, renderHeight, *app.rasterThreadPool,
+                                            *app.rasterGBuffer);
     }
     app.lastPathTraceTrigger = current;
 }
@@ -1061,10 +1107,10 @@ int main(int argc, char** argv) {
                 if (!app) {
                     exitCode = EXIT_FAILURE;
                 } else {
-                    // Constructed here, not as part of AppResources's designated-initializer list: app (this std::optional<AppResources> local) is where sceneAccel/environmentMap/stumpModel first reach their final, permanent address (initializeApp's own return-type conversion to std::optional<AppResources> move-constructs once en route), so this is the first point at which PathTraceDriver's reference members can safely bind to them -- see path_trace_driver.h's constructor comment.
+                    // Constructed here, not as part of AppResources's designated-initializer list: app (this std::optional<AppResources> local) is where sceneAccel/environmentMap/stumpModel/perInstanceSettings first reach their final, permanent address (initializeApp's own return-type conversion to std::optional<AppResources> move-constructs once en route), so this is the first point at which PathTraceDriver's reference members can safely bind to them -- see path_trace_driver.h's constructor comment.
                     app->pathTraceDriver = std::make_unique<engine::scene::PathTraceDriver>(
                         app->sceneAccel, app->stumpModel.shadingTriangles, app->stumpModel.instances,
-                        app->environmentMap);
+                        app->environmentMap, app->perInstanceSettings);
 
                     wireCallbacks(window, *app);
 
