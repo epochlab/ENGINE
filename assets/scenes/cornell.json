@@ -1,6 +1,6 @@
 {
     "model": {
-        "gltfPath": "geometry/cornell/cornell_v001.gltf",
+        "gltfPath": "geometry/cornell/cornell_v007.gltf",
         "texturePath": "",
         "position": [0.0, 0.0, 0.0],
         "rotation": [0.0, 0.0, 0.0]
@@ -8,5 +8,8 @@
     "environment": {
         "hdriPath": "textures/republiqueHDR_2k.exr"
     },
-    "materialPath": "materials/diffuse.json"
+    "materialPath": "materials/diffuse.json",
+    "materialOverrides": {
+        "sphere01": "materials/chrome.json"
+    }
 }
