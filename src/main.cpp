@@ -316,12 +316,12 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
                   << " deg ev100=" << initialCamera.ev100() << '\n';
     }
 
-    // Scene-level placement (scene.json model.position/model.rotationDegrees), order X,Y,Z.
+    // Scene-level placement (scene.json model.position/model.rotation), order X,Y,Z.
     const glm::mat4 sceneTransform =
         glm::translate(glm::mat4(1.0F), sceneConfig.model.position) *
-        glm::rotate(glm::mat4(1.0F), glm::radians(sceneConfig.model.rotationDegrees.z), glm::vec3(0.0F, 0.0F, 1.0F)) *
-        glm::rotate(glm::mat4(1.0F), glm::radians(sceneConfig.model.rotationDegrees.y), glm::vec3(0.0F, 1.0F, 0.0F)) *
-        glm::rotate(glm::mat4(1.0F), glm::radians(sceneConfig.model.rotationDegrees.x), glm::vec3(1.0F, 0.0F, 0.0F));
+        glm::rotate(glm::mat4(1.0F), glm::radians(sceneConfig.model.rotation.z), glm::vec3(0.0F, 0.0F, 1.0F)) *
+        glm::rotate(glm::mat4(1.0F), glm::radians(sceneConfig.model.rotation.y), glm::vec3(0.0F, 1.0F, 0.0F)) *
+        glm::rotate(glm::mat4(1.0F), glm::radians(sceneConfig.model.rotation.x), glm::vec3(1.0F, 0.0F, 0.0F));
 
     const auto loadStart = std::chrono::steady_clock::now();
     std::optional<engine::scene::LoadedModel> stumpModel = engine::scene::loadGltf(
