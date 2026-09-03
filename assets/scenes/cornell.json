@@ -3,13 +3,13 @@
         "gltfPath": "geometry/cornell/cornell_v001.gltf",
         "texturePath": "",
         "position": [0.0, 0.0, 0.0],
-        "rotationDegrees": [0.0, 0.0, 0.0]
+        "rotation": [0.0, 0.0, 0.0]
     },
     "environment": {
         "hdriPath": "textures/republiqueHDR_2k.exr"
     },
     "material": {
-        "diffuseColour": [0.75, 0.75, 0.75],
+        "diffuseColour": [0.5, 0.5, 0.5],
         "roughnessFactor": 0.5,
         "roughnessMin": 0.045,
         "roughnessMax": 1.0,

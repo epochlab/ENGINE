@@ -12,7 +12,7 @@ struct ModelConfig {
     std::string gltfPath;
     std::string texturePath;  // directory (relative to ASSET_ROOT_DIR) glTF image URIs resolve against, overriding the .gltf's own directory -- lets one config swap texture resolution (2K/4K/8K) across every tier without editing each .gltf
     glm::vec3 position;         // model root, composed on top of the glTF's own node transforms
-    glm::vec3 rotationDegrees;  // order X,Y,Z, see main.cpp's loadGltf call
+    glm::vec3 rotation;  // degrees, order X,Y,Z, see main.cpp's loadGltf call
 };
 
 // What lights the scene.
