@@ -16,6 +16,11 @@ struct BsdfParams {
     glm::vec3 f0;                // specular reflectance at normal incidence
     float ior;                   // dielectric IOR, non-metal lobes only
     float transmissionFactor;    // KHR_materials_transmission, 0 = opaque
+    // EON rough-diffuse parameter r in [0,1] (Portsmouth, Kutz, Hill 2025, "EON: A Practical
+    // Energy-Preserving Rough Diffuse BRDF", JCGT 14(1)) -- distinct from `roughness`, which drives
+    // the specular GGX lobe: these are different microsurface statistics even on the same material.
+    // 0 = Lambertian (EON's exact r->0 limit), see evaluateDiffuseLobe.
+    float diffuseRoughness;
 };
 
 // Local shading frame (z = shading normal) for world<->local direction transforms.

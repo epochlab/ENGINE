@@ -131,14 +131,14 @@ add_executable(downsample tools/downsample.cpp)
 target_compile_options(downsample PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(downsample PRIVATE OpenEXR::OpenEXR Imath::Imath)
 
-# One-off asset-prep for bare Houdini POSITION/NORMAL/TEXCOORD_0 glTF exports: synthesizes a
-# placeholder TANGENT and a texture-less material in place, so gltf_loader.cpp's default-texture
-# substitution takes over and scene_config's global material scalars (see
-# assets/scenes/cornell.json) drive the look instead.
-add_executable(gltf_prep tools/gltf_prep.cpp)
-target_include_directories(gltf_prep PRIVATE ${JSON_DIR})
-target_compile_options(gltf_prep PRIVATE -Wall -Wextra -Werror)
-target_link_libraries(gltf_prep PRIVATE glm::glm)
+# One-off asset-prep for Houdini glTF exports: synthesizes a TANGENT accessor for any primitive
+# that lacks one, in place. Every other attribute (POSITION/NORMAL/TEXCOORD_0/COLOR_0/...), every
+# material, and every other primitive is patched, not rebuilt -- gltf_loader.cpp's own default-texture
+# substitution (and its acceptance of a primitive with no material at all) handles the rest.
+add_executable(gltf_tangent tools/gltf_tangent.cpp)
+target_include_directories(gltf_tangent PRIVATE ${JSON_DIR})
+target_compile_options(gltf_tangent PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(gltf_tangent PRIVATE glm::glm)
 
 # Headless correctness checks (Phase 4): no test framework exists yet, so these follow test_pattern/downsample's standalone-CLI convention (non-zero exit on failure).
 # -march=native/IPO mirror the engine target's flags so these tools validate the exact codegen that ships, not a differently-optimized build of the same math.

@@ -299,7 +299,7 @@ void shadePixel(RasterGBuffer& result, int x, int y, float viewZ, float origU, f
                  const ScreenVertex& v1, const ScreenVertex& v2) {
     const ShadingVertex shading = interpolateShading(triangle, origU, origV);
     const ShadingFrame frame = buildShadingFrame(shading, material, settings);
-    const BsdfParams params = resolveBsdfParams(material, shading.uv, settings);
+    const BsdfParams params = resolveBsdfParams(material, shading.uv, shading.colour, settings);
     const glm::vec3 woWorld = glm::normalize(camPos - shading.position);
     const float ndotV = std::max(glm::dot(frame.normal, woWorld), 1e-4F);
     const float fresnelVal = fresnelSchlick(ndotV, params.f0).x;
