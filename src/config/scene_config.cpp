@@ -29,7 +29,7 @@ std::optional<SceneConfig> loadSceneConfig(const std::string& path) {
                 model.at("gltfPath").get<std::string>(),
                 model.at("texturePath").get<std::string>(),
                 model.at("position").get<glm::vec3>(),
-                model.at("rotationDegrees").get<glm::vec3>(),
+                model.at("rotation").get<glm::vec3>(),
             },
             EnvironmentConfig{
                 environment.at("hdriPath").get<std::string>(),

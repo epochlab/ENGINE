@@ -131,6 +131,15 @@ add_executable(downsample tools/downsample.cpp)
 target_compile_options(downsample PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(downsample PRIVATE OpenEXR::OpenEXR Imath::Imath)
 
+# One-off asset-prep for bare Houdini POSITION/NORMAL/TEXCOORD_0 glTF exports: synthesizes a
+# placeholder TANGENT and a texture-less material in place, so gltf_loader.cpp's default-texture
+# substitution takes over and scene_config's global material scalars (see
+# assets/scenes/cornell.json) drive the look instead.
+add_executable(gltf_prep tools/gltf_prep.cpp)
+target_include_directories(gltf_prep PRIVATE ${JSON_DIR})
+target_compile_options(gltf_prep PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(gltf_prep PRIVATE glm::glm)
+
 # Headless correctness checks (Phase 4): no test framework exists yet, so these follow test_pattern/downsample's standalone-CLI convention (non-zero exit on failure).
 # -march=native/IPO mirror the engine target's flags so these tools validate the exact codegen that ships, not a differently-optimized build of the same math.
 add_executable(embree_validate tools/embree_validate.cpp src/scene/embree_accel.cpp src/scene/ray_types.cpp)
