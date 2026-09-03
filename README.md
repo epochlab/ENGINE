@@ -48,8 +48,10 @@ This produces nine targets:
 ### Run
 
 ```
-./build/engine
+./build/engine [--scene path/to/scene.json]
 ```
+
+Defaults to `assets/scenes/tree.json` if `--scene` is omitted.
 
 ## 1. Pipeline
 
@@ -132,7 +134,6 @@ Ordered quick → complex; items within **Large** are a strict dependency chain 
 ### Quick
 
 - **Expand terminal output (launch + loop)**: startup logs GL extensions/camera pose/model/BVH stats (`main.cpp:286-361`); no per-frame stats print during the interactive loop (`main.cpp:990`); sample/pass/convergence stats reach only the HUD (`hud_overlay.cpp`), not stdout.
-- **scene.json as a CLI arg**: `main()` has no `argc`/`argv` (`main.cpp:864`); paths are hardcoded. Enables multi-scenario scenes.
 - **Texture bit depth (16/32) via JSON**: hardcoded `GL_RGBA16F` today (`texture.cpp:45`); 32F ~doubles VRAM/buffer.
 - **Screen capture to PNG**: dump the composited, LUT-applied Beauty framebuffer (`glReadPixels`, precedent at `main.cpp:670`) before `app.hud.render()` (`main.cpp:944`) so HUD, crosshair (`hud_overlay.cpp:266`), and the pixel probe panel (`hud_overlay.cpp:381`) are excluded. No PNG encoder in the tree yet (`third_party/imgui`'s is unrelated); needs one added.
 
