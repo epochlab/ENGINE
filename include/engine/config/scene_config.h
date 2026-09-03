@@ -1,5 +1,6 @@
 #pragma once
 
+#include <map>
 #include <optional>
 #include <string>
 
@@ -38,6 +39,8 @@ struct SceneConfig {
     ModelConfig model;
     EnvironmentConfig environment;
     std::string materialPath;  // relative to ASSET_ROOT_DIR, points to a material JSON file (e.g. materials/diffuse.json), matching ModelConfig::gltfPath's convention
+    // glTF node name -> material JSON path (relative to ASSET_ROOT_DIR), overriding materialPath for that instance's triangles. Optional key; absent in the scene JSON means an empty map, i.e. every instance uses materialPath. Keyed by MeshInstance::name (gltf_loader.h).
+    std::map<std::string, std::string> materialOverrides;
 };
 
 // Reads and parses path. Returns nullopt and logs to stderr if the file is missing, unreadable, or any required field can't be found/parsed. User-editable input, not an internal invariant: failure is expected and surfaced rather than defaulted around.

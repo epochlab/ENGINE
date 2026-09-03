@@ -198,10 +198,10 @@ int main(int argc, char** argv) {
     }
 
     std::vector<MeshInstance> instances;
-    instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.8F, 0.2F, 0.2F), 0.2F, 1.0F), glm::mat4(1.0F)});
-    instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.2F, 0.8F, 0.2F), 0.5F, 0.6F), glm::mat4(1.0F)});
-    instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.2F, 0.2F, 0.8F), 0.8F, 0.3F), glm::mat4(1.0F)});
-    instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.8F, 0.8F, 0.2F), 1.0F, 0.9F), glm::mat4(1.0F)});
+    instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.8F, 0.2F, 0.2F), 0.2F, 1.0F), glm::mat4(1.0F), ""});
+    instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.2F, 0.8F, 0.2F), 0.5F, 0.6F), glm::mat4(1.0F), ""});
+    instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.2F, 0.2F, 0.8F), 0.8F, 0.3F), glm::mat4(1.0F), ""});
+    instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.8F, 0.8F, 0.2F), 1.0F, 0.9F), glm::mat4(1.0F), ""});
 
     PathTraceSettings settings{};
     settings.samplesPerPixel = 1;
@@ -215,12 +215,13 @@ int main(int argc, char** argv) {
     settings.transmissionFactor = 0.0F;
     settings.metallicFactor = 0.2F;
     settings.roughnessFactor = 1.0F;
+    const std::vector<PathTraceSettings> perInstanceSettings(instances.size(), settings);
 
     ThreadPool threadPool;
     // One buffer for the whole run, matching how the app owns it: renderRasterGBuffer reuses it in place, so the timed frames measure steady-state cost with no allocation in them.
     RasterGBuffer gbuffer;
     // Discarded warm-up pass, absorbing the costs that happen once rather than per frame: spinning up and parking the pool's workers, and the buffer's only allocation.
-    renderRasterGBuffer(camera, *accel, shadingTriangles, instances, settings, options->width,
+    renderRasterGBuffer(camera, *accel, shadingTriangles, instances, perInstanceSettings, options->width,
                          options->height, threadPool, gbuffer);
     if (gbuffer.depth.width != options->width) {
         std::cerr << "raster_bench: warm-up produced a " << gbuffer.depth.width << "px-wide buffer\n";
@@ -231,8 +232,8 @@ int main(int argc, char** argv) {
     milliseconds.reserve(static_cast<std::size_t>(options->frames));
     for (int frame = 0; frame < options->frames; ++frame) {
         const auto start = std::chrono::steady_clock::now();
-        renderRasterGBuffer(camera, *accel, shadingTriangles, instances, settings, options->width,
-                             options->height, threadPool, gbuffer);
+        renderRasterGBuffer(camera, *accel, shadingTriangles, instances, perInstanceSettings,
+                             options->width, options->height, threadPool, gbuffer);
         const auto end = std::chrono::steady_clock::now();
         milliseconds.push_back(std::chrono::duration<double, std::milli>(end - start).count());
         // Reading one texel keeps the optimizer from treating the whole call as dead; the result is otherwise unused.

@@ -23,6 +23,11 @@ std::optional<SceneConfig> loadSceneConfig(const std::string& path) {
         const nlohmann::json& model = j.at("model");
         const nlohmann::json& environment = j.at("environment");
 
+        std::map<std::string, std::string> materialOverrides;
+        if (const auto it = j.find("materialOverrides"); it != j.end()) {
+            materialOverrides = it->get<std::map<std::string, std::string>>();
+        }
+
         return SceneConfig{
             ModelConfig{
                 model.at("gltfPath").get<std::string>(),
@@ -34,6 +39,7 @@ std::optional<SceneConfig> loadSceneConfig(const std::string& path) {
                 environment.at("hdriPath").get<std::string>(),
             },
             j.at("materialPath").get<std::string>(),
+            std::move(materialOverrides),
         };
     } catch (const nlohmann::json::exception& e) {
         std::cerr << "loadSceneConfig: " << path << ": " << e.what() << '\n';

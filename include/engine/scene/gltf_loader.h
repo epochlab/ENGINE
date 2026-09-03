@@ -16,6 +16,7 @@ namespace engine::scene {
 struct MeshInstance {
     Material material;
     glm::mat4 transform;
+    std::string name;  // owning glTF node's name, empty if the node has none; keys SceneConfig::materialOverrides
 };
 
 struct LoadedModel {

@@ -359,8 +359,9 @@ void depthPassRow(int y, const std::vector<RasterSubTriangle>& subTriangles,
 // viewZ is read back from the depth buffer rather than recomputed: it is the value this same winner stored, so reading it is both cheaper and exact where a recomputation would only be exact by argument.
 void shadeRow(RasterGBuffer& result, int y, int width, const std::vector<RasterSubTriangle>& subTriangles,
                const std::vector<ShadingTriangle>& shadingTriangles,
-               const std::vector<MeshInstance>& instances, const PathTraceSettings& settings,
-               const glm::vec3& camPos, const float* zRow, const int* winnerRow) {
+               const std::vector<MeshInstance>& instances,
+               const std::vector<PathTraceSettings>& perInstanceSettings, const glm::vec3& camPos,
+               const float* zRow, const int* winnerRow) {
     const float py = static_cast<float>(y) + 0.5F;
     for (int x = 0; x < width; ++x) {
         if (winnerRow[x] < 0) {
@@ -377,8 +378,10 @@ void shadeRow(RasterGBuffer& result, int y, int width, const std::vector<RasterS
                             viewZ;
         const ShadingTriangle& triangle = shadingTriangles[static_cast<std::size_t>(st.triangleIndex)];
         const Material& material = instances[static_cast<std::size_t>(triangle.instanceIndex)].material;
-        shadePixel(result, x, y, viewZ, origU, origV, triangle, material, settings, camPos, st.v0, st.v1,
-                   st.v2);
+        const PathTraceSettings& instanceSettings =
+            perInstanceSettings[static_cast<std::size_t>(triangle.instanceIndex)];
+        shadePixel(result, x, y, viewZ, origU, origV, triangle, material, instanceSettings, camPos, st.v0,
+                   st.v1, st.v2);
     }
 }
 
@@ -415,8 +418,8 @@ std::array<engine::gfx::HdrImage*, 15> aovImages(RasterGBuffer& g) {
 void renderRasterGBuffer(const Camera& camera, const EmbreeAccel& accel,
                           const std::vector<ShadingTriangle>& shadingTriangles,
                           const std::vector<MeshInstance>& instances,
-                          const PathTraceSettings& settings, int width, int height,
-                          ThreadPool& threadPool, RasterGBuffer& result) {
+                          const std::vector<PathTraceSettings>& perInstanceSettings, int width,
+                          int height, ThreadPool& threadPool, RasterGBuffer& result) {
     const std::array<engine::gfx::HdrImage*, 15> images = aovImages(result);
     // Reallocated only on a resolution change; every other call reuses the storage and relies on renderRow's clear. makeImage's own zeroing is redundant against that clear but runs once per resize, not once per frame.
     if (result.depth.width != width || result.depth.height != height) {
@@ -454,8 +457,8 @@ void renderRasterGBuffer(const Camera& camera, const EmbreeAccel& accel,
         }
 
         depthPassRow(y, subTriangles, rowBuckets, zRow, winnerRow);
-        shadeRow(result, y, width, subTriangles, shadingTriangles, instances, settings, camPos, zRow,
-                 winnerRow);
+        shadeRow(result, y, width, subTriangles, shadingTriangles, instances, perInstanceSettings, camPos,
+                 zRow, winnerRow);
         drawBoxEdgesRow(result, y, boxEdges, zRow);
     };
 

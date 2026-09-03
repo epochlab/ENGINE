@@ -43,11 +43,13 @@ void accumulateMean(PathTraceResult& sample, const PathTraceResult& previousMean
 PathTraceDriver::PathTraceDriver(const EmbreeAccel& accel,
                                   const std::vector<ShadingTriangle>& shadingTriangles,
                                   const std::vector<MeshInstance>& instances,
-                                  const EnvironmentMap& environmentMap)
+                                  const EnvironmentMap& environmentMap,
+                                  const std::vector<PathTraceSettings>& perInstanceSettings)
     : accel_(accel),
       shadingTriangles_(shadingTriangles),
       instances_(instances),
       environmentMap_(environmentMap),
+      perInstanceSettings_(perInstanceSettings),
       thread_([this](std::stop_token stopToken) { driverLoop(std::move(stopToken)); }) {}
 
 PathTraceDriver::~PathTraceDriver() = default;  // jthread requests stop + joins automatically
@@ -130,7 +132,7 @@ void PathTraceDriver::driverLoop(std::stop_token stopToken) {
         renderPathTraced(activeRequest->camera, accel_, shadingTriangles_, instances_,
                           environmentMap_, activeRequest->width, activeRequest->height,
                           activeRequest->envRotationRadians, activeRequest->showSky,
-                          activeRequest->envExposure, activeRequest->settings,
+                          activeRequest->envExposure, activeRequest->settings, perInstanceSettings_,
                           static_cast<std::uint32_t>(passIndex), generation_, activeGeneration,
                           threadPool_, *pass);
 
