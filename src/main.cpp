@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -983,9 +984,38 @@ void renderFrame(engine::platform::Window& window, AppResources& app) {
     window.swapBuffers();
 }
 
+struct Options {
+    std::string scenePath = ASSET_ROOT_DIR "/scenes/tree.json";
+};
+
+// Returns nullopt on an unrecognized flag or a missing value -- argv is a system
+// boundary, so a bad value is surfaced rather than defaulted around.
+std::optional<Options> parseOptions(int argc, char** argv) {
+    Options options;
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--scene") == 0) {
+            if (i + 1 >= argc) {
+                std::cerr << "engine: --scene expects a value\n";
+                return std::nullopt;
+            }
+            options.scenePath = argv[++i];
+        } else {
+            std::cerr << "engine: unknown flag " << argv[i]
+                       << "\n  usage: engine [--scene path/to/scene.json]\n";
+            return std::nullopt;
+        }
+    }
+    return options;
+}
+
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    const std::optional<Options> options = parseOptions(argc, argv);
+    if (!options) {
+        return EXIT_FAILURE;
+    }
+
     glfwSetErrorCallback(&glfwErrorCallback);
 
     if (glfwInit() != GLFW_TRUE) {
@@ -997,7 +1027,7 @@ int main() {
     {
         // Config is pure file I/O with no GL dependency, but profile.json's window size must be known before Window is constructed, so it's loaded first, before any GLFW/GL object exists. Both files hard-fail identically on missing or malformed: this is user-editable input where a load failure is a real, expected-to-happen event, not an internal invariant, so it's surfaced immediately rather than defaulted around -- matching the shader/model/OCIO all-or-nothing gate inside initializeApp.
         std::optional<engine::config::SceneConfig> sceneConfig =
-            engine::config::loadSceneConfig(ASSET_ROOT_DIR "/config/scene.json");
+            engine::config::loadSceneConfig(options->scenePath);
         std::optional<engine::config::ProfileConfig> profileConfig =
             engine::config::loadProfileConfig(ASSET_ROOT_DIR "/config/profile.json");
 
