@@ -193,33 +193,64 @@ std::optional<std::vector<unsigned int>> readIndices(const cgltf_accessor* indic
     return indices;
 }
 
+// Neutral, non-file defaults for a material with no texture authored for this slot -- see
+// gbuffer_shading.cpp for how each is consumed. 1x1 avoids a div-by-zero in buildShadingFrame's
+// bump texel-size calc; the constant value makes bump's finite-difference exactly zero regardless.
+engine::gfx::HdrImage defaultBaseColor() { return {1, 1, {1.0F, 1.0F, 1.0F, 1.0F}}; }
+engine::gfx::HdrImage defaultNormal() { return {1, 1, {0.5F, 0.5F, 1.0F, 1.0F}}; }  // decodes to (0,0,1) tangent-space up
+engine::gfx::HdrImage defaultRoughness() { return {1, 1, {1.0F, 1.0F, 1.0F, 1.0F}}; }  // roughnessFactor/min/max fully control the result
+engine::gfx::HdrImage defaultSpecular() { return {1, 1, {0.04F, 0.04F, 0.04F, 1.0F}}; }  // standard dielectric f0; inert whenever metallicFactor=0
+engine::gfx::HdrImage defaultBump() { return {1, 1, {0.5F, 0.5F, 0.5F, 1.0F}}; }  // any constant -> zero finite-difference
+engine::gfx::HdrImage defaultAo() { return {1, 1, {1.0F, 1.0F, 1.0F, 1.0F}}; }  // fully unoccluded
+
+// A slot with no texture referenced at all is not a failure -- substitutes fallback. A slot that
+// DOES reference a texture but fails to resolve/decode it (bad path, corrupt file) is a real
+// error and must still propagate as nullopt, not silently default -- distinguishing these two
+// nullopt-producing cases is exactly what loadTexture/loadTextureByIndex can't do alone.
+std::optional<engine::gfx::HdrImage> resolveTexture(const cgltf_texture* texture,
+                                                     const std::string& dir,
+                                                     engine::gfx::HdrImage fallback) {
+    if (texture == nullptr) {
+        return fallback;
+    }
+    return loadTexture(texture, dir);
+}
+
+std::optional<engine::gfx::HdrImage> resolveTextureByIndex(const cgltf_data* data,
+                                                             std::optional<int> index,
+                                                             const std::string& dir,
+                                                             engine::gfx::HdrImage fallback) {
+    if (!index.has_value()) {
+        return fallback;
+    }
+    return loadTextureByIndex(data, index, dir);
+}
+
 std::optional<Material> loadMaterialTextures(const cgltf_data* data, const cgltf_material& mat,
                                               const std::string& dir) {
-    auto baseColor = loadTexture(mat.pbr_metallic_roughness.base_color_texture.texture, dir);
-    auto normal = loadTexture(mat.normal_texture.texture, dir);
-    auto ao = loadTexture(mat.occlusion_texture.texture, dir);
-    auto roughness =
-        loadTextureByIndex(data, extrasTextureIndex(mat.extras.data, "roughnessTexture"), dir);
-    auto specular =
-        loadTextureByIndex(data, extrasTextureIndex(mat.extras.data, "specularTexture"), dir);
-    auto bump = loadTextureByIndex(data, extrasTextureIndex(mat.extras.data, "bumpTexture"), dir);
+    auto baseColor =
+        resolveTexture(mat.pbr_metallic_roughness.base_color_texture.texture, dir, defaultBaseColor());
+    auto normal = resolveTexture(mat.normal_texture.texture, dir, defaultNormal());
+    auto ao = resolveTexture(mat.occlusion_texture.texture, dir, defaultAo());
+    auto roughness = resolveTextureByIndex(
+        data, extrasTextureIndex(mat.extras.data, "roughnessTexture"), dir, defaultRoughness());
+    auto specular = resolveTextureByIndex(
+        data, extrasTextureIndex(mat.extras.data, "specularTexture"), dir, defaultSpecular());
+    auto bump = resolveTextureByIndex(data, extrasTextureIndex(mat.extras.data, "bumpTexture"), dir,
+                                       defaultBump());
     if (!baseColor || !normal || !ao || !roughness || !specular || !bump) {
         std::cerr << "loadGltf: material '" << (mat.name != nullptr ? mat.name : "<unnamed>")
-                   << "' is missing one or more of the 6 required textures\n";
+                   << "' references a texture that failed to load\n";
         return std::nullopt;
     }
 
     return Material{
-        std::move(*baseColor),
-        std::move(*normal),
-        std::move(*bump),
-        std::move(*roughness),
-        std::move(*specular),
-        std::move(*ao),
+        std::move(*baseColor), std::move(*normal), std::move(*bump),
+        std::move(*roughness), std::move(*specular), std::move(*ao),
     };
 }
 
-// Builds one MeshInstance's Vertex/index arrays and Material from a single triangle primitive. Fails clearly (nullopt) rather than substituting a placeholder for a primitive this loader doesn't support (non-triangle mode, missing attributes/material/textures).
+// Builds one MeshInstance's Vertex/index arrays and Material from a single triangle primitive. Fails clearly (nullopt) rather than substituting a placeholder for a primitive this loader doesn't support (non-triangle mode, missing attributes/material). A material with no texture for a given slot is not a failure -- loadMaterialTextures substitutes a neutral default for that slot instead.
 std::optional<MeshInstance> loadPrimitive(const cgltf_data* data, const cgltf_primitive& prim,
                                            const glm::mat4& transform, const std::string& dir,
                                            int instanceIndex,
