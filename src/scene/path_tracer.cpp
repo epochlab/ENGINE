@@ -79,6 +79,7 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
                        const std::vector<MeshInstance>& instances,
                        const EnvironmentMap& environmentMap, float envRotationRadians,
                        bool showSky, float envExposure, const PathTraceSettings& settings,
+                       const std::vector<PathTraceSettings>& perInstanceSettings,
                        Sampler& sampler) {
     glm::vec3 radiance(0.0F);
     glm::vec3 throughput(1.0F);
@@ -146,10 +147,13 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
             shadingTriangles[static_cast<std::size_t>(hit->triangleIndex)];
         const Material& material =
             instances[static_cast<std::size_t>(triangle.instanceIndex)].material;
+        const PathTraceSettings& instanceSettings =
+            perInstanceSettings[static_cast<std::size_t>(triangle.instanceIndex)];
 
         const ShadingVertex shading = interpolateShading(triangle, hit->u, hit->v);
-        const ShadingFrame frame = buildShadingFrame(shading, material, settings);
-        const BsdfParams params = resolveBsdfParams(material, shading.uv, shading.colour, settings);
+        const ShadingFrame frame = buildShadingFrame(shading, material, instanceSettings);
+        const BsdfParams params =
+            resolveBsdfParams(material, shading.uv, shading.colour, instanceSettings);
         const glm::vec3 woWorld = -ray.dir;
         // True flat per-triangle plane normal -- used below for the normal-map light-leak rejection and for offsetting shadow/continuation ray origins off the surface, both of which need the actual geometry rather than the interpolated or normal-mapped shading normal.
         const glm::vec3 geoNormal = geometricNormalOf(triangle);
@@ -283,8 +287,9 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                        const std::vector<MeshInstance>& instances,
                        const EnvironmentMap& environmentMap, int width, int height,
                        float envRotationRadians, bool showSky, float envExposure,
-                       const PathTraceSettings& settings, std::uint32_t runSeed,
-                       const std::atomic<std::uint64_t>& generation,
+                       const PathTraceSettings& settings,
+                       const std::vector<PathTraceSettings>& perInstanceSettings,
+                       std::uint32_t runSeed, const std::atomic<std::uint64_t>& generation,
                        std::uint64_t requestedGeneration, ThreadPool& threadPool,
                        PathTraceResult& out) {
     const float aspect = static_cast<float>(width) / static_cast<float>(height);
@@ -319,7 +324,8 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                     const Ray primary = camera.primaryRay(basis, ndcX, ndcY);
                     const TraceResult trace = tracePath(primary, accel, shadingTriangles, instances,
                                                          environmentMap, envRotationRadians, showSky,
-                                                         envExposure, settings, sampler);
+                                                         envExposure, settings, perInstanceSettings,
+                                                         sampler);
                     const std::array<float, kSampleLanes> values{
                         trace.radiance.x,          trace.radiance.y,
                         trace.radiance.z,          static_cast<float>(trace.terminationBounce),

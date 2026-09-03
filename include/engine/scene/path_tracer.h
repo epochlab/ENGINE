@@ -61,8 +61,9 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                        const std::vector<MeshInstance>& instances,
                        const EnvironmentMap& environmentMap, int width, int height,
                        float envRotationRadians, bool showSky, float envExposure,
-                       const PathTraceSettings& settings, std::uint32_t runSeed,
-                       const std::atomic<std::uint64_t>& generation,
+                       const PathTraceSettings& settings,
+                       const std::vector<PathTraceSettings>& perInstanceSettings,
+                       std::uint32_t runSeed, const std::atomic<std::uint64_t>& generation,
                        std::uint64_t requestedGeneration, ThreadPool& threadPool,
                        PathTraceResult& out);
 
