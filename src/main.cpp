@@ -344,10 +344,12 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
     // Decoded once here (not via a texture-upload helper): the path tracer is the only consumer, sampling this CPU HdrImage directly, with no GPU upload step in between.
     std::optional<engine::gfx::HdrImage> environmentImage =
         engine::gfx::loadExr(std::string(ASSET_ROOT_DIR) + "/" + sceneConfig.environment.hdriPath);
+    std::optional<engine::config::MaterialConfig> materialConfig = engine::config::loadMaterialConfig(
+        std::string(ASSET_ROOT_DIR) + "/" + sceneConfig.materialPath);
 
-    if (!shaders || !stumpModel || !environmentImage) {
-        std::cerr << "main: shader compile/link, model load, or environment map load failed, "
-                     "aborting startup\n";
+    if (!shaders || !stumpModel || !environmentImage || !materialConfig) {
+        std::cerr << "main: shader compile/link, model load, environment map load, or material "
+                     "load failed, aborting startup\n";
         return std::nullopt;
     }
 
@@ -419,14 +421,15 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
                 .samplesPerPixel = profileConfig.pathTracer.samplesPerPixel,
                 .maxBounces = profileConfig.pathTracer.maxBounces,
                 .russianRouletteStartBounce = profileConfig.pathTracer.russianRouletteStartBounce,
-                .bumpStrength = sceneConfig.material.bumpStrength,
-                .roughnessMin = sceneConfig.material.roughnessMin,
-                .roughnessMax = sceneConfig.material.roughnessMax,
-                .diffuseColour = sceneConfig.material.diffuseColour,
-                .ior = sceneConfig.material.ior,
-                .transmissionFactor = sceneConfig.material.transmissionFactor,
-                .metallicFactor = sceneConfig.material.metallicFactor,
-                .roughnessFactor = sceneConfig.material.roughnessFactor,
+                .bumpStrength = materialConfig->bumpStrength,
+                .roughnessMin = materialConfig->roughnessMin,
+                .roughnessMax = materialConfig->roughnessMax,
+                .diffuseColour = materialConfig->diffuseColour,
+                .ior = materialConfig->ior,
+                .transmissionFactor = materialConfig->transmissionFactor,
+                .metallicFactor = materialConfig->metallicFactor,
+                .roughnessFactor = materialConfig->roughnessFactor,
+                .diffuseRoughness = materialConfig->diffuseRoughness,
             },
         .maxSamples = profileConfig.pathTracer.maxSamples,
         // Constructed in main() right after initializeApp() returns -- see path_trace_driver.h's constructor precondition (its reference members must bind to sceneAccel/environmentMap/stumpModel at their final, permanent address, which this designated-initializer expression, still local-variable-based and one AppResources move away from that address, cannot yet guarantee).

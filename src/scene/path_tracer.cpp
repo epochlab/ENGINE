@@ -149,7 +149,7 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
 
         const ShadingVertex shading = interpolateShading(triangle, hit->u, hit->v);
         const ShadingFrame frame = buildShadingFrame(shading, material, settings);
-        const BsdfParams params = resolveBsdfParams(material, shading.uv, settings);
+        const BsdfParams params = resolveBsdfParams(material, shading.uv, shading.colour, settings);
         const glm::vec3 woWorld = -ray.dir;
         // True flat per-triangle plane normal -- used below for the normal-map light-leak rejection and for offsetting shadow/continuation ray origins off the surface, both of which need the actual geometry rather than the interpolated or normal-mapped shading normal.
         const glm::vec3 geoNormal = geometricNormalOf(triangle);

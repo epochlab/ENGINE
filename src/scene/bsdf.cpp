@@ -394,12 +394,161 @@ float diffuseKdAt(const BsdfParams& params, const glm::vec3& wi, const LobeProba
     return std::max(lobes.diffuseKd, 0.0F) * (1.0F - coat);
 }
 
-LobeEval evaluateDiffuseLobe(const BsdfParams& params, const glm::vec3& wi,
+// --- EON rough-diffuse BRDF (Portsmouth, Kutz, Hill 2025, "EON: A Practical Energy-Preserving Rough
+// Diffuse BRDF", JCGT 14(1)) -- replaces plain Lambertian as evaluateDiffuseLobe's base reflectance
+// below, still wrapped by diffuseKdAt's Fresnel-coat coupling above. Builds on Fujii's FON model (a
+// corrected qualitative Oren-Nayar) with an analytic multiple-scattering compensation term, the same
+// Kulla & Conty 2017 philosophy this file's specular lobe already applies to GGX. Ported directly from
+// the paper's reference GLSL listings; do not hand-derive replacement constants from memory.
+
+constexpr float kConstant1Fon = 0.5F - (2.0F / (3.0F * kPi));
+constexpr float kConstant2Fon = (2.0F / 3.0F) - (28.0F / (15.0F * kPi));
+
+// FON directional albedo, quartic polynomial fit (paper eq. 14): accurate to <0.1% versus the exact
+// trigonometric form and ~5x cheaper to evaluate -- used exclusively, the exact form has no consumer here.
+float evalFonAlbedoApprox(float mu, float r) {
+    const float muComplement = 1.0F - mu;
+    constexpr float g1 = 0.0571085289F;
+    constexpr float g2 = 0.491881867F;
+    constexpr float g3 = -0.332181442F;
+    constexpr float g4 = 0.0714429953F;
+    const float gOverPi =
+        muComplement * (g1 + (muComplement * (g2 + (muComplement * (g3 + (muComplement * g4))))));
+    const float af = 1.0F / (1.0F + (kConstant1Fon * r));
+    return (1.0F + (r * gOverPi)) * af;
+}
+
+// EON BRDF value (paper eq. 16-19): FON single scatter plus an analytic multiple-scattering lobe. rho
+// is the single-scattering albedo; using baseColor directly here (rather than white + post-tint) means
+// the multi-scatter term's saturation at high roughness/chromatic albedo is left in, per the paper's
+// simpler alternative to its Appendix A albedo inversion.
+glm::vec3 evaluateEon(const glm::vec3& rho, float r, const glm::vec3& wi, const glm::vec3& wo) {
+    const float muI = wi.z;
+    const float muO = wo.z;
+    const float s = glm::dot(wi, wo) - (muI * muO);
+    const float sOverT = s > 0.0F ? s / std::max(muI, muO) : s;
+    const float af = 1.0F / (1.0F + (kConstant1Fon * r));
+    const glm::vec3 singleScatter = (rho / kPi) * af * (1.0F + (r * sOverT));
+
+    const float eFonO = evalFonAlbedoApprox(muO, r);
+    const float eFonI = evalFonAlbedoApprox(muI, r);
+    const float avgEFon = af * (1.0F + (kConstant2Fon * r));
+    const glm::vec3 rhoMs = (rho * rho) * avgEFon / (glm::vec3(1.0F) - (rho * (1.0F - avgEFon)));
+    constexpr float kEps = 1e-7F;
+    const glm::vec3 multiScatter = (rhoMs / kPi) * std::max(kEps, 1.0F - eFonO) *
+                                    std::max(kEps, 1.0F - eFonI) / std::max(kEps, 1.0F - avgEFon);
+    return singleScatter + multiScatter;
+}
+
+// Uniform hemisphere direction (z = u.x directly, not remapped to [-1,1]): pdf = 1/(2*pi). EON's
+// defensive-sampling companion to CLTC below (Owen & Zhou 2000's one-sample MIS), not a general utility
+// -- sampleCosineHemisphere already covers the codebase's other uniform/cosine sampling needs.
+glm::vec3 sampleUniformHemisphereEon(glm::vec2 u) {
+    const float sinTheta = std::sqrt(std::max(0.0F, 1.0F - (u.x * u.x)));
+    const float phi = 2.0F * kPi * u.y;
+    return {sinTheta * std::cos(phi), sinTheta * std::sin(phi), u.x};
+}
+
+struct EonLtcCoeffs {
+    float a;
+    float b;
+    float c;
+    float d;
+};
+
+// Fitted Linearly-Transformed-Cosine matrix coefficients (paper Listing 2) that best match EON's
+// cosine-weighted backscattering lobe for a given view angle/roughness -- the shape CLTC sampling below
+// imports from.
+EonLtcCoeffs eonLtcCoeffs(float mu, float r) {
+    const float a = 1.0F + (r * (0.303392F + (((-0.518982F + (0.111709F * mu)) * mu) +
+                                                ((-0.276266F + (0.335918F * mu)) * r))));
+    const float b = (r * (-1.16407F + (1.15859F * mu) + ((0.150815F - (0.150105F * mu)) * r))) /
+                    ((mu * mu * mu) - 1.43545F);
+    const float c = 1.0F + (r * (0.20013F + ((-0.506373F + (0.261777F * mu)) * mu)));
+    const float d = (r * (0.540852F + ((-1.01625F + (0.475392F * mu)) * mu))) /
+                    (-1.0743F + ((0.0725628F + mu) * mu));
+    return {a, b, c, d};
+}
+
+// Orthonormal frame aligning wLocal's azimuth to the x-axis, used to move into/out of the space the LTC
+// fit (above) is expressed in.
+glm::mat3 orthonormalBasisLtc(const glm::vec3& wLocal) {
+    const float lenSq = (wLocal.x * wLocal.x) + (wLocal.y * wLocal.y);
+    const glm::vec3 x = lenSq > 0.0F ? glm::vec3(wLocal.x, wLocal.y, 0.0F) * (1.0F / std::sqrt(lenSq))
+                                       : glm::vec3(1.0F, 0.0F, 0.0F);
+    const glm::vec3 y(-x.y, x.x, 0.0F);
+    return glm::mat3(x, y, glm::vec3(0.0F, 0.0F, 1.0F));
+}
+
+// Clipped-LTC direction sample (paper Sec. 4, Listing 3): cosine-weighted sampling of the hemisphere
+// clipped to the LTC lobe's positive half-space (the Nusselt-analog half-circle/half-ellipse
+// projection), restricted to the positive hemisphere by construction -- no rejected below-surface
+// samples, unlike naive LTC sampling.
+glm::vec3 cltcSample(const glm::vec3& woLocal, float r, glm::vec2 u) {
+    const EonLtcCoeffs m = eonLtcCoeffs(woLocal.z, r);
+    const float radius = std::sqrt(u.x);
+    const float phi = 2.0F * kPi * u.y;
+    const float y = radius * std::sin(phi);
+    const float vz = 1.0F / std::sqrt((m.d * m.d) + 1.0F);
+    const float s = 0.5F * (1.0F + vz);
+    const float x = -lerp1(std::sqrt(std::max(0.0F, 1.0F - (y * y))), radius * std::cos(phi), s);
+    const glm::vec3 wh(x, y, std::sqrt(std::max(0.0F, 1.0F - (x * x) - (y * y))));
+    const glm::vec3 wiUnnormalized((m.a * wh.x) + (m.b * wh.z), m.c * wh.y, (m.d * wh.x) + wh.z);
+    return glm::normalize(orthonormalBasisLtc(woLocal) * wiUnnormalized);
+}
+
+// pdf of cltcSample's distribution at an arbitrary wiLocal (paper Listing 3's cltc_pdf) -- evaluated
+// independently of how wiLocal was actually obtained, matching this file's existing convention of
+// recomputing a lobe's pdf from evaluateBsdfSplit rather than threading it out of the sampler.
+float cltcPdf(const glm::vec3& woLocal, const glm::vec3& wiLocal, float r) {
+    const EonLtcCoeffs m = eonLtcCoeffs(woLocal.z, r);
+    const glm::vec3 wi = glm::transpose(orthonormalBasisLtc(woLocal)) * wiLocal;
+    const glm::vec3 wh(m.c * (wi.x - (m.b * wi.z)), (m.a - (m.b * m.d)) * wi.y,
+                        -m.c * ((m.d * wi.x) - (m.a * wi.z)));
+    const float lenSq = glm::dot(wh, wh);
+    const float detM = m.c * (m.a - (m.b * m.d));
+    const float vz = 1.0F / std::sqrt((m.d * m.d) + 1.0F);
+    const float s = 0.5F * (1.0F + vz);
+    return (detM * detM) / std::max(lenSq * lenSq, 1e-12F) * std::max(wh.z, 0.0F) / (kPi * s);
+}
+
+// Mixing weight between the CLTC lobe and a defensive uniform-hemisphere lobe (paper Sec. 4, fitted by
+// minimizing the CLTC estimator's maximum throughput weight): CLTC alone has a residual bias/variance
+// spike the uniform term corrects via one-sample MIS. Shared by sampleEon and pdfEon so the two always
+// agree on which mixture they are drawing from/evaluating.
+float eonUniformMixWeight(float mu, float r) {
+    const float inner = 0.538233F - (0.290822F * mu);
+    const float mid = -0.372058F + (inner * mu);
+    return std::pow(r, 0.1F) * (0.162925F + (mid * mu));
+}
+
+// Samples EON's importance-sampling distribution (paper Sec. 4): one-sample MIS between the CLTC lobe
+// and a uniform hemisphere lobe. Direction only -- pdfEon below is the single source of truth for the
+// resulting density, called via evaluateDiffuseLobe regardless of which strategy produced wi.
+glm::vec3 sampleEon(const glm::vec3& woLocal, float r, glm::vec2 u) {
+    const float pUniform = eonUniformMixWeight(woLocal.z, r);
+    if (u.x <= pUniform) {
+        u.x /= pUniform;
+        return sampleUniformHemisphereEon(u);
+    }
+    u.x = (u.x - pUniform) / (1.0F - pUniform);
+    return cltcSample(woLocal, r, u);
+}
+
+// pdf of sampleEon's distribution at an arbitrary wiLocal.
+float pdfEon(const glm::vec3& woLocal, const glm::vec3& wiLocal, float r) {
+    const float pUniform = eonUniformMixWeight(woLocal.z, r);
+    constexpr float kUniformHemispherePdf = 1.0F / (2.0F * kPi);
+    return (pUniform * kUniformHemispherePdf) + ((1.0F - pUniform) * cltcPdf(woLocal, wiLocal, r));
+}
+
+LobeEval evaluateDiffuseLobe(const BsdfParams& params, const glm::vec3& wo, const glm::vec3& wi,
                               const LobeProbabilities& lobes) {
-    if (wi.z <= 0.0F) {
+    if (wi.z <= 0.0F || wo.z <= 0.0F) {
         return {glm::vec3(0.0F), 0.0F};
     }
-    return {params.baseColor * diffuseKdAt(params, wi, lobes) / kPi, wi.z / kPi};
+    const glm::vec3 f = evaluateEon(params.baseColor, params.diffuseRoughness, wi, wo);
+    return {f * diffuseKdAt(params, wi, lobes), pdfEon(wo, wi, params.diffuseRoughness)};
 }
 
 // Single scatter D*G2*F/(4*ndotV*ndotL) plus the Kulla-Conty multiple-scattering lobe, and the VNDF pdf (Heitz 2018 eq.3, Jacobian 1/(4*dot(wo,nh))).
@@ -434,10 +583,15 @@ LobeEval evaluateSpecularLobe(const BsdfParams& params, const glm::vec3& wo, con
     const float albedoWi = directionalAlbedo(wi.z, params.roughness).total();
     const glm::vec3 opaqueMs = fms * ((1.0F - lobes.albedoWo) * (1.0F - albedoWi)) /
                                 (kPi * std::max(1.0F - lobes.albedoAvg, 1e-4F));
-    const glm::vec3 transmissiveMs =
-        glm::vec3((1.0F - lobes.transmitShare) * multiScatterShape(params, wi.z, lobes));
+    // transmitWeight is exactly zero for every opaque material (transmissionFactor=0, or metallic=1
+    // regardless of transmissionFactor) -- the common case. Skip multiScatterShape's own escape-table
+    // lookup entirely rather than compute it and glm::mix it away at weight 0.
     const glm::vec3 multiScatter =
-        glm::mix(opaqueMs, transmissiveMs, lobes.transmitWeight);
+        lobes.transmitWeight > 0.0F
+            ? glm::mix(opaqueMs,
+                        glm::vec3((1.0F - lobes.transmitShare) * multiScatterShape(params, wi.z, lobes)),
+                        lobes.transmitWeight)
+            : opaqueMs;
 
     const float g1 = smithG1(wo.z, alpha);
     const float pdf = (g1 * woDotNh * d) / std::max(wo.z, 1e-6F) / (4.0F * woDotNh);
@@ -495,21 +649,32 @@ LobeProbabilities computeLobeProbabilities(const BsdfParams& params, const glm::
     const float effectiveTransmission = exiting ? 1.0F : params.transmissionFactor;
     const float transmitWeight = effectiveTransmission * (1.0F - params.metallic);
     // R + T, with no transmissionFactor weighting: energy the interface refracts but transmissionFactor withholds from the transmit lobe enters the diffuse substrate instead (that is what diffuseKd's (1-transmissionFactor) does), and escapes from there. Either way it leaves, so the microfacet deficit the compensation must return is the same. Weighting this term by transmitWeight instead over-reported the deficit at partial transmission, measured Lo=2.64 against a bound of 2.25.
-    const EscapeSplit escapeWo = escapeAlbedo(wo.z, params.roughness, eta);
-    const EscapeSplit escapeMean = averageEscapeAlbedo(params.roughness, eta);
-    const float escape = escapeWo.total();
-    const float escapeAvg = escapeMean.total();
-    const float transmitSsAvg = transmitWeight * escapeMean.transmit;
-    const float transmitShare = transmitSsAvg / std::max(escapeAvg, 1e-4F);
-
-    // Split of the transmit selection mass between the two far-hemisphere strategies, proportional to the energy each carries (transmitWeight cancels from both sides). Gated on the same kMinDeficit test multiScatterShape switches off at, so no mass reaches a lobe of identically zero value, also what leaves the smooth-glass rows bit-identical.
+    // Skipped entirely when transmissionFactor==0 (which also covers "not exiting", since exiting
+    // requires transmissionFactor>0 by definition above): escapeAlbedo/averageEscapeAlbedo are trilinear
+    // lookups over a log-spaced eta axis, and every value they'd feed here (transmitShare, msFraction)
+    // only matters to the transmissive multi-scatter path, which evaluateSpecularLobe's transmitWeight
+    // gate below already skips for every opaque material -- paying for the lookup anyway would be pure
+    // waste on the common diffuse+specular case.
+    float escape = 0.0F;
+    float escapeAvg = 0.0F;
+    float transmitShare = 0.0F;
     float msFraction = 0.0F;
-    if (transmissionIsRough(params, alpha) && (1.0F - escapeAvg) > kMinDeficit) {
-        const float msEnergy = transmitShare * std::max(1.0F - escape, 0.0F);
-        const float ssEnergy = escapeWo.transmit;
-        if (msEnergy + ssEnergy > 1e-6F) {
-            // Capped so the peaked single-scatter lobe always keeps a quarter of the mass.
-            msFraction = std::clamp(msEnergy / (msEnergy + ssEnergy), 0.0F, 0.75F);
+    if (params.transmissionFactor > 0.0F) {
+        const EscapeSplit escapeWo = escapeAlbedo(wo.z, params.roughness, eta);
+        const EscapeSplit escapeMean = averageEscapeAlbedo(params.roughness, eta);
+        escape = escapeWo.total();
+        escapeAvg = escapeMean.total();
+        const float transmitSsAvg = transmitWeight * escapeMean.transmit;
+        transmitShare = transmitSsAvg / std::max(escapeAvg, 1e-4F);
+
+        // Split of the transmit selection mass between the two far-hemisphere strategies, proportional to the energy each carries (transmitWeight cancels from both sides). Gated on the same kMinDeficit test multiScatterShape switches off at, so no mass reaches a lobe of identically zero value, also what leaves the smooth-glass rows bit-identical.
+        if (transmissionIsRough(params, alpha) && (1.0F - escapeAvg) > kMinDeficit) {
+            const float msEnergy = transmitShare * std::max(1.0F - escape, 0.0F);
+            const float ssEnergy = escapeWo.transmit;
+            if (msEnergy + ssEnergy > 1e-6F) {
+                // Capped so the peaked single-scatter lobe always keeps a quarter of the mass.
+                msFraction = std::clamp(msEnergy / (msEnergy + ssEnergy), 0.0F, 0.75F);
+            }
         }
     }
     const float msTransmitProb = transmitProb * msFraction;
@@ -583,7 +748,7 @@ BsdfEval evaluateContinuousLobes(const BsdfParams& params, const glm::vec3& wo, 
                 (lobes.transmit * transmission.pdf) + (lobes.msTransmit * -wi.z / kPi)};
     }
     const LobeEval specular = evaluateSpecularLobe(params, wo, wi, alpha, lobes);
-    const LobeEval diffuse = evaluateDiffuseLobe(params, wi, lobes);
+    const LobeEval diffuse = evaluateDiffuseLobe(params, wo, wi, lobes);
     return {diffuse.f, specular.f, glm::vec3(0.0F),
             (lobes.specular * specular.pdf) + (lobes.diffuse * diffuse.pdf)};
 }
@@ -628,7 +793,7 @@ std::optional<BsdfSample> sampleBsdf(const BsdfParams& params, const glm::vec3& 
             const glm::vec3 nh = sampleGGXVNDF(wo, alpha, sampler.next2D());
             wi = glm::reflect(-wo, nh);
         } else {
-            wi = sampleCosineHemisphere(sampler.next2D());
+            wi = sampleEon(wo, params.diffuseRoughness, sampler.next2D());
         }
         if (wi.z <= 0.0F) {
             return std::nullopt;
