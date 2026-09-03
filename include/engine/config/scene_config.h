@@ -32,7 +32,7 @@ struct MaterialConfig {
     float roughnessFactor;         // multiplies the roughness texture sample, before roughnessMin/Max clamp
 };
 
-// The asset to load and how to shade/light it -- everything main.cpp needs that's specific to this scene rather than a session-wide renderer/camera default (those are ProfileConfig). Grouped into model/environment/material sub-objects; see assets/config/scene.json for the checked-in defaults.
+// The asset to load and how to shade/light it -- everything main.cpp needs that's specific to this scene rather than a session-wide renderer/camera default (those are ProfileConfig). Grouped into model/environment/material sub-objects; see assets/scenes/tree.json for the checked-in defaults.
 struct SceneConfig {
     ModelConfig model;
     EnvironmentConfig environment;
