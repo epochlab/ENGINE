@@ -1,6 +1,5 @@
 .DS_Store
 build/
-# tools/render_beauty.cpp output -- review artifacts, regenerable from any revision, never committed.
 renders/
 *.gltf
 *.bin
