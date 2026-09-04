@@ -164,7 +164,7 @@ bool checkPose(const char* poseName, const Camera& camera, const EmbreeAccel& ac
             const BsdfParams params = resolveBsdfParams(material, shading.uv, shading.colour, settings);
             const glm::vec3 woWorld = -ray.dir;
             const float ndotV = std::max(glm::dot(frame.normal, woWorld), 1e-4F);
-            const float fresnelVal = fresnelSchlick(ndotV, params.f0).x;
+            const float fresnelVal = fresnelAtViewAngle(params, ndotV).x;
             const float aoVal = engine::gfx::sampleBilinear(material.aoTexture, shading.uv).r;
             const float depth = glm::dot(shading.position - camPos, camForward);
 

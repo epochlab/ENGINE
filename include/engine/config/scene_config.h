@@ -35,6 +35,8 @@ struct MaterialConfig {
     // Beer-Lambert volumetric absorption while a path travels inside this material (transmissionFactor>0 only). Optional, default [1,1,1]: -log(1)=0, so absorption is a true no-op regardless of transmissionDepth unless a material opts in. See path_tracer.cpp's sigmaAFromTransmission.
     glm::vec3 transmissionColor = glm::vec3(1.0F);
     float transmissionDepth = 1.0F;  // distance (world units) at which transmittance reaches transmissionColor
+    // Gulbrandsen 2014 edgetint for the conductor lobe (metallicFactor>0 only). Optional, default [1,1,1]: white is the no-dip edge Schlick always produced, so an existing material file loads unchanged. See bsdf.cpp's conductorIorFromReflectivity.
+    glm::vec3 edgeTint = glm::vec3(1.0F);
 };
 
 // The asset to load and how to shade/light it -- everything main.cpp needs that's specific to this scene rather than a session-wide renderer/camera default (those are ProfileConfig). Grouped into model/environment sub-objects, plus a path to the scene's material file; see assets/scenes/tree.json for the checked-in defaults.

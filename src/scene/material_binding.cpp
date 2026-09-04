@@ -56,6 +56,7 @@ std::optional<std::vector<PathTraceSettings>> resolvePerInstanceSettings(
             settings.diffuseRoughness = overrideMaterial.diffuseRoughness;
             settings.transmissionColor = overrideMaterial.transmissionColor;
             settings.transmissionDepth = overrideMaterial.transmissionDepth;
+            settings.edgeTint = overrideMaterial.edgeTint;
         }
         perInstanceSettings.push_back(settings);
     }
