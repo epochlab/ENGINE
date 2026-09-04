@@ -32,7 +32,8 @@ constexpr float kPi = 3.14159265F;
 BsdfParams makeParams(float roughness, float metallic) {
     const glm::vec3 baseColor(1.0F);  // worst case: full white albedo
     const glm::vec3 f0 = glm::mix(glm::vec3(0.04F), baseColor, metallic);
-    return BsdfParams{baseColor, metallic, roughness, f0, 1.5F, /*transmissionFactor=*/0.0F, 0.0F};
+    return BsdfParams{baseColor,   metallic, roughness, f0, /*edgeTint=*/glm::vec3(1.0F),
+                       /*ior=*/1.5F, /*transmissionFactor=*/0.0F, /*diffuseRoughness=*/0.0F};
 }
 
 glm::vec3 sampleUniformHemisphere(std::mt19937& rng) {

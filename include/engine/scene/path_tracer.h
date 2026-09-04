@@ -37,6 +37,8 @@ struct PathTraceSettings {
     // Beer-Lambert volumetric absorption while a path travels inside this material (transmissionFactor>0 only). See tracePath's mediumSigmaA (path_tracer.cpp).
     glm::vec3 transmissionColor = glm::vec3(1.0F);
     float transmissionDepth = 1.0F;
+    // Gulbrandsen 2014 edgetint for the conductor lobe; 1 = white edge, see bsdf.h's BsdfParams.
+    glm::vec3 edgeTint = glm::vec3(1.0F);
 };
 
 // One renderPathTraced() call's raw output -- what a single pass computes, and what PathTraceDriver republishes in full on every accumulated pass. Single-channel fields are broadcast to RGB (alpha=1), matching HdrImage's fixed 4-floats/texel layout so every field can go straight through Texture::createFromFloatPixels unchanged. Every field here is a per-sample quantity averaged across the call's samples, and re-averaged across accumulated passes by the driver. The primary-hit G-buffer AOVs (depth/worldPos/normal/albedo/metallic/roughness/tangent/objectId/alpha/fresnel/ao/uv/geomNormal/IOR) are NOT here: rasterizer.h's RasterGBuffer is their only producer, refreshed synchronously on the render thread every trigger change, and main.cpp's selectPathTracedImage routed every one of them there -- the path-traced copies were computed, stored and published to no reader at all. Wireframe/BoundingBox are likewise rasterizer.h-only.
