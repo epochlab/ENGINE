@@ -46,6 +46,10 @@ constexpr float kPi = 3.14159265F;
 
 // Quad half-extent: large enough that every primary ray in the narrow test FOV lands on it, so no pixel sees the environment directly and the measured value is purely surface radiance.
 constexpr float kQuadExtent = 1000.0F;
+// Sphere test geometry, shared by the two checks that use it so their tessellations cannot drift apart -- checkBeerLambert's expected transmittance is a function of the chord, so the two must agree on the radius.
+constexpr float kSphereRadius = 1.0F;
+constexpr int kSphereSlices = 64;
+constexpr int kSphereStacks = 32;
 // Narrow FOV (200mm on a 36x24 gate, ~6.9 degrees vertical) so every pixel's view direction is within a fraction of a degree of the quad normal -- lets one analytic reference at wo = the normal stand for the whole probed region.
 constexpr float kFocalLengthMm = 200.0F;
 constexpr int kImageSize = 16;
@@ -71,14 +75,14 @@ engine::scene::Material makeMaterial(float roughness, glm::vec3 f0) {
     };
 }
 
-// One quad in the z=0 plane facing +Z, wound counter-clockwise as seen from +Z so geometricNormalOf gives (0,0,1). The camera sits at +Z looking down -Z (yaw=0/pitch=0, this codebase's default orientation), so the centre pixel's view direction is exactly the surface normal.
-struct QuadScene {
+struct TestScene {
     std::vector<Triangle> worldTriangles;
     std::vector<ShadingTriangle> shadingTriangles;
     std::vector<MeshInstance> instances;
 };
 
-QuadScene makeQuadScene(float roughness, glm::vec3 f0) {
+// One quad in the z=0 plane facing +Z, wound counter-clockwise as seen from +Z so geometricNormalOf gives (0,0,1). The camera sits at +Z looking down -Z (yaw=0/pitch=0, this codebase's default orientation), so the centre pixel's view direction is exactly the surface normal.
+TestScene makeQuadScene(float roughness, glm::vec3 f0) {
     const glm::vec3 normal(0.0F, 0.0F, 1.0F);
     const glm::vec4 tangent(1.0F, 0.0F, 0.0F, 1.0F);
     const auto vertex = [&](float x, float y) {
@@ -89,7 +93,7 @@ QuadScene makeQuadScene(float roughness, glm::vec3 f0) {
     const ShadingVertex v2 = vertex(kQuadExtent, kQuadExtent);
     const ShadingVertex v3 = vertex(-kQuadExtent, kQuadExtent);
 
-    QuadScene scene;
+    TestScene scene;
     scene.worldTriangles = {Triangle{v0.position, v1.position, v2.position},
                              Triangle{v0.position, v2.position, v3.position}};
     scene.shadingTriangles = {ShadingTriangle{v0, v1, v2, 0}, ShadingTriangle{v0, v2, v3, 0}};
@@ -98,7 +102,7 @@ QuadScene makeQuadScene(float roughness, glm::vec3 f0) {
 }
 
 // Two parallel quads with opposing geometric normals: the front facing the camera at +Z, the back facing away at -Z. A camera ray enters at the front face (woLocal.z>0) and leaves at the back (woLocal.z<0), the only configuration that exercises bsdf.cpp's exiting side and the far-side NEE guard. A single quad cannot: it is entered from the front and every hit reads as entering.
-QuadScene makeSlabScene(float roughness, glm::vec3 f0, float thickness) {
+TestScene makeSlabScene(float roughness, glm::vec3 f0, float thickness) {
     const glm::vec4 tangent(1.0F, 0.0F, 0.0F, 1.0F);
     const auto vertex = [&](float x, float y, float z, float nz) {
         return ShadingVertex{glm::vec3(x, y, z), glm::vec3(0.0F, 0.0F, nz), glm::vec2(0.5F, 0.5F),
@@ -114,7 +118,7 @@ QuadScene makeSlabScene(float roughness, glm::vec3 f0, float thickness) {
     const ShadingVertex bv2 = vertex(kQuadExtent, kQuadExtent, -thickness, -1.0F);
     const ShadingVertex bv3 = vertex(kQuadExtent, -kQuadExtent, -thickness, -1.0F);
 
-    QuadScene scene;
+    TestScene scene;
     scene.worldTriangles = {Triangle{fv0.position, fv1.position, fv2.position},
                              Triangle{fv0.position, fv2.position, fv3.position},
                              Triangle{bv0.position, bv1.position, bv2.position},
@@ -126,8 +130,8 @@ QuadScene makeSlabScene(float roughness, glm::vec3 f0, float thickness) {
 }
 
 // The quad above plus an opaque wall at x=1 facing -X, the only scene here where a non-transmissive path reaches a second surface: the wall sits outside the narrow view frustum (primary rays land within |x|<0.31 at z=0) so it is never primary-visible, but it catches the floor's +X-going bounce rays, and NEE fires there at bounce>=1, the only way anything reaches the Indirect buckets.
-QuadScene makeCornerScene(float roughness, glm::vec3 f0) {
-    QuadScene scene = makeQuadScene(roughness, f0);
+TestScene makeCornerScene(float roughness, glm::vec3 f0) {
+    TestScene scene = makeQuadScene(roughness, f0);
     const glm::vec3 wallNormal(-1.0F, 0.0F, 0.0F);
     const glm::vec4 wallTangent(0.0F, 1.0F, 0.0F, 1.0F);
     const auto vertex = [&](float y, float z) {
@@ -143,6 +147,41 @@ QuadScene makeCornerScene(float roughness, glm::vec3 f0) {
     scene.worldTriangles.push_back(Triangle{w0.position, w2.position, w1.position});
     scene.shadingTriangles.push_back(ShadingTriangle{w0, w3, w2, 0});
     scene.shadingTriangles.push_back(ShadingTriangle{w0, w2, w1, 0});
+    return scene;
+}
+
+// UV sphere at the origin, poles on Y so the camera (at +Z looking down -Z) reads the well-tessellated equator rather than the degenerate pole fan. Vertex normals are the exact analytic outward normals and the tangent is d(position)/d(theta), non-degenerate everywhere including the poles.
+// THE POINT IS THE CURVATURE. Every other scene here is flat quads, whose coplanar vertex normals make transmissionOffsetEpsilon's curvature factor exactly zero and shadowTerminatorOffset a no-op -- so the two integrator bugs those two mechanisms actually had (a far-side NEE shadow ray on the flat kRayEpsilon, and the shadow-terminator projection pushing an inward-going ray back out through the interface and desynchronising the medium stack) were invisible to all four suites while plainly visible in a cornell render. Here both are non-zero.
+// The tessellation sets the offset epsilon (max edge length * sin of the vertex-normal divergence, both taken across the quad's diagonal), which backs each ray origin that much into the medium and so shortens every measured in-medium segment. At 64x32 on a unit sphere that is 1.93e-2. Coarse enough that the curvature terms are firmly non-zero, fine enough that checkBeerLambert's analytic chord stays accurate; the detection strength this costs was measured, not assumed, by re-running the checks at 24x12 (528 triangles, cornell's own tessellation), where they behave the same.
+TestScene makeSphereScene(float roughness, glm::vec3 f0) {
+    const auto vertexAt = [&](int stack, int slice) {
+        const float phi = kPi * static_cast<float>(stack) / static_cast<float>(kSphereStacks);
+        const float theta = 2.0F * kPi * static_cast<float>(slice) / static_cast<float>(kSphereSlices);
+        const glm::vec3 normal(std::sin(phi) * std::sin(theta), std::cos(phi),
+                                std::sin(phi) * std::cos(theta));
+        return ShadingVertex{normal * kSphereRadius, normal, glm::vec2(0.5F, 0.5F),
+                              glm::vec4(std::cos(theta), 0.0F, -std::sin(theta), 1.0F)};
+    };
+
+    TestScene scene;
+    for (int stack = 0; stack < kSphereStacks; ++stack) {
+        for (int slice = 0; slice < kSphereSlices; ++slice) {
+            const ShadingVertex v00 = vertexAt(stack, slice);
+            const ShadingVertex v10 = vertexAt(stack + 1, slice);
+            const ShadingVertex v11 = vertexAt(stack + 1, slice + 1);
+            const ShadingVertex v01 = vertexAt(stack, slice + 1);
+            // Wound so geometricNormalOf points outward. Each pole row contributes one triangle, not two: the half-quad whose two vertices collapse onto the pole is dropped rather than emitted with zero area, which would normalize(0) to NaN in geometricNormalOf. Guarding the wrong half of each row leaves an annular hole at both poles (measured: 128 zero-area triangles, surface area 12.4808 against 4*pi) and silently unseals the medium.
+            if (stack + 1 < kSphereStacks) {
+                scene.worldTriangles.push_back(Triangle{v00.position, v10.position, v11.position});
+                scene.shadingTriangles.push_back(ShadingTriangle{v00, v10, v11, 0});
+            }
+            if (stack > 0) {
+                scene.worldTriangles.push_back(Triangle{v00.position, v11.position, v01.position});
+                scene.shadingTriangles.push_back(ShadingTriangle{v00, v11, v01, 0});
+            }
+        }
+    }
+    scene.instances = {MeshInstance{makeMaterial(roughness, f0), glm::mat4(1.0F), ""}};
     return scene;
 }
 
@@ -211,7 +250,7 @@ float referenceLo(const BsdfParams& params, const glm::vec3& wo, int sampleCount
 }
 
 // Runs one full renderPathTraced pass over the quad scene. showSky gates only the primary ray's own miss, so turning it off zeroes the background term the transport buckets deliberately exclude.
-engine::scene::PathTraceResult renderPass(const QuadScene& scene, const EnvironmentMap& env,
+engine::scene::PathTraceResult renderPass(const TestScene& scene, const EnvironmentMap& env,
                                            const PathTraceSettings& settings, EmbreeAccel& accel,
                                            engine::scene::ThreadPool& pool, bool showSky) {
     const std::atomic<std::uint64_t> generation{1};
@@ -226,7 +265,7 @@ engine::scene::PathTraceResult renderPass(const QuadScene& scene, const Environm
 }
 
 // Centre-region mean radiance of one pass.
-float renderCentre(const QuadScene& scene, const EnvironmentMap& env, const PathTraceSettings& settings,
+float renderCentre(const TestScene& scene, const EnvironmentMap& env, const PathTraceSettings& settings,
                     EmbreeAccel& accel, engine::scene::ThreadPool& pool) {
     const glm::vec3 mean = centreMean(renderPass(scene, env, settings, accel, pool, true).beauty);
     return std::max({mean.x, mean.y, mean.z});
@@ -262,7 +301,7 @@ bool runCases() {
     std::cout << "  case                              maxB=0    maxB=1    RR on    reference\n";
 
     for (const Case& testCase : cases) {
-        const QuadScene scene = makeQuadScene(testCase.roughness, testCase.f0);
+        const TestScene scene = makeQuadScene(testCase.roughness, testCase.f0);
         std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
         if (!accel.has_value()) {
             std::cerr << "integrator_validate: FAILED to build Embree scene for " << testCase.name << '\n';
@@ -332,7 +371,7 @@ bool checkTransmissiveSlab() {
 
     std::cout << "integrator_validate: white non-absorbing slab, uniform L0=1 (1.0 = invisible)\n";
     for (float roughness : roughnesses) {
-        const QuadScene scene = makeSlabScene(roughness, glm::vec3(0.04F), kThickness);
+        const TestScene scene = makeSlabScene(roughness, glm::vec3(0.04F), kThickness);
         std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
         if (!accel.has_value()) {
             std::cerr << "integrator_validate: FAILED to build Embree slab scene\n";
@@ -349,6 +388,111 @@ bool checkTransmissiveSlab() {
                          "energy; above 1.0 means NEE and the BSDF-sampled miss are double-counting "
                          "the transmission lobe, below means a transmissive vertex is losing energy.\n";
             ok = false;
+        }
+    }
+    return ok;
+}
+
+// The curved counterpart of checkTransmissiveSlab, on the same invariant for the same reason: a white, non-absorbing dielectric under a uniform L0=1 environment is invisible WHATEVER ITS SHAPE, since every photon entering leaves again and the eta^2 radiance compression cancels over the round trip. Only the geometry changes, and the geometry is the whole point -- this is the suite's only case where a transmissive vertex sees non-zero curvature, so it is the only one that can see a bug in transmissionOffsetEpsilon or in shadowTerminatorOffset's projection side (see makeSphereScene).
+// A sphere traps far more light than a slab: past the critical angle every internal hit totally internally reflects, so paths ring around the inside for many bounces. Truncation only ever darkens, which is why the depth is well above the slab's and the band is two-sided.
+bool checkTransmissiveSphere() {
+    // Measured convergence point, not a guess: 32 and 96 bounces are bit-identical to this, and 12 is not.
+    constexpr int kSphereBounces = 16;
+    constexpr float kTolerance = 0.03F;
+    // 0.02 is below bsdf.cpp's smooth-roughness threshold, so it takes the delta transmission path; the rest take the Walter lobe, where far-side NEE is the estimator that actually lights the far side.
+    const std::array<float, 4> roughnesses = {0.02F, 0.2F, 0.4F, 0.7F};
+
+    const EnvironmentMap env = makeUniformEnvironment();
+    engine::scene::ThreadPool pool;
+    bool ok = true;
+
+    std::cout << "integrator_validate: white non-absorbing glass sphere, uniform L0=1 (1.0 = invisible)\n";
+    for (float roughness : roughnesses) {
+        const TestScene scene =
+            makeSphereScene(roughness, glm::vec3(0.04F));
+        std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
+        if (!accel.has_value()) {
+            std::cerr << "integrator_validate: FAILED to build Embree sphere scene\n";
+            return false;
+        }
+        const float lo = renderCentre(
+            scene, env, makeSettings(kSphereBounces, 999, /*metallic=*/0.0F, /*transmission=*/1.0F),
+            *accel, pool);
+        std::cout << "  roughness " << roughness << "   Lo " << lo << '\n';
+        if (std::fabs(lo - 1.0F) > kTolerance) {
+            std::cerr << "integrator_validate: FAILED glass sphere transparency at roughness=" << roughness
+                      << " -- rendered " << lo
+                      << ", expected 1.0. Same invariant as the flat slab above, so a flat slab that "
+                         "passes while this fails localises the fault to a curvature-driven term: the "
+                         "transmission offset epsilon, or the shadow-terminator projection's side.\n";
+            ok = false;
+        }
+    }
+    return ok;
+}
+
+// Beer-Lambert volumetric absorption -- the newest thing in the pipeline and, until now, the only part of the transmissive path with no coverage at all: both slabs above are white and non-absorbing, so sigmaAFromTransmission and tracePath's medium attenuation were never once evaluated by this suite.
+// Asserts the documented contract rather than restating its formula: transmissionDepth is "the distance at which transmittance reaches transmissionColor" (scene_config.h), so setting transmissionDepth to the actual traversal distance makes the expected reading exactly transmissionColor, with no exp() written in the test at all. Halving transmissionDepth squares it, which is what separates a true exponential from anything linear in distance -- a test at one depth cannot tell the two apart.
+// ior 1.0 is what makes this exact rather than approximate, and it is a physically real configuration (an index-matched pure absorber), not a test-only dodge. The interface neither bends the ray -- so the traversal distance is the slab thickness or the sphere chord, both known in closed form -- nor reflects any of it, since fresnelDielectric is identically zero at eta 1. The delta transmission lobe contributes nothing through NEE either. Absorption is then the only mechanism left that can move the reading off 1.0.
+// Per-channel colour, distinct in every channel: a swapped or luminance-collapsed sigmaA passes a grey test and fails this one.
+bool checkBeerLambert() {
+    constexpr int kBounces = 8;
+    constexpr float kSlabThickness = 0.5F;
+    // Relative, since the squared row's green channel is 0.0625 and an absolute band would be vacuous there.
+    // The flat rows are exact to 3e-4 relative. The sphere row reads systematically HIGH, from two named biases that both shorten its path and so under-absorb: the offset epsilon backs the origin 1.93e-2 into the medium (see makeSphereScene), and the probed block's outermost ray has an impact parameter of 0.075 rather than 0, a chord of 1.9944 rather than 2.0. Measured 0.89/1.82/0.35% across the three channels, which divided by each channel's own sigma_a give the same 0.025 path deficit -- one shortened path, matching the 0.019+0.006 predicted, and not a per-channel error. Worst row is therefore 1.8% against this band.
+    constexpr float kRelativeTolerance = 0.03F;
+    const glm::vec3 colour(0.5F, 0.25F, 0.75F);
+
+    struct AbsorptionCase {
+        const char* name;
+        bool sphere;
+        float depth;
+        glm::vec3 expected;
+    };
+    const std::array<AbsorptionCase, 3> cases{{
+        {"flat slab, depth == thickness", false, kSlabThickness, colour},
+        {"flat slab, depth == half thickness", false, kSlabThickness * 0.5F, colour * colour},
+        {"sphere, depth == chord", true, 2.0F * kSphereRadius, colour},
+    }};
+
+    const EnvironmentMap env = makeUniformEnvironment();
+    engine::scene::ThreadPool pool;
+    bool ok = true;
+
+    std::cout << "integrator_validate: Beer-Lambert absorption through an index-matched medium\n";
+    for (const AbsorptionCase& testCase : cases) {
+        const TestScene scene =
+            testCase.sphere
+                ? makeSphereScene(0.02F, glm::vec3(0.04F))
+                : makeSlabScene(0.02F, glm::vec3(0.04F), kSlabThickness);
+        std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
+        if (!accel.has_value()) {
+            std::cerr << "integrator_validate: FAILED to build Embree scene for " << testCase.name << '\n';
+            return false;
+        }
+        PathTraceSettings settings = makeSettings(kBounces, 999, /*metallic=*/0.0F, /*transmission=*/1.0F);
+        settings.ior = 1.0F;
+        settings.transmissionColor = colour;
+        settings.transmissionDepth = testCase.depth;
+        const glm::vec3 lo = centreMean(renderPass(scene, env, settings, *accel, pool, true).beauty);
+
+        std::cout << "  " << testCase.name;
+        for (std::size_t pad = std::string(testCase.name).size(); pad < 36; ++pad) {
+            std::cout << ' ';
+        }
+        std::cout << "measured [" << lo.x << ", " << lo.y << ", " << lo.z << "]   expected ["
+                  << testCase.expected.x << ", " << testCase.expected.y << ", "
+                  << testCase.expected.z << "]\n";
+        for (int c = 0; c < 3; ++c) {
+            if (std::fabs(lo[c] - testCase.expected[c]) > kRelativeTolerance * testCase.expected[c]) {
+                std::cerr << "integrator_validate: FAILED Beer-Lambert at " << testCase.name
+                          << " channel " << c << " -- measured " << lo[c] << ", expected "
+                          << testCase.expected[c]
+                          << ". transmissionDepth is the distance at which transmittance reaches "
+                             "transmissionColor, so with the medium index-matched to vacuum nothing "
+                             "but exp(-sigma_a*d) can move this reading.\n";
+                ok = false;
+            }
         }
     }
     return ok;
@@ -385,7 +529,7 @@ bool checkTransportPartition() {
 
     std::cout << "integrator_validate: transport buckets partition beauty (showSky off)\n";
     for (const PartitionCase& testCase : cases) {
-        const QuadScene scene =
+        const TestScene scene =
             testCase.geometry == Geometry::Slab
                 ? makeSlabScene(testCase.roughness, glm::vec3(0.04F), 0.5F)
                 : testCase.geometry == Geometry::Corner
@@ -450,8 +594,10 @@ bool checkTransportPartition() {
 int main() {
     const bool casesOk = runCases();
     const bool slabOk = checkTransmissiveSlab();
+    const bool sphereOk = checkTransmissiveSphere();
+    const bool absorptionOk = checkBeerLambert();
     const bool partitionOk = checkTransportPartition();
-    if (!casesOk || !slabOk || !partitionOk) {
+    if (!casesOk || !slabOk || !sphereOk || !absorptionOk || !partitionOk) {
         std::cerr << "integrator_validate: FAILED\n";
         return EXIT_FAILURE;
     }
