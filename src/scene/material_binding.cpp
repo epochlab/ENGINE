@@ -1,6 +1,8 @@
 #include "engine/scene/material_binding.h"
 
 #include <iostream>
+#include <set>
+#include <string_view>
 #include <utility>
 
 namespace engine::scene {
@@ -8,6 +10,18 @@ namespace engine::scene {
 std::optional<std::vector<PathTraceSettings>> resolvePerInstanceSettings(
     const PathTraceSettings& base, const std::vector<MeshInstance>& instances,
     const std::map<std::string, std::string>& materialOverrides, const std::string& assetRoot) {
+    std::set<std::string_view> instanceNames;
+    for (const MeshInstance& instance : instances) {
+        instanceNames.insert(instance.name);
+    }
+    for (const auto& [nodeName, path] : materialOverrides) {
+        if (!instanceNames.contains(nodeName)) {
+            std::cerr << "resolvePerInstanceSettings: materialOverrides key '" << nodeName
+                      << "' matches no glTF node\n";
+            return std::nullopt;
+        }
+    }
+
     std::map<std::string, engine::config::MaterialConfig> overrideMaterialsByPath;
     for (const auto& [nodeName, path] : materialOverrides) {
         if (overrideMaterialsByPath.contains(path)) {
