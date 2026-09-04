@@ -4,6 +4,16 @@
 
 ![Sample render](sample.png)
 
+## Contents
+
+- [Build](#build)
+- [1. Pipeline](#1-pipeline)
+- [2. Component reference](#2-component-reference)
+- [3. Material library](#3-material-library)
+- [4. AOV reference](#4-aov-reference)
+- [5. Roadmap](#5-roadmap)
+- [6. References](#6-references)
+
 ## Build
 
 C++20, built with CMake. Currently developed against macOS only.
@@ -64,7 +74,7 @@ Every frame, on any camera/scene-state change, `PathTraceDriver` hands a fresh r
 - Recursive bounce loop with Russian roulette, Chiang/Li/Burley 2019 shadow-terminator-corrected secondary-ray origins, Beer-Lambert extinction while a path is inside a transmissive material
 - Radiance + a full G-buffer/transport-component AOV set accumulated per pass, published as a snapshot the render thread reads lock-free
 
-Independently, on the same trigger, a synchronous CPU rasterizer (`rasterizer.cpp`) computes the 15 primary-hit-only AOVs (§3) directly on the render thread every frame: edge-function rasterization (Pineda 1988) with a near-plane Sutherland-Hodgman clip, sharing `gbuffer_shading.h`'s material sampling with the path tracer but no Embree, BSDF, or recursion. This gives those AOVs instant, glitch-free feedback during camera movement, decoupled from Beauty's own progressive convergence; the path-traced request above only restarts when the selected AOV actually needs light-transport data.
+Independently, on the same trigger, a synchronous CPU rasterizer (`rasterizer.cpp`) computes the 15 primary-hit-only AOVs (§4) directly on the render thread every frame: edge-function rasterization (Pineda 1988) with a near-plane Sutherland-Hodgman clip, sharing `gbuffer_shading.h`'s material sampling with the path tracer but no Embree, BSDF, or recursion. This gives those AOVs instant, glitch-free feedback during camera movement, decoupled from Beauty's own progressive convergence; the path-traced request above only restarts when the selected AOV actually needs light-transport data.
 
 The render thread blits whichever AOV is selected through OCIO's display transform (exposure/tone-mapping) and the debug HUD, converging visibly over subsequent passes rather than blocking on a single long render. No GPU rasterization anywhere in this path: OpenGL exists only for the window, the post-process/OCIO blit, and ImGui; the primary-hit rasterizer above is CPU-only.
 
@@ -82,20 +92,46 @@ The render thread blits whichever AOV is selected through OCIO's display transfo
 | Scene stats | Object/triangle/point counts, viewport resolution | Scene-complexity readout |
 | Debug camera controls | WASD/QE fly, R reset, LMB-drag orbit around a pivot read directly from the path tracer's own G-buffer (world-space hit position + hit mask at its centre pixel) | Interactive navigation without hand-editing camera parameters between runs |
 | Camera framing overlays | Centre crosshair, always on, drawn on the foreground overlay over the viewport | Composition aid that never contaminates the AOV buffers being debugged |
-| AOV selector | Dropdown across the full AOV set (§3), plus R/G/B channel-isolation hotkeys | Isolates one signal at a time for debugging |
+| AOV selector | Dropdown across the full AOV set (§4), plus R/G/B channel-isolation hotkeys | Isolates one signal at a time for debugging |
 | Live histogram | Per-channel (R/G/B) histogram of the currently displayed image | Catches exposure/clipping and colour-space bugs a single still frame can hide |
 | glTF loading | cgltf; per-primitive vertices baked to world-space triangles/shading data at load time, materials' textures decoded once to `HdrImage` | Standard interchange format; nothing GPU-resident is needed once the CPU Embree scene/shading data exists |
 | Tangent-space normal mapping | Per-vertex tangent (glTF-supplied only), Gram-Schmidt re-orthogonalized per-ray | Surface micro-detail without extra geometry |
 | Ray acceleration | Intel Embree (SIMD BVH build/traversal), CPU, built once at load | Sub-linear ray-scene intersection, required before recursion is affordable |
-| Primary-hit rasterizer | CPU edge-function rasterization (Pineda 1988) + near-plane clip (Sutherland-Hodgman 1974), row-parallel, synchronous every frame | Instant primary-hit G-buffer AOVs (§3), decoupled from Beauty's progressive convergence |
+| Primary-hit rasterizer | CPU edge-function rasterization (Pineda 1988) + near-plane clip (Sutherland-Hodgman 1974), row-parallel, synchronous every frame | Instant primary-hit G-buffer AOVs (§4), decoupled from Beauty's progressive convergence |
 | Stochastic BSDF | EON rough-diffuse (Portsmouth, Kutz, Hill 2025), GGX microfacet specular, Walter 2007 rough dielectric transmission (delta Snell + TIR below the smooth-roughness threshold), Kulla-Conty multiple-scattering compensation on the reflective and transmissive interface alike; four-lobe stochastic selection, one-sample mixture estimator | Materials respond to light with real physical behaviour, including rough and smooth glass, and conserve energy at every roughness |
-| Volumetric absorption | Beer-Lambert extinction (`transmissionColor`/`transmissionDepth`, Arnold `standard_surface` convention) applied to a single-level medium stack while a path is inside a `transmissionFactor>0` material | Tinted/coloured glass without participating-media in-scattering (§4 Large item 2) |
+| Volumetric absorption | Beer-Lambert extinction (`transmissionColor`/`transmissionDepth`, Arnold `standard_surface` convention) applied to a single-level medium stack while a path is inside a `transmissionFactor>0` material | Tinted/coloured glass without participating-media in-scattering (§5 Large item 2) |
 | Per-object materials | `SceneConfig::materialOverrides` (glTF node name → `materials/*.json` path) builds a per-instance settings vector, indexed by `ShadingTriangle::instanceIndex` through both render paths | Different objects in one scene can carry different materials (e.g. a chrome sphere and a glass sphere in the same Cornell box) |
 | Environment lighting | Equirect HDR map, BSDF-sampled misses + luminance-importance-sampled NEE, MIS-combined | The scene's sole light source: image-based, no punctual/area lights |
 | Russian roulette | Survival probability clamped from running throughput from `russianRouletteStartBounce`, reweighted by `1/p` | Keeps recursion finite without biasing the estimator |
 | Progressive accumulation | Each background pass re-traces at the current camera/settings and averages into the displayed result; any camera/scene change restarts accumulation | Real-time-interactive without waiting for a single long render to finish |
 
-## 3. AOV reference
+## 3. Material library
+
+Named presets (`assets/materials/*.json`), parsed into `MaterialConfig` (`scene_config.h`) and assigned per-scene via `SceneConfig::materialPath` (the scene's default material) plus an optional per-object override, `SceneConfig::materialOverrides` (glTF node name → material JSON path) -- e.g. `assets/scenes/cornell.json`'s `{"sphere01": "materials/chrome.json", "sphere02": "materials/glass.json"}`, cornell box left on the scene default. Overrides build a per-instance settings vector indexed by `ShadingTriangle::instanceIndex` through both render paths (§2 Per-object materials).
+
+| File | metallic | transmission | roughness (factor / min) | Role |
+|---|---|---|---|---|
+| `default.json` | 0.0 | 0.0 | 1.0 / 0.045 | Material for the default scene (`tree.json`, `materialPath`); rough dielectric, heavy bump (`bumpStrength: 10.0`) |
+| `diffuse.json` | 0.0 | 0.0 | 0.5 / 0.045 | Neutral matte dielectric, no bump |
+| `chrome.json` | 1.0 | 0.0 | 0.05 / 0.045 | Polished conductor, Schlick Fresnel (`diffuseColour` doubles as `f0` tint) |
+| `glass.json` | 0.0 | 1.0 | 0.02 / 0.01 | Smooth/clear dielectric, `ior: 1.5`; tinted via Beer-Lambert `transmissionColor: [0.96, 0.98, 1.0]` over `transmissionDepth: 0.4` world units, not `diffuseColour` |
+
+`MaterialConfig` fields:
+
+| Field | Meaning |
+|---|---|
+| `diffuseColour` | Multiplies `baseColorTexture`; also the conductor lobe's `f0` tint |
+| `metallicFactor` / `transmissionFactor` | Lobe selection -- a material is dielectric, conductor, or transmissive, not blended between (every shipped file uses 0.0/1.0) |
+| `roughnessFactor` | Multiplies the roughness texture sample, before the `roughnessMin`/`roughnessMax` clamp |
+| `roughnessMin` / `roughnessMax` | Per-material clamp on the roughness sample; a material can floor below the shared 0.045 (e.g. glass's 0.01) for a genuinely smooth GGX lobe |
+| `ior` | Dielectric IOR, non-metal lobes only |
+| `diffuseRoughness` | EON rough-diffuse parameter r ∈ [0,1] (Portsmouth, Kutz, Hill 2025); 0 = Lambertian |
+| `bumpStrength` | Scales the bump texture's per-texel height difference |
+| `transmissionColor` / `transmissionDepth` | Beer-Lambert absorption coefficient (`sigmaA = -log(transmissionColor)/transmissionDepth`, Arnold `standard_surface` convention), applied while a path is inside a `transmissionFactor>0` material. Optional, default `[1,1,1]`/`1.0`: a true no-op, so existing materials didn't need editing when this shipped (§2 Volumetric absorption) |
+
+The first nine fields are required (`j.at`, missing/malformed fails the load and logs to stderr); `transmissionColor`/`transmissionDepth` are parsed optional-with-default (`j.value`). Add a new material by dropping a JSON file in `assets/materials/` and pointing `materialPath`/`materialOverrides` at it -- no code or schema change needed.
+
+## 4. AOV reference
 
 Every AOV below is computed by the path tracer each pass, except: the 15 primary-hit-only AOVs (Alpha, Depth, WorldPos, UV, Normal, GeomNormal, Albedo, Metallic, Roughness, Tangent, ObjectID, Fresnel, IOR, AO, Wireframe), which come from the synchronous CPU rasterizer (§1, §2) instead, refreshed every frame; and HSV/Luminance/Sobel/Gabor, GPU post-filters of the Beauty image (shared `PostProcessPass`, run once per selection, not per-pass).
 
@@ -129,7 +165,7 @@ Every AOV below is computed by the path tracer each pass, except: the 15 primary
 | Refraction | Lighting | Radiance from any path that sampled a transmission lobe (sticky bucket) | Isolates glass/transmissive transport |
 | Shadow | Lighting | Binary NEE occlusion test toward the env light at the primary hit, re-averaged across progressive passes into continuous shadow/penumbra density | Isolates direct-light visibility from material/lighting colour |
 
-## 4. Roadmap
+## 5. Roadmap
 
 Ordered quick → complex; items within **Large** are a strict dependency chain (each needs the ones before it) and must land in that order. Items elsewhere have no hard blocker on one another.
 
@@ -143,7 +179,7 @@ Ordered quick → complex; items within **Large** are a strict dependency chain 
 
 - **Recover the delighted DirectDiffuse/DirectSpecular view**: `bdecb41` deliberately made the five transport AOVs physical (each contribution written once, at its physical value) so they exactly partition Beauty, an identity `tools/integrator_validate.cpp:387` (`checkTransportPartition`) now asserts at 1e-4 relative; the prior delighted view (base colour divided out) was the deliberate casualty of that fix, not a regression, and the commit message names its replacement as `DirectDiffuse / Albedo`. Not Quick because Albedo is a `RasterGBuffer` field (`rasterizer.cpp:321`) and `main.cpp:773-808`'s `aovNeedsLightTransport` gating makes the rasterizer and path tracer mutually exclusive; Albedo and DirectDiffuse are never simultaneously fresh. Needs either a path-traced albedo buffer (3 more accumulator lanes) or relaxing that gating.
 - **Frustum/backface culling**: skip `buildSubTriangles`'s per-frame full-scene walk (`rasterizer.cpp:153,274`) and the equivalent Embree traversal when out of view.
-- **Low-discrepancy sampler upgrade**: Sobol / hash-based Owen scrambling (Burley 2020, §5), replacing randomized Halton (`sampler.cpp`).
+- **Low-discrepancy sampler upgrade**: Sobol / hash-based Owen scrambling (Burley 2020, §6), replacing randomized Halton (`sampler.cpp`).
 - **Render-mode selector + adaptive tiling**: Single Sample / Progressive / Adaptive Tiling (today: the path tracer dispatches fixed 96x96 tiles and the rasterizer rows, both through `ThreadPool`; neither adapts to where the image is still noisy, and the mode is not selectable).
 - **Adaptive per-pixel sample budget**: variance-driven, builds on tiling above; `samplesPerPixel` (`profile.json`) is one fixed global today, no per-pixel allocation.
 - **Texture minification filtering (MIP-mapping)**: point/bilinear only today (`sampleBilinear`, `hdr_image.h:22`); grazing/distant surfaces alias. No mip chain exists to select from; needs ray differentials to pick a level per ray.
@@ -151,10 +187,10 @@ Ordered quick → complex; items within **Large** are a strict dependency chain 
 - **Ray reordering before shading**: the tile loop traces in raster order (`path_tracer.cpp:307-320`) with no Morton/direction coherence sort ahead of `tracePath` (`path_tracer.cpp:77`).
 - **Deferred/sorted shading by material**: `tracePath` (`path_tracer.cpp:77`) evaluates the BSDF inline per ray; no material-bucketed shading pass.
 - **Camera film-back preset drop-down**: `Camera::FilmBack` (`camera.h:13-16`) is one fixed `{widthMm, heightMm}` from `profile.json:5`. JSON-defined preset list (Alexa XT, IMAX, Medium Format, 5D, Leica M11, Red, 35mm, 70mm); `ImGui::Combo` in HUD, existing pattern at `hud_overlay.cpp:297`.
-- **Photometric calibration**: tie radiometric output to real photometric units (lux/candela/lumen) so `ev100()` (`camera.h:54-56`) and light intensities can be checked against a light meter instead of eyeballed. Complements the Macbeth chart scene (§4 Large item 1).
-- **Optic flow AOV**: per-pixel motion vectors, appended to `AovId` (`aov.h:7-40`). No scene-graph animation yet (§4 Moderate item 14), camera-only motion over static geometry, so this is reprojecting `WorldPos` (§3) through the previous frame's camera transform, not true motion capture. That state doesn't exist: `Camera` (`camera.h:10`) exposes only current `position()` (`camera.h:23`), no stored prior-frame matrix; needs one new persisted matrix, no new ray/sample work.
+- **Photometric calibration**: tie radiometric output to real photometric units (lux/candela/lumen) so `ev100()` (`camera.h:54-56`) and light intensities can be checked against a light meter instead of eyeballed. Complements the Macbeth chart scene (§5 Large item 1).
+- **Optic flow AOV**: per-pixel motion vectors, appended to `AovId` (`aov.h:7-40`). No scene-graph animation yet (§5 Moderate item 14), camera-only motion over static geometry, so this is reprojecting `WorldPos` (§4) through the previous frame's camera transform, not true motion capture. That state doesn't exist: `Camera` (`camera.h:10`) exposes only current `position()` (`camera.h:23`), no stored prior-frame matrix; needs one new persisted matrix, no new ray/sample work.
 - **Contact sheet export (grid of every AOV)**: tile thumbnails of all 27 `AovId` (`aov.h:7-40`) at once, vs. the HUD's single `ImGui::Combo` (`hud_overlay.cpp:336`) feeding one `pathTraceDisplayTexture` blit (`presentFrame`, `main.cpp:739`). Same mutual-exclusion blocker as the delighted-view item above: `aovNeedsLightTransport` (`main.cpp:93-108`) partitions the 27 into 12 light-transport / 15 rasterizer AOVs, only one side fresh per frame; needs that gating relaxed, not just N reads of one cached buffer.
-- **Scene-graph foundation**: three steps in strict order, the only ordered chain outside **Large**, and the prerequisite for Motion blur (§4 Low priority item 1).
+- **Scene-graph foundation**: three steps in strict order, the only ordered chain outside **Large**, and the prerequisite for Motion blur (§5 Low priority item 1).
   1. *Indexed geometry.* `gltf_loader.cpp:94-129` de-indexes every mesh into soup and stores positions twice (once in `Triangle` for Embree, once in `ShadingVertex.position` for shading), 184 B/tri, ~920 MB on a 5M-triangle asset. `rtcSetSharedGeometryBuffer` takes a byte stride, so Embree can read positions in place from the indexed shading vertices instead, deleting the `Triangle` array, keeping glTF's own index buffer rather than filling one with the identity sequence (`embree_accel.cpp:77-84`), and dropping the `reserve(size+1)` padding hack. ~5x smaller, and the traversal locality matters more than the footprint.
   2. *Object instancing.* `RTC_GEOMETRY_TYPE_INSTANCE` over one scene per unique mesh, replacing today's single flattened geometry (`embree_accel.cpp:65`) and finally giving `MeshInstance::transform` (`gltf_loader.h:18`, stored and never read) a consumer. `Hit` gains `geomID`/`instID`. Rays trace in object space against shared BVH leaves instead of the per-instance duplication today's flattened soup incurs. Needs (1)'s indexed layout.
   3. ~~*Per-material factors.*~~ **Solved by a different mechanism, not this one.** A scene containing a metal object and a dielectric object is now representable: `SceneConfig::materialOverrides` (glTF node name → `materials/*.json` path) builds a per-instance settings vector independent of (1)/(2) above, no indexed-geometry or instancing prerequisite. `Material` itself still holds only six textures -- `metallic_factor`/`roughness_factor`/etc. are still parsed by cgltf and discarded, and `extrasTextureIndex` (`gltf_loader.cpp:35`) is still the hand-rolled substring scanner it always was. What changed is that per-object factors are authored in `scene.json`/`materials/*.json` (JSON, keyed by node name) rather than in the glTF file itself; moving them onto `Material` for glTF-native authoring remains open if that authoring path is ever wanted.
@@ -163,40 +199,40 @@ Ordered quick → complex; items within **Large** are a strict dependency chain 
 
 1. **Cornell box + per-material showcase**: an IBL-lit version now exists (`assets/scenes/cornell.json`: chrome + glass spheres, box on default diffuse, per-object materials via item 3 above), covering mirror/rough conductor and smooth/rough dielectric. Still blocked on the *classic* emissive-panel-lit variant, which needs (3) below (only IBL lighting exists today); subsurface showcase waits on (2).
 2. **Volumetric & subsurface transport**: participating media (in-scattering, phase functions) + BSSRDF/random-walk subsurface. Beer-Lambert *extinction* (no in-scattering) already ships for tinted glass (`transmissionColor`/`transmissionDepth`, `path_tracer.cpp`'s `mediumSigmaA`) -- a simpler subset of this item, not the item itself. The multiple-scattering transmission lobe's energy-orientation bug (`multiScatterShape` evaluating the transmitted-wi escape probability at the wrong eta) is fixed; what remains is a structural, not buggy, property: that lobe's strict per-direction reciprocity (`f(wo→wi) ≠ f(wi→wo)`) is inherent to the transmissive multi-scatter formulation itself (`tools/bsdf_validate.cpp`'s `checkTransmissionReciprocity` stays deliberately scoped to single scatter), so full bidirectional participating-media/subsurface transport is still blocked on whatever that transport algorithm needs from this lobe, not on a fix already available.
-3. **Global illumination**: area lights + shadow rays to them. ReSTIR (Bitterli et al. 2020) follows once multiple area lights exist. Ray-traced AO replaces today's baked-texture AO AOV (§3). Caustics do not fall out of this: unidirectional path tracing structurally cannot sample specular-diffuse-specular paths regardless of light count; that needs (5).
+3. **Global illumination**: area lights + shadow rays to them. ReSTIR (Bitterli et al. 2020) follows once multiple area lights exist. Ray-traced AO replaces today's baked-texture AO AOV (§4). Caustics do not fall out of this: unidirectional path tracing structurally cannot sample specular-diffuse-specular paths regardless of light count; that needs (5).
 4. **GPU ray-tracing backend**: Embree SYCL or CUDA-OptiX, to raise achievable sample budget beyond CPU Embree. Today's single-ray `rtcIntersect1`/`rtcOccluded1` calls and per-ray inline shading in `tracePath` (`path_tracer.cpp:77`) are the opposite of a wavefront/streaming GPU kernel design; this item is that rearchitecture, not just a backend swap.
 5. **Bidirectional path tracing with MIS (caustics)**: light-subpath/eye-subpath vertex connection (Veach & Guibas 1995; Veach 1997); the transport algorithm caustics need, since unidirectional path tracing (3) cannot produce them at all. Blocked on (3) + the transmissive multi-scatter lobe's structural non-reciprocity noted in (2) -- connection needs BSDF agreement in both directions, which that lobe does not provide by construction, not because of a bug.
 6. **Spectral upgrade**: per-wavelength transport, hero-wavelength sampling (Wilkie et al. 2014), spectral dispersion. Likely offline-only given sample-budget cost.
 7. **Denoising**: needs (1)-(6) transport correctness first; denoising an incorrect image just smooths the error.
-8. **Upscaling**: spatial/temporal supersampling (neural, Xiao et al. 2020, §5, or classical).
+8. **Upscaling**: spatial/temporal supersampling (neural, Xiao et al. 2020, §6, or classical).
 9. **GenAI diffusion channel**: img2img refinement AOV + raw latent/embedding output for HOST's cognitive pipeline. Needs (7)'s converged image.
 
 ### Low priority
 
-1. **Motion blur**: blocked on Scene-graph foundation's (§4 Moderate item 14) scene graph + Embree multi-timestep geometry.
+1. **Motion blur**: blocked on Scene-graph foundation's (§5 Moderate item 14) scene graph + Embree multi-timestep geometry.
 2. **Depth of field**: thin-lens sampling in `primaryRay` + focus distance; technically unblocked today, cheaper once adaptive sampling (above) lands.
 3. **Nuke-equivalent exposure/gamma control**: extend `OcioDisplayTransform` with live numeric control, beyond today's LUT cycling (`L`).
 4. **Code-quality audit**: `rotateAboutY` (`environment_map.cpp:13`) → `glm::rotate`; `ShadingFrame::toLocal`/`toWorld` (`bsdf.h:26`) → `glm::mat3`. (BSDF math in `bsdf.cpp`, GGX/Smith/Fresnel/VNDF, is standard domain logic, not an offload candidate.)
 
-## 5. References
+## 6. References
 
 - Khronos Group. glTF 2.0 specification: scene/mesh/material interchange format.
 - Mikkelsen, M.S. (2008). Simulation of wrinkled surfaces revisited: MikkTSpace tangent space standard; not implemented (tangent mapping uses glTF-supplied tangents only, no MikkTSpace generation).
-- Goral, C.M., Torrance, K.E., Greenberg, D.P., Battaile, B. (1984). Modeling the interaction of light between diffuse surfaces. SIGGRAPH: the Cornell box, named in §4's Cornell box roadmap item, not yet implemented (no area lights exist to author its emissive panel with).
+- Goral, C.M., Torrance, K.E., Greenberg, D.P., Battaile, B. (1984). Modeling the interaction of light between diffuse surfaces. SIGGRAPH: the Cornell box, named in §5's Cornell box roadmap item, not yet implemented (no area lights exist to author its emissive panel with).
 - Kajiya, J.T. (1986). The rendering equation. SIGGRAPH.
-- Veach, E. (1997). Robust Monte Carlo Methods for Light Transport Simulation. PhD thesis, Stanford: multiple importance sampling, next-event estimation, and the MIS-weighted vertex connection named in §4's bidirectional-path-tracing roadmap item, not yet implemented.
-- Veach, E., Guibas, L.J. (1995). Bidirectional estimators for light transport. Eurographics Rendering Workshop: light-subpath/eye-subpath vertex connection, named in §4's bidirectional-path-tracing roadmap item, not yet implemented.
+- Veach, E. (1997). Robust Monte Carlo Methods for Light Transport Simulation. PhD thesis, Stanford: multiple importance sampling, next-event estimation, and the MIS-weighted vertex connection named in §5's bidirectional-path-tracing roadmap item, not yet implemented.
+- Veach, E., Guibas, L.J. (1995). Bidirectional estimators for light transport. Eurographics Rendering Workshop: light-subpath/eye-subpath vertex connection, named in §5's bidirectional-path-tracing roadmap item, not yet implemented.
 - Pharr, M., Jakob, W., Humphreys, G. Physically Based Rendering: From Theory to Implementation (PBRT); source of `FrDielectric`, the exact unpolarized dielectric Fresnel formula the BSDF uses.
 - Cook, R.L., Torrance, K.E. (1982). A reflectance model for computer graphics. ACM ToG: BRDF and Fresnel foundations.
 - Walter, B. et al. (2007). Microfacet models for refraction through rough surfaces: the GGX distribution, and the rough-refraction BTDF (value eq. 21, half-vector eq. 16, Jacobian eq. 17) the transmission lobe implements in PBRT-v3's radiance-transport form.
 - Debevec, P. (1998). Rendering synthetic objects into real scenes: HDR image-based lighting.
-- Wilkie, A. et al. (2014). Hero wavelength spectral sampling. Computer Graphics Forum: the sample-budget-bounding scheme named in §4's spectral-upgrade roadmap item, not yet implemented.
+- Wilkie, A. et al. (2014). Hero wavelength spectral sampling. Computer Graphics Forum: the sample-budget-bounding scheme named in §5's spectral-upgrade roadmap item, not yet implemented.
 - OpenEXR / Academy Software Foundation technical documentation: linear HDR pipeline, exposure.
 - Wald, I., Woop, S., Benthin, C., Johnson, G.S., Ernst, M. (2014). Embree: A Kernel Framework for Efficient CPU Ray Tracing. ACM ToG (SIGGRAPH); the CPU ray-scene intersection kernel library (`EmbreeAccel`) backing BVH build/traversal, replacing an earlier hand-rolled binned-SAH implementation.
 - Heitz, E. (2014). Understanding the Masking-Shadowing Function in Microfacet-Based BRDFs: the Smith height-correlated visibility term (`bsdf.cpp`'s `smithG1`/`smithG2`).
 - Christensen, P.H., Jarosz, W. (2016). The Path to Path-Traced Movies. Foundations and Trends in Computer Graphics and Vision: production path-tracing grounding.
 - Heitz, E. (2018). Sampling the GGX Distribution of Visible Normals. JCGT 7(4): the VNDF importance-sampling routine the specular lobe uses.
-- Sobel filtering: edge-detection AOV computed from Luminance (§3), arXiv:2601.16806.
+- Sobel filtering: edge-detection AOV computed from Luminance (§4), arXiv:2601.16806.
 - Chiang, M.J.-Y., Li, Y., Burley, B. (2019). Taming the Shadow Terminator. JCGT 8(4): the shading-point correction used for secondary-ray origins.
 - Halton, J.H. (1960). On the efficiency of certain quasi-random sequences of points in evaluating multi-dimensional integrals; Cranley, R., Patterson, T.N.L. (1976). Randomization of number theoretic methods for multiple integration: `Sampler`'s radical inverse + per-pixel rotation.
 - O'Neill, M.E. (2014). PCG: A Family of Simple Fast Space-Efficient Statistically Good Algorithms for Random Number Generation; `Sampler`'s fallback generator beyond its low-discrepancy dimension budget.
@@ -205,17 +241,17 @@ Ordered quick → complex; items within **Large** are a strict dependency chain 
 - Dupuy, J., Benyoub, A. (2023). Sampling Visible GGX Normals with Spherical Caps; Tokuyoshi, Y., Eto, K. (2023). Bounded VNDF Sampling for Smith-GGX Reflections: newer VNDF refinements surveyed, not implemented (Heitz 2018 used instead; better-established, lower risk to reproduce correctly from reference material alone).
 - Heitz, E., Hanika, J., d'Eon, E., Dachsbacher, C. (2016). Multiple-scattering microfacet BSDFs with the Smith model. The source of the problem, not the solution used: it establishes the energy single-scatter GGX discards (a white conductor returned 0.31 of the light it received at roughness 1.0), but the implemented compensation is Kulla & Conty's cheaper directional-albedo form below rather than this paper's stochastic microsurface evaluation.
 - Kulla, C., Conty, A. (2017). Revisiting Physically Based Shading at Imageworks. SIGGRAPH course. The multiple-scattering energy compensation the BSDF implements: a directional-albedo table drives a compensation lobe returning exactly the deficit `smithG2` masks away, on the reflective and transmissive interface alike, with its own cosine sampling strategy on the transmit side.
-- Burley, B. (2020). Practical Hash-based Owen Scrambling. JCGT 9(4): named in §4's low-discrepancy-sampler-upgrade roadmap item (Sobol + Owen scrambling), not yet implemented (depends on precomputed direction-number tables; randomized Halton used instead).
+- Burley, B. (2020). Practical Hash-based Owen Scrambling. JCGT 9(4): named in §5's low-discrepancy-sampler-upgrade roadmap item (Sobol + Owen scrambling), not yet implemented (depends on precomputed direction-number tables; randomized Halton used instead).
 - Schüßler, V., Heitz, E., Hanika, J., Dachsbacher, C. (2017). Microfacet-based normal mapping for robust Monte Carlo path tracing: considered for normal-map robustness, not implemented (a simpler geometric-normal-consistency rejection is used instead: a normal-map-induced light-leak sample is absorbed rather than reconstructed via the full two-facet microsurface model).
-- Jensen, H.W., Marschner, S.R., Levoy, M., Hanrahan, P. (2001). A Practical Model for Subsurface Light Transport. SIGGRAPH; Christensen, P.H., Burley, B. (2015). Approximate Reflectance Profiles for Efficient Subsurface Scattering: BSSRDF and its practical diffusion-profile approximation, named in §4's volumetric-and-subsurface roadmap item, not yet implemented.
-- Novák, J., Georgiev, I., Hanika, J., Jarosz, W. (2018). Monte Carlo Methods for Volumetric Light Transport Simulation. Computer Graphics Forum (EG STAR): participating-media survey, named in §4's volumetric-and-subsurface roadmap item, not yet implemented.
-- Cook, R.L., Porter, T., Carpenter, L. (1984). Distributed Ray Tracing. SIGGRAPH: the stochastic-sampling origin of depth of field and motion blur, named in §4's depth-of-field and motion-blur roadmap items, not yet implemented (primary rays are pinhole and instantaneous; the camera's aperture and shutter drive exposure only).
-- Williams, L. (1983). Pyramidal Parametrics. SIGGRAPH: MIP-mapping, named in §4's texture-minification-filtering roadmap item, not yet implemented (textures are point/bilinear-sampled per ray only).
-- Zwicker, M. et al. (2015). Recent Advances in Adaptive Sampling and Reconstruction for Monte Carlo Rendering. Computer Graphics Forum (EG STAR): denoising/reconstruction survey, named in §4's denoising roadmap item, not yet implemented.
-- Belcour, L. (2018). Efficient Rendering of Layered Materials using an Atomic Decomposition with Statistical Operators. ACM ToG: layered-BSDF approach, named in §4's production-scale roadmap item's broader-material-coverage note, not yet implemented (materials are single-layer metallic-roughness only).
-- Bitterli, B., Wyman, C., Pharr, M., Shirley, P., Lefohn, A., Jarosz, W. (2020). Spatiotemporal reservoir resampling for real-time ray tracing with dynamic direct lighting (ReSTIR). SIGGRAPH: named in §4's global-illumination roadmap item, not yet implemented (NEE currently samples the environment map only, with no area lights to resample across yet).
-- Miller, G. (1994). Efficient algorithms for local and global accessibility shading. SIGGRAPH: ambient occlusion, named in §4's global-illumination roadmap item's ray-traced-AO note, not yet implemented (the AO AOV currently samples a baked texture, §3).
-- Xiao, L., Nouri, S., Chapman, M., Fix, A., Lanman, D., Kaplanyan, A. (2020). Neural supersampling for real-time rendering. SIGGRAPH: upscaling, named in §4's upscaling roadmap item, not yet implemented.
-- Ho, J., Jain, A., Abbeel, P. (2020). Denoising diffusion probabilistic models. NeurIPS; Rombach, R., Blattmann, A., Lorenz, D., Esser, P., Ommer, B. (2022). High-resolution image synthesis with latent diffusion models. CVPR: diffusion-model foundations, named in §4's genAI-diffusion-channel roadmap item, not yet implemented.
+- Jensen, H.W., Marschner, S.R., Levoy, M., Hanrahan, P. (2001). A Practical Model for Subsurface Light Transport. SIGGRAPH; Christensen, P.H., Burley, B. (2015). Approximate Reflectance Profiles for Efficient Subsurface Scattering: BSSRDF and its practical diffusion-profile approximation, named in §5's volumetric-and-subsurface roadmap item, not yet implemented.
+- Novák, J., Georgiev, I., Hanika, J., Jarosz, W. (2018). Monte Carlo Methods for Volumetric Light Transport Simulation. Computer Graphics Forum (EG STAR): participating-media survey, named in §5's volumetric-and-subsurface roadmap item, not yet implemented.
+- Cook, R.L., Porter, T., Carpenter, L. (1984). Distributed Ray Tracing. SIGGRAPH: the stochastic-sampling origin of depth of field and motion blur, named in §5's depth-of-field and motion-blur roadmap items, not yet implemented (primary rays are pinhole and instantaneous; the camera's aperture and shutter drive exposure only).
+- Williams, L. (1983). Pyramidal Parametrics. SIGGRAPH: MIP-mapping, named in §5's texture-minification-filtering roadmap item, not yet implemented (textures are point/bilinear-sampled per ray only).
+- Zwicker, M. et al. (2015). Recent Advances in Adaptive Sampling and Reconstruction for Monte Carlo Rendering. Computer Graphics Forum (EG STAR): denoising/reconstruction survey, named in §5's denoising roadmap item, not yet implemented.
+- Belcour, L. (2018). Efficient Rendering of Layered Materials using an Atomic Decomposition with Statistical Operators. ACM ToG: layered-BSDF approach, named in §5's production-scale roadmap item's broader-material-coverage note, not yet implemented (materials are single-layer metallic-roughness only).
+- Bitterli, B., Wyman, C., Pharr, M., Shirley, P., Lefohn, A., Jarosz, W. (2020). Spatiotemporal reservoir resampling for real-time ray tracing with dynamic direct lighting (ReSTIR). SIGGRAPH: named in §5's global-illumination roadmap item, not yet implemented (NEE currently samples the environment map only, with no area lights to resample across yet).
+- Miller, G. (1994). Efficient algorithms for local and global accessibility shading. SIGGRAPH: ambient occlusion, named in §5's global-illumination roadmap item's ray-traced-AO note, not yet implemented (the AO AOV currently samples a baked texture, §4).
+- Xiao, L., Nouri, S., Chapman, M., Fix, A., Lanman, D., Kaplanyan, A. (2020). Neural supersampling for real-time rendering. SIGGRAPH: upscaling, named in §5's upscaling roadmap item, not yet implemented.
+- Ho, J., Jain, A., Abbeel, P. (2020). Denoising diffusion probabilistic models. NeurIPS; Rombach, R., Blattmann, A., Lorenz, D., Esser, P., Ommer, B. (2022). High-resolution image synthesis with latent diffusion models. CVPR: diffusion-model foundations, named in §5's genAI-diffusion-channel roadmap item, not yet implemented.
 - Pineda, J. (1988). A parallel algorithm for polygon rasterization. SIGGRAPH: the edge-function incremental rasterization technique behind the primary-hit rasterizer (§1, §2, `rasterizer.cpp`).
 - Sutherland, I.E., Hodgman, G.W. (1974). Reentrant polygon clipping. CACM: the near-plane polygon clip the primary-hit rasterizer's triangle setup uses (`rasterizer.cpp`).
