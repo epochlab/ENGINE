@@ -1,0 +1,17 @@
+[
+    { "name": "4x5 Large Format View Camera", "widthMm": 101.6, "heightMm": 127.0 },
+    { "name": "IMAX 15/70 Film", "widthMm": 70.41, "heightMm": 52.63 },
+    { "name": "Hasselblad X2D 100C", "widthMm": 43.8, "heightMm": 32.9 },
+    { "name": "VistaVision (35mm, 8-perf)", "widthMm": 37.72, "heightMm": 24.92 },
+    { "name": "Human Eye (approx.)", "widthMm": 40.0, "heightMm": 27.0 },
+    { "name": "ARRI Alexa 65", "widthMm": 54.12, "heightMm": 25.58 },
+    { "name": "ARRI Alexa XT (Open Gate)", "widthMm": 28.17, "heightMm": 18.13 },
+    { "name": "ARRI Alexa XT (16:9)", "widthMm": 23.76, "heightMm": 13.37 },
+    { "name": "RED V-RAPTOR", "widthMm": 40.96, "heightMm": 21.6 },
+    { "name": "Canon 5D Mark IV", "widthMm": 36.0, "heightMm": 24.0 },
+    { "name": "Leica M11", "widthMm": 35.8, "heightMm": 23.9 },
+    { "name": "GoPro HERO12 Black", "widthMm": 6.3, "heightMm": 5.5 },
+    { "name": "Super 35", "widthMm": 24.89, "heightMm": 18.66 },
+    { "name": "Super 16", "widthMm": 12.52, "heightMm": 7.41 },
+    { "name": "Super 8", "widthMm": 5.79, "heightMm": 4.01 }
+]

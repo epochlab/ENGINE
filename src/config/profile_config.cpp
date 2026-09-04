@@ -58,9 +58,7 @@ std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
         const glm::vec3 position = camera.at("position").get<glm::vec3>();
         const float yawDegrees = camera.at("yawDegrees").get<float>();
         const float pitchDegrees = camera.at("pitchDegrees").get<float>();
-        const nlohmann::json& filmBackJson = camera.at("filmBack");
-        const engine::scene::Camera::FilmBack filmBack{filmBackJson.at("widthMm").get<float>(),
-                                                         filmBackJson.at("heightMm").get<float>()};
+        const std::string defaultFilmBackPresetName = camera.at("filmBackPreset").get<std::string>();
         const float focalLengthMm = camera.at("focalLengthMm").get<float>();
         const float nearClip = camera.at("nearClip").get<float>();
         const float farClip = camera.at("farClip").get<float>();
@@ -77,11 +75,10 @@ std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
         const int russianRouletteStartBounce = pathTracer.at("russianRouletteStartBounce").get<int>();
         const int maxSamples = pathTracer.at("maxSamples").get<int>();
 
-        // These feed Camera::verticalFovRadians()/ev100() as denominators or bases of a physically meaningful quantity -- a zero/negative value would silently produce inf/NaN there instead of failing at this asset-load boundary.
-        if (filmBack.heightMm <= 0.0F || focalLengthMm <= 0.0F || aperture <= 0.0F ||
-            shutterSeconds <= 0.0F || iso <= 0.0F) {
+        // These feed Camera::verticalFovRadians()/ev100() as denominators or bases of a physically meaningful quantity -- a zero/negative value would silently produce inf/NaN there instead of failing at this asset-load boundary. filmBack itself is validated by loadFilmBackPresets, not here -- this function never loads that file.
+        if (focalLengthMm <= 0.0F || aperture <= 0.0F || shutterSeconds <= 0.0F || iso <= 0.0F) {
             std::cerr << "loadProfileConfig: " << path
-                       << " has a non-positive filmBack/focalLengthMm/aperture/shutterSeconds/iso\n";
+                       << " has a non-positive focalLengthMm/aperture/shutterSeconds/iso\n";
             return std::nullopt;
         }
         // Bounded at (0,1] rather than merely positive: above 1 would render above the framebuffer and hand the display blit a downscale it has no filter for, and at or below 0 the render target collapses.
@@ -101,7 +98,7 @@ std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
                 position,
                 yawDegrees,
                 pitchDegrees,
-                filmBack,
+                defaultFilmBackPresetName,
                 focalLengthMm,
                 nearClip,
                 farClip,
@@ -128,6 +125,39 @@ std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
         };
     } catch (const nlohmann::json::exception& e) {
         std::cerr << "loadProfileConfig: " << path << ": " << e.what() << '\n';
+        return std::nullopt;
+    }
+}
+
+std::optional<std::vector<engine::scene::Camera::FilmBackPreset>> loadFilmBackPresets(
+    const std::string& path) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        std::cerr << "loadFilmBackPresets: could not read " << path << '\n';
+        return std::nullopt;
+    }
+
+    try {
+        nlohmann::json j;
+        file >> j;
+
+        std::vector<engine::scene::Camera::FilmBackPreset> presets;
+        presets.reserve(j.size());
+        for (const nlohmann::json& presetJson : j) {
+            std::string name = presetJson.at("name").get<std::string>();
+            const float widthMm = presetJson.at("widthMm").get<float>();
+            const float heightMm = presetJson.at("heightMm").get<float>();
+            // widthMm/heightMm are physical sensor dimensions -- feed Camera::verticalFovRadians() and the HUD's aspect-ratio display as denominators, so a non-positive value must fail here rather than surface as inf/NaN later.
+            if (widthMm <= 0.0F || heightMm <= 0.0F) {
+                std::cerr << "loadFilmBackPresets: " << path << " has a non-positive filmBack for \""
+                           << name << "\"\n";
+                return std::nullopt;
+            }
+            presets.push_back({std::move(name), engine::scene::Camera::FilmBack{widthMm, heightMm}});
+        }
+        return presets;
+    } catch (const nlohmann::json::exception& e) {
+        std::cerr << "loadFilmBackPresets: " << path << ": " << e.what() << '\n';
         return std::nullopt;
     }
 }

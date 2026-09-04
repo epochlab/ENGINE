@@ -1,5 +1,7 @@
 #pragma once
 
+#include <string>
+
 #include <glm/glm.hpp>
 
 #include "engine/scene/ray_types.h"
@@ -20,6 +22,12 @@ public:
     struct FilmBack {
         float widthMm;
         float heightMm;
+    };
+
+    // A named, real-world FilmBack (e.g. "ARRI Alexa 65") -- the HUD's film-back preset dropdown and its backing JSON catalogue (assets/config/camera.json) both key off name.
+    struct FilmBackPreset {
+        std::string name;
+        FilmBack filmBack;
     };
 
     // yawDegrees/pitchDegrees are authored in degrees (more ergonomic at call sites than radians); converted once here and stored as radians, since every consumer (the Euler-to-forward-vector trig) needs radians. aperture is an f-number (e.g. 2.8 for f/2.8), shutterSeconds is the exposure time (e.g. 1/125), iso is sensor sensitivity: the standard photographic exposure triangle, feeding ev100() below.
