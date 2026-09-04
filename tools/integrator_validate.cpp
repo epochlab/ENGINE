@@ -20,12 +20,14 @@
 
 #include <glm/glm.hpp>
 
+#include "engine/config/scene_config.h"
 #include "engine/gfx/hdr_image.h"
 #include "engine/scene/bsdf.h"
 #include "engine/scene/camera.h"
 #include "engine/scene/embree_accel.h"
 #include "engine/scene/environment_map.h"
 #include "engine/scene/gltf_loader.h"
+#include "engine/scene/material_binding.h"
 #include "engine/scene/path_tracer.h"
 #include "engine/scene/shading_scene.h"
 #include "engine/scene/thread_pool.h"
@@ -185,6 +187,34 @@ TestScene makeSphereScene(float roughness, glm::vec3 f0) {
     return scene;
 }
 
+// Two coplanar quads meeting at x=0, each its OWN MeshInstance, so shadingTriangles carry instanceIndex 0 on the left and 1 on the right. The only scene here with more than one instance, and therefore the only one where perInstanceSettings is indexed by anything but 0 -- see checkPerInstanceMaterials.
+// Both instances get the identical Material, so nothing distinguishes them except which perInstanceSettings entry the integrator resolves for their triangles.
+TestScene makeTwoInstanceScene(float roughness, glm::vec3 f0) {
+    const glm::vec3 normal(0.0F, 0.0F, 1.0F);
+    const glm::vec4 tangent(1.0F, 0.0F, 0.0F, 1.0F);
+    const auto vertex = [&](float x, float y) {
+        return ShadingVertex{glm::vec3(x, y, 0.0F), normal, glm::vec2(0.5F, 0.5F), tangent};
+    };
+    // Wound counter-clockwise as seen from +Z so geometricNormalOf gives (0,0,1), matching makeQuadScene.
+    const auto addQuad = [&](TestScene& scene, float xMin, float xMax, int instanceIndex) {
+        const ShadingVertex v0 = vertex(xMin, -kQuadExtent);
+        const ShadingVertex v1 = vertex(xMax, -kQuadExtent);
+        const ShadingVertex v2 = vertex(xMax, kQuadExtent);
+        const ShadingVertex v3 = vertex(xMin, kQuadExtent);
+        scene.worldTriangles.push_back(Triangle{v0.position, v1.position, v2.position});
+        scene.worldTriangles.push_back(Triangle{v0.position, v2.position, v3.position});
+        scene.shadingTriangles.push_back(ShadingTriangle{v0, v1, v2, instanceIndex});
+        scene.shadingTriangles.push_back(ShadingTriangle{v0, v2, v3, instanceIndex});
+    };
+
+    TestScene scene;
+    addQuad(scene, -kQuadExtent, 0.0F, 0);
+    addQuad(scene, 0.0F, kQuadExtent, 1);
+    scene.instances = {MeshInstance{makeMaterial(roughness, f0), glm::mat4(1.0F), ""},
+                        MeshInstance{makeMaterial(roughness, f0), glm::mat4(1.0F), ""}};
+    return scene;
+}
+
 EnvironmentMap makeUniformEnvironment() {
     engine::gfx::HdrImage image;
     image.width = 64;
@@ -217,12 +247,12 @@ Camera makeCamera() {
                    kFocalLengthMm, 0.01F, 1000.0F, 2.8F, 1.0F / 125.0F, 100.0F);
 }
 
-// Mean radiance over the centre 4x4 block -- averaging several pixels tightens the estimate without widening the view-direction spread enough to matter at this FOV.
-glm::vec3 centreMean(const engine::gfx::HdrImage& image) {
+// Mean radiance over the half-open pixel block [x0,x1) x [y0,y1).
+glm::vec3 regionMean(const engine::gfx::HdrImage& image, int x0, int y0, int x1, int y1) {
     glm::vec3 sum(0.0F);
     int count = 0;
-    for (int y = (kImageSize / 2) - 2; y < (kImageSize / 2) + 2; ++y) {
-        for (int x = (kImageSize / 2) - 2; x < (kImageSize / 2) + 2; ++x) {
+    for (int y = y0; y < y1; ++y) {
+        for (int x = x0; x < x1; ++x) {
             const std::size_t idx =
                 ((static_cast<std::size_t>(y) * static_cast<std::size_t>(image.width)) +
                  static_cast<std::size_t>(x)) *
@@ -232,6 +262,12 @@ glm::vec3 centreMean(const engine::gfx::HdrImage& image) {
         }
     }
     return sum / static_cast<float>(count);
+}
+
+// Mean radiance over the centre 4x4 block -- averaging several pixels tightens the estimate without widening the view-direction spread enough to matter at this FOV.
+glm::vec3 centreMean(const engine::gfx::HdrImage& image) {
+    return regionMean(image, (kImageSize / 2) - 2, (kImageSize / 2) - 2, (kImageSize / 2) + 2,
+                       (kImageSize / 2) + 2);
 }
 
 // Independent ground truth, identical in form to nee_validate.cpp's referenceLo: Lo(wo) = integral over the hemisphere of evaluateBsdf(wo,wi)*wi.z dwi, with L0=1. Uniform-hemisphere Monte Carlo, so it under-samples a sharp GGX peak -- callers restrict the tight comparison to roughness values where it converges.
@@ -249,19 +285,28 @@ float referenceLo(const BsdfParams& params, const glm::vec3& wo, int sampleCount
     return std::max({accum.x, accum.y, accum.z}) / static_cast<float>(sampleCount);
 }
 
-// Runs one full renderPathTraced pass over the quad scene. showSky gates only the primary ray's own miss, so turning it off zeroes the background term the transport buckets deliberately exclude.
-engine::scene::PathTraceResult renderPass(const TestScene& scene, const EnvironmentMap& env,
-                                           const PathTraceSettings& settings, EmbreeAccel& accel,
-                                           engine::scene::ThreadPool& pool, bool showSky) {
+// Runs one full renderPathTraced pass with an explicit per-instance settings vector, the only way to give two instances different materials. showSky gates only the primary ray's own miss, so turning it off zeroes the background term the transport buckets deliberately exclude.
+engine::scene::PathTraceResult renderPassPerInstance(
+    const TestScene& scene, const EnvironmentMap& env, const PathTraceSettings& settings,
+    const std::vector<PathTraceSettings>& perInstanceSettings, EmbreeAccel& accel,
+    engine::scene::ThreadPool& pool, bool showSky) {
     const std::atomic<std::uint64_t> generation{1};
     engine::scene::PathTraceResult result =
         engine::scene::makePathTraceResult(kImageSize, kImageSize);
-    const std::vector<PathTraceSettings> perInstanceSettings(scene.instances.size(), settings);
     engine::scene::renderPathTraced(makeCamera(), accel, scene.shadingTriangles, scene.instances, env,
                                      kImageSize, kImageSize, /*envRotationRadians=*/0.0F, showSky,
                                      /*envExposure=*/1.0F, settings, perInstanceSettings, /*runSeed=*/7U,
                                      generation, /*requestedGeneration=*/1U, pool, result);
     return result;
+}
+
+// The same pass with every instance on one material, which is what every check but checkPerInstanceMaterials wants.
+engine::scene::PathTraceResult renderPass(const TestScene& scene, const EnvironmentMap& env,
+                                           const PathTraceSettings& settings, EmbreeAccel& accel,
+                                           engine::scene::ThreadPool& pool, bool showSky) {
+    return renderPassPerInstance(
+        scene, env, settings, std::vector<PathTraceSettings>(scene.instances.size(), settings), accel,
+        pool, showSky);
 }
 
 // Centre-region mean radiance of one pass.
@@ -498,6 +543,176 @@ bool checkBeerLambert() {
     return ok;
 }
 
+// Per-instance material binding, integrator side: nothing asserted that ShadingTriangle::instanceIndex resolves into the RIGHT perInstanceSettings entry. Every other scene in this suite has exactly one instance, so every lookup is index 0 and any mis-indexing is invisible; in a real scene it renders plausibly and silently, which is the whole failure mode.
+// Two coplanar quads, one instance each, identical Materials, distinguished only by a per-instance diffuseColour -- red on the left of x=0, blue on the right. Under a white uniform environment the left block must read red-dominant and the right blue-dominant, and swapping the two vector entries must swap the two readings. The first assertion catches an off-by-one or a constant index; the second catches a reading that happens to come from anywhere other than this vector's order.
+// Probed columns stay 2px clear of the x=0 seam at the image centre, wider than the 1.5px reconstruction filter, so neither block contains a pixel the other instance splatted into.
+bool checkPerInstanceMaterials() {
+    constexpr float kRoughness = 1.0F;
+    constexpr float kDominance = 4.0F;   // the off-channel is the white specular coat, not zero, so this is a ratio test rather than an equality one
+    constexpr float kSwapTolerance = 0.02F;
+    const glm::vec3 red(1.0F, 0.0F, 0.0F);
+    const glm::vec3 blue(0.0F, 0.0F, 1.0F);
+
+    const TestScene scene = makeTwoInstanceScene(kRoughness, glm::vec3(0.04F));
+    std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
+    if (!accel.has_value()) {
+        std::cerr << "integrator_validate: FAILED to build Embree two-instance scene\n";
+        return false;
+    }
+
+    const EnvironmentMap env = makeUniformEnvironment();
+    engine::scene::ThreadPool pool;
+    const PathTraceSettings base = makeSettings(1, 999, /*metallic=*/0.0F);
+
+    const auto render = [&](const glm::vec3& left, const glm::vec3& right) {
+        std::vector<PathTraceSettings> perInstance(2, base);
+        perInstance[0].diffuseColour = left;
+        perInstance[1].diffuseColour = right;
+        const engine::gfx::HdrImage beauty =
+            renderPassPerInstance(scene, env, base, perInstance, *accel, pool, /*showSky=*/true).beauty;
+        return std::pair{regionMean(beauty, 2, 6, 6, 10), regionMean(beauty, 10, 6, 14, 10)};
+    };
+
+    bool ok = true;
+    const auto [leftRed, rightBlue] = render(red, blue);
+    const auto [leftBlue, rightRed] = render(blue, red);
+
+    std::cout << "integrator_validate: per-instance material binding (two instances, one material each)\n";
+    std::cout << "  entry0=red   entry1=blue   left [" << leftRed.x << ", " << leftRed.z
+              << "]  right [" << rightBlue.x << ", " << rightBlue.z << "]  (r, b)\n";
+    std::cout << "  entry0=blue  entry1=red    left [" << leftBlue.x << ", " << leftBlue.z
+              << "]  right [" << rightRed.x << ", " << rightRed.z << "]  (r, b)\n";
+
+    if (!(leftRed.x > kDominance * leftRed.z) || !(rightBlue.z > kDominance * rightBlue.x)) {
+        std::cerr << "integrator_validate: FAILED per-instance material binding -- with entry 0 red "
+                     "and entry 1 blue, the left quad (instanceIndex 0) read ["
+                  << leftRed.x << ", " << leftRed.z << "] and the right (instanceIndex 1) read ["
+                  << rightBlue.x << ", " << rightBlue.z
+                  << "] in (r, b). Each instance's triangles must resolve to its own "
+                     "perInstanceSettings entry; a swap or a constant index lands here.\n";
+        ok = false;
+    }
+    // Swapping the vector must swap the picture. Compares each block against the OTHER assignment's opposite block, so it fails if the reading is driven by geometry, by triangle order, or by anything but this vector's order.
+    if (std::fabs(leftRed.x - rightRed.x) > kSwapTolerance ||
+        std::fabs(rightBlue.z - leftBlue.z) > kSwapTolerance) {
+        std::cerr << "integrator_validate: FAILED per-instance material binding under swap -- "
+                     "exchanging the two perInstanceSettings entries must exchange the two blocks' "
+                     "readings, but red measured " << leftRed.x << " on the left and " << rightRed.x
+                  << " on the right, blue " << rightBlue.z << " then " << leftBlue.z << ".\n";
+        ok = false;
+    }
+    return ok;
+}
+
+// Per-instance material binding, resolution side: resolvePerInstanceSettings maps each materialOverrides key (a glTF node NAME) onto the instance of that name, leaving every other instance on the scene-wide material, and refuses the whole scene if a key matches nothing.
+// No validator constructs a scene config, so this entire path was uncovered -- all five exit 0 on a build where it is broken, which is exactly what made a one-character typo in cornell.json render a 41% different image with no diagnostic before the unmatched-key gate landed. The bit-identical render that gated that change cannot see it either: a render only exercises the keys that already match.
+// Compared against loadMaterialConfig's own reading of the same file rather than against literals copied out of it, so editing assets/materials/glass.json cannot silently defeat this. The material files are shipped assets, not fixtures, which is the point: this asserts the binding the real scenes use.
+bool checkMaterialBinding() {
+    const std::string assetRoot = ASSET_ROOT_DIR;
+    const std::optional<engine::config::MaterialConfig> glass =
+        engine::config::loadMaterialConfig(assetRoot + "/materials/glass.json");
+    if (!glass.has_value()) {
+        std::cerr << "integrator_validate: FAILED to load materials/glass.json\n";
+        return false;
+    }
+
+    // How many of the 11 fields resolvePerInstanceSettings copies currently match the material file. A count rather than a bool so the base settings below can be required to match ZERO of them, which is what makes each individual copy observable. Exact equality is right: this is a copy, not a computation.
+    const auto matchingFields = [](const PathTraceSettings& s,
+                                    const engine::config::MaterialConfig& m) {
+        return static_cast<int>(s.bumpStrength == m.bumpStrength) +
+               static_cast<int>(s.roughnessMin == m.roughnessMin) +
+               static_cast<int>(s.roughnessMax == m.roughnessMax) +
+               static_cast<int>(s.diffuseColour == m.diffuseColour) +
+               static_cast<int>(s.ior == m.ior) +
+               static_cast<int>(s.transmissionFactor == m.transmissionFactor) +
+               static_cast<int>(s.metallicFactor == m.metallicFactor) +
+               static_cast<int>(s.roughnessFactor == m.roughnessFactor) +
+               static_cast<int>(s.diffuseRoughness == m.diffuseRoughness) +
+               static_cast<int>(s.transmissionColor == m.transmissionColor) +
+               static_cast<int>(s.transmissionDepth == m.transmissionDepth);
+    };
+    constexpr int kMaterialFields = 11;
+
+    const std::vector<MeshInstance> instances = {
+        MeshInstance{makeMaterial(1.0F, glm::vec3(0.04F)), glm::mat4(1.0F), "alpha"},
+        MeshInstance{makeMaterial(1.0F, glm::vec3(0.04F)), glm::mat4(1.0F), "beta"},
+        MeshInstance{makeMaterial(1.0F, glm::vec3(0.04F)), glm::mat4(1.0F), "gamma"}};
+    // Sentinel values, deliberately unlike glass.json in EVERY field -- nothing here is rendered, so these need not be plausible, only distinguishable. makeSettings' own defaults would not do: they happen to agree with glass.json on bumpStrength, roughnessMax, diffuseColour, ior, metallicFactor and diffuseRoughness, so a dropped copy of any of those six would leave the resolved value equal to the base, which equals glass, and pass unnoticed.
+    PathTraceSettings base = makeSettings(1, 999, /*metallic=*/1.0F);
+    base.bumpStrength = 0.25F;
+    base.roughnessMin = 0.2F;
+    base.roughnessMax = 0.9F;
+    base.diffuseColour = glm::vec3(0.3F, 0.4F, 0.5F);
+    base.ior = 1.33F;
+    base.roughnessFactor = 0.75F;
+    base.diffuseRoughness = 0.6F;
+    base.transmissionColor = glm::vec3(0.5F);
+    base.transmissionDepth = 2.0F;
+
+    bool ok = true;
+    std::cout << "integrator_validate: materialOverrides resolution (3 instances, 1 overridden)\n";
+
+    // Non-vacuity, and the assumption every assertion below rests on: the base must differ from the override in all 11 fields, so that each field's copy is independently observable. A field they happened to share would be untestable here whatever resolvePerInstanceSettings did with it.
+    if (matchingFields(base, *glass) != 0) {
+        std::cerr << "integrator_validate: FAILED material binding setup -- the base settings already "
+                     "agree with glass.json on " << matchingFields(base, *glass)
+                  << " field(s), so a dropped copy of those fields would be invisible here. Change "
+                     "the sentinel values above, or glass.json has moved onto them.\n";
+        return false;
+    }
+
+    const std::optional<std::vector<PathTraceSettings>> resolved =
+        engine::scene::resolvePerInstanceSettings(base, instances,
+                                                   {{"beta", "materials/glass.json"}}, assetRoot);
+    if (!resolved.has_value() || resolved->size() != instances.size()) {
+        std::cerr << "integrator_validate: FAILED material binding -- a valid override was rejected, "
+                     "or returned the wrong number of entries.\n";
+        return false;
+    }
+    std::cout << "  entry 0/1/2 fields matching glass: " << matchingFields((*resolved)[0], *glass) << '/'
+              << matchingFields((*resolved)[1], *glass) << '/'
+              << matchingFields((*resolved)[2], *glass) << "   (expected 0/" << kMaterialFields
+              << "/0 of " << kMaterialFields << ")\n";
+    if (matchingFields((*resolved)[1], *glass) != kMaterialFields) {
+        std::cerr << "integrator_validate: FAILED material binding -- the override keyed on 'beta' "
+                     "reached instance 1 with only "
+                  << matchingFields((*resolved)[1], *glass) << " of " << kMaterialFields
+                  << " fields carried across. Every field the material file defines must be copied, "
+                     "not merely the ones a render happens to look at.\n";
+        ok = false;
+    }
+    // Zero, not "not all": the base differs from glass in every field, so any field matching glass here is one the override wrote onto an instance it does not name.
+    if (matchingFields((*resolved)[0], *glass) != 0 || matchingFields((*resolved)[2], *glass) != 0) {
+        std::cerr << "integrator_validate: FAILED material binding -- an override keyed on 'beta' "
+                     "leaked onto an instance not named by it; instances 0 and 2 matched "
+                  << matchingFields((*resolved)[0], *glass) << " and "
+                  << matchingFields((*resolved)[2], *glass)
+                  << " of glass.json's fields, and must keep the scene-wide material.\n";
+        ok = false;
+    }
+
+    // Both rejection paths. A scene that silently renders the wrong material is worse than one that refuses to start, which is the contract resolvePerInstanceSettings documents.
+    std::cout << "  the two stderr diagnostics below are expected: they are the function under test "
+                 "refusing a bad scene\n";
+    if (engine::scene::resolvePerInstanceSettings(base, instances,
+                                                   {{"delta", "materials/glass.json"}}, assetRoot)
+            .has_value()) {
+        std::cerr << "integrator_validate: FAILED material binding -- an override key matching no "
+                     "instance name was accepted; a typo must abort the scene, not render it "
+                     "silently with the wrong material.\n";
+        ok = false;
+    }
+    if (engine::scene::resolvePerInstanceSettings(base, instances,
+                                                   {{"beta", "materials/does_not_exist.json"}},
+                                                   assetRoot)
+            .has_value()) {
+        std::cerr << "integrator_validate: FAILED material binding -- an override naming an "
+                     "unloadable material file was accepted.\n";
+        ok = false;
+    }
+    return ok;
+}
+
 // The five transport buckets are a partition of beauty, not a set of related-looking images: with the background term zeroed (showSky off), DirectDiffuse + IndirectDiffuse + DirectSpecular + IndirectSpecular + Refraction must equal Beauty at every pixel, to float error.
 // Every radiance contribution tracePath adds is written to exactly one bucket at its own physical value, so any gap means a contribution was bucketed twice, dropped, or rescaled, exactly what the previous delighted buckets did by construction (they stripped baseColor at bounce 0 only, leaving direct and indirect in different units and neither summing to anything).
 // The slab rows carry the load: a single quad reaches only the Direct buckets, while the slab's internal reflections populate Indirect and Refraction and exercise the transmissive exiting vertex.
@@ -596,8 +811,10 @@ int main() {
     const bool slabOk = checkTransmissiveSlab();
     const bool sphereOk = checkTransmissiveSphere();
     const bool absorptionOk = checkBeerLambert();
+    const bool bindingOk = checkPerInstanceMaterials();
+    const bool resolveOk = checkMaterialBinding();
     const bool partitionOk = checkTransportPartition();
-    if (!casesOk || !slabOk || !sphereOk || !absorptionOk || !partitionOk) {
+    if (!casesOk || !slabOk || !sphereOk || !absorptionOk || !bindingOk || !resolveOk || !partitionOk) {
         std::cerr << "integrator_validate: FAILED\n";
         return EXIT_FAILURE;
     }
