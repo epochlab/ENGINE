@@ -185,8 +185,11 @@ add_executable(integrator_validate tools/integrator_validate.cpp src/scene/path_
                src/scene/gbuffer_shading.cpp src/scene/embree_accel.cpp src/scene/ray_types.cpp
                src/scene/shading_scene.cpp src/scene/bsdf.cpp src/scene/sampler.cpp
                src/scene/environment_map.cpp src/scene/camera.cpp src/scene/thread_pool.cpp
-               src/gfx/hdr_image.cpp)
-target_include_directories(integrator_validate PRIVATE include)
+               src/scene/material_binding.cpp src/config/scene_config.cpp src/gfx/hdr_image.cpp)
+# material_binding/scene_config and the asset root are for checkMaterialBinding, which resolves real assets/materials/*.json files against named instances -- the materialOverrides path no other validator touches.
+target_include_directories(integrator_validate PRIVATE include ${JSON_DIR})
+target_compile_definitions(integrator_validate PRIVATE
+    ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets")
 target_compile_options(integrator_validate PRIVATE -Wall -Wextra -Werror -march=native)
 target_link_libraries(integrator_validate PRIVATE glm::glm embree OpenEXR::OpenEXR Imath::Imath)
 if(IPO_SUPPORTED)
