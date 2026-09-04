@@ -7,7 +7,7 @@
         "position": [0.0, 0.0, 6.0],
         "yawDegrees": 0.0,
         "pitchDegrees": 0.0,
-        "filmBack": { "widthMm": 23.76, "heightMm": 13.37 },
+        "filmBackPreset": "ARRI Alexa XT (16:9)",
         "focalLengthMm": 70.0,
         "nearClip": 0.1,
         "farClip": 100.0,
