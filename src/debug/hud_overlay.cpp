@@ -400,7 +400,14 @@ void drawPixelProbePanel(const PixelProbeSample& pixelProbe) {
         ImGui::TextDisabled("R --   G --   B --   A --");
     }
 
+    const ImVec2 windowMin = ImGui::GetWindowPos();
+    const ImVec2 windowSize = ImGui::GetWindowSize();
     ImGui::End();
+
+    // Drawn on the foreground list, after End(): a rect at the exact window bounds gets clipped
+    // to near-invisibility by the window's own clip rect if added to its draw list before End().
+    ImGui::GetForegroundDrawList()->AddRect(windowMin, ImVec2(windowMin.x + windowSize.x, windowMin.y + windowSize.y),
+                                             IM_COL32(60, 60, 60, 180));
 }
 
 // Active R/G/B channel isolation, top-right corner -- foreground draw list, independent of the ##hud window.
@@ -428,7 +435,7 @@ HudOverlay::HudOverlay(GLFWwindow* nativeHandle) {
     ImGuiStyle& style = ImGui::GetStyle();
     style.WindowRounding = 0.0F;
     style.WindowBorderSize = 0.0F;
-    style.Colors[ImGuiCol_WindowBg] = ImVec4(0.0F, 0.0F, 0.0F, 0.85F);
+    style.Colors[ImGuiCol_WindowBg] = ImVec4(0.0F, 0.0F, 0.0F, 0.80F);
 
     if (!ImGui_ImplGlfw_InitForOpenGL(nativeHandle, true)) {
         std::cerr << "HudOverlay: ImGui_ImplGlfw_InitForOpenGL failed\n";
