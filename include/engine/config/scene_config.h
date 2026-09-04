@@ -1,5 +1,6 @@
 #pragma once
 
+#include <map>
 #include <optional>
 #include <string>
 
@@ -20,7 +21,7 @@ struct EnvironmentConfig {
     std::string hdriPath;  // environment map, relative to ASSET_ROOT_DIR
 };
 
-// Tunable shading constants that shape how a material's textures get turned into BSDF input -- externalized so these can be edited without recompiling. diffuseColour/ior/transmissionFactor/metallicFactor/roughnessFactor are a single global material definition applied to every mesh in the scene, replacing what used to be read per-object off each glTF's material block.
+// Tunable shading constants that shape how a material's textures get turned into BSDF input -- externalized so these can be edited without recompiling. diffuseColour/ior/transmissionFactor/metallicFactor/roughnessFactor/diffuseRoughness are a single global material definition applied to every mesh in the scene, replacing what used to be read per-object off each glTF's material block. Loaded from its own file (see loadMaterialConfig) rather than inline in scene.json, so a shader library of named material files (assets/materials/*.json) can grow without a scene.json schema change.
 struct MaterialConfig {
     float bumpStrength;   // scales the bump texture's raw per-texel height difference; see path_tracer.cpp's buildShadingFrame
     float roughnessMin;   // floor applied to the roughness texture sample, avoids a near-zero-roughness GGX singularity
@@ -30,16 +31,25 @@ struct MaterialConfig {
     float transmissionFactor;      // KHR_materials_transmission-style factor, 0 = opaque
     float metallicFactor;
     float roughnessFactor;         // multiplies the roughness texture sample, before roughnessMin/Max clamp
+    float diffuseRoughness;        // EON rough-diffuse parameter r in [0,1]; 0 = Lambertian, see bsdf.cpp's evaluateDiffuseLobe
+    // Beer-Lambert volumetric absorption while a path travels inside this material (transmissionFactor>0 only). Optional, default [1,1,1]: -log(1)=0, so absorption is a true no-op regardless of transmissionDepth unless a material opts in. See path_tracer.cpp's sigmaAFromTransmission.
+    glm::vec3 transmissionColor = glm::vec3(1.0F);
+    float transmissionDepth = 1.0F;  // distance (world units) at which transmittance reaches transmissionColor
 };
 
-// The asset to load and how to shade/light it -- everything main.cpp needs that's specific to this scene rather than a session-wide renderer/camera default (those are ProfileConfig). Grouped into model/environment/material sub-objects; see assets/scenes/tree.json for the checked-in defaults.
+// The asset to load and how to shade/light it -- everything main.cpp needs that's specific to this scene rather than a session-wide renderer/camera default (those are ProfileConfig). Grouped into model/environment sub-objects, plus a path to the scene's material file; see assets/scenes/tree.json for the checked-in defaults.
 struct SceneConfig {
     ModelConfig model;
     EnvironmentConfig environment;
-    MaterialConfig material;
+    std::string materialPath;  // relative to ASSET_ROOT_DIR, points to a material JSON file (e.g. materials/diffuse.json), matching ModelConfig::gltfPath's convention
+    // glTF node name -> material JSON path (relative to ASSET_ROOT_DIR), overriding materialPath for that instance's triangles. Optional key; absent in the scene JSON means an empty map, i.e. every instance uses materialPath. Keyed by MeshInstance::name (gltf_loader.h).
+    std::map<std::string, std::string> materialOverrides;
 };
 
 // Reads and parses path. Returns nullopt and logs to stderr if the file is missing, unreadable, or any required field can't be found/parsed. User-editable input, not an internal invariant: failure is expected and surfaced rather than defaulted around.
 [[nodiscard]] std::optional<SceneConfig> loadSceneConfig(const std::string& path);
+
+// Reads and parses a standalone material file (e.g. assets/materials/diffuse.json). Same failure contract as loadSceneConfig.
+[[nodiscard]] std::optional<MaterialConfig> loadMaterialConfig(const std::string& path);
 
 }  // namespace engine::config

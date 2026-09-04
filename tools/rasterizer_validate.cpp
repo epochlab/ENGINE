@@ -125,10 +125,11 @@ int checkFields(const std::vector<FieldCheck>& fields, int x, int y, const char*
 // Oracle: pixel-center (unjittered) Embree primary-ray intersection, resolved through the same gbuffer_shading.h functions renderRasterGBuffer itself calls -- independent of the rasterizer's own scan-conversion/clipping code, so agreement is a real cross-check.
 bool checkPose(const char* poseName, const Camera& camera, const EmbreeAccel& accel,
                const std::vector<ShadingTriangle>& shadingTriangles,
-               const std::vector<MeshInstance>& instances, const PathTraceSettings& settings,
-               ThreadPool& threadPool) {
+               const std::vector<MeshInstance>& instances,
+               const std::vector<PathTraceSettings>& perInstanceSettings, ThreadPool& threadPool) {
     RasterGBuffer raster;
-    renderRasterGBuffer(camera, accel, shadingTriangles, instances, settings, kWidth, kHeight, threadPool, raster);
+    renderRasterGBuffer(camera, accel, shadingTriangles, instances, perInstanceSettings, kWidth, kHeight,
+                         threadPool, raster);
     const float aspect = static_cast<float>(kWidth) / static_cast<float>(kHeight);
     const glm::vec3 camPos = camera.position();
     const glm::vec3 camForward = camera.forward();
@@ -156,9 +157,11 @@ bool checkPose(const char* poseName, const Camera& camera, const EmbreeAccel& ac
 
             const ShadingTriangle& triangle = shadingTriangles[static_cast<std::size_t>(hit->triangleIndex)];
             const Material& material = instances[static_cast<std::size_t>(triangle.instanceIndex)].material;
+            const PathTraceSettings& settings =
+                perInstanceSettings[static_cast<std::size_t>(triangle.instanceIndex)];
             const ShadingVertex shading = interpolateShading(triangle, hit->u, hit->v);
             const ShadingFrame frame = buildShadingFrame(shading, material, settings);
-            const BsdfParams params = resolveBsdfParams(material, shading.uv, settings);
+            const BsdfParams params = resolveBsdfParams(material, shading.uv, shading.colour, settings);
             const glm::vec3 woWorld = -ray.dir;
             const float ndotV = std::max(glm::dot(frame.normal, woWorld), 1e-4F);
             const float fresnelVal = fresnelSchlick(ndotV, params.f0).x;
@@ -272,7 +275,8 @@ bool checkBoundingBoxOcclusion(ThreadPool& threadPool) {
     settings.roughnessFactor = 1.0F;
 
     std::vector<MeshInstance> instances;
-    instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.5F), 0.5F, 1.0F), glm::mat4(1.0F)});
+    instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.5F), 0.5F, 1.0F), glm::mat4(1.0F), ""});
+    const std::vector<PathTraceSettings> perInstanceSettings(instances.size(), settings);
 
     const ShadingTriangle farMarker = makeTinyTriangle(glm::vec3(-0.5F, -0.5F, -15.0F), 0.05F, 0);
     const ShadingTriangle nearMarker = makeTinyTriangle(glm::vec3(0.5F, 0.5F, -5.0F), 0.05F, 0);
@@ -287,7 +291,8 @@ bool checkBoundingBoxOcclusion(ThreadPool& threadPool) {
             return false;
         }
         RasterGBuffer raster;
-        renderRasterGBuffer(camera, *accel, scene, instances, settings, kWidth, kHeight, threadPool, raster);
+        renderRasterGBuffer(camera, *accel, scene, instances, perInstanceSettings, kWidth, kHeight,
+                             threadPool, raster);
         const int unoccluded = countBoundingBoxPixels(raster);
         std::cout << "rasterizer_validate: boundingBox unoccluded -- " << unoccluded << " pixels\n";
         if (unoccluded == 0) {
@@ -306,8 +311,8 @@ bool checkBoundingBoxOcclusion(ThreadPool& threadPool) {
             return false;
         }
         RasterGBuffer occludedRaster;
-        renderRasterGBuffer(camera, *occludedAccel, occludedScene, instances, settings, kWidth, kHeight,
-                             threadPool, occludedRaster);
+        renderRasterGBuffer(camera, *occludedAccel, occludedScene, instances, perInstanceSettings, kWidth,
+                             kHeight, threadPool, occludedRaster);
         const int occluded = countBoundingBoxPixels(occludedRaster);
         std::cout << "rasterizer_validate: boundingBox occluded -- " << occluded << " pixels\n";
         if (occluded * 2 >= unoccluded) {
@@ -323,10 +328,12 @@ bool checkBoundingBoxOcclusion(ThreadPool& threadPool) {
 // Regression check: must draw something (not silently empty) but only a thin fraction of hit pixels, not most of the mesh.
 bool checkWireframeSanity(const Camera& camera, const EmbreeAccel& accel,
                            const std::vector<ShadingTriangle>& shadingTriangles,
-                           const std::vector<MeshInstance>& instances, const PathTraceSettings& settings,
+                           const std::vector<MeshInstance>& instances,
+                           const std::vector<PathTraceSettings>& perInstanceSettings,
                            ThreadPool& threadPool) {
     RasterGBuffer raster;
-    renderRasterGBuffer(camera, accel, shadingTriangles, instances, settings, kWidth, kHeight, threadPool, raster);
+    renderRasterGBuffer(camera, accel, shadingTriangles, instances, perInstanceSettings, kWidth, kHeight,
+                         threadPool, raster);
     int hitPixels = 0;
     int wirePixels = 0;
     for (int y = 0; y < kHeight; ++y) {
@@ -366,10 +373,10 @@ int main() {
     }
 
     std::vector<MeshInstance> instances;
-    instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.8F, 0.2F, 0.2F), 0.2F, 1.0F), glm::mat4(1.0F)});
-    instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.2F, 0.8F, 0.2F), 0.5F, 0.6F), glm::mat4(1.0F)});
-    instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.2F, 0.2F, 0.8F), 0.8F, 0.3F), glm::mat4(1.0F)});
-    instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.8F, 0.8F, 0.2F), 1.0F, 0.9F), glm::mat4(1.0F)});
+    instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.8F, 0.2F, 0.2F), 0.2F, 1.0F), glm::mat4(1.0F), ""});
+    instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.2F, 0.8F, 0.2F), 0.5F, 0.6F), glm::mat4(1.0F), ""});
+    instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.2F, 0.2F, 0.8F), 0.8F, 0.3F), glm::mat4(1.0F), ""});
+    instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.8F, 0.8F, 0.2F), 1.0F, 0.9F), glm::mat4(1.0F), ""});
 
     PathTraceSettings settings{};
     settings.samplesPerPixel = 1;
@@ -383,6 +390,7 @@ int main() {
     settings.transmissionFactor = 0.0F;
     settings.metallicFactor = 0.2F;
     settings.roughnessFactor = 1.0F;
+    const std::vector<PathTraceSettings> perInstanceSettings(instances.size(), settings);
 
     const Camera::FilmBack filmBack{36.0F, 24.0F};
     const Camera straightOn(glm::vec3(0.0F, 0.0F, 0.0F), 0.0F, 0.0F, filmBack, 35.0F, 0.1F, 100.0F, 2.8F,
@@ -395,10 +403,18 @@ int main() {
 
     ThreadPool threadPool;
     bool ok = true;
-    ok = checkPose("straightOn", straightOn, *accel, shadingTriangles, instances, settings, threadPool) && ok;
-    ok = checkPose("angled", angled, *accel, shadingTriangles, instances, settings, threadPool) && ok;
-    ok = checkPose("clipTest", clipTest, *accel, shadingTriangles, instances, settings, threadPool) && ok;
-    ok = checkWireframeSanity(straightOn, *accel, shadingTriangles, instances, settings, threadPool) && ok;
+    ok = checkPose("straightOn", straightOn, *accel, shadingTriangles, instances, perInstanceSettings,
+                   threadPool) &&
+         ok;
+    ok = checkPose("angled", angled, *accel, shadingTriangles, instances, perInstanceSettings,
+                   threadPool) &&
+         ok;
+    ok = checkPose("clipTest", clipTest, *accel, shadingTriangles, instances, perInstanceSettings,
+                   threadPool) &&
+         ok;
+    ok = checkWireframeSanity(straightOn, *accel, shadingTriangles, instances, perInstanceSettings,
+                               threadPool) &&
+         ok;
     ok = checkBoundingBoxOcclusion(threadPool) && ok;
 
     if (!ok) {

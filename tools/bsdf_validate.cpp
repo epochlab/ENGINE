@@ -20,16 +20,17 @@ using engine::scene::BsdfParams;
 
 constexpr float kPi = 3.14159265F;
 
-BsdfParams makeParams(float roughness, float metallic, float transmissionFactor) {
+BsdfParams makeParams(float roughness, float metallic, float transmissionFactor,
+                       float diffuseRoughness = 0.0F) {
     const glm::vec3 baseColor(1.0F);  // worst case: full white albedo
     const glm::vec3 f0 = glm::mix(glm::vec3(0.04F), baseColor, metallic);
-    return BsdfParams{baseColor, metallic, roughness, f0, 1.5F, transmissionFactor};
+    return BsdfParams{baseColor, metallic, roughness, f0, 1.5F, transmissionFactor, diffuseRoughness};
 }
 
 // A colored/dark conductor (f0=0.5, not the white f0=baseColor=1 makeParams gives at metallic=1): the case that caught evaluateDiffuseLobe's pdf-gating bug.
 // A white f0 clamps specularProb to 0.95, leaving only 5% diffuse selection mass to hide a diffuse-pdf bug under this test's tolerance; f0=0.5 leaves ~50%, large enough for the same bug to fail loudly.
 BsdfParams makeColoredMetalParams(float roughness) {
-    return BsdfParams{glm::vec3(1.0F), 1.0F, roughness, glm::vec3(0.5F), 1.5F, 0.0F};
+    return BsdfParams{glm::vec3(1.0F), 1.0F, roughness, glm::vec3(0.5F), 1.5F, 0.0F, 0.0F};
 }
 
 // Uniform-solid-angle hemisphere sample (PBRT-style inversion, same as furnace_test.cpp): z=u1, r=sqrt(1-u1^2), phi=2*pi*u2, pdf=1/(2*pi).
@@ -215,6 +216,44 @@ bool checkWhiteFurnaceTwoSided() {
     return ok;
 }
 
+// EON rough-diffuse energy preservation: the same two-sided white furnace test as
+// checkWhiteFurnaceTwoSided above, swept over diffuseRoughness instead of (specular) roughness.
+// Classical Oren-Nayar variants (and this codebase's own diffuse lobe before EON) lose energy as
+// diffuseRoughness increases -- exactly the problem EON's analytic multiple-scattering compensation
+// term exists to fix (Portsmouth, Kutz, Hill 2025) -- so this must read 1.0 at every value, same
+// correctness target as the specular sweep. Conductors have no diffuse substrate (diffuseKd is zeroed
+// at metallic=1 in computeLobeProbabilities), so this is dielectric-only; roughness is fixed at a
+// mid-range value since it is the specular lobe's own parameter, orthogonal to diffuseRoughness.
+bool checkEonDiffuseFurnace() {
+    constexpr int kSampleCount = 400000;
+    constexpr float kTolerance = 0.02F;
+    constexpr float kRoughness = 0.5F;
+    const std::array<float, 5> diffuseRoughnesses = {0.0F, 0.25F, 0.5F, 0.75F, 1.0F};
+    const std::array<float, 3> ndotVs = {1.0F, 0.6F, 0.2F};
+
+    bool ok = true;
+    std::uint32_t seed = 20000;
+    std::cout << "bsdf_validate: EON diffuse-roughness furnace energy (1.0 = perfectly energy-conserving)\n";
+    std::cout << "  diffuseRoughness  ndotV  Lo\n";
+    for (float diffuseRoughness : diffuseRoughnesses) {
+        for (float ndotV : ndotVs) {
+            ++seed;
+            const BsdfParams params = makeParams(kRoughness, 0.0F, 0.0F, diffuseRoughness);
+            const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (ndotV * ndotV))), 0.0F, ndotV);
+            const glm::vec3 lo = furnaceLo(params, wo, kSampleCount, seed);
+            std::cout << "  " << diffuseRoughness << "              " << ndotV << "    "
+                      << minChannel(lo) << '\n';
+            if (minChannel(lo) < 1.0F - kTolerance || maxChannel(lo) > 1.0F + kTolerance) {
+                std::cerr << "bsdf_validate: FAILED EON diffuse furnace energy at diffuseRoughness="
+                          << diffuseRoughness << " ndotV=" << ndotV << " Lo=[" << minChannel(lo) << ", "
+                          << maxChannel(lo) << "] (expected 1.0 +/- " << kTolerance << ")\n";
+                ok = false;
+            }
+        }
+    }
+    return ok;
+}
+
 // Mean throughput through sampleBsdf with every transmitted draw converted back from radiance to energy. sampleBsdf applies the non-symmetric eta^2 radiance compression on refraction (Veach 1997 sec. 5.2), so a transmitted sample carries radiance and a raw mean is bounded by ior^2, not 1.0, which is why checkFurnace can only assert an upper bound on its transmissive rows and never sees energy loss there.
 // Dividing those draws by eta^2 puts every sample in one domain with an analytic answer; LobeType::Transmission is exactly the far-hemisphere draws, delta and rough alike.
 glm::vec3 transmissiveEnergyLo(const BsdfParams& params, const glm::vec3& wo, int sampleCount,
@@ -318,7 +357,7 @@ bool checkReciprocity() {
 
 // eta^2-corrected reciprocity for the transmission lobe: f_t(wo->wi)*eta_wi^2 == f_t(wi->wo)*eta_wo^2. Every term in evaluateTransmissionLobe is symmetric under the swap except denom = (wo.h) + etaR*(wi.h), which the reversed frame rescales by etaI/etaT; squared, that is exactly the eta ratio above. With wo outside and wi inside it reads f(wo->wi)*ior^2 == f(wi->wo).
 // Catches a misplaced etaR^2, a flipped denom orientation or an un-flipped ht -- O(1) errors (a stray eta^2 is 2.25x or 0.44x at ior 1.5) invisible to the furnace and round-trip tests, which assert only totals and in which the two sides' errors cancel.
-// SINGLE SCATTER ONLY. multiScatterShape evaluates escapeWi at the wo-side eta for every wi, transmitted ones in the other medium included -- deliberate, and the reason its hemisphere integral comes out at exactly (1 - escapeWo) -- but under the swap both etaSq and that eta flip. Known limitation (README sec. 4): it blocks bidirectional transport through rough glass, not this unidirectional integrator.
+// SINGLE SCATTER ONLY, permanently -- not a symptom of a fixable bug. multiScatterShape (bsdf.cpp) now looks up escapeWi at the correct per-branch eta (reciprocal for a transmitted wi, matching wo's orientation for a reflected one, each paired with its own averageEscapeAlbedo normalisation), which restores the total-energy identity (checkTransmissiveEnergyBalance sweeps this at roughness up to 1.0) but does not and cannot make the multi-scatter transmit lobe itself reciprocal: its numerator is symmetric under the wo/wi swap but its denominator (deficitAvg, tied to each side's own physical eta orientation) is not, which is inherent to transmissive multiple scattering, not an implementation gap. Known limitation (README sec. 4): it blocks bidirectional transport through rough glass, not this unidirectional integrator. Confirmed empirically: extending this sweep to roughness 0.20 still passes (the multi-scatter term stays under kMinDeficit there), but 0.40 fails hard (up to 5x forward/reverse mismatch) for exactly this reason -- do not chase that by widening the sweep.
 // Isolated with no new accessor by staying under bsdf.cpp's kMinDeficit, where the multiple-scattering term switches itself off: 1 - escapeAvg measures 1.4e-4 at roughness 0.10 and 1.8e-3 at 0.20 against a 1e-3 gate, so 0.15 upward is not safe. Both roughnesses stay above kSmoothAlpha or there is no continuous lobe to test at all.
 // wi is CONSTRUCTED, not sampled: at these roughnesses the lobe is a fraction of a degree wide, so an arbitrary far-side direction returns zero on both sides and the check passes having tested nothing. Refract wo through the macro normal, then perturb by a multiple of alpha for off-peak pairs; the non-zero-pair count is asserted for the same reason.
 // transmissionFactor is pinned at 1.0. Between 0 and 1 the entering side scales the lobe by it and the exiting side by 1.0 -- a modelling asymmetry (inside the medium there is no substrate to withhold anything), not a Jacobian error, so sweeping it would test the convention rather than the invariant.
@@ -338,7 +377,7 @@ bool checkTransmissionReciprocity() {
     for (float roughness : roughnesses) {
         const float alpha = roughness * roughness;
         for (float ior : iors) {
-            const BsdfParams params{glm::vec3(1.0F), 0.0F, roughness, glm::vec3(0.04F), ior, 1.0F};
+            const BsdfParams params{glm::vec3(1.0F), 0.0F, roughness, glm::vec3(0.04F), ior, 1.0F, 0.0F};
             for (float mu : cosines) {
                 const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (mu * mu))), 0.0F, mu);
                 const glm::vec3 refracted =
@@ -430,13 +469,14 @@ int main() {
     const bool pdfOk = checkPdfNormalization();
     const bool furnaceOk = checkFurnace();
     const bool whiteFurnaceOk = checkWhiteFurnaceTwoSided();
+    const bool eonDiffuseOk = checkEonDiffuseFurnace();
     const bool transmissiveEnergyOk = checkTransmissiveEnergyBalance();
     const bool reciprocityOk = checkReciprocity();
     const bool transmissionReciprocityOk = checkTransmissionReciprocity();
     const bool roundTripOk = checkTransmissionRoundTrip();
 
-    if (!pdfOk || !furnaceOk || !whiteFurnaceOk || !transmissiveEnergyOk || !reciprocityOk ||
-        !transmissionReciprocityOk || !roundTripOk) {
+    if (!pdfOk || !furnaceOk || !whiteFurnaceOk || !eonDiffuseOk || !transmissiveEnergyOk ||
+        !reciprocityOk || !transmissionReciprocityOk || !roundTripOk) {
         std::cerr << "bsdf_validate: FAILED\n";
         return EXIT_FAILURE;
     }

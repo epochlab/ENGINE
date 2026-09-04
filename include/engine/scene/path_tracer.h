@@ -23,16 +23,20 @@ struct PathTraceSettings {
     float rrMinProb = 0.05F;  // floor: stops a near-zero-throughput path being killed with near-certainty
     // Ceiling of exactly 1.0: a path carrying full throughput must never be terminated. Any lower caps survival for no gain -- it saves a fraction of deep-path tracing and pays for it with variance costing more than that fraction in extra samples.
     float rrMaxProb = 1.0F;
-    // Sourced from SceneConfig::material/scene.json's material block -- see resolveRoughness/buildShadingFrame (path_tracer.cpp).
+    // Sourced from the scene's material file (SceneConfig::materialPath, loaded via loadMaterialConfig) -- see resolveRoughness/buildShadingFrame (path_tracer.cpp).
     float bumpStrength;
     float roughnessMin;
     float roughnessMax;
-    // Global material override, sourced from SceneConfig::material/scene.json's material block -- see resolveBsdfParams (path_tracer.cpp).
+    // Global material override, sourced from the scene's material file (SceneConfig::materialPath, loaded via loadMaterialConfig) -- see resolveBsdfParams (path_tracer.cpp).
     glm::vec3 diffuseColour;
     float ior;
     float transmissionFactor;
     float metallicFactor;
     float roughnessFactor;
+    float diffuseRoughness;  // EON rough-diffuse parameter r in [0,1]; 0 = Lambertian, see bsdf.h's BsdfParams
+    // Beer-Lambert volumetric absorption while a path travels inside this material (transmissionFactor>0 only). See tracePath's mediumSigmaA (path_tracer.cpp).
+    glm::vec3 transmissionColor = glm::vec3(1.0F);
+    float transmissionDepth = 1.0F;
 };
 
 // One renderPathTraced() call's raw output -- what a single pass computes, and what PathTraceDriver republishes in full on every accumulated pass. Single-channel fields are broadcast to RGB (alpha=1), matching HdrImage's fixed 4-floats/texel layout so every field can go straight through Texture::createFromFloatPixels unchanged. Every field here is a per-sample quantity averaged across the call's samples, and re-averaged across accumulated passes by the driver. The primary-hit G-buffer AOVs (depth/worldPos/normal/albedo/metallic/roughness/tangent/objectId/alpha/fresnel/ao/uv/geomNormal/IOR) are NOT here: rasterizer.h's RasterGBuffer is their only producer, refreshed synchronously on the render thread every trigger change, and main.cpp's selectPathTracedImage routed every one of them there -- the path-traced copies were computed, stored and published to no reader at all. Wireframe/BoundingBox are likewise rasterizer.h-only.
@@ -60,8 +64,9 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                        const std::vector<MeshInstance>& instances,
                        const EnvironmentMap& environmentMap, int width, int height,
                        float envRotationRadians, bool showSky, float envExposure,
-                       const PathTraceSettings& settings, std::uint32_t runSeed,
-                       const std::atomic<std::uint64_t>& generation,
+                       const PathTraceSettings& settings,
+                       const std::vector<PathTraceSettings>& perInstanceSettings,
+                       std::uint32_t runSeed, const std::atomic<std::uint64_t>& generation,
                        std::uint64_t requestedGeneration, ThreadPool& threadPool,
                        PathTraceResult& out);
 
