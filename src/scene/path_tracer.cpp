@@ -160,8 +160,14 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
         // medium state carried over from the previous iteration's Transmission sample. hit->t is genuine
         // Euclidean distance: every ray direction reaching this point is unit-length (primary rays via
         // Camera::primaryRay, continuation rays via ShadingFrame::toWorld of a normalized local sample).
-        if (mediumSigmaA.has_value() && hit.has_value()) {
-            throughput *= glm::exp(-*mediumSigmaA * hit->t);
+        // A miss is an unbounded segment: transmittance is exp(-sigmaA * inf), which is 0 in any channel that absorbs and 1 in any that does not. Written per channel because 0 * inf is NaN, so the exp form cannot express the non-absorbing case. Reachable whenever a transmissive object is not watertight -- integrator_validate's own two-quad slab has open sides -- where the previous hit-only gate contributed unattenuated environment radiance and gained energy.
+        if (mediumSigmaA.has_value()) {
+            const glm::vec3& sigmaA = *mediumSigmaA;
+            throughput *= hit.has_value()
+                               ? glm::exp(-sigmaA * hit->t)
+                               : glm::vec3(sigmaA.x > 0.0F ? 0.0F : 1.0F,
+                                            sigmaA.y > 0.0F ? 0.0F : 1.0F,
+                                            sigmaA.z > 0.0F ? 0.0F : 1.0F);
         }
 
         if (!hit.has_value()) {
@@ -258,7 +264,7 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
                     const float shadowEpsilon =
                         farSide ? transmissionOffsetEpsilon(triangle) : kRayEpsilon;
                     const glm::vec3 shadowOrigin =
-                        shadowTerminatorOffset(triangle, hit->u, hit->v) +
+                        shadowTerminatorOffset(triangle, hit->u, hit->v, geoCos > 0.0F) +
                         (geoNormal * shadowEpsilon * (geoCos > 0.0F ? 1.0F : -1.0F));
                     const Ray shadowRay{shadowOrigin, lightSample.direction, shadowEpsilon,
                                          std::numeric_limits<float>::max()};
@@ -324,12 +330,14 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
         }
 
         // Chiang/Li/Burley shadow-terminator-corrected origin, nudged off the true triangle plane along the geometric normal (toward wi's side) to avoid self-intersection. Transmission gets a facet-scaled epsilon instead of the fixed one -- see transmissionOffsetEpsilon.
+        // The correction is projected toward whichever side wi leaves on: it pulls the hit onto the vertex tangent planes, which moves it strictly along +normal, so on an inward-going ray (refraction entering, or TIR inside a dielectric) the unmirrored form pushes the origin back through the interface. That crossing registers no transmission event, desynchronising the medium stack -- measured at 0.93% of glass entries in cornell, each contributing unattenuated environment radiance on a later miss.
+        const bool leavingOnNormalSide = glm::dot(wiWorld, geoNormal) > 0.0F;
         const float offsetEpsilon = sample->type == LobeType::Transmission
                                          ? transmissionOffsetEpsilon(triangle)
                                          : kRayEpsilon;
         const glm::vec3 offsetOrigin =
-            shadowTerminatorOffset(triangle, hit->u, hit->v) +
-            (geoNormal * offsetEpsilon * (glm::dot(wiWorld, geoNormal) > 0.0F ? 1.0F : -1.0F));
+            shadowTerminatorOffset(triangle, hit->u, hit->v, leavingOnNormalSide) +
+            (geoNormal * offsetEpsilon * (leavingOnNormalSide ? 1.0F : -1.0F));
         ray = Ray{offsetOrigin, wiWorld, offsetEpsilon, std::numeric_limits<float>::max()};
     }
 
