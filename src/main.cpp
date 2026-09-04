@@ -1005,7 +1005,7 @@ void renderFrame(engine::platform::Window& window, AppResources& app) {
 }
 
 struct Options {
-    std::string scenePath = ASSET_ROOT_DIR "/scenes/tree.json";
+    std::string scenePath = ASSET_ROOT_DIR "/scenes/cornell.json";
 };
 
 // Returns nullopt on an unrecognized flag or a missing value -- argv is a system
