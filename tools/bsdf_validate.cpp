@@ -44,6 +44,7 @@ glm::vec3 sampleUniformHemisphere(std::mt19937& rng) {
 
 // Integrates pdfBsdf(wo, .) over the hemisphere via uniform-hemisphere Monte Carlo; for an opaque material (transmissionFactor=0) this must not exceed 1.0, since all sampling probability mass is in the two continuous lobes the pdf covers.
 // Upper-bound only, not a tight equality check: uniform hemisphere sampling under-samples a sharp GGX lobe at low roughness (same accepted limitation as furnace_test.cpp's checkPunctualSweep), so a low reading there is expected noise; only exceeding 1.0 indicates a real double-counted pdf.
+// diffuseRoughness is swept because at 0 -- the only value this used to test, and the one default.json ships -- eonUniformMixWeight is pow(0, 0.1) = 0 exactly, so pdfEon degenerates to cltcPdf alone and CLTC itself degenerates to plain cosine. Neither the LTC fit's own normalisation nor the uniform/CLTC one-sample MIS mixture was reached at all. The metallic=1 rows matter most here: metallic zeroes diffuseKd but NOT diffuseProb, so a conductor still carries the full CLTC density with none of its value, and a mis-normalised fit shows up in the mixture denominator rather than in any picture.
 bool checkPdfNormalization() {
     std::mt19937 rng(7);
     constexpr int kSampleCount = 200000;
@@ -52,29 +53,33 @@ bool checkPdfNormalization() {
     const std::array<float, 4> roughnesses = {0.05F, 0.25F, 0.5F, 1.0F};
     const std::array<float, 2> metallics = {0.0F, 1.0F};
     const std::array<float, 4> ndotVs = {0.2F, 0.6F, 1.0F, -0.6F};
+    const std::array<float, 3> diffuseRoughnesses = {0.0F, 0.5F, 1.0F};
 
     bool ok = true;
     for (float roughness : roughnesses) {
         for (float metallic : metallics) {
-            for (float ndotV : ndotVs) {
-                const BsdfParams params = makeParams(roughness, metallic, 0.0F);
-                const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (ndotV * ndotV))), 0.0F, ndotV);
-                double integral = 0.0;
-                for (int i = 0; i < kSampleCount; ++i) {
-                    glm::vec3 wi = sampleUniformHemisphere(rng);
-                    // pdfBsdf mirrors wi into wo's hemisphere, so for a below-surface wo the density over the +z hemisphere is identically zero.
-                    // Integrating the +z hemisphere there measured 0 and passed the <=1.0 assertion vacuously, so the exiting-side rows tested nothing; flip the sampled hemisphere to match wo's side.
-                    if (ndotV < 0.0F) {
-                        wi.z = -wi.z;
+            for (float diffuseRoughness : diffuseRoughnesses) {
+                for (float ndotV : ndotVs) {
+                    const BsdfParams params = makeParams(roughness, metallic, 0.0F, diffuseRoughness);
+                    const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (ndotV * ndotV))), 0.0F, ndotV);
+                    double integral = 0.0;
+                    for (int i = 0; i < kSampleCount; ++i) {
+                        glm::vec3 wi = sampleUniformHemisphere(rng);
+                        // pdfBsdf mirrors wi into wo's hemisphere, so for a below-surface wo the density over the +z hemisphere is identically zero.
+                        // Integrating the +z hemisphere there measured 0 and passed the <=1.0 assertion vacuously, so the exiting-side rows tested nothing; flip the sampled hemisphere to match wo's side.
+                        if (ndotV < 0.0F) {
+                            wi.z = -wi.z;
+                        }
+                        integral += engine::scene::pdfBsdf(params, wo, wi) / kUniformPdf;
                     }
-                    integral += engine::scene::pdfBsdf(params, wo, wi) / kUniformPdf;
-                }
-                integral /= kSampleCount;
-                if (!(integral <= 1.0 + kTolerance)) {
-                    std::cerr << "bsdf_validate: FAILED pdf normalization UPPER bound at roughness="
-                              << roughness << " metallic=" << metallic << " ndotV=" << ndotV
-                              << " integral=" << integral << " (expected <= 1.0)\n";
-                    ok = false;
+                    integral /= kSampleCount;
+                    if (!(integral <= 1.0 + kTolerance)) {
+                        std::cerr << "bsdf_validate: FAILED pdf normalization UPPER bound at roughness="
+                                  << roughness << " metallic=" << metallic
+                                  << " diffuseRoughness=" << diffuseRoughness << " ndotV=" << ndotV
+                                  << " integral=" << integral << " (expected <= 1.0)\n";
+                        ok = false;
+                    }
                 }
             }
         }
@@ -331,27 +336,33 @@ bool checkReciprocity() {
     const std::array<float, 4> roughnesses = {0.05F, 0.25F, 0.5F, 1.0F};
     const std::array<float, 3> metallics = {0.0F, 0.5F, 1.0F};
     const std::array<float, 4> cosines = {1.0F, 0.7F, 0.4F, 0.15F};
+    // At 0 the diffuse lobe is Lambertian and reciprocal for free, so the sweep is what actually puts EON under this check. Every term of evaluateEon is symmetric under the wo/wi swap by construction -- dot(wi,wo), max(muI,muO), and the (1-eFonO)*(1-eFonI) product -- which is a property the model guarantees and nothing here asserted.
+    const std::array<float, 3> diffuseRoughnesses = {0.0F, 0.5F, 1.0F};
 
     bool ok = true;
     for (float roughness : roughnesses) {
         for (float metallic : metallics) {
-            const BsdfParams params = makeParams(roughness, metallic, 0.0F);
-            for (float muA : cosines) {
-                for (float muB : cosines) {
-                    // Non-coplanar pair: a shared azimuth would leave a swapped-phi bug invisible.
-                    const float sinA = std::sqrt(std::max(0.0F, 1.0F - (muA * muA)));
-                    const float sinB = std::sqrt(std::max(0.0F, 1.0F - (muB * muB)));
-                    const glm::vec3 wo(sinA, 0.0F, muA);
-                    const glm::vec3 wi(sinB * std::cos(1.1F), sinB * std::sin(1.1F), muB);
-                    const glm::vec3 forward = engine::scene::evaluateBsdf(params, wo, wi);
-                    const glm::vec3 reverse = engine::scene::evaluateBsdf(params, wi, wo);
-                    const float scale = std::max(maxChannel(forward), maxChannel(reverse));
-                    if (!(maxChannel(glm::abs(forward - reverse)) <=
-                          kRelativeTolerance * std::max(scale, 1e-4F))) {
-                        std::cerr << "bsdf_validate: FAILED reciprocity at roughness=" << roughness
-                                  << " metallic=" << metallic << " muO=" << muA << " muI=" << muB
-                                  << " f(wo->wi)=" << forward.x << " f(wi->wo)=" << reverse.x << '\n';
-                        ok = false;
+            for (float diffuseRoughness : diffuseRoughnesses) {
+                const BsdfParams params = makeParams(roughness, metallic, 0.0F, diffuseRoughness);
+                for (float muA : cosines) {
+                    for (float muB : cosines) {
+                        // Non-coplanar pair: a shared azimuth would leave a swapped-phi bug invisible.
+                        const float sinA = std::sqrt(std::max(0.0F, 1.0F - (muA * muA)));
+                        const float sinB = std::sqrt(std::max(0.0F, 1.0F - (muB * muB)));
+                        const glm::vec3 wo(sinA, 0.0F, muA);
+                        const glm::vec3 wi(sinB * std::cos(1.1F), sinB * std::sin(1.1F), muB);
+                        const glm::vec3 forward = engine::scene::evaluateBsdf(params, wo, wi);
+                        const glm::vec3 reverse = engine::scene::evaluateBsdf(params, wi, wo);
+                        const float scale = std::max(maxChannel(forward), maxChannel(reverse));
+                        if (!(maxChannel(glm::abs(forward - reverse)) <=
+                              kRelativeTolerance * std::max(scale, 1e-4F))) {
+                            std::cerr << "bsdf_validate: FAILED reciprocity at roughness=" << roughness
+                                      << " metallic=" << metallic
+                                      << " diffuseRoughness=" << diffuseRoughness << " muO=" << muA
+                                      << " muI=" << muB << " f(wo->wi)=" << forward.x
+                                      << " f(wi->wo)=" << reverse.x << '\n';
+                            ok = false;
+                        }
                     }
                 }
             }
