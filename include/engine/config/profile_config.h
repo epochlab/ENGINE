@@ -2,6 +2,7 @@
 
 #include <optional>
 #include <string>
+#include <vector>
 
 #include <glm/glm.hpp>
 
@@ -20,7 +21,8 @@ struct CameraConfig {
     float yawDegrees;
     float pitchDegrees;
 
-    engine::scene::Camera::FilmBack filmBack;
+    // Resolved against assets/config/camera.json by name at startup (main.cpp) -- loadProfileConfig alone can't validate this, since it doesn't load that file.
+    std::string defaultFilmBackPresetName;
     float focalLengthMm;
     float nearClip;
     float farClip;
@@ -61,5 +63,9 @@ struct ProfileConfig {
 
 // Reads and parses path. Returns nullopt and logs to stderr if the file is missing, unreadable, or any required field can't be found/parsed. User-editable input, not an internal invariant: failure is expected and surfaced rather than defaulted around.
 [[nodiscard]] std::optional<ProfileConfig> loadProfileConfig(const std::string& path);
+
+// Reads and parses the film-back preset catalogue (assets/config/camera.json): a JSON array of {name, widthMm, heightMm}. Same failure contract as loadProfileConfig, plus every entry's widthMm/heightMm must be > 0 (they feed Camera::verticalFovRadians()/an aspect-ratio display as physically meaningful denominators/ratios).
+[[nodiscard]] std::optional<std::vector<engine::scene::Camera::FilmBackPreset>> loadFilmBackPresets(
+    const std::string& path);
 
 }  // namespace engine::config
