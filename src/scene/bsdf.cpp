@@ -81,6 +81,9 @@ struct ConductorIor {
 // form. The literal form is what forces the listing's 0.99 clamp: it subtracts two large near-equal
 // numbers, and in float32 at r=0.9999, g=0 it returns k^2 = -1.28e6 where the true value is exactly 0.
 // The factored form returns exactly 0 there, since nMax - n is exactly zero at g=0.
+// Authoring a real metal, for reference: reflectivity and edgeTint both come from measured n,k through the paper's eq 14/15, NOT from eyeballing a colour. Chromium at 615/550/465 nm from Johnson & Christy 1974 (refractiveindex.info main/Cr/nk/Johnson.yml) gives reflectivity [0.552, 0.555, 0.558], edgeTint [0.555, 0.558, 0.672] -- shipped in chrome.json until the preset was returned to an idealised near-white mirror, and reinstatable by pasting those two triples back.
+// That look is 0.58x darker at normal incidence than the mirror it replaced, plus the grazing dip only edgeTint can carry -- the part Schlick cannot express at any f0. The cool cast is NOT the edge tint: it comes from the reflectivity triple already leaning blue (+0.006), since edgeTint acts at grazing and has ~zero effect at normal incidence.
+// Round-tripping the two triples through this inversion recovers the source n,k to 0.0048, inside its three-significant-figure precision, so the 3-decimal rounding is the whole error budget. Representative wavelengths, not a spectral integration -- this renderer is RGB with no spectral upsampling, and across plausible wavelength triples reflectivity moves under 0.007 and edgeTint under 0.025.
 ConductorIor conductorIorFromReflectivity(const glm::vec3& reflectivity, const glm::vec3& edgeTint) {
     const glm::vec3 r = glm::clamp(reflectivity, kMinReflectivity, kMaxReflectivity);
     const glm::vec3 g = glm::clamp(edgeTint, 0.0F, 1.0F);  // the paper's stated domain for g
@@ -98,7 +101,7 @@ ConductorIor conductorIorFromReflectivity(const glm::vec3& reflectivity, const g
 // Wolf), in the standard real-arithmetic form: two hardware sqrts, no complex division, and no <complex>
 // in this translation unit. NOT the paper's Appendix A rs/rp, which is the large-|eta| approximation
 // (PBRT-v2's FrCond) and deviates from this by up to 0.094 absolute around r~0.25 -- mid reflectivity,
-// which is where real metals sit (chrome.json's measured chromium is r~0.555). bsdf_validate compares
+// which is where real metals sit -- chrome.json ships an idealised near-white mirror (r 0.95/0.95/0.97, edgeTint 1, no dip), well above that. bsdf_validate compares
 // this against the complex-arithmetic definition, which the two forms match to 2.2e-12 over the clamped
 // (r, g, cosTheta) domain.
 // Deliberately free of clamps, unlike the inversion above, where a max() guards an exact-zero boundary
