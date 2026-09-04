@@ -58,9 +58,9 @@ struct BsdfEval {
     [[nodiscard]] glm::vec3 total() const { return diffuse + specular + transmission; }
 };
 
-// Schlick's approximation of Fresnel reflectance at normal-incidence reflectance f0, evaluated at cosTheta = dot(normal, direction). Sole consumer is the rasterizer's Fresnel G-buffer AOV (rasterizer.cpp), evaluated at the view angle rather than the sampled/shading direction.
-// NOT what the path tracer uses any more: the dielectric lobes evaluate exact fresnelDielectric and the conductor lobe exact complex-IOR Fresnel (bsdf.cpp), so for a metal this AOV is a Schlick-basis approximation of the shaded result, not the term itself. Kept because the AOV is a debug display and Schlick is monotone and cheap; do not reintroduce it into a shading path.
-[[nodiscard]] glm::vec3 fresnelSchlick(float cosTheta, const glm::vec3& f0);
+// Macro-surface Fresnel reflectance at cosTheta = dot(normal, viewDirection): the exact dielectric and exact complex-IOR conductor terms mixed by metallic, which is the same term evaluateSpecularLobe evaluates, in the entering orientation a primary-hit value wants.
+// Sole consumer is the rasterizer's Fresnel G-buffer AOV (rasterizer.cpp). It exists so that AOV shows the Fresnel the renderer actually shades with: it used to be Schlick against f0, which for a metal is a different curve entirely -- Schlick is monotone in cos by construction, so it cannot show the reflectance dip an authored edgeTint produces.
+[[nodiscard]] glm::vec3 fresnelAtViewAngle(const BsdfParams& params, float cosTheta);
 
 // Value and pdf of the continuous lobes at wiLocal, split by transport type. Piecewise, since reflection and transmission occupy disjoint hemispheres: wiLocal on wo's side gives the specular-reflection + diffuse mixture, the far side gives the rough transmission lobe. Transmission is excluded only when it is a delta (roughness below the smooth threshold, zero-measure). woLocal.z sign: entering (>0) vs exiting (<0) a dielectric. One call rather than the four separate lobe evaluations NEE used to make -- the lobe probabilities, the GGX/Fresnel terms and the albedo-table lookups are all computed once and shared.
 [[nodiscard]] BsdfEval evaluateBsdfSplit(const BsdfParams& params, const glm::vec3& woLocal,

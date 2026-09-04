@@ -113,7 +113,7 @@ Named presets (`assets/materials/*.json`), parsed into `MaterialConfig` (`scene_
 |---|---|---|---|---|
 | `default.json` | 0.0 | 0.0 | 1.0 / 0.045 | Material for the default scene (`tree.json`, `materialPath`); rough dielectric, heavy bump (`bumpStrength: 10.0`) |
 | `diffuse.json` | 0.0 | 0.0 | 0.5 / 0.045 | Neutral matte dielectric, no bump |
-| `chrome.json` | 1.0 | 0.0 | 0.05 / 0.045 | Polished conductor, Schlick Fresnel (`diffuseColour` doubles as `f0` tint) |
+| `chrome.json` | 1.0 | 0.0 | 0.05 / 0.045 | Polished conductor, exact complex-IOR Fresnel from Gulbrandsen reflectivity/`edgeTint` (`diffuseColour` doubles as `f0`, i.e. the reflectivity `r`) |
 | `glass.json` | 0.0 | 1.0 | 0.02 / 0.01 | Smooth/clear dielectric, `ior: 1.5`; tinted via Beer-Lambert `transmissionColor: [0.96, 0.98, 1.0]` over `transmissionDepth: 0.4` world units, not `diffuseColour` |
 
 `MaterialConfig` fields:
@@ -155,7 +155,7 @@ Every AOV below is computed by the path tracer each pass, except: the 15 primary
 | Tangent | Material | Shading tangent basis at the primary hit | Debugs the tangent-space basis used for normal mapping |
 | ObjectID | Material | Per-instance index, false-coloured (`falseColorForId`) | Isolation mask for compositing/debugging |
 | AO | Material | Authored ambient-occlusion texture sample at the primary hit | Debug baked AO independent of lighting |
-| Fresnel | Transport | Bare Schlick term at the primary hit's view angle from `f0`; simpler than shading's `mix(dielectric Fresnel, Schlick(f0), metallic)`, so it can disagree with what's actually rendered (e.g. reading near 1.0 from an unclamped specular texture where shading computes ~0.04 for a dielectric) | Debug grazing-angle reflectance behaviour in isolation; not a preview of the exact shading value |
+| Fresnel | Transport | `mix(exact dielectric Fresnel, exact complex-IOR conductor Fresnel, metallic)` at the primary hit's view angle — the same term shading evaluates (`fresnelAtViewAngle`, `bsdf.h`), against the macro normal rather than a microfacet half-vector | Debug grazing-angle reflectance behaviour in isolation, including the conductor dip an authored `edgeTint` produces, which the previous Schlick term could not represent at any `f0` |
 | IOR | Transport | Per-instance dielectric IOR (`settings.ior`), -1 on a miss | Isolates the raw refractive-index input driving Fresnel/transmission |
 | BounceCount | Transport | Mean path termination depth across samples, per pixel | Debug Russian roulette/termination behaviour |
 | DirectDiffuse | Lighting | Diffuse-bucketed radiance from a path's first (bounce-0) surface, physical (base colour included) | Isolates direct diffuse light arrival, in the same units as Beauty |

@@ -879,8 +879,16 @@ BsdfEval evaluateContinuousLobes(const BsdfParams& params, const glm::vec3& wo, 
 
 }  // namespace
 
-glm::vec3 fresnelSchlick(float cosTheta, const glm::vec3& f0) {
-    return f0 + ((glm::vec3(1.0F) - f0) * std::pow(std::clamp(1.0F - cosTheta, 0.0F, 1.0F), 5.0F));
+glm::vec3 fresnelAtViewAngle(const BsdfParams& params, float cosTheta) {
+    // Entering orientation (etaI=1): a primary-hit view-angle value is always outside the surface, so
+    // unlike evaluateSpecularLobe there is no exiting side to swap etaI/etaT for.
+    const float fDielectric = fresnelDielectric(cosTheta, 1.0F, params.ior);
+    if (params.metallic <= 0.0F) {
+        return glm::vec3(fDielectric);
+    }
+    const ConductorIor conductor = conductorIorFromReflectivity(params.f0, params.edgeTint);
+    return glm::mix(glm::vec3(fDielectric), fresnelConductor(cosTheta, conductor.n, conductor.k),
+                     params.metallic);
 }
 
 BsdfEval evaluateBsdfSplit(const BsdfParams& params, const glm::vec3& woLocal,
