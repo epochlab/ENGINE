@@ -3,11 +3,14 @@
 // Also runs a furnace test (uniform incident radiance from every direction, including through transmission) via BSDF importance sampling: must never reflect/transmit more energy than received.
 // Same standalone-CLI convention as embree_validate.cpp/furnace_test.cpp: no test framework, non-zero exit on failure.
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <optional>
 #include <random>
+#include <utility>
 
 #include <glm/glm.hpp>
 
@@ -98,6 +101,14 @@ glm::vec3 furnaceLo(const BsdfParams& params, const glm::vec3& wo, int sampleCou
 float maxChannel(const glm::vec3& v) { return std::max({v.x, v.y, v.z}); }
 float minChannel(const glm::vec3& v) { return std::min({v.x, v.y, v.z}); }
 
+// Every energy assertion below is a pair of comparisons, and every comparison against a NaN is false, so
+// a mean poisoned by one non-finite sample passes them all vacuously -- the blind spot that let a
+// divide-by-zero in sampleBsdf's EON branch (u.x/pUniform at diffuseRoughness 0) reach the albedo
+// tables' integer indexing as an out-of-bounds read rather than fail here as a number.
+bool allFinite(const glm::vec3& v) {
+    return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
+}
+
 // Furnace test through sampleBsdf: uniform radiance L0=1 from every direction (both hemispheres, since transmission can receive from the far side); estimator Lo = mean(throughputWeight) since throughputWeight already folds in f*cosTheta/pdf.
 // ndotV sweep includes negative values (woLocal.z<0, the exiting side of a transmissive dielectric) and a value past the ior=1.5 critical angle (~41.8deg, cosTheta~0.745) to force total internal reflection.
 // Energy bound is 1.0 (L0) everywhere except the exiting side (ndotV<0) of a transmissive material below the critical angle, where sampleBsdf's eta^2 non-symmetric radiance-compression factor (Veach 1997 sec. 5.2, see bsdf.cpp's transmission branch) legitimately raises Lo above L0: L/n^2 is the invariant along a ray, so radiance increases going from a denser medium (ior=1.5, inside) into a rarer one (1.0, outside) by up to ior^2.
@@ -121,10 +132,11 @@ bool checkFurnace() {
                     const BsdfParams params = makeParams(roughness, metallic, transmission);
                     const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (ndotV * ndotV))), 0.0F,
                                         ndotV);
-                    const float maxLo = maxChannel(furnaceLo(params, wo, kSampleCount, seed));
+                    const glm::vec3 lo = furnaceLo(params, wo, kSampleCount, seed);
+                    const float maxLo = maxChannel(lo);
                     const bool exitingTransmissive = ndotV < 0.0F && transmission > 0.0F;
                     const float energyBound = exitingTransmissive ? kIor * kIor : 1.0F;
-                    if (maxLo > energyBound + kTolerance) {
+                    if (!allFinite(lo) || maxLo > energyBound + kTolerance) {
                         std::cerr << "bsdf_validate: FAILED furnace test at roughness=" << roughness
                                   << " metallic=" << metallic << " transmission=" << transmission
                                   << " ndotV=" << ndotV << " Lo=" << maxLo
@@ -142,8 +154,9 @@ bool checkFurnace() {
             ++seed;
             const BsdfParams params = makeColoredMetalParams(roughness);
             const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (ndotV * ndotV))), 0.0F, ndotV);
-            const float maxLo = maxChannel(furnaceLo(params, wo, kSampleCount, seed));
-            if (maxLo > 1.0F + kTolerance) {
+            const glm::vec3 lo = furnaceLo(params, wo, kSampleCount, seed);
+            const float maxLo = maxChannel(lo);
+            if (!allFinite(lo) || maxLo > 1.0F + kTolerance) {
                 std::cerr << "bsdf_validate: FAILED colored-metal furnace test at roughness="
                           << roughness << " ndotV=" << ndotV << " Lo=" << maxLo
                           << " (expected <= 1.0)\n";
@@ -204,7 +217,8 @@ bool checkWhiteFurnaceTwoSided() {
         const std::array<std::pair<const char*, glm::vec3>, 2> measured = {
             {{"conductor", conductor}, {"dielectric", dielectric}}};
         for (const auto& [label, value] : measured) {
-            if (minChannel(value) < 1.0F - kTolerance || maxChannel(value) > 1.0F + kTolerance) {
+            if (!allFinite(value) || minChannel(value) < 1.0F - kTolerance ||
+                maxChannel(value) > 1.0F + kTolerance) {
                 std::cerr << "bsdf_validate: FAILED white-" << label
                           << " furnace energy conservation at roughness=" << entry.roughness
                           << " ndotV=" << entry.ndotV << " Lo=[" << minChannel(value) << ", "
@@ -243,7 +257,8 @@ bool checkEonDiffuseFurnace() {
             const glm::vec3 lo = furnaceLo(params, wo, kSampleCount, seed);
             std::cout << "  " << diffuseRoughness << "              " << ndotV << "    "
                       << minChannel(lo) << '\n';
-            if (minChannel(lo) < 1.0F - kTolerance || maxChannel(lo) > 1.0F + kTolerance) {
+            if (!allFinite(lo) || minChannel(lo) < 1.0F - kTolerance ||
+                maxChannel(lo) > 1.0F + kTolerance) {
                 std::cerr << "bsdf_validate: FAILED EON diffuse furnace energy at diffuseRoughness="
                           << diffuseRoughness << " ndotV=" << ndotV << " Lo=[" << minChannel(lo) << ", "
                           << maxChannel(lo) << "] (expected 1.0 +/- " << kTolerance << ")\n";
@@ -303,7 +318,8 @@ bool checkTransmissiveEnergyBalance() {
                     const glm::vec3 lo = transmissiveEnergyLo(params, wo, kSampleCount, seed);
                     std::cout << "  " << roughness << "        " << ndotV << "     " << transmission
                               << "           " << metallic << "       " << minChannel(lo) << '\n';
-                    if (minChannel(lo) < 1.0F - kTolerance || maxChannel(lo) > 1.0F + kTolerance) {
+                    if (!allFinite(lo) || minChannel(lo) < 1.0F - kTolerance ||
+                        maxChannel(lo) > 1.0F + kTolerance) {
                         std::cerr << "bsdf_validate: FAILED transmissive energy balance at roughness="
                                   << roughness << " ndotV=" << ndotV
                                   << " transmission=" << transmission << " metallic=" << metallic
@@ -327,26 +343,38 @@ bool checkReciprocity() {
     const std::array<float, 3> metallics = {0.0F, 0.5F, 1.0F};
     const std::array<float, 4> cosines = {1.0F, 0.7F, 0.4F, 0.15F};
 
+    // diffuseRoughness swept alongside metallic: EON is symmetric in (wi, wo) by construction -- s,
+    // sOverT and the eFonO*eFonI product all are -- but nothing asserted it, so a swapped pair in
+    // evaluateEon or evaluateDiffuseLobe's argument order would have been invisible. r=0 keeps the
+    // Lambertian rows this sweep already had.
+    const std::array<float, 3> diffuseRoughnesses = {0.0F, 0.5F, 1.0F};
+
     bool ok = true;
     for (float roughness : roughnesses) {
         for (float metallic : metallics) {
-            const BsdfParams params = makeParams(roughness, metallic, 0.0F);
-            for (float muA : cosines) {
-                for (float muB : cosines) {
-                    // Non-coplanar pair: a shared azimuth would leave a swapped-phi bug invisible.
-                    const float sinA = std::sqrt(std::max(0.0F, 1.0F - (muA * muA)));
-                    const float sinB = std::sqrt(std::max(0.0F, 1.0F - (muB * muB)));
-                    const glm::vec3 wo(sinA, 0.0F, muA);
-                    const glm::vec3 wi(sinB * std::cos(1.1F), sinB * std::sin(1.1F), muB);
-                    const glm::vec3 forward = engine::scene::evaluateBsdf(params, wo, wi);
-                    const glm::vec3 reverse = engine::scene::evaluateBsdf(params, wi, wo);
-                    const float scale = std::max(maxChannel(forward), maxChannel(reverse));
-                    if (maxChannel(glm::abs(forward - reverse)) >
-                        kRelativeTolerance * std::max(scale, 1e-4F)) {
-                        std::cerr << "bsdf_validate: FAILED reciprocity at roughness=" << roughness
-                                  << " metallic=" << metallic << " muO=" << muA << " muI=" << muB
-                                  << " f(wo->wi)=" << forward.x << " f(wi->wo)=" << reverse.x << '\n';
-                        ok = false;
+            for (float diffuseRoughness : diffuseRoughnesses) {
+                const BsdfParams params =
+                    makeParams(roughness, metallic, 0.0F, diffuseRoughness);
+                for (float muA : cosines) {
+                    for (float muB : cosines) {
+                        // Non-coplanar pair: a shared azimuth would leave a swapped-phi bug invisible.
+                        const float sinA = std::sqrt(std::max(0.0F, 1.0F - (muA * muA)));
+                        const float sinB = std::sqrt(std::max(0.0F, 1.0F - (muB * muB)));
+                        const glm::vec3 wo(sinA, 0.0F, muA);
+                        const glm::vec3 wi(sinB * std::cos(1.1F), sinB * std::sin(1.1F), muB);
+                        const glm::vec3 forward = engine::scene::evaluateBsdf(params, wo, wi);
+                        const glm::vec3 reverse = engine::scene::evaluateBsdf(params, wi, wo);
+                        const float scale = std::max(maxChannel(forward), maxChannel(reverse));
+                        if (maxChannel(glm::abs(forward - reverse)) >
+                            kRelativeTolerance * std::max(scale, 1e-4F)) {
+                            std::cerr << "bsdf_validate: FAILED reciprocity at roughness="
+                                      << roughness << " metallic=" << metallic
+                                      << " diffuseRoughness=" << diffuseRoughness
+                                      << " muO=" << muA << " muI=" << muB
+                                      << " f(wo->wi)=" << forward.x
+                                      << " f(wi->wo)=" << reverse.x << '\n';
+                            ok = false;
+                        }
                     }
                 }
             }
