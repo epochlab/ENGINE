@@ -111,8 +111,8 @@ Named presets (`assets/materials/*.json`), parsed into `MaterialConfig` (`scene_
 
 | File | metallic | transmission | roughness (factor / min) | Role |
 |---|---|---|---|---|
-| `default.json` | 0.0 | 0.0 | 1.0 / 0.045 | Material for the tree scene (`tree.json`'s `materialPath`); rough dielectric, heavy bump (`bumpStrength: 10.0`) |
-| `diffuse.json` | 0.0 | 0.0 | 0.5 / 0.045 | Neutral matte dielectric, no bump |
+| `principled.json` | 0.0 | 0.0 | 1.0 / 0.045 | Material for the tree scene (`tree.json`'s `materialPath`); rough dielectric, heavy bump (`bumpStrength: 10.0`). The one file that declares every field, including the otherwise-optional `transmissionColor`/`transmissionDepth`/`edgeTint` |
+| `clay.json` | 0.0 | 0.0 | 0.5 / 0.045 | Neutral matte dielectric, no bump |
 | `chrome.json` | 1.0 | 0.0 | 0.05 / 0.045 | Idealised near-white mirror: `diffuseColour` (which at `metallic=1` *is* `f0`, Gulbrandsen's reflectivity `r`) is `[0.95, 0.95, 0.97]` and `edgeTint` is white, i.e. **no reflectance dip** — the one edge tint at which the conductor reproduces Schlick's grazing behaviour, so this preset exercises the transport rather than the parameterisation. A measured metal is what the `(r, edgeTint)` basis exists for: chromium's Johnson & Christy 1974 triples, their provenance and their error budget are recorded at `conductorIorFromReflectivity` (`bsdf.cpp`) and can be pasted straight back into this file |
 | `glass.json` | 0.0 | 1.0 | 0.02 / 0.01 | Smooth/clear dielectric, `ior: 1.5`; tinted via Beer-Lambert `transmissionColor: [0.96, 0.98, 1.0]` over `transmissionDepth: 0.4` world units, not `diffuseColour` |
 
@@ -128,8 +128,9 @@ Named presets (`assets/materials/*.json`), parsed into `MaterialConfig` (`scene_
 | `diffuseRoughness` | EON rough-diffuse parameter r ∈ [0,1] (Portsmouth, Kutz, Hill 2025); 0 = Lambertian |
 | `bumpStrength` | Scales the bump texture's per-texel height difference |
 | `transmissionColor` / `transmissionDepth` | Beer-Lambert absorption coefficient (`sigmaA = -log(transmissionColor)/transmissionDepth`, Arnold `standard_surface` convention), applied while a path is inside a `transmissionFactor>0` material. Optional, default `[1,1,1]`/`1.0`: a true no-op, so existing materials didn't need editing when this shipped (§2 Volumetric absorption) |
+| `edgeTint` | Gulbrandsen 2014 edge tint for the conductor lobe, `metallicFactor>0` only. Optional, default `[1,1,1]`: white is the no-dip edge Schlick always produced |
 
-The first nine fields are required (`j.at`, missing/malformed fails the load and logs to stderr); `transmissionColor`/`transmissionDepth` are parsed optional-with-default (`j.value`). Add a new material by dropping a JSON file in `assets/materials/` and pointing `materialPath`/`materialOverrides` at it -- no code or schema change needed.
+`diffuseColour`/`roughnessFactor`/`roughnessMin`/`roughnessMax`/`bumpStrength` are required (`j.at`, missing/malformed fails the load and logs to stderr); `ior`/`metallicFactor`/`transmissionFactor`/`diffuseRoughness`/`transmissionColor`/`transmissionDepth`/`edgeTint` are parsed optional-with-default (`j.value`), each defaulting to the value that makes it a no-op in its owning lobe -- so a bespoke material only declares the fields its archetype actually uses (see `clay.json`/`glass.json`/`chrome.json` above vs. `principled.json`, which declares all twelve). Add a new material by dropping a JSON file in `assets/materials/` and pointing `materialPath`/`materialOverrides` at it -- no code or schema change needed.
 
 ## 4. AOV reference
 
