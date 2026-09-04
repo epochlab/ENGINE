@@ -346,7 +346,6 @@ struct LobeProbabilities {
     float albedoWo;         // E(mu_o, roughness), Fresnel-free
     float albedoAvg;        // Eavg(roughness)
     float coatF0;           // dielectric f0 implied by ior, for the diffuse coupling
-    float coatAlbedoAvg;    // cosine-weighted mean coat albedo, the coupling's normalisation
     glm::vec3 fresnelAvg;
     // Multiple-scattering state for a transmissive interface, which needs its own deficit. A facet either reflects or refracts, chosen by Fresnel, so the escaping fraction is inherently Fresnel-weighted (R_ss + T_ss) and cannot reuse the opaque path's Fresnel-free (1 - E); adding the two Fresnel-free throughputs double-counts the same facets and drives the deficit negative.
     // The two formulations are therefore blended by transmissionFactor rather than unified, so an opaque material keeps exactly the measured behaviour the opaque compensation already has.
@@ -700,7 +699,6 @@ LobeProbabilities computeLobeProbabilities(const BsdfParams& params, const glm::
              .albedoWo = splitWo.total(),
              .albedoAvg = splitAvg.total(),
              .coatF0 = coatF0,
-             .coatAlbedoAvg = coatAlbedoAvg,
              .fresnelAvg = fresnelAvg,
              .escapeWo = escape,
              .escapeAvg = escapeAvg,
