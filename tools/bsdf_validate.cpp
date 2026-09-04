@@ -339,7 +339,7 @@ bool checkTransmissiveEnergyBalance() {
 // real-arithmetic unpolarized form, so one comparison against this reference tests both at once. Double is
 // what makes the literal k^2 usable here; it is what fails in float32 near r=1, which is why bsdf.cpp
 // factors it.
-double referenceConductorFresnel(double r, double g, double cosTheta) {
+std::complex<double> referenceConductorIor(double r, double g) {
     r = std::clamp(r, 1e-4, 0.9999);   // matches bsdf.cpp's kMinReflectivity/kMaxReflectivity
     g = std::clamp(g, 0.0, 1.0);
     const double sqrtR = std::sqrt(r);
@@ -347,7 +347,10 @@ double referenceConductorFresnel(double r, double g, double cosTheta) {
     const double nMax = (1.0 + sqrtR) / (1.0 - sqrtR);
     const double n = (nMin * g) + ((1.0 - g) * nMax);
     const double k2 = ((((n + 1.0) * (n + 1.0)) * r) - ((n - 1.0) * (n - 1.0))) / (1.0 - r);
-    const std::complex<double> eta(n, std::sqrt(std::max(0.0, k2)));
+    return {n, std::sqrt(std::max(0.0, k2))};
+}
+
+double referenceConductorFresnelAt(const std::complex<double>& eta, double cosTheta) {
     const double c = std::clamp(cosTheta, 0.0, 1.0);
     const std::complex<double> cosThetaT = std::sqrt(1.0 - ((1.0 - (c * c)) / (eta * eta)));
     const std::complex<double> rParallel = ((eta * c) - cosThetaT) / ((eta * c) + cosThetaT);
@@ -355,24 +358,124 @@ double referenceConductorFresnel(double r, double g, double cosTheta) {
     return 0.5 * (std::norm(rParallel) + std::norm(rPerpendicular));
 }
 
+double referenceConductorFresnel(double r, double g, double cosTheta) {
+    return referenceConductorFresnelAt(referenceConductorIor(r, g), cosTheta);
+}
+
+// Exact unpolarized dielectric Fresnel, entering orientation, in double -- the reference dielectricFresnelAvg's rational fit is measured against below.
+double referenceDielectricFresnel(double cosTheta, double ior) {
+    const double c = std::clamp(cosTheta, 0.0, 1.0);
+    const double sinT2 = (1.0 - (c * c)) / (ior * ior);
+    if (sinT2 >= 1.0) {
+        return 1.0;
+    }
+    const double cosT = std::sqrt(1.0 - sinT2);
+    const double rs = (c - (ior * cosT)) / (c + (ior * cosT));
+    const double rp = ((ior * c) - cosT) / ((ior * c) + cosT);
+    return 0.5 * ((rs * rs) + (rp * rp));
+}
+
+// Cosine-weighted average Fresnel, 2*int_0^1 F(mu)*mu dmu, by composite Simpson. The integrand is analytic on [0,1] for every (n, k) the Gulbrandsen domain reaches, so the O(h^4) error at this width is ~1e-13 -- ten orders under the tolerances it is used to police, and doubling the panel count moves no printed digit.
+// The mu=0 endpoint contributes nothing (the mu weight kills it) whatever F does there, which is what keeps the rule insensitive to the grazing limit both Fresnels approach differently.
+template <typename Fresnel>
+double cosineAverageFresnel(Fresnel fresnel) {
+    constexpr int kPanels = 4000;   // even, for Simpson
+    const double h = 1.0 / kPanels;
+    double sum = fresnel(1.0);
+    for (int i = 1; i < kPanels; ++i) {
+        const double mu = i * h;
+        sum += (i % 2 == 1 ? 4.0 : 2.0) * fresnel(mu) * mu;
+    }
+    return 2.0 * (h / 3.0) * sum;
+}
+
+// The instrument the suite never had. F_avg attenuates every repeated bounce of the Kulla-Conty multiple-scattering lobe, and NO energy test in this file can see an error in it: checkWhiteFurnaceTwoSided runs at f0=1, where Schlick's mean, the quadrature rule and the truth all agree to 1e-4, and checkFurnace's coloured-metal rows are upper-bound-only and so blind to a loss. Measuring F_avg directly is the honest fix; testing around it is not available, because a two-sided grey-conductor furnace has no closed form.
+// Truth is this file's own independent reference -- literal k^2, complex arithmetic, double -- not the shipped Fresnel, so a transcription error in bsdf.cpp shows up here instead of cancelling. The two inversions agree to 4e-12 (checkConductorFresnel pins that), twelve orders under the tolerance, so what this measures is the quadrature rule's own fit error and nothing else.
+// Conductor tolerance is the fit's measured bound (max 4.0e-4 over the full clamped domain, worst near r=0.48) plus headroom. Karis' Schlick mean fails it by 216x at r=0.255 g=1, which is the point: reverting bsdf.cpp to schlickFresnelAvg must fail this test, and must NOT fail at g=1 r=1 where the old suite did all its conductor energy checking.
+bool checkAverageFresnel() {
+    constexpr double kConductorTolerance = 5e-4;
+    // dielectricFresnelAvg's own long-standing claim, now asserted rather than only written down. Loose next to the conductor rule because it is a two-constant rational fit, not a fitted quadrature. Headroom is thin and deliberately not widened: measured worst is 0.00597 at ior 3.0 and 0.00588 at ior 1.1, ~9% under the bound, so any refit or tolerance change trips this rather than passing silently.
+    constexpr double kDielectricTolerance = 0.0065;
+    const std::array<double, 12> reflectivities = {1e-4, 0.01, 0.1,  0.25, 0.4,  0.48,
+                                                    0.555, 0.7, 0.85, 0.95, 0.99, 1.0};
+    const std::array<double, 8> edgeTints = {0.0, 0.1, 0.25, 0.5, 0.6, 0.75, 0.9, 1.0};
+    // dielectricFresnelAvg's stated range, plus ior=1 where an index-matched interface reflects nothing and the fit must return exactly 0 -- the collapse Karis' mean of coatF0 does not have (it returns 1/21 there).
+    const std::array<double, 7> iors = {1.0, 1.1, 1.33, 1.5, 2.0, 2.5, 3.0};
+
+    bool ok = true;
+    std::cout << "bsdf_validate: average Fresnel vs quadrature (F_avg = 2*int F(mu)*mu dmu)\n";
+    std::cout << "  conductor: worst |rule - truth| over edgeTint, per reflectivity\n";
+    for (double reflectivity : reflectivities) {
+        double worst = 0.0;
+        double worstTint = 0.0;
+        for (double edgeTint : edgeTints) {
+            const std::complex<double> eta = referenceConductorIor(reflectivity, edgeTint);
+            const double truth = cosineAverageFresnel(
+                [&](double mu) { return referenceConductorFresnelAt(eta, mu); });
+            const glm::vec3 rule = engine::scene::conductorFresnelAvg(
+                glm::vec3(static_cast<float>(eta.real())), glm::vec3(static_cast<float>(eta.imag())));
+            const double error = std::abs(static_cast<double>(rule.x) - truth);
+            if (error > worst) {
+                worst = error;
+                worstTint = edgeTint;
+            }
+            if (!(error <= kConductorTolerance)) {
+                std::cerr << "bsdf_validate: FAILED conductor F_avg at r=" << reflectivity
+                          << " edgeTint=" << edgeTint << " rule=" << rule.x << " vs quadrature " << truth
+                          << " (error " << error << ", tolerance " << kConductorTolerance << ")\n";
+                ok = false;
+            }
+        }
+        std::cout << "    r " << reflectivity << "   worst " << worst << " at edgeTint " << worstTint
+                  << '\n';
+    }
+
+    std::cout << "  dielectric: |dielectricFresnelAvg - truth| per ior\n";
+    for (double ior : iors) {
+        const double truth =
+            cosineAverageFresnel([&](double mu) { return referenceDielectricFresnel(mu, ior); });
+        const double fit = engine::scene::dielectricFresnelAvg(static_cast<float>(ior));
+        const double error = std::abs(fit - truth);
+        std::cout << "    ior " << ior << "   fit " << fit << "   truth " << truth << "   error "
+                  << error << '\n';
+        if (!(error <= kDielectricTolerance)) {
+            std::cerr << "bsdf_validate: FAILED dielectric F_avg at ior=" << ior << " fit=" << fit
+                      << " vs quadrature " << truth << " (error " << error << ", tolerance "
+                      << kDielectricTolerance << ")\n";
+            ok = false;
+        }
+    }
+    return ok;
+}
+
 // Conductor Fresnel (bsdf.cpp's conductorIorFromReflectivity/fresnelConductor), verified through the
-// public API with no accessor added to bsdf.h.
+// public API.
 // At metallic=1 the diffuse lobe carries diffuseKd=0, so evaluateBsdf is the specular lobe alone:
-// f(g) = K*F_g(woDotNh) + M, where K = D*G2/(4*muO*muI) and M is the Kulla-Conty multiple-scattering term.
-// NEITHER depends on edgeTint -- M's Favg comes from f0 alone (computeLobeProbabilities) and K is pure
-// geometry -- so differencing across edgeTint cancels both exactly:
-//     (f(g) - f(1)) / (f(0) - f(1))  ==  (F_g - F_1) / (F_0 - F_1)
-// pinning the whole reflectance curve, inversion included, against the independent reference above.
+// f(g) = K*F_g(woDotNh) + M, where K = D*G2/(4*muO*muI) is pure geometry and M is the Kulla-Conty
+// multiple-scattering term. M is attenuated by F_avg, which conductorFresnelAvg makes a function of the
+// complex IOR and therefore of edgeTint, so M does NOT cancel out of a difference across edgeTint. It
+// used to: schlickFresnelAvg took F_avg from f0 alone, and this test was built on that cancellation.
+// Both halves are therefore split by roughness rather than swept over both:
+//   0.05 -- E(mu) ~ 1, so M is under this test's own tolerances and f(g) is the Fresnel term alone. The
+//     exact ratio identity (f(g)-f(1))/(f(0)-f(1)) == (F_g-F_1)/(F_0-F_1) holds, pinning the whole
+//     reflectance curve, inversion included, against the independent reference above. F does not depend
+//     on roughness, so testing the curve at one roughness is testing it everywhere.
+//   0.6 -- M is a third of the value, and its edgeTint dependence is the point: the normal-incidence
+//     value must RISE monotonically with edgeTint, because F_avg does and multiScatterTint is monotone in
+//     it. That is the assertion Karis structurally cannot pass -- schlickFresnelAvg(f0) is constant in g,
+//     so on the old code every reading here was byte-identical and the span exactly zero.
 // wo/wi are a coplanar pair mirrored about the normal, unlike checkReciprocity's deliberately
 // non-coplanar ones: that puts nh exactly on +z so woDotNh IS the swept cosine, which is what makes the
 // comparison against a reference evaluated at that cosine exact rather than approximate.
-// Two roughnesses, because M is a third of the value at 0.6 and negligible at 0.05: if the cancellation
-// above were wrong the two would disagree, so this doubles as the check on the algebra it rests on.
 bool checkConductorFresnel() {
     // The ratio is a quotient of differences of float BSDF values, so it carries the cancellation of both.
     constexpr float kRatioTolerance = 2e-3F;
     // Normal incidence is an exact identity, not a fit: R(theta=0) == r for every g (paper sec. 2.3.1).
     constexpr float kNormalIncidenceTolerance = 1e-5F;
+    // Roughness at or below which the multiple-scattering deficit (1-E) leaves M under the identity's own
+    // tolerance, so the two assertions that need M to vanish can use it. Measured: the identity holds to
+    // 1e-5 relative at 0.05 and is violated by 1.5e-2 at 0.6, so the split is decisive, not marginal.
+    constexpr float kMsNegligibleRoughness = 0.1F;
     // The property Schlick structurally cannot have: at grazing a black edge tint must sit well below a
     // white one. Schlick's (1-c)^5 tail forces every metal to exactly 1 there, so on the old code this
     // separation is identically zero whatever edgeTint says.
@@ -391,6 +494,7 @@ bool checkConductorFresnel() {
 
     bool ok = true;
     int ratiosChecked = 0;
+    int monotonicRowsChecked = 0;
     std::cout << "bsdf_validate: conductor Fresnel, edgeTint 0.00 -> 1.00 (Gulbrandsen 2014)\n";
     std::cout << "  r     cos    F(g=0)   F(g=1)   grazing separation\n";
     for (float reflectivity : reflectivities) {
@@ -402,16 +506,44 @@ bool checkConductorFresnel() {
         // R(theta=0) == r, independent of edgeTint: wo == wi == +z puts woDotNh at exactly 1.
         const glm::vec3 normalIncidence(0.0F, 0.0F, 1.0F);
         for (float roughness : roughnesses) {
-            const float atWhite = maxChannel(engine::scene::evaluateBsdf(
-                params(roughness, glm::vec3(1.0F)), normalIncidence, normalIncidence));
-            for (float edgeTint : edgeTints) {
-                const float measured = maxChannel(engine::scene::evaluateBsdf(
-                    params(roughness, glm::vec3(edgeTint)), normalIncidence, normalIncidence));
-                if (!(std::abs(measured - atWhite) <= kNormalIncidenceTolerance * atWhite)) {
-                    std::cerr << "bsdf_validate: FAILED conductor Fresnel normal-incidence identity at r="
-                              << reflectivity << " roughness=" << roughness << " edgeTint=" << edgeTint
-                              << " f=" << measured << " vs " << atWhite
-                              << "; R(theta=0) must equal r for every edgeTint\n";
+            std::array<float, 5> atNormal{};
+            for (std::size_t i = 0; i < edgeTints.size(); ++i) {
+                atNormal[i] = maxChannel(engine::scene::evaluateBsdf(
+                    params(roughness, glm::vec3(edgeTints[i])), normalIncidence, normalIncidence));
+            }
+            const float atWhite = atNormal.back();
+            if (roughness <= kMsNegligibleRoughness) {
+                for (std::size_t i = 0; i < edgeTints.size(); ++i) {
+                    if (!(std::abs(atNormal[i] - atWhite) <= kNormalIncidenceTolerance * atWhite)) {
+                        std::cerr
+                            << "bsdf_validate: FAILED conductor Fresnel normal-incidence identity at r="
+                            << reflectivity << " roughness=" << roughness
+                            << " edgeTint=" << edgeTints[i] << " f=" << atNormal[i] << " vs " << atWhite
+                            << "; R(theta=0) must equal r for every edgeTint\n";
+                        ok = false;
+                    }
+                }
+                continue;
+            }
+            // Same conditioning guard the ratio below uses: at r=1 every edge tint gives the same mirror,
+            // so the span across edgeTint is float noise rather than signal (measured 6e-6 relative there
+            // against 1.5e-2 at r=0.1). monotonicRowsChecked keeps the skip honest.
+            if ((atWhite - atNormal.front()) / atWhite < kMinConditionedSpan) {
+                continue;
+            }
+            ++monotonicRowsChecked;
+            // Strict, with no epsilon: the guard above conditions the whole g=0->1 span, but the compare is
+            // per adjacent step, and the tightest real step is r=0.95 g=0->0.25 at 6.6e-5 relative in F_avg
+            // -- hundreds of times float32's own precision even after M attenuates it. Strictness is what
+            // makes a constant F_avg fail rather than round into a pass.
+            for (std::size_t i = 1; i < edgeTints.size(); ++i) {
+                if (!(atNormal[i] > atNormal[i - 1])) {
+                    std::cerr << "bsdf_validate: FAILED conductor F_avg edgeTint dependence at r="
+                              << reflectivity << " roughness=" << roughness << " edgeTint "
+                              << edgeTints[i - 1] << " -> " << edgeTints[i] << " gave " << atNormal[i - 1]
+                              << " -> " << atNormal[i]
+                              << "; the multiple-scattering lobe must brighten monotonically with edge "
+                                 "tint, which a Schlick F_avg cannot do at any f0\n";
                     ok = false;
                 }
             }
@@ -437,6 +569,12 @@ bool checkConductorFresnel() {
                               << atWhite << " at r=" << reflectivity << " roughness=" << roughness
                               << " cos=" << cosine << ", so edgeTint reaches nothing\n";
                     ok = false;
+                    continue;
+                }
+                // The exact ratio identity needs M to cancel across edgeTint, which it does only where the
+                // multiple-scattering deficit is negligible; the rough row's edgeTint dependence is real
+                // and is asserted at normal incidence above instead.
+                if (roughness > kMsNegligibleRoughness) {
                     continue;
                 }
                 // The quotient below divides one span by another, so it only carries signal where the
@@ -493,7 +631,13 @@ bool checkConductorFresnel() {
                      "compared against the reference\n";
         ok = false;
     }
-    std::cout << "  conductor Fresnel curve: " << ratiosChecked << " points vs reference\n";
+    if (monotonicRowsChecked == 0) {
+        std::cerr << "bsdf_validate: FAILED conductor Fresnel -- every rough row was skipped as too "
+                     "ill-conditioned, so F_avg's edgeTint dependence was never asserted\n";
+        ok = false;
+    }
+    std::cout << "  conductor Fresnel curve: " << ratiosChecked << " points vs reference, "
+              << monotonicRowsChecked << " rough rows monotone in edgeTint\n";
     return ok;
 }
 
@@ -659,12 +803,14 @@ int main() {
     const bool eonDiffuseOk = checkEonDiffuseFurnace();
     const bool transmissiveEnergyOk = checkTransmissiveEnergyBalance();
     const bool conductorFresnelOk = checkConductorFresnel();
+    const bool averageFresnelOk = checkAverageFresnel();
     const bool reciprocityOk = checkReciprocity();
     const bool transmissionReciprocityOk = checkTransmissionReciprocity();
     const bool roundTripOk = checkTransmissionRoundTrip();
 
     if (!pdfOk || !furnaceOk || !whiteFurnaceOk || !eonDiffuseOk || !transmissiveEnergyOk ||
-        !conductorFresnelOk || !reciprocityOk || !transmissionReciprocityOk || !roundTripOk) {
+        !conductorFresnelOk || !averageFresnelOk || !reciprocityOk || !transmissionReciprocityOk ||
+        !roundTripOk) {
         std::cerr << "bsdf_validate: FAILED\n";
         return EXIT_FAILURE;
     }
