@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <vector>
 
 #include <glm/glm.hpp>
 
@@ -337,15 +338,22 @@ void drawAovSection(int& aov) {
     ImGui::Separator();
 }
 
-// pos/rot/filmback/clip: read-only text. focalLength/aperture/shutter/iso/aberrationStrength: editable sliders.
+// pos/rot/clip: read-only text. filmback: preset dropdown + read-only resolved mm/aspect-ratio text. focalLength/aperture/shutter/iso/aberrationStrength: editable sliders.
 void drawCameraSection(const HudFrameData& frame, float& focalLengthMm, float& aperture,
-                        float& shutterSeconds, float& iso, float& aberrationStrength) {
+                        float& shutterSeconds, float& iso, int& filmBackPresetIndex,
+                        const std::vector<const char*>& filmBackPresetNames,
+                        float& aberrationStrength) {
     ImGui::TextColored(kCyan, "Camera");
     const glm::vec3 camPos = frame.camera.position();
     ImGui::Text("pos  x %.2f  y %.2f  z %.2f", camPos.x, camPos.y, camPos.z);
     ImGui::Text("rot  x %.1f  y %.1f", frame.cameraPitchDegrees, frame.cameraYawDegrees);
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+    ImGui::Combo("##filmBackPreset", &filmBackPresetIndex, filmBackPresetNames.data(),
+                 static_cast<int>(filmBackPresetNames.size()));
     const engine::scene::Camera::FilmBack filmBack = frame.camera.filmBack();
-    ImGui::Text("Filmback  %.1f x %.1f mm", filmBack.widthMm, filmBack.heightMm);
+    // heightMm > 0 is guaranteed by loadFilmBackPresets's boundary validation (profile_config.cpp), so this division is always well-defined.
+    ImGui::Text("Filmback  %.2f x %.2f mm  (%.2f:1)", filmBack.widthMm, filmBack.heightMm,
+                filmBack.widthMm / filmBack.heightMm);
     ImGui::Text("Near  %.2f  Far  %.1f", frame.camera.nearClip(), frame.camera.farClip());
     if (frame.cameraOrbiting) {
         ImGui::TextColored(kCyan, "orbiting");
@@ -480,8 +488,9 @@ void HudOverlay::beginFrame() const {
 }
 
 void HudOverlay::draw(const HudFrameData& frame, int& aov, float& focalLengthMm, float& aperture,
-                       float& shutterSeconds, float& iso, bool& showSky, int& envRotationDegrees,
-                       float& envExposureStops, float& aberrationStrength,
+                       float& shutterSeconds, float& iso, int& filmBackPresetIndex,
+                       const std::vector<const char*>& filmBackPresetNames, bool& showSky,
+                       int& envRotationDegrees, float& envExposureStops, float& aberrationStrength,
                        const FramingOverlayState& framing, const PixelProbeSample& pixelProbe) const {
     ImGui::SetNextWindowPos(ImVec2(8, 8), ImGuiCond_Always);
     constexpr ImGuiWindowFlags flags =
@@ -502,7 +511,8 @@ void HudOverlay::draw(const HudFrameData& frame, int& aov, float& focalLengthMm,
     }
 
     drawAovSection(aov);
-    drawCameraSection(frame, focalLengthMm, aperture, shutterSeconds, iso, aberrationStrength);
+    drawCameraSection(frame, focalLengthMm, aperture, shutterSeconds, iso, filmBackPresetIndex,
+                       filmBackPresetNames, aberrationStrength);
     drawHdriSection(showSky, envRotationDegrees, envExposureStops);
 
     ImGui::End();

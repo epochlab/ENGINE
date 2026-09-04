@@ -12,7 +12,7 @@ class Window;
 
 namespace engine::scene {
 
-// Mutable fly/orbit state that produces a fresh, immutable Camera each frame via snapshot(): Camera itself stays immutable by design (see its header); this is the debug camera its doc comment forward-references. Film back and clip planes are loaded once from profile.json and never mutated at runtime; pose (position/yaw/pitch), orbit state, focal length, and the exposure triangle (aperture/shutterSeconds/iso, editable live via the HUD's Camera section sliders) do change.
+// Mutable fly/orbit state that produces a fresh, immutable Camera each frame via snapshot(): Camera itself stays immutable by design (see its header); this is the debug camera its doc comment forward-references. Clip planes are loaded once from profile.json and never mutated at runtime; pose (position/yaw/pitch), orbit state, focal length, film back (editable live via the HUD's Camera section preset dropdown), and the exposure triangle (aperture/shutterSeconds/iso, editable live via the HUD's Camera section sliders) do change.
 class DebugCameraController {
 public:
     // position/yawDegrees/pitchDegrees become both the initial pose and the pose resetToDefault() restores; the remaining lens params are passed through unchanged to every snapshot()'d Camera.
@@ -40,12 +40,14 @@ public:
     [[nodiscard]] float yawDegrees() const { return yawDegrees_; }
     [[nodiscard]] float pitchDegrees() const { return pitchDegrees_; }
     [[nodiscard]] float focalLengthMm() const { return focalLengthMm_; }
+    [[nodiscard]] Camera::FilmBack filmBack() const { return filmBack_; }
     [[nodiscard]] float aperture() const { return aperture_; }
     [[nodiscard]] float shutterSeconds() const { return shutterSeconds_; }
     [[nodiscard]] float iso() const { return iso_; }
 
-    // Bound to the HUD's Camera section sliders via setter, not a bare reference (controller-owned state).
+    // Bound to the HUD's Camera section sliders/dropdown via setter, not a bare reference (controller-owned state).
     void setFocalLengthMm(float focalLengthMm) { focalLengthMm_ = focalLengthMm; }
+    void setFilmBack(Camera::FilmBack filmBack) { filmBack_ = filmBack; }
     void setAperture(float aperture) { aperture_ = aperture; }
     void setShutterSeconds(float shutterSeconds) { shutterSeconds_ = shutterSeconds; }
     void setIso(float iso) { iso_ = iso; }
@@ -67,7 +69,7 @@ private:
     const float defaultYawDegrees_;
     const float defaultPitchDegrees_;
 
-    const Camera::FilmBack filmBack_;
+    Camera::FilmBack filmBack_;
     const float nearClip_;
     const float farClip_;
     float aperture_;

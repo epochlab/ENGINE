@@ -10,6 +10,7 @@
 #include <optional>
 #include <string>
 #include <utility>
+#include <vector>
 
 // GLEW before GLFW: see gl_debug.cpp for why.
 #include <GL/glew.h>
@@ -122,6 +123,8 @@ struct PathTraceInputState {
     float cameraYawDegrees = 0.0F;
     float cameraPitchDegrees = 0.0F;
     float focalLengthMm = 0.0F;
+    // The only FilmBack component that actually feeds the render (Camera::verticalFovRadians()) -- widthMm is display-only (HUD text/aspect-ratio readout), so tracking it here would trigger retraces for a change with no visible effect on the image.
+    float filmBackHeightMm = 0.0F;
     int envRotationDegrees = -1;
     bool showSky = false;
     float envExposureStops = 0.0F;
@@ -187,6 +190,10 @@ struct AppResources {
 
     // HUD-editable UI/run state.
     int aov;
+    // Film-back preset catalogue (assets/config/camera.json), loaded once at startup; filmBackPresetNames is index-parallel .c_str() pointers into filmBackPresets, built once for ImGui::Combo (same shape as aov/kAovNames). filmBackPresetIndex is the HUD dropdown's bound selection.
+    std::vector<engine::scene::Camera::FilmBackPreset> filmBackPresets;
+    std::vector<const char*> filmBackPresetNames;
+    int filmBackPresetIndex;
     int channelView;
     engine::gfx::OcioDisplayTransform::Lut userLut;
     engine::debug::FramingOverlayState framingState;
@@ -306,10 +313,36 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
               << engine::debug::gpuTimerQueryAvailable() << '\n';
     const engine::debug::GpuInfo gpuInfo = engine::debug::queryGpuInfo();
 
+    // Loaded separately from profile.json (not gated on window size, unlike profile.json itself), then resolved by name against profileConfig.camera.defaultFilmBackPresetName -- mirrors loadMaterialConfig's "standalone JSON file" precedent below.
+    std::optional<std::vector<engine::scene::Camera::FilmBackPreset>> filmBackPresets =
+        engine::config::loadFilmBackPresets(ASSET_ROOT_DIR "/config/camera.json");
+    if (!filmBackPresets) {
+        std::cerr << "main: film back preset load failed, aborting startup\n";
+        return std::nullopt;
+    }
+    const auto filmBackPresetIt =
+        std::find_if(filmBackPresets->begin(), filmBackPresets->end(),
+                     [&](const engine::scene::Camera::FilmBackPreset& preset) {
+                         return preset.name == profileConfig.camera.defaultFilmBackPresetName;
+                     });
+    if (filmBackPresetIt == filmBackPresets->end()) {
+        std::cerr << "main: profile.json filmBackPreset \"" << profileConfig.camera.defaultFilmBackPresetName
+                   << "\" not found in camera.json\n";
+        return std::nullopt;
+    }
+    const int filmBackPresetIndex =
+        static_cast<int>(std::distance(filmBackPresets->begin(), filmBackPresetIt));
+    // Computed before filmBackPresets is moved into AppResources below: vector's move is a buffer-ownership transfer (element addresses, hence these c_str() pointers, stay valid across it), but building this from an already-moved-from vector would not be.
+    std::vector<const char*> filmBackPresetNames;
+    filmBackPresetNames.reserve(filmBackPresets->size());
+    for (const engine::scene::Camera::FilmBackPreset& preset : *filmBackPresets) {
+        filmBackPresetNames.push_back(preset.name.c_str());
+    }
+
     // ev100() is logged but not render-path-consumed directly: DebugCameraController::relativeExposureEv() derives the display-stage multiplier from it (OcioDisplayTransform), not this log line.
     engine::scene::DebugCameraController debugCamera(
         profileConfig.camera.position, profileConfig.camera.yawDegrees,
-        profileConfig.camera.pitchDegrees, profileConfig.camera.filmBack,
+        profileConfig.camera.pitchDegrees, filmBackPresetIt->filmBack,
         profileConfig.camera.focalLengthMm, profileConfig.camera.nearClip,
         profileConfig.camera.farClip, profileConfig.camera.aperture,
         profileConfig.camera.shutterSeconds, profileConfig.camera.iso,
@@ -437,6 +470,9 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         .uHsvInvertLoc = hsvUniforms.invert,
         // aov selects which AOV the path tracer's snapshot supplies (see selectPathTracedImage); channelView isolates one R/G/B channel of whatever aov currently shows. userLut is the LUT 'L' cycles through -- kept separate from OcioDisplayTransform's active LUT because non-Beauty AOVs force Raw (see the LUT-select comment in presentFrame) and must not clobber the user's actual choice. Both aov and userLut start from profile.json rather than a fixed literal.
         .aov = profileConfig.render.defaultAov,
+        .filmBackPresets = std::move(*filmBackPresets),
+        .filmBackPresetNames = std::move(filmBackPresetNames),
+        .filmBackPresetIndex = filmBackPresetIndex,
         .channelView = 0,
         .userLut = profileConfig.render.defaultLut,
         .framingState = engine::debug::FramingOverlayState{},
@@ -891,7 +927,8 @@ void requestPathTraceIfTriggerChanged(AppResources& app, const engine::scene::Ca
     const bool needsLightTransport = aovNeedsLightTransport(static_cast<engine::debug::AovId>(app.aov));
     const PathTraceInputState input{
         camera.position(),       app.debugCamera.yawDegrees(), app.debugCamera.pitchDegrees(),
-        app.debugCamera.focalLengthMm(), app.envRotationDegrees, app.showSky, app.envExposureStops,
+        app.debugCamera.focalLengthMm(), app.debugCamera.filmBack().heightMm,
+        app.envRotationDegrees, app.showSky, app.envExposureStops,
         fbWidth,                 fbHeight,                     needsLightTransport,
         app.aov};
 
@@ -994,10 +1031,12 @@ void updateHud(AppResources& app, const engine::platform::Window& window,
     float aperture = app.debugCamera.aperture();
     float shutterSeconds = app.debugCamera.shutterSeconds();
     float iso = app.debugCamera.iso();
+    int filmBackPresetIndex = app.filmBackPresetIndex;
     const engine::debug::PixelProbeSample pixelProbe = samplePixelProbe(
         window, pathTraceSnapshot, app, static_cast<engine::debug::AovId>(app.aov));
     if (app.showHud) {
-        app.hud.draw(hudFrameData, app.aov, focalLengthMm, aperture, shutterSeconds, iso, app.showSky,
+        app.hud.draw(hudFrameData, app.aov, focalLengthMm, aperture, shutterSeconds, iso,
+                     filmBackPresetIndex, app.filmBackPresetNames, app.showSky,
                      app.envRotationDegrees, app.envExposureStops, app.aberrationStrength,
                      app.framingState, pixelProbe);
     }
@@ -1005,6 +1044,9 @@ void updateHud(AppResources& app, const engine::platform::Window& window,
     app.debugCamera.setAperture(aperture);
     app.debugCamera.setShutterSeconds(shutterSeconds);
     app.debugCamera.setIso(iso);
+    app.filmBackPresetIndex = filmBackPresetIndex;
+    app.debugCamera.setFilmBack(
+        app.filmBackPresets[static_cast<std::size_t>(filmBackPresetIndex)].filmBack);
     app.hud.render();
 }
 

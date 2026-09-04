@@ -318,9 +318,26 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
 
+    // Resolved the same way as main.cpp's initializeApp: profile.json names a preset, assets/config/camera.json supplies its dimensions.
+    const std::optional<std::vector<engine::scene::Camera::FilmBackPreset>> filmBackPresets =
+        engine::config::loadFilmBackPresets(assetRoot + "/config/camera.json");
+    if (!filmBackPresets) {
+        return EXIT_FAILURE;
+    }
+    const auto filmBackPresetIt =
+        std::find_if(filmBackPresets->begin(), filmBackPresets->end(),
+                     [&](const engine::scene::Camera::FilmBackPreset& preset) {
+                         return preset.name == profileConfig->camera.defaultFilmBackPresetName;
+                     });
+    if (filmBackPresetIt == filmBackPresets->end()) {
+        std::cerr << "render_beauty: profile.json filmBackPreset \""
+                   << profileConfig->camera.defaultFilmBackPresetName << "\" not found in camera.json\n";
+        return EXIT_FAILURE;
+    }
+
     const engine::config::CameraConfig& cameraConfig = profileConfig->camera;
     const engine::scene::Camera camera(cameraConfig.position, cameraConfig.yawDegrees,
-                                        cameraConfig.pitchDegrees, cameraConfig.filmBack,
+                                        cameraConfig.pitchDegrees, filmBackPresetIt->filmBack,
                                         cameraConfig.focalLengthMm, cameraConfig.nearClip,
                                         cameraConfig.farClip, cameraConfig.aperture,
                                         cameraConfig.shutterSeconds, cameraConfig.iso);
