@@ -27,8 +27,8 @@
     },
     "pathTracer": {
         "samplesPerPixel": 1,
-        "maxBounces": 8,
+        "maxBounces": 4,
         "russianRouletteStartBounce": 3,
-        "maxSamples": 32
+        "maxSamples": 8
     }
 }

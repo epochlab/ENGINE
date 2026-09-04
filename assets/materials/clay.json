@@ -3,8 +3,6 @@
     "roughnessFactor": 0.5,
     "roughnessMin": 0.045,
     "roughnessMax": 1.0,
-    "metallicFactor": 0.0,
-    "transmissionFactor": 0.0,
     "ior": 1.5,
     "bumpStrength": 0.0,
     "diffuseRoughness": 0.3

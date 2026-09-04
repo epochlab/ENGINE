@@ -21,17 +21,21 @@ struct EnvironmentConfig {
     std::string hdriPath;  // environment map, relative to ASSET_ROOT_DIR
 };
 
-// Tunable shading constants that shape how a material's textures get turned into BSDF input -- externalized so these can be edited without recompiling. diffuseColour/ior/transmissionFactor/metallicFactor/roughnessFactor/diffuseRoughness are a single global material definition applied to every mesh in the scene, replacing what used to be read per-object off each glTF's material block. Loaded from its own file (see loadMaterialConfig) rather than inline in scene.json, so a shader library of named material files (assets/materials/*.json) can grow without a scene.json schema change.
+// Tunable shading constants that shape how a material's textures get turned into BSDF input -- externalized so these can be edited without recompiling. diffuseColour/ior/transmissionFactor/metallicFactor/roughnessFactor/diffuseRoughness are a single global material definition applied to every mesh in the scene, replacing what used to be read per-object off each glTF's material block. Loaded from its own file (see loadMaterialConfig) rather than inline in scene.json, so a shader library of named material files (assets/materials/*.json) can grow without a scene.json schema change. Only diffuseColour/roughnessFactor/roughnessMin/roughnessMax/bumpStrength are always live; the rest default to a no-op value so a bespoke material (e.g. clay.json) need only declare what its archetype actually uses -- see materials/principled.json for the full parameter surface.
 struct MaterialConfig {
     float bumpStrength;   // scales the bump texture's raw per-texel height difference; see path_tracer.cpp's buildShadingFrame
     float roughnessMin;   // floor applied to the roughness texture sample, avoids a near-zero-roughness GGX singularity
     float roughnessMax;   // ceiling applied to the roughness texture sample
     glm::vec3 diffuseColour;      // multiplies baseColorTexture
-    float ior;                     // dielectric IOR, non-metal lobes only
-    float transmissionFactor;      // KHR_materials_transmission-style factor, 0 = opaque
-    float metallicFactor;
+    // Dielectric IOR, non-metal lobes only. Optional, default 1.5: nullified by (1-metallic) at metallicFactor=1, so a pure conductor (e.g. chrome.json) need not declare it.
+    float ior = 1.5F;
+    // KHR_materials_transmission-style factor, 0 = opaque. Optional, default 0.0: a true no-op (transmitProb=0), so a material with no transmission lobe (e.g. clay.json, chrome.json) need not declare it.
+    float transmissionFactor = 0.0F;
+    // Optional, default 0.0: a true no-op, so a non-metal material (e.g. clay.json, glass.json) need not declare it.
+    float metallicFactor = 0.0F;
     float roughnessFactor;         // multiplies the roughness texture sample, before roughnessMin/Max clamp
-    float diffuseRoughness;        // EON rough-diffuse parameter r in [0,1]; 0 = Lambertian, see bsdf.cpp's evaluateDiffuseLobe
+    // EON rough-diffuse parameter r in [0,1]; 0 = Lambertian, see bsdf.cpp's evaluateDiffuseLobe. Optional, default 0.0: dead once metallicFactor=1 or transmissionFactor=1, so glass.json/chrome.json need not declare it.
+    float diffuseRoughness = 0.0F;
     // Beer-Lambert volumetric absorption while a path travels inside this material (transmissionFactor>0 only). Optional, default [1,1,1]: -log(1)=0, so absorption is a true no-op regardless of transmissionDepth unless a material opts in. See path_tracer.cpp's sigmaAFromTransmission.
     glm::vec3 transmissionColor = glm::vec3(1.0F);
     float transmissionDepth = 1.0F;  // distance (world units) at which transmittance reaches transmissionColor
@@ -43,7 +47,7 @@ struct MaterialConfig {
 struct SceneConfig {
     ModelConfig model;
     EnvironmentConfig environment;
-    std::string materialPath;  // relative to ASSET_ROOT_DIR, points to a material JSON file (e.g. materials/diffuse.json), matching ModelConfig::gltfPath's convention
+    std::string materialPath;  // relative to ASSET_ROOT_DIR, points to a material JSON file (e.g. materials/clay.json), matching ModelConfig::gltfPath's convention
     // glTF node name -> material JSON path (relative to ASSET_ROOT_DIR), overriding materialPath for that instance's triangles. Optional key; absent in the scene JSON means an empty map, i.e. every instance uses materialPath. Keyed by MeshInstance::name (gltf_loader.h).
     std::map<std::string, std::string> materialOverrides;
 };
@@ -51,7 +55,7 @@ struct SceneConfig {
 // Reads and parses path. Returns nullopt and logs to stderr if the file is missing, unreadable, or any required field can't be found/parsed. User-editable input, not an internal invariant: failure is expected and surfaced rather than defaulted around.
 [[nodiscard]] std::optional<SceneConfig> loadSceneConfig(const std::string& path);
 
-// Reads and parses a standalone material file (e.g. assets/materials/diffuse.json). Same failure contract as loadSceneConfig.
+// Reads and parses a standalone material file (e.g. assets/materials/clay.json). Same failure contract as loadSceneConfig.
 [[nodiscard]] std::optional<MaterialConfig> loadMaterialConfig(const std::string& path);
 
 }  // namespace engine::config
