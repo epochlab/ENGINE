@@ -254,10 +254,13 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
                 if (eval.pdf > 0.0F &&
                     (bsdfValue.x > 0.0F || bsdfValue.y > 0.0F || bsdfValue.z > 0.0F)) {
                     // Offset along geoNormal toward whichever side the light sample is on -- the far side for a transmissive vertex lit from behind, the near side otherwise.
+                    // Far side crosses the interface like a transmission continuation ray, so it takes the same curvature-scaled offset: kRayEpsilon does not clear the neighbouring facet on curved geometry, leaking env radiance through a surface that should occlude it. Near side keeps kRayEpsilon; flat geometry collapses to it.
+                    const float shadowEpsilon =
+                        farSide ? transmissionOffsetEpsilon(triangle) : kRayEpsilon;
                     const glm::vec3 shadowOrigin =
                         shadowTerminatorOffset(triangle, hit->u, hit->v) +
-                        (geoNormal * kRayEpsilon * (geoCos > 0.0F ? 1.0F : -1.0F));
-                    const Ray shadowRay{shadowOrigin, lightSample.direction, kRayEpsilon,
+                        (geoNormal * shadowEpsilon * (geoCos > 0.0F ? 1.0F : -1.0F));
+                    const Ray shadowRay{shadowOrigin, lightSample.direction, shadowEpsilon,
                                          std::numeric_limits<float>::max()};
                     if (!accel.occluded(shadowRay)) {
                         if (bounce == 0) {
