@@ -97,9 +97,10 @@ ConductorIor conductorIorFromReflectivity(const glm::vec3& reflectivity, const g
 // Exact unpolarized Fresnel reflectance of one channel of a conductor with complex IOR n + ik (Born &
 // Wolf), in the standard real-arithmetic form: two hardware sqrts, no complex division, and no <complex>
 // in this translation unit. NOT the paper's Appendix A rs/rp, which is the large-|eta| approximation
-// (PBRT-v2's FrCond) and deviates from this by up to 0.094 absolute at mid reflectivity, 0.0074 at
-// chrome's r=0.95. bsdf_validate compares this against the complex-arithmetic definition, which the two
-// forms match to 2.2e-12 over the clamped (r, g, cosTheta) domain.
+// (PBRT-v2's FrCond) and deviates from this by up to 0.094 absolute around r~0.25 -- mid reflectivity,
+// which is where real metals sit (chrome.json's measured chromium is r~0.555). bsdf_validate compares
+// this against the complex-arithmetic definition, which the two forms match to 2.2e-12 over the clamped
+// (r, g, cosTheta) domain.
 // Deliberately free of clamps, unlike the inversion above, where a max() guards an exact-zero boundary
 // (g=0) that float rounding can push slightly negative. Here no denominator can vanish once r is floored
 // away from 0: a2b2 - t0 > 0 follows from a2b2 >= |t0| alone, and a2b2 itself is positive either because
@@ -753,10 +754,12 @@ LobeProbabilities computeLobeProbabilities(const BsdfParams& params, const glm::
     }
     // KNOWN INCONSISTENCY, bounded and deliberate (README sec. 5). schlickFresnelAvg is the EXACT cosine
     // mean of Schlick, but the conductor's single scatter now evaluates exact complex-IOR Fresnel, whose
-    // true cosine mean is higher: measured -1.7e-5 at f0=1, -0.0083 at chrome's r=0.95, worst -0.086 at
-    // r~0.25. multiScatterTint is monotone in this, so the error is always an under-return, never a gain,
-    // and it scales with the deficit (1-E): under 3e-4 for anything at roughness <= 0.05, up to 0.048 of
-    // incident radiance for a mid-reflectivity metal at roughness 1. No test in the suite can see it --
+    // true cosine mean differs, and the SIGN depends on edgeTint: Karis is a function of f0 alone, while
+    // the true mean falls as the edge tint darkens. At g=1 Karis under-predicts (-1.7e-5 at f0=1, worst
+    // -0.086 near r=0.25); at chrome.json's measured chromium (r~0.555, g~0.55-0.67) it over-predicts by
+    // +0.030. So the multiple-scattering lobe returns too little on a white-edged metal and too much on a
+    // tinted one. Either way it scales with the deficit (1-E): 3e-4 of incident radiance at chrome's
+    // roughness 0.05, up to ~0.05 for a mid-reflectivity metal at roughness 1. No test in the suite sees it --
     // the two-sided white furnace is f0=1 only (where it vanishes) and the coloured rows are upper-bound
     // only (blind to a loss). Fixing it needs an F_avg over (r, g), the same shape as dielectricFresnelAvg.
     const glm::vec3 fresnelAvg = glm::mix(glm::vec3(dielectricFresnelAvg(params.ior)),
