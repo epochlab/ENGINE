@@ -68,6 +68,8 @@ std::optional<MaterialConfig> loadMaterialConfig(const std::string& path) {
             j.at("metallicFactor").get<float>(),
             j.at("roughnessFactor").get<float>(),
             j.at("diffuseRoughness").get<float>(),
+            j.value("transmissionColor", glm::vec3(1.0F)),
+            j.value("transmissionDepth", 1.0F),
         };
     } catch (const nlohmann::json::exception& e) {
         std::cerr << "loadMaterialConfig: " << path << ": " << e.what() << '\n';

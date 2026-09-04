@@ -32,6 +32,9 @@ struct MaterialConfig {
     float metallicFactor;
     float roughnessFactor;         // multiplies the roughness texture sample, before roughnessMin/Max clamp
     float diffuseRoughness;        // EON rough-diffuse parameter r in [0,1]; 0 = Lambertian, see bsdf.cpp's evaluateDiffuseLobe
+    // Beer-Lambert volumetric absorption while a path travels inside this material (transmissionFactor>0 only). Optional, default [1,1,1]: -log(1)=0, so absorption is a true no-op regardless of transmissionDepth unless a material opts in. See path_tracer.cpp's sigmaAFromTransmission.
+    glm::vec3 transmissionColor = glm::vec3(1.0F);
+    float transmissionDepth = 1.0F;  // distance (world units) at which transmittance reaches transmissionColor
 };
 
 // The asset to load and how to shade/light it -- everything main.cpp needs that's specific to this scene rather than a session-wide renderer/camera default (those are ProfileConfig). Grouped into model/environment sub-objects, plus a path to the scene's material file; see assets/scenes/tree.json for the checked-in defaults.
