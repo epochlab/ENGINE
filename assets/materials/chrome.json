@@ -1,6 +1,6 @@
 {
-    "diffuseColour": [0.552, 0.555, 0.558],
-    "edgeTint": [0.555, 0.558, 0.672],
+    "diffuseColour": [0.95, 0.95, 0.97],
+    "edgeTint": [1.0, 1.0, 1.0],
     "roughnessFactor": 0.05,
     "roughnessMin": 0.045,
     "roughnessMax": 1.0,
