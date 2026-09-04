@@ -40,7 +40,7 @@ struct RasterGBuffer {
 void renderRasterGBuffer(const Camera& camera, const EmbreeAccel& accel,
                           const std::vector<ShadingTriangle>& shadingTriangles,
                           const std::vector<MeshInstance>& instances,
-                          const PathTraceSettings& settings, int width, int height,
-                          ThreadPool& threadPool, RasterGBuffer& out);
+                          const std::vector<PathTraceSettings>& perInstanceSettings, int width,
+                          int height, ThreadPool& threadPool, RasterGBuffer& out);
 
 }  // namespace engine::scene

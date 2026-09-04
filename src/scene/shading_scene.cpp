@@ -12,6 +12,7 @@ ShadingVertex interpolateShading(const ShadingTriangle& tri, float u, float v) {
         glm::normalize((w * glm::vec3(tri.v0.tangent)) + (u * glm::vec3(tri.v1.tangent)) +
                         (v * glm::vec3(tri.v2.tangent)));
     result.tangent = glm::vec4(tangentXyz, tri.v0.tangent.w);  // handedness: +-1 constant, glTF requires it consistent per-triangle
+    result.colour = (w * tri.v0.colour) + (u * tri.v1.colour) + (v * tri.v2.colour);
     return result;
 }
 

@@ -7,9 +7,13 @@ namespace engine::scene {
 
 namespace {
 
-glm::vec3 resolveBaseColor(const Material& material, glm::vec2 uv, const PathTraceSettings& settings) {
+// glTF core spec order: baseColorFactor * baseColorTexture * COLOR_0 (commutative, so the order here
+// is documentation, not a correctness requirement). vertexColour is white (1,1,1) when the primitive
+// has no COLOR_0 attribute, making this a no-op multiply for every asset that doesn't use it.
+glm::vec3 resolveBaseColor(const Material& material, glm::vec2 uv, const glm::vec3& vertexColour,
+                            const PathTraceSettings& settings) {
     const glm::vec4 sample = engine::gfx::sampleBilinear(material.baseColorTexture, uv);
-    return glm::vec3(sample) * settings.diffuseColour;
+    return glm::vec3(sample) * settings.diffuseColour * vertexColour;
 }
 
 float resolveRoughness(const Material& material, glm::vec2 uv, const PathTraceSettings& settings) {
@@ -28,13 +32,15 @@ LineProximity nearLineSegmentPx(glm::vec2 p, glm::vec2 a, glm::vec2 b, float thi
     return LineProximity{glm::length(p - closest) < thicknessPx, t};
 }
 
-BsdfParams resolveBsdfParams(const Material& material, glm::vec2 uv, const PathTraceSettings& settings) {
-    const glm::vec3 baseColor = resolveBaseColor(material, uv, settings);
+BsdfParams resolveBsdfParams(const Material& material, glm::vec2 uv, const glm::vec3& vertexColour,
+                              const PathTraceSettings& settings) {
+    const glm::vec3 baseColor = resolveBaseColor(material, uv, vertexColour, settings);
     const float roughness = resolveRoughness(material, uv, settings);
     const glm::vec3 specular = glm::vec3(engine::gfx::sampleBilinear(material.specularTexture, uv));
     const glm::vec3 f0 = glm::mix(specular, baseColor, settings.metallicFactor);
-    return BsdfParams{baseColor, settings.metallicFactor, roughness, f0, settings.ior,
-                       settings.transmissionFactor};
+    return BsdfParams{baseColor,       settings.metallicFactor,       roughness,
+                       f0,             settings.ior,                  settings.transmissionFactor,
+                       settings.diffuseRoughness};
 }
 
 ShadingFrame buildShadingFrame(const ShadingVertex& shading, const Material& material,

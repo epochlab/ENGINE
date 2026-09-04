@@ -1,0 +1,13 @@
+{
+    "diffuseColour": [1.0, 1.0, 1.0],
+    "roughnessFactor": 0.02,
+    "roughnessMin": 0.01,
+    "roughnessMax": 1.0,
+    "metallicFactor": 0.0,
+    "transmissionFactor": 1.0,
+    "ior": 1.5,
+    "bumpStrength": 0.0,
+    "diffuseRoughness": 0.3,
+    "transmissionColor": [0.96, 0.98, 1.0],
+    "transmissionDepth": 0.4
+}

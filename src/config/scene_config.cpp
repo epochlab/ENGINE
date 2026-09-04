@@ -22,7 +22,11 @@ std::optional<SceneConfig> loadSceneConfig(const std::string& path) {
 
         const nlohmann::json& model = j.at("model");
         const nlohmann::json& environment = j.at("environment");
-        const nlohmann::json& material = j.at("material");
+
+        std::map<std::string, std::string> materialOverrides;
+        if (const auto it = j.find("materialOverrides"); it != j.end()) {
+            materialOverrides = it->get<std::map<std::string, std::string>>();
+        }
 
         return SceneConfig{
             ModelConfig{
@@ -34,19 +38,41 @@ std::optional<SceneConfig> loadSceneConfig(const std::string& path) {
             EnvironmentConfig{
                 environment.at("hdriPath").get<std::string>(),
             },
-            MaterialConfig{
-                material.at("bumpStrength").get<float>(),
-                material.at("roughnessMin").get<float>(),
-                material.at("roughnessMax").get<float>(),
-                material.at("diffuseColour").get<glm::vec3>(),
-                material.at("ior").get<float>(),
-                material.at("transmissionFactor").get<float>(),
-                material.at("metallicFactor").get<float>(),
-                material.at("roughnessFactor").get<float>(),
-            },
+            j.at("materialPath").get<std::string>(),
+            std::move(materialOverrides),
         };
     } catch (const nlohmann::json::exception& e) {
         std::cerr << "loadSceneConfig: " << path << ": " << e.what() << '\n';
+        return std::nullopt;
+    }
+}
+
+std::optional<MaterialConfig> loadMaterialConfig(const std::string& path) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        std::cerr << "loadMaterialConfig: could not read " << path << '\n';
+        return std::nullopt;
+    }
+
+    try {
+        nlohmann::json j;
+        file >> j;
+
+        return MaterialConfig{
+            j.at("bumpStrength").get<float>(),
+            j.at("roughnessMin").get<float>(),
+            j.at("roughnessMax").get<float>(),
+            j.at("diffuseColour").get<glm::vec3>(),
+            j.at("ior").get<float>(),
+            j.at("transmissionFactor").get<float>(),
+            j.at("metallicFactor").get<float>(),
+            j.at("roughnessFactor").get<float>(),
+            j.at("diffuseRoughness").get<float>(),
+            j.value("transmissionColor", glm::vec3(1.0F)),
+            j.value("transmissionDepth", 1.0F),
+        };
+    } catch (const nlohmann::json::exception& e) {
+        std::cerr << "loadMaterialConfig: " << path << ": " << e.what() << '\n';
         return std::nullopt;
     }
 }

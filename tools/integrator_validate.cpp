@@ -93,7 +93,7 @@ QuadScene makeQuadScene(float roughness, glm::vec3 f0) {
     scene.worldTriangles = {Triangle{v0.position, v1.position, v2.position},
                              Triangle{v0.position, v2.position, v3.position}};
     scene.shadingTriangles = {ShadingTriangle{v0, v1, v2, 0}, ShadingTriangle{v0, v2, v3, 0}};
-    scene.instances = {MeshInstance{makeMaterial(roughness, f0), glm::mat4(1.0F)}};
+    scene.instances = {MeshInstance{makeMaterial(roughness, f0), glm::mat4(1.0F), ""}};
     return scene;
 }
 
@@ -121,7 +121,7 @@ QuadScene makeSlabScene(float roughness, glm::vec3 f0, float thickness) {
                              Triangle{bv0.position, bv2.position, bv3.position}};
     scene.shadingTriangles = {ShadingTriangle{fv0, fv1, fv2, 0}, ShadingTriangle{fv0, fv2, fv3, 0},
                                ShadingTriangle{bv0, bv1, bv2, 0}, ShadingTriangle{bv0, bv2, bv3, 0}};
-    scene.instances = {MeshInstance{makeMaterial(roughness, f0), glm::mat4(1.0F)}};
+    scene.instances = {MeshInstance{makeMaterial(roughness, f0), glm::mat4(1.0F), ""}};
     return scene;
 }
 
@@ -217,10 +217,11 @@ engine::scene::PathTraceResult renderPass(const QuadScene& scene, const Environm
     const std::atomic<std::uint64_t> generation{1};
     engine::scene::PathTraceResult result =
         engine::scene::makePathTraceResult(kImageSize, kImageSize);
+    const std::vector<PathTraceSettings> perInstanceSettings(scene.instances.size(), settings);
     engine::scene::renderPathTraced(makeCamera(), accel, scene.shadingTriangles, scene.instances, env,
                                      kImageSize, kImageSize, /*envRotationRadians=*/0.0F, showSky,
-                                     /*envExposure=*/1.0F, settings, /*runSeed=*/7U, generation,
-                                     /*requestedGeneration=*/1U, pool, result);
+                                     /*envExposure=*/1.0F, settings, perInstanceSettings, /*runSeed=*/7U,
+                                     generation, /*requestedGeneration=*/1U, pool, result);
     return result;
 }
 
@@ -281,7 +282,7 @@ bool runCases() {
             *accel, pool);
 
         const BsdfParams params{glm::vec3(1.0F), testCase.metallic, testCase.roughness, testCase.f0,
-                                 1.5F, 0.0F};
+                                 1.5F, 0.0F, 0.0F};
         const float reference = referenceLo(params, glm::vec3(0.0F, 0.0F, 1.0F), kReferenceSamples,
                                              referenceRng);
 

@@ -31,10 +31,11 @@ public:
         int maxSamples = 0;  // accumulated-pass cap; 0 = unbounded
     };
 
-    // accel/shadingTriangles/instances/environmentMap must already be at their final, permanent address and must outlive the driver (EmbreeAccel has no refit/update API -- the scene is static) -- held by reference, not copied per-request. Do not construct this as part of the same aggregate-initialization expression that also constructs those referenced objects (e.g. AppResources's designated-initializer list): a bare identifier there would still name the pre-move local, and AppResources's return-type conversion to std::optional<AppResources> move-constructs once more regardless -- either way a reference captured that early would dangle. Construct this only after the referenced object is confirmed at its final address (main.cpp emplaces AppResources::pathTraceDriver, itself a std::optional, right after initializeApp() returns).
+    // accel/shadingTriangles/instances/environmentMap/perInstanceSettings must already be at their final, permanent address and must outlive the driver (EmbreeAccel has no refit/update API -- the scene is static) -- held by reference, not copied per-request. Do not construct this as part of the same aggregate-initialization expression that also constructs those referenced objects (e.g. AppResources's designated-initializer list): a bare identifier there would still name the pre-move local, and AppResources's return-type conversion to std::optional<AppResources> move-constructs once more regardless -- either way a reference captured that early would dangle. Construct this only after the referenced object is confirmed at its final address (main.cpp emplaces AppResources::pathTraceDriver, itself a std::optional, right after initializeApp() returns).
     PathTraceDriver(const EmbreeAccel& accel, const std::vector<ShadingTriangle>& shadingTriangles,
                      const std::vector<MeshInstance>& instances,
-                     const EnvironmentMap& environmentMap);
+                     const EnvironmentMap& environmentMap,
+                     const std::vector<PathTraceSettings>& perInstanceSettings);
     ~PathTraceDriver();
 
     PathTraceDriver(const PathTraceDriver&) = delete;
@@ -65,6 +66,7 @@ private:
     const std::vector<ShadingTriangle>& shadingTriangles_;
     const std::vector<MeshInstance>& instances_;
     const EnvironmentMap& environmentMap_;
+    const std::vector<PathTraceSettings>& perInstanceSettings_;
 
     std::mutex requestMutex_;
     // Camera has no default constructor, so this can't be a plain Request -- std::nullopt until the first requestTrace() call, which is fine: driverLoop never reads it before generation_ (whose first bump happens in the same requestTrace call, under the same lock) has gone non-zero.
@@ -87,7 +89,7 @@ private:
     // Persistent parallel dispatch for renderPathTraced and its accumulate step, reused across every pass -- see ThreadPool's own doc comment. Declared before thread_ so it's fully constructed (and its workers parked and ready) before driverLoop starts, and outlives every renderPathTraced call driverLoop makes (destroyed only after thread_ has stopped and joined).
     ThreadPool threadPool_;
 
-    // Declared last: constructed last (starts driverLoop only once every member above exists), destroyed first (std::jthread's destructor requests a stop and joins before any member above -- or, per the constructor's own precondition, the objects accel_/shadingTriangles_/instances_/environmentMap_ reference -- could be invalidated by outer teardown).
+    // Declared last: constructed last (starts driverLoop only once every member above exists), destroyed first (std::jthread's destructor requests a stop and joins before any member above -- or, per the constructor's own precondition, the objects accel_/shadingTriangles_/instances_/environmentMap_/perInstanceSettings_ reference -- could be invalidated by outer teardown).
     std::jthread thread_;
 };
 

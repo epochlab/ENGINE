@@ -24,6 +24,7 @@ struct Vertex {
     glm::vec2 uv;
     glm::vec3 normal;
     glm::vec4 tangent;  // .w = bitangent handedness (glTF convention)
+    glm::vec3 colour;   // COLOR_0, multiplies baseColor; white (1,1,1) when the primitive has none
 };
 
 std::string dirOf(const std::string& path) {
@@ -116,6 +117,7 @@ void appendShadingTriangles(const std::vector<Vertex>& vertices,
             glm::normalize(normalMatrix * v.normal),
             v.uv,
             glm::vec4(glm::normalize(linear * glm::vec3(v.tangent)), v.tangent.w),
+            v.colour,
         };
     };
     for (std::size_t i = 0; i + 2 < indices.size(); i += 3) {
@@ -133,11 +135,17 @@ struct RequiredAccessors {
     const cgltf_accessor* normal;
     const cgltf_accessor* uv;
     const cgltf_accessor* tangent;
+    const cgltf_accessor* color;  // COLOR_0, optional -- nullptr means "no vertex colour"
 };
 
-// Locates the position/normal/uv0/tangent accessors this loader requires and rejects (nullopt) a primitive missing any of them, or -- since cgltf_accessor_read_float can't signal failure through its return value for a sparse accessor (their own source: "This is an error case, but we can't communicate the error with existing interface") -- a primitive using a sparse accessor for any of them, which this loader doesn't support.
+// Locates the position/normal/uv0/tangent accessors this loader requires (plus an optional COLOR_0)
+// and rejects (nullopt) a primitive missing any of the required ones, or -- since
+// cgltf_accessor_read_float can't signal failure through its return value for a sparse accessor
+// (their own source: "This is an error case, but we can't communicate the error with existing
+// interface") -- a primitive using a sparse accessor for any of them (COLOR_0 included, when
+// present), which this loader doesn't support.
 std::optional<RequiredAccessors> findAttributeAccessors(const cgltf_primitive& prim) {
-    RequiredAccessors acc{nullptr, nullptr, nullptr, nullptr};
+    RequiredAccessors acc{nullptr, nullptr, nullptr, nullptr, nullptr};
     for (cgltf_size ai = 0; ai < prim.attributes_count; ++ai) {
         const cgltf_attribute& attr = prim.attributes[ai];
         if (attr.type == cgltf_attribute_type_position) {
@@ -148,6 +156,8 @@ std::optional<RequiredAccessors> findAttributeAccessors(const cgltf_primitive& p
             acc.uv = attr.data;
         } else if (attr.type == cgltf_attribute_type_tangent) {
             acc.tangent = attr.data;
+        } else if (attr.type == cgltf_attribute_type_color && attr.index == 0) {
+            acc.color = attr.data;
         }
     }
     if (acc.position == nullptr || acc.normal == nullptr || acc.uv == nullptr ||
@@ -156,7 +166,7 @@ std::optional<RequiredAccessors> findAttributeAccessors(const cgltf_primitive& p
         return std::nullopt;
     }
     if (acc.position->is_sparse || acc.normal->is_sparse || acc.uv->is_sparse ||
-        acc.tangent->is_sparse) {
+        acc.tangent->is_sparse || (acc.color != nullptr && acc.color->is_sparse)) {
         std::cerr << "loadGltf: sparse accessors are not supported\n";
         return std::nullopt;
     }
@@ -172,6 +182,17 @@ std::vector<Vertex> readVertices(const RequiredAccessors& acc) {
         // No V flip: glTF's v=0-at-top already matches loadExr's row-0-at-top convention.
         cgltf_accessor_read_float(acc.uv, vi, &v.uv.x, 2);
         cgltf_accessor_read_float(acc.tangent, vi, &v.tangent.x, 4);
+        if (acc.color != nullptr) {
+            // COLOR_0 may be VEC3 or VEC4 per the glTF 2.0 core spec; cgltf_accessor_read_float
+            // already normalizes FLOAT vs. UNSIGNED_BYTE/UNSIGNED_SHORT transparently, but won't
+            // default a missing 4th component itself, so size the read to the accessor's own type
+            // and drop alpha -- nothing in this engine's shading consumes vertex-colour alpha.
+            float raw[4] = {1.0F, 1.0F, 1.0F, 1.0F};
+            cgltf_accessor_read_float(acc.color, vi, raw, cgltf_num_components(acc.color->type));
+            v.colour = glm::vec3(raw[0], raw[1], raw[2]);
+        } else {
+            v.colour = glm::vec3(1.0F);
+        }
     }
     return vertices;
 }
@@ -250,18 +271,14 @@ std::optional<Material> loadMaterialTextures(const cgltf_data* data, const cgltf
     };
 }
 
-// Builds one MeshInstance's Vertex/index arrays and Material from a single triangle primitive. Fails clearly (nullopt) rather than substituting a placeholder for a primitive this loader doesn't support (non-triangle mode, missing attributes/material). A material with no texture for a given slot is not a failure -- loadMaterialTextures substitutes a neutral default for that slot instead.
+// Builds one MeshInstance's Vertex/index arrays and Material from a single triangle primitive. Fails clearly (nullopt) rather than substituting a placeholder for a primitive this loader doesn't support (non-triangle mode, missing attributes). A material with no texture for a given slot -- or no material at all -- is not a failure: loadMaterialTextures substitutes a neutral default for that slot regardless, which for an absent material (kDefaultMaterial below) means every slot, reproducing glTF's own spec-defined default material.
 std::optional<MeshInstance> loadPrimitive(const cgltf_data* data, const cgltf_primitive& prim,
                                            const glm::mat4& transform, const std::string& dir,
-                                           int instanceIndex,
+                                           int instanceIndex, const std::string& name,
                                            std::vector<Triangle>& outWorldTriangles,
                                            std::vector<ShadingTriangle>& outShadingTriangles) {
     if (prim.type != cgltf_primitive_type_triangles) {
         std::cerr << "loadGltf: skipping non-triangle primitive\n";
-        return std::nullopt;
-    }
-    if (prim.material == nullptr) {
-        std::cerr << "loadGltf: primitive has no material\n";
         return std::nullopt;
     }
 
@@ -273,7 +290,12 @@ std::optional<MeshInstance> loadPrimitive(const cgltf_data* data, const cgltf_pr
     if (!indices.has_value()) {
         return std::nullopt;
     }
-    std::optional<Material> material = loadMaterialTextures(data, *prim.material, dir);
+    // Zero-initialized: every texture pointer and the name/extras fields are null, matching cgltf's
+    // own representation of "this field wasn't in the JSON" -- loadMaterialTextures's per-slot
+    // resolveTexture(..., default...()) calls already treat that as "use the neutral default".
+    static const cgltf_material kDefaultMaterial{};
+    std::optional<Material> material =
+        loadMaterialTextures(data, prim.material != nullptr ? *prim.material : kDefaultMaterial, dir);
     if (!material.has_value()) {
         return std::nullopt;
     }
@@ -285,6 +307,7 @@ std::optional<MeshInstance> loadPrimitive(const cgltf_data* data, const cgltf_pr
     return MeshInstance{
         std::move(*material),
         transform,
+        name,
     };
 }
 
@@ -305,10 +328,11 @@ bool walkNodes(const cgltf_data* data, cgltf_node* const* nodes, cgltf_size coun
         const glm::mat4 world = parentTransform * localNodeTransform(node);
 
         if (node->mesh != nullptr) {
+            const std::string name = node->name != nullptr ? node->name : "";
             for (cgltf_size pi = 0; pi < node->mesh->primitives_count; ++pi) {
                 const int instanceIndex = static_cast<int>(instances.size());  // index this primitive's MeshInstance will get
                 std::optional<MeshInstance> instance =
-                    loadPrimitive(data, node->mesh->primitives[pi], world, dir, instanceIndex,
+                    loadPrimitive(data, node->mesh->primitives[pi], world, dir, instanceIndex, name,
                                   worldTriangles, shadingTriangles);
                 if (!instance.has_value()) {
                     return false;
