@@ -8,5 +8,5 @@
     "environment": {
         "hdriPath": "textures/republiqueHDR_2k.exr"
     },
-    "materialPath": "materials/default.json"
+    "materialPath": "materials/principled.json"
 }
