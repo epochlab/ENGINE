@@ -8,7 +8,7 @@
     "environment": {
         "hdriPath": "textures/republiqueHDR_2k.exr"
     },
-    "materialPath": "materials/diffuse.json",
+    "materialPath": "materials/clay.json",
     "materialOverrides": {
         "sphere01": "materials/chrome.json",
         "sphere02": "materials/glass.json"
