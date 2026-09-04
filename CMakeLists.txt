@@ -18,6 +18,8 @@ find_package(Imath REQUIRED)
 find_package(OpenEXR REQUIRED)
 find_package(OpenColorIO REQUIRED)
 find_package(embree 4 CONFIG REQUIRED)
+# render_beauty's PNG encode only. Not a new third-party dependency: OpenEXR already links zlib transitively and the platform ships it -- naming it here just makes the direct use explicit.
+find_package(ZLIB REQUIRED)
 
 # Static-analysis gate: -Wall -Wextra -Werror plus clang-tidy/cppcheck, applied to every build, not just CI. clang-tidy is wired below as a per-compile gate (non-fatal: it surfaces findings every build without turning pre-existing debt into a hard build failure); cppcheck is a separate `cmake --build build --target cppcheck` target. Both are no-ops (not required) if not installed, so a fresh checkout without them still configures and builds.
 find_program(CLANG_TIDY_EXE NAMES clang-tidy)
@@ -89,6 +91,7 @@ add_executable(engine
     src/scene/environment_map.cpp
     src/scene/gbuffer_shading.cpp
     src/scene/gltf_loader.cpp
+    src/scene/material_binding.cpp
     src/scene/path_tracer.cpp
     src/scene/path_trace_driver.cpp
     src/scene/rasterizer.cpp
@@ -188,6 +191,23 @@ target_compile_options(integrator_validate PRIVATE -Wall -Wextra -Werror -march=
 target_link_libraries(integrator_validate PRIVATE glm::glm embree OpenEXR::OpenEXR Imath::Imath)
 if(IPO_SUPPORTED)
     set_target_properties(integrator_validate PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
+endif()
+
+# Headless before/after comparison renders (tools/render_beauty.cpp). Not a correctness gate and deliberately absent from the add_test loop below: its output is a picture for a human to look at, and a full-scene render is far slower than any validator. Needs OCIO (the display transform, evaluated on the CPU) and zlib (PNG encode) on top of the usual render dependencies.
+add_executable(render_beauty tools/render_beauty.cpp src/scene/path_tracer.cpp
+               src/scene/gbuffer_shading.cpp src/scene/embree_accel.cpp src/scene/ray_types.cpp
+               src/scene/shading_scene.cpp src/scene/bsdf.cpp src/scene/sampler.cpp
+               src/scene/environment_map.cpp src/scene/camera.cpp src/scene/thread_pool.cpp
+               src/scene/gltf_loader.cpp src/scene/material_binding.cpp
+               src/config/scene_config.cpp src/config/profile_config.cpp src/gfx/hdr_image.cpp
+               $<TARGET_OBJECTS:vendored_no_tidy>)
+target_include_directories(render_beauty PRIVATE include ${CGLTF_DIR} ${JSON_DIR})
+target_compile_definitions(render_beauty PRIVATE ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets")
+target_compile_options(render_beauty PRIVATE -Wall -Wextra -Werror -march=native)
+target_link_libraries(render_beauty PRIVATE glm::glm embree OpenEXR::OpenEXR Imath::Imath
+                       OpenColorIO::OpenColorIO ZLIB::ZLIB glfw)
+if(IPO_SUPPORTED)
+    set_target_properties(render_beauty PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
 endif()
 
 # Timing harness, not a correctness gate: deliberately absent from the add_test loop below (a benchmark's pass/fail is a human reading a number, and it would make ctest as slow as its worst --triangles sweep). Same sources and -march=native/IPO flags as rasterizer_validate, so it times the exact codegen that ships.

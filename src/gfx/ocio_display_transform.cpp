@@ -20,10 +20,10 @@ namespace engine::gfx {
 
 namespace {
 
-// Pinned, not "-latest": empirically verified (compiled + ran against the installed library) that this config's "Un-tone-mapped" view is a pure colorimetric pass (0->0, 1->1, zero LUT textures), no filmic rolloff. Pinning avoids a future brew upgrade silently resolving "-latest" to a structurally different config.
-constexpr const char* kBuiltinConfigName = "cg-config-v1.0.0_aces-v1.3_ocio-v2.1";
-constexpr const char* kSceneColorSpace = "Linear Rec.709 (sRGB)";
-constexpr const char* kView = "Un-tone-mapped";
+// Declared in ocio_display_transform.h so CPU-side consumers reproduce this exact transform -- see the header.
+constexpr const char* kBuiltinConfigName = kOcioConfigName;
+constexpr const char* kSceneColorSpace = kOcioSceneColorSpace;
+constexpr const char* kView = kOcioView;
 
 // Channel isolation, applied to the sampled texels before exposure and the display curve -- the exact pipeline position the CPU-side bake occupied, so the displayed result is unchanged. As a uniform it costs no re-upload, which is the point: it previously forced a full re-copy and re-create of the display texture on every R/G/B keypress.
 constexpr const char* kChannelViewGlsl =
@@ -152,7 +152,7 @@ std::optional<OcioDisplayTransform> OcioDisplayTransform::create() {
     }
 
     const std::string rawFragSrc = buildRawFragmentSource();
-    const std::string srgbFragSrc = buildOcioFragmentSource("sRGB - Display", "OCIODisplaySRGB");
+    const std::string srgbFragSrc = buildOcioFragmentSource(kOcioSrgbDisplay, "OCIODisplaySRGB");
     const std::string rec709FragSrc =
         buildOcioFragmentSource("Rec.1886 Rec.709 - Display", "OCIODisplayRec709");
 
