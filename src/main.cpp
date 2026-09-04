@@ -397,6 +397,7 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         .diffuseRoughness = materialConfig->diffuseRoughness,
         .transmissionColor = materialConfig->transmissionColor,
         .transmissionDepth = materialConfig->transmissionDepth,
+        .edgeTint = materialConfig->edgeTint,
     };
 
     std::optional<std::vector<engine::scene::PathTraceSettings>> perInstanceSettings =

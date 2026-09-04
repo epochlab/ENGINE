@@ -365,8 +365,9 @@ bool runCases() {
             scene, env, makeSettings(1, 0, testCase.metallic),
             *accel, pool);
 
-        const BsdfParams params{glm::vec3(1.0F), testCase.metallic, testCase.roughness, testCase.f0,
-                                 1.5F, 0.0F, 0.0F};
+        const BsdfParams params{glm::vec3(1.0F),      testCase.metallic, testCase.roughness,
+                                 testCase.f0,          glm::vec3(1.0F),   /*ior=*/1.5F,
+                                 /*transmissionFactor=*/0.0F, /*diffuseRoughness=*/0.0F};
         const float reference = referenceLo(params, glm::vec3(0.0F, 0.0F, 1.0F), kReferenceSamples,
                                              referenceRng);
 
@@ -616,7 +617,7 @@ bool checkMaterialBinding() {
         return false;
     }
 
-    // How many of the 11 fields resolvePerInstanceSettings copies currently match the material file. A count rather than a bool so the base settings below can be required to match ZERO of them, which is what makes each individual copy observable. Exact equality is right: this is a copy, not a computation.
+    // How many of the 12 fields resolvePerInstanceSettings copies currently match the material file. A count rather than a bool so the base settings below can be required to match ZERO of them, which is what makes each individual copy observable. Exact equality is right: this is a copy, not a computation.
     const auto matchingFields = [](const PathTraceSettings& s,
                                     const engine::config::MaterialConfig& m) {
         return static_cast<int>(s.bumpStrength == m.bumpStrength) +
@@ -629,15 +630,16 @@ bool checkMaterialBinding() {
                static_cast<int>(s.roughnessFactor == m.roughnessFactor) +
                static_cast<int>(s.diffuseRoughness == m.diffuseRoughness) +
                static_cast<int>(s.transmissionColor == m.transmissionColor) +
-               static_cast<int>(s.transmissionDepth == m.transmissionDepth);
+               static_cast<int>(s.transmissionDepth == m.transmissionDepth) +
+               static_cast<int>(s.edgeTint == m.edgeTint);
     };
-    constexpr int kMaterialFields = 11;
+    constexpr int kMaterialFields = 12;
 
     const std::vector<MeshInstance> instances = {
         MeshInstance{makeMaterial(1.0F, glm::vec3(0.04F)), glm::mat4(1.0F), "alpha"},
         MeshInstance{makeMaterial(1.0F, glm::vec3(0.04F)), glm::mat4(1.0F), "beta"},
         MeshInstance{makeMaterial(1.0F, glm::vec3(0.04F)), glm::mat4(1.0F), "gamma"}};
-    // Sentinel values, deliberately unlike glass.json in EVERY field -- nothing here is rendered, so these need not be plausible, only distinguishable. makeSettings' own defaults would not do: they happen to agree with glass.json on bumpStrength, roughnessMax, diffuseColour, ior, metallicFactor and diffuseRoughness, so a dropped copy of any of those six would leave the resolved value equal to the base, which equals glass, and pass unnoticed.
+    // Sentinel values, deliberately unlike glass.json in EVERY field -- nothing here is rendered, so these need not be plausible, only distinguishable. makeSettings' own defaults would not do: they happen to agree with glass.json on bumpStrength, roughnessMax, diffuseColour, ior, metallicFactor, diffuseRoughness and edgeTint, so a dropped copy of any of those seven would leave the resolved value equal to the base, which equals glass, and pass unnoticed.
     PathTraceSettings base = makeSettings(1, 999, /*metallic=*/1.0F);
     base.bumpStrength = 0.25F;
     base.roughnessMin = 0.2F;
@@ -648,11 +650,14 @@ bool checkMaterialBinding() {
     base.diffuseRoughness = 0.6F;
     base.transmissionColor = glm::vec3(0.5F);
     base.transmissionDepth = 2.0F;
+    // glass.json omits edgeTint, so it loads as the [1,1,1] default -- which is also PathTraceSettings'
+    // own default, so without a sentinel here the two agree and the non-vacuity gate below fires.
+    base.edgeTint = glm::vec3(0.4F, 0.5F, 0.6F);
 
     bool ok = true;
     std::cout << "integrator_validate: materialOverrides resolution (3 instances, 1 overridden)\n";
 
-    // Non-vacuity, and the assumption every assertion below rests on: the base must differ from the override in all 11 fields, so that each field's copy is independently observable. A field they happened to share would be untestable here whatever resolvePerInstanceSettings did with it.
+    // Non-vacuity, and the assumption every assertion below rests on: the base must differ from the override in all 12 fields, so that each field's copy is independently observable. A field they happened to share would be untestable here whatever resolvePerInstanceSettings did with it.
     if (matchingFields(base, *glass) != 0) {
         std::cerr << "integrator_validate: FAILED material binding setup -- the base settings already "
                      "agree with glass.json on " << matchingFields(base, *glass)

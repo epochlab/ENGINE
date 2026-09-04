@@ -13,7 +13,9 @@ struct BsdfParams {
     glm::vec3 baseColor;
     float metallic;
     float roughness;            // perceptual; alpha = roughness^2, floored to avoid a delta lobe
-    glm::vec3 f0;                // specular reflectance at normal incidence
+    glm::vec3 f0;                // specular reflectance at normal incidence; also Gulbrandsen's reflectivity r for the conductor lobe, clamped to [1e-4, 0.9999] at the point of use
+    // Gulbrandsen 2014 edgetint g, the conductor's grazing-angle colour bias: 1 = white edge (no reflectance dip, what Schlick forces), 0 = maximum dip. Together with f0 it inverts to a complex IOR -- see bsdf.cpp's conductorIorFromReflectivity. Inert at metallic=0.
+    glm::vec3 edgeTint;
     float ior;                   // dielectric IOR, non-metal lobes only
     float transmissionFactor;    // KHR_materials_transmission, 0 = opaque
     // EON rough-diffuse parameter r in [0,1] (Portsmouth, Kutz, Hill 2025, "EON: A Practical
@@ -56,7 +58,8 @@ struct BsdfEval {
     [[nodiscard]] glm::vec3 total() const { return diffuse + specular + transmission; }
 };
 
-// Schlick's approximation of Fresnel reflectance at normal-incidence reflectance f0, evaluated at cosTheta = dot(normal, direction). Shared with path_tracer.cpp's Fresnel G-buffer AOV, which wants the same reflectance term sampleBsdf/evaluateBsdf use internally, evaluated at the view angle rather than the sampled/shading direction.
+// Schlick's approximation of Fresnel reflectance at normal-incidence reflectance f0, evaluated at cosTheta = dot(normal, direction). Sole consumer is the rasterizer's Fresnel G-buffer AOV (rasterizer.cpp), evaluated at the view angle rather than the sampled/shading direction.
+// NOT what the path tracer uses any more: the dielectric lobes evaluate exact fresnelDielectric and the conductor lobe exact complex-IOR Fresnel (bsdf.cpp), so for a metal this AOV is a Schlick-basis approximation of the shaded result, not the term itself. Kept because the AOV is a debug display and Schlick is monotone and cheap; do not reintroduce it into a shading path.
 [[nodiscard]] glm::vec3 fresnelSchlick(float cosTheta, const glm::vec3& f0);
 
 // Value and pdf of the continuous lobes at wiLocal, split by transport type. Piecewise, since reflection and transmission occupy disjoint hemispheres: wiLocal on wo's side gives the specular-reflection + diffuse mixture, the far side gives the rough transmission lobe. Transmission is excluded only when it is a delta (roughness below the smooth threshold, zero-measure). woLocal.z sign: entering (>0) vs exiting (<0) a dielectric. One call rather than the four separate lobe evaluations NEE used to make -- the lobe probabilities, the GGX/Fresnel terms and the albedo-table lookups are all computed once and shared.
