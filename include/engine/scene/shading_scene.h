@@ -25,6 +25,8 @@ struct ShadingTriangle {
 [[nodiscard]] ShadingVertex interpolateShading(const ShadingTriangle& tri, float u, float v);
 
 // Chiang/Li/Burley 2019 shadow-terminator fix: per-vertex tangent-plane projection, barycentric-blended, for use as a secondary ray origin.
-[[nodiscard]] glm::vec3 shadowTerminatorOffset(const ShadingTriangle& tri, float u, float v);
+// normalSide: which side the secondary ray leaves on. The projection moves the hit along the vertex normals, so a ray going the other way (refraction entering a dielectric, TIR inside one) needs it mirrored or the origin lands past the interface it just crossed.
+[[nodiscard]] glm::vec3 shadowTerminatorOffset(const ShadingTriangle& tri, float u, float v,
+                                               bool normalSide);
 
 }  // namespace engine::scene

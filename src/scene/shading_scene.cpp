@@ -16,7 +16,7 @@ ShadingVertex interpolateShading(const ShadingTriangle& tri, float u, float v) {
     return result;
 }
 
-glm::vec3 shadowTerminatorOffset(const ShadingTriangle& tri, float u, float v) {
+glm::vec3 shadowTerminatorOffset(const ShadingTriangle& tri, float u, float v, bool normalSide) {
     const float w = 1.0F - u - v;
     const glm::vec3 flatPosition =
         (w * tri.v0.position) + (u * tri.v1.position) + (v * tri.v2.position);
@@ -25,7 +25,8 @@ glm::vec3 shadowTerminatorOffset(const ShadingTriangle& tri, float u, float v) {
                                               const glm::vec3& vertexNormal) {
         const glm::vec3 toHit = flatPosition - vertexPos;
         const float d = glm::dot(toHit, vertexNormal);
-        return vertexPos + (d < 0.0F ? toHit - (d * vertexNormal) : toHit);
+        const bool below = normalSide ? (d < 0.0F) : (d > 0.0F);
+        return vertexPos + (below ? toHit - (d * vertexNormal) : toHit);
     };
 
     const glm::vec3 p0 = pulledOntoTangentPlane(tri.v0.position, tri.v0.normal);
