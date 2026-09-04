@@ -196,7 +196,7 @@ struct AppResources {
 
     // Async path-traced view, selected via the `aov` field (engine::debug::AovId, the HUD's AOV dropdown). pathTraceDriver runs continuously on its own background thread once constructed (main() constructs it after initializeApp() returns -- see path_trace_driver.h's constructor precondition on reference stability); requestTrace() is called only from renderFrame's requestPathTraceIfTriggerChanged, whenever lastPathTraceTrigger detects the camera/scene state renderPathTraced depends on has changed -- no manual trigger. unique_ptr, not a by-value optional: PathTraceDriver holds reference members and an owned std::jthread/std::mutex, so it's neither copyable nor movable -- a by-value optional<T> member would make that non-movability propagate to AppResources itself (optional<T>'s move ctor is only available when T's is), which would break initializeApp's return-by-value/RVO pattern every other member here relies on. A unique_ptr's own move just transfers ownership of the pointee's address, never touching PathTraceDriver's reference members, so AppResources stays movable and PathTraceDriver itself is never relocated in memory once constructed.
     engine::scene::PathTraceSettings pathTraceSettings;
-    // Per-instance material fields, parallel-indexed with stumpModel.instances (ShadingTriangle::instanceIndex resolves into this) -- pathTraceSettings's 9 material fields copied per instance, overridden from sceneConfig.materialOverrides by MeshInstance::name where present. Renderer-only fields (samplesPerPixel/maxBounces/RR) are never read from these entries; see resolveBsdfParams/buildShadingFrame call sites in path_tracer.cpp/rasterizer.cpp.
+    // Per-instance material fields, parallel-indexed with stumpModel.instances (ShadingTriangle::instanceIndex resolves into this) -- pathTraceSettings's 11 material fields copied per instance, overridden from sceneConfig.materialOverrides by MeshInstance::name where present. Renderer-only fields (samplesPerPixel/maxBounces/RR) are never read from these entries; see resolveBsdfParams/buildShadingFrame call sites in path_tracer.cpp/rasterizer.cpp.
     std::vector<engine::scene::PathTraceSettings> perInstanceSettings;
     int maxSamples;  // accumulated-pass cap for PathTraceDriver; 0 = unbounded
     std::unique_ptr<engine::scene::PathTraceDriver> pathTraceDriver;
@@ -411,11 +411,13 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         .metallicFactor = materialConfig->metallicFactor,
         .roughnessFactor = materialConfig->roughnessFactor,
         .diffuseRoughness = materialConfig->diffuseRoughness,
+        .transmissionColor = materialConfig->transmissionColor,
+        .transmissionDepth = materialConfig->transmissionDepth,
     };
 
     // One entry per stumpModel->instances, in the same order -- ShadingTriangle::instanceIndex indexes
     // both. Renderer-only fields (samplesPerPixel/maxBounces/RR) are always basePathTraceSettings's;
-    // only the 9 material fields vary per instance.
+    // only the 11 material fields vary per instance.
     std::vector<engine::scene::PathTraceSettings> perInstanceSettings;
     perInstanceSettings.reserve(stumpModel->instances.size());
     for (const engine::scene::MeshInstance& instance : stumpModel->instances) {
@@ -433,6 +435,8 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
             settings.metallicFactor = overrideMaterial.metallicFactor;
             settings.roughnessFactor = overrideMaterial.roughnessFactor;
             settings.diffuseRoughness = overrideMaterial.diffuseRoughness;
+            settings.transmissionColor = overrideMaterial.transmissionColor;
+            settings.transmissionDepth = overrideMaterial.transmissionDepth;
         }
         perInstanceSettings.push_back(settings);
     }

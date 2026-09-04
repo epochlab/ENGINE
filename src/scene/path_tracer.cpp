@@ -20,6 +20,38 @@ namespace {
 
 constexpr float kRayEpsilon = 1e-4F;
 
+// Beer-Lambert absorption coefficient (Arnold standard_surface convention): the color read at
+// transmissionDepth. Floored against user-authored JSON reaching color==0 (-log(0)=+inf) or depth==0
+// (divide by zero) -- both are reachable material-file inputs, not internal invariants.
+glm::vec3 sigmaAFromTransmission(const glm::vec3& color, float depth) {
+    return -glm::log(glm::max(color, glm::vec3(1e-6F))) / std::max(depth, 1e-4F);
+}
+
+// Reflection/diffuse continuation rays stay close to the geometric normal's hemisphere, where
+// kRayEpsilon (a floating-point-scale constant) has always been sufficient. Transmission bends sharply
+// away from it, and on curved geometry approximated by flat facets, the shading-normal-derived refraction
+// direction can clip a NEIGHBOURING facet a small-but-nonzero distance away -- a genuine geometric
+// intersection, not floating-point noise (measured on a 500-triangle sphere: self-intersections at ~1e-3,
+// an order of magnitude below a facet's own edge length).
+// Scaled by curvature, not raw facet size: the mechanism is the smooth shading normal diverging from the
+// flat facet's true geometric normal across the facet, so the fix must vanish wherever that divergence
+// does. sin(angle) between each pair of vertex normals (cross product of two unit vectors) is exactly
+// zero on any planar patch -- coplanar vertex normals, whatever the facet's absolute size -- and grows
+// with tessellation coarseness on genuinely curved geometry. Scaling raw edge length alone (an earlier,
+// broken version of this fix) has no such zero: it blew up on a flat 2000-unit slab quad, pushing the
+// continuation ray origin far past the geometry it needed to traverse (caught by integrator_validate).
+float transmissionOffsetEpsilon(const ShadingTriangle& tri) {
+    const glm::vec3 n0 = glm::normalize(tri.v0.normal);
+    const glm::vec3 n1 = glm::normalize(tri.v1.normal);
+    const glm::vec3 n2 = glm::normalize(tri.v2.normal);
+    const float curvature = std::max({glm::length(glm::cross(n0, n1)), glm::length(glm::cross(n1, n2)),
+                                       glm::length(glm::cross(n2, n0))});
+    const float e0 = glm::length(tri.v1.position - tri.v0.position);
+    const float e1 = glm::length(tri.v2.position - tri.v1.position);
+    const float e2 = glm::length(tri.v0.position - tri.v2.position);
+    return std::max(kRayEpsilon, std::max({e0, e1, e2}) * curvature);
+}
+
 // Blackman-Harris at Arnold's default 1.5px radius: support wider than one pixel, so neighbouring footprints overlap and each sample reconstructs several pixels instead of only the one it was drawn in -- which is where nearly all of a reconstruction filter's benefit over the 1px box comes from. Non-negative everywhere, so no pixel can end up with a zero or negative total weight and no ringing appears around highlights.
 constexpr float kFilterRadius = 1.5F;
 constexpr int kFilterExtent = 1;  // how many pixels either side of a sample its splat can reach: a sample sits at most 1.0 past its own pixel's far centre, so a destination two pixels away is at least kFilterRadius off and weighs exactly zero
@@ -86,6 +118,11 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
     Ray ray = primaryRay;
     int bounce = 0;
     std::optional<PathBucket> pathBucket;  // unset until bounce 0 successfully samples a lobe
+    // Single-level medium stack: nullopt = vacuum, set = the sigmaA of the dielectric the ray is
+    // currently inside. Toggled below on every Transmission-lobe sample (entering sets it, exiting
+    // clears it) -- sufficient for one glass object; would need generalising to a real stack before a
+    // second, overlapping transmissive object entered the scene.
+    std::optional<glm::vec3> mediumSigmaA;
     glm::vec3 directDiffuseAccum(0.0F);
     glm::vec3 indirectDiffuseAccum(0.0F);
     glm::vec3 directSpecularAccum(0.0F);
@@ -118,6 +155,15 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
     // bounce 0 (the primary/camera ray, direct lighting via NEE) always traces regardless of maxBounces -- maxBounces counts secondary/indirect bounces beyond it, so maxBounces==0 means direct lighting only, no continuation rays. The loop runs one iteration PAST maxBounces so the final BSDF-sampled ray can still collect its MIS-weighted environment contribution via the miss branch below; that extra iteration breaks at the depth guard before any surface interaction -- see the guard for why the terminal ray must be traced rather than dropped.
     for (; bounce <= settings.maxBounces + 1; ++bounce) {
         const std::optional<Hit> hit = accel.intersect(ray);
+
+        // Beer-Lambert attenuation for the segment just traveled (ray.origin to this hit/miss), gated on
+        // medium state carried over from the previous iteration's Transmission sample. hit->t is genuine
+        // Euclidean distance: every ray direction reaching this point is unit-length (primary rays via
+        // Camera::primaryRay, continuation rays via ShadingFrame::toWorld of a normalized local sample).
+        if (mediumSigmaA.has_value() && hit.has_value()) {
+            throughput *= glm::exp(-*mediumSigmaA * hit->t);
+        }
+
         if (!hit.has_value()) {
             // showSky gates only the primary ray's own miss (the camera seeing the background directly) -- indirect bounces and NEE (below) always sample real environment radiance regardless of showSky, so hiding the background doesn't unlight the scene.
             if (bounce == 0 && !showSky) {
@@ -175,6 +221,19 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
             } else if (sample->type == LobeType::Transmission) {
                 pathBucket = PathBucket::Refraction;
             }
+        }
+
+        // Medium-state toggle, co-located with the bucket assignment above since both key off the same
+        // condition: a Transmission sample crossed the interface. Entering (currently vacuum) starts
+        // absorbing at this instance's sigmaA; exiting (already inside) returns to vacuum. Reflection
+        // bounces, including TIR, leave the state untouched -- the ray stays in whichever medium it was
+        // already in.
+        if (sample.has_value() && sample->type == LobeType::Transmission) {
+            mediumSigmaA = mediumSigmaA.has_value()
+                               ? std::nullopt
+                               : std::make_optional(sigmaAFromTransmission(
+                                     instanceSettings.transmissionColor,
+                                     instanceSettings.transmissionDepth));
         }
 
         // Next-event estimation: sample the environment directly from this vertex (importance sampled by luminance, see EnvironmentMap::importanceSampleDirection), evaluate the combined BSDF value/pdf toward it, and add the MIS-weighted contribution if unoccluded. Independent of whichever lobe `sample` above drew for the continuing bounce -- NEE and the continuing ray are two separate estimators for two separate directions from the same vertex, only sharing this vertex's params/frame. Firing unconditionally (no lobe-type check) is deliberate: the guard below admits both sides of a transmissive vertex, so refraction is light-sampled rather than left to BSDF sampling alone, and the MIS weights above and below now balance the same two strategies over the same directions.
@@ -261,11 +320,14 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
             throughput /= continueProb;
         }
 
-        // Chiang/Li/Burley shadow-terminator-corrected origin, nudged off the true triangle plane along the geometric normal (toward wi's side) to avoid self-intersection.
+        // Chiang/Li/Burley shadow-terminator-corrected origin, nudged off the true triangle plane along the geometric normal (toward wi's side) to avoid self-intersection. Transmission gets a facet-scaled epsilon instead of the fixed one -- see transmissionOffsetEpsilon.
+        const float offsetEpsilon = sample->type == LobeType::Transmission
+                                         ? transmissionOffsetEpsilon(triangle)
+                                         : kRayEpsilon;
         const glm::vec3 offsetOrigin =
             shadowTerminatorOffset(triangle, hit->u, hit->v) +
-            (geoNormal * kRayEpsilon * (glm::dot(wiWorld, geoNormal) > 0.0F ? 1.0F : -1.0F));
-        ray = Ray{offsetOrigin, wiWorld, kRayEpsilon, std::numeric_limits<float>::max()};
+            (geoNormal * offsetEpsilon * (glm::dot(wiWorld, geoNormal) > 0.0F ? 1.0F : -1.0F));
+        ray = Ray{offsetOrigin, wiWorld, offsetEpsilon, std::numeric_limits<float>::max()};
     }
 
     return {radiance,           bounce,               gShadow,
