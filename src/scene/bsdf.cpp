@@ -50,6 +50,94 @@ float fresnelDielectric(float cosThetaI, float etaI, float etaT) {
     return ((rParallel * rParallel) + (rPerpendicular * rPerpendicular)) * 0.5F;
 }
 
+// --- Conductor Fresnel: Gulbrandsen 2014, "Artist Friendly Metallic Fresnel", JCGT 3(4), ported
+// from the paper's Appendix A listing. Replaces Schlick on the metal path, which is monotone in
+// cos by construction ((1-c)^5 >= 0) and therefore forces every conductor to exactly white at
+// grazing and cannot express the reflectance dip real metals have. Parameterised by reflectivity
+// r (params.f0) and edgetint g (params.edgeTint), inverted to a complex IOR (n, k).
+
+// Reflectivity is clamped, not asserted: f0 arrives from resolveBsdfParams as an unbounded texture
+// product (baseColor * diffuseColour), so both ends are reachable from an asset.
+// Upper end: at r=1 nMax is infinite and g=1 evaluates 0*inf = NaN. The listing clamps to 0.99, which
+// costs 1% of normal-incidence reflectance at f0=1 -- enough to move the white furnace test onto its
+// tolerance edge. 0.9999 is safe here because of the k^2 form below; measured in float32, n and k land
+// within 1.4e-8 of their double values and the furnace rows shift by under 2e-4.
+// Lower end: r=0 inverts to n=1, k=0 -- an index-matched interface, where the Fresnel below is 0/0 at
+// cosTheta=0 exactly. Reachable from any black texel on a metal. At the 1e-4 floor k=0.02, F tends to 1
+// at grazing and nothing is degenerate; the floor costs a pure-black metal 1e-4 of normal-incidence
+// reflectance.
+constexpr float kMinReflectivity = 1e-4F;
+constexpr float kMaxReflectivity = 0.9999F;
+
+struct ConductorIor {
+    glm::vec3 n;
+    glm::vec3 k;
+};
+
+// Paper eq 12 for n (a linear blend in g between the two ends of eq 11's range) and eq 2 for k.
+// k^2 is evaluated as (nMax - n)(n - nLow) rather than the listing's ((n+1)^2*r - (n-1)^2)/(1-r).
+// The two are the same expression -- those factors are eq 3's interval endpoints, i.e. eq 2's own roots
+// -- and agree to 4e-12 relative in double, which tools/bsdf_validate.cpp asserts against the literal
+// form. The literal form is what forces the listing's 0.99 clamp: it subtracts two large near-equal
+// numbers, and in float32 at r=0.9999, g=0 it returns k^2 = -1.28e6 where the true value is exactly 0.
+// The factored form returns exactly 0 there, since nMax - n is exactly zero at g=0.
+ConductorIor conductorIorFromReflectivity(const glm::vec3& reflectivity, const glm::vec3& edgeTint) {
+    const glm::vec3 r = glm::clamp(reflectivity, kMinReflectivity, kMaxReflectivity);
+    const glm::vec3 g = glm::clamp(edgeTint, 0.0F, 1.0F);  // the paper's stated domain for g
+    const glm::vec3 sqrtR = glm::sqrt(r);
+    const glm::vec3 nMin = (1.0F - r) / (1.0F + r);
+    const glm::vec3 nMax = (1.0F + sqrtR) / (1.0F - sqrtR);
+    const glm::vec3 nLow = (1.0F - sqrtR) / (1.0F + sqrtR);
+    const glm::vec3 n = (g * nMin) + ((1.0F - g) * nMax);
+    // Both factors are non-negative across the clamped domain (nLow <= nMin <= n <= nMax); the max
+    // absorbs float rounding on nMax - n at g -> 0, where the true value is zero.
+    return {n, glm::sqrt(glm::max((nMax - n) * (n - nLow), 0.0F))};
+}
+
+// Exact unpolarized Fresnel reflectance of one channel of a conductor with complex IOR n + ik (Born &
+// Wolf), in the standard real-arithmetic form: two hardware sqrts, no complex division, and no <complex>
+// in this translation unit. NOT the paper's Appendix A rs/rp, which is the large-|eta| approximation
+// (PBRT-v2's FrCond) and deviates from this by up to 0.094 absolute around r~0.25 -- mid reflectivity,
+// which is where real metals sit (chrome.json's measured chromium is r~0.555). bsdf_validate compares
+// this against the complex-arithmetic definition, which the two forms match to 2.2e-12 over the clamped
+// (r, g, cosTheta) domain.
+// Deliberately free of clamps, unlike the inversion above, where a max() guards an exact-zero boundary
+// (g=0) that float rounding can push slightly negative. Here no denominator can vanish once r is floored
+// away from 0: a2b2 - t0 > 0 follows from a2b2 >= |t0| alone, and a2b2 itself is positive either because
+// k >= 0.02 (as g drives n toward nMin) or because n = nMax > 1 forces t0 = n^2 - s2 > 0 at g=0, the one
+// input where k is exactly 0. So a max() here could not prevent a fault, only hide one -- which is
+// exactly what one did, see below.
+float fresnelConductorChannel(float cosTheta, float n, float k) {
+    const float c2 = cosTheta * cosTheta;
+    const float s2 = 1.0F - c2;
+    const float nk2 = (n * n) * (k * k);
+    const float t0 = (n * n) - (k * k) - s2;
+    const float a2b2 = std::sqrt((t0 * t0) + (4.0F * nk2));
+    // a^2 = (a2b2 + t0)/2, taken through whichever of its two algebraically equal forms is a SUM.
+    // Direct when t0 >= 0. When t0 < 0 the direct form subtracts two near-equal magnitudes: at f0=1,
+    // n is ~5e-5 and it must resolve 2.5e-9 out of two numbers near 1.0, which in float32 collapses a to
+    // zero and pins F at exactly 1.0. Measured, that is Schlick's own answer at f0=1, so the white
+    // furnace's conductor rows came back byte-identical and the fault read as "the change is inert".
+    // (a2b2 + t0)(a2b2 - t0) = 4*n^2*k^2 turns that branch into a division by a sum.
+    const float a2 = t0 >= 0.0F ? (a2b2 + t0) * 0.5F : (2.0F * nk2) / (a2b2 - t0);
+    const float a = std::sqrt(a2);
+    const float t1 = a2b2 + c2;
+    const float t2 = 2.0F * a * cosTheta;
+    const float rPerpendicular = (t1 - t2) / (t1 + t2);
+    const float t3 = (c2 * a2b2) + (s2 * s2);
+    const float t4 = t2 * s2;
+    // R = (rPerp + rPara)/2 with rPara = rPerp*(t3-t4)/(t3+t4), factored to drop a multiply.
+    return 0.5F * rPerpendicular * (1.0F + ((t3 - t4) / (t3 + t4)));
+}
+
+// cosTheta is clamped to [0,1] rather than sign-swapped the way fresnelDielectric handles etaI/etaT: a
+// conductor has no far side to enter, and grazing-angle normal mapping can push wo.z negative.
+glm::vec3 fresnelConductor(float cosTheta, const glm::vec3& n, const glm::vec3& k) {
+    const float c = std::clamp(cosTheta, 0.0F, 1.0F);
+    return {fresnelConductorChannel(c, n.x, k.x), fresnelConductorChannel(c, n.y, k.y),
+             fresnelConductorChannel(c, n.z, k.z)};
+}
+
 // Heitz 2018 VNDF sampling. wo.z > 0 required (caller pre-flips into the +z hemisphere).
 glm::vec3 sampleGGXVNDF(const glm::vec3& wo, float alpha, glm::vec2 u) {
     const glm::vec3 vh = glm::normalize(glm::vec3(alpha * wo.x, alpha * wo.y, wo.z));
@@ -347,6 +435,12 @@ struct LobeProbabilities {
     float albedoAvg;        // Eavg(roughness)
     float coatF0;           // dielectric f0 implied by ior, for the diffuse coupling
     glm::vec3 fresnelAvg;
+    // Complex IOR inverted from (f0, edgeTint) once per evaluation rather than once per lobe call.
+    // Set to the index-matched (1, 0) when metallic==0, where no consumer reads them: evaluateSpecularLobe
+    // gates its conductor Fresnel on the SAME metallic>0 test computeLobeProbabilities gates this on, and
+    // the two must stay identical -- (1, 0) is 0/0 at cosTheta=0 exactly, the one degenerate input.
+    glm::vec3 conductorN;
+    glm::vec3 conductorK;
     // Multiple-scattering state for a transmissive interface, which needs its own deficit. A facet either reflects or refracts, chosen by Fresnel, so the escaping fraction is inherently Fresnel-weighted (R_ss + T_ss) and cannot reuse the opaque path's Fresnel-free (1 - E); adding the two Fresnel-free throughputs double-counts the same facets and drives the deficit negative.
     // The two formulations are therefore blended by transmissionFactor rather than unified, so an opaque material keeps exactly the measured behaviour the opaque compensation already has.
     float escapeWo;         // R_ss(mu_o) + T_ss(mu_o), the Fresnel-weighted escaping fraction
@@ -571,8 +665,14 @@ LobeEval evaluateSpecularLobe(const BsdfParams& params, const glm::vec3& wo, con
     const float d = distributionGGX(nh.z, alpha);
     const float g2 = smithG2(wo.z, wi.z, alpha);
     const float fDielectric = fresnelDielectric(woDotNh, lobes.etaI, lobes.etaT);
+    // Gated, not mixed away at weight 0: glm::mix is a + t*(b-a), so a non-finite conductor term would
+    // survive t=0 as NaN rather than cancel. Skipping the call keeps every dielectric bit-identical and
+    // costs it nothing -- the same reasoning as the transmitWeight gate below.
     const glm::vec3 f =
-        glm::mix(glm::vec3(fDielectric), fresnelSchlick(woDotNh, params.f0), params.metallic);
+        params.metallic > 0.0F
+            ? glm::mix(glm::vec3(fDielectric),
+                        fresnelConductor(woDotNh, lobes.conductorN, lobes.conductorK), params.metallic)
+            : glm::vec3(fDielectric);
     const glm::vec3 singleScatter = (d * g2 * f) / std::max(4.0F * wo.z * wi.z, 1e-6F);
 
     // Kulla & Conty 2017. Integrates to (1-E(mu_o)) at Favg=1 -- the energy smithG2 discarded -- so a
@@ -614,8 +714,14 @@ LobeProbabilities computeLobeProbabilities(const BsdfParams& params, const glm::
     const float etaI = exiting ? params.ior : 1.0F;
     const float etaT = exiting ? 1.0F : params.ior;
     const float fresnelAtNormal = fresnelDielectric(wo.z, etaI, etaT);
-    const glm::vec3 fresnelConductor = fresnelSchlick(wo.z, params.f0);
-    const float conductorLuma = (fresnelConductor.x + fresnelConductor.y + fresnelConductor.z) / 3.0F;
+    // Same metallic>0 gate as evaluateSpecularLobe's, for the same reason; see LobeProbabilities.
+    ConductorIor conductor{glm::vec3(1.0F), glm::vec3(0.0F)};
+    float conductorLuma = 0.0F;
+    if (params.metallic > 0.0F) {
+        conductor = conductorIorFromReflectivity(params.f0, params.edgeTint);
+        const glm::vec3 conductorF = fresnelConductor(wo.z, conductor.n, conductor.k);
+        conductorLuma = (conductorF.x + conductorF.y + conductorF.z) / 3.0F;
+    }
     const AlbedoSplit splitWo = directionalAlbedo(wo.z, params.roughness);
     const AlbedoSplit splitAvg = averageAlbedo(params.roughness);
     // Scaled by E: the specular lobe now has two parts, and only the single-scattering part is drawn by VNDF sampling. The multiple-scattering part is cosine-shaped and picked up by the diffuse strategy, so its selection mass must move there too; otherwise a rough white metal, whose Fresnel pins specularProb to the 0.95 clamp, would sample 69% of its own reflectance only 5% of the time.
@@ -646,6 +752,16 @@ LobeProbabilities computeLobeProbabilities(const BsdfParams& params, const glm::
         transmitProb = 1.0F - specularProb;
         transmitPhysicalValue = transmittance;
     }
+    // KNOWN INCONSISTENCY, bounded and deliberate (README sec. 5). schlickFresnelAvg is the EXACT cosine
+    // mean of Schlick, but the conductor's single scatter now evaluates exact complex-IOR Fresnel, whose
+    // true cosine mean differs, and the SIGN depends on edgeTint: Karis is a function of f0 alone, while
+    // the true mean falls as the edge tint darkens. At g=1 Karis under-predicts (-1.7e-5 at f0=1, worst
+    // -0.086 near r=0.25); at chrome.json's measured chromium (r~0.555, g~0.55-0.67) it over-predicts by
+    // +0.030. So the multiple-scattering lobe returns too little on a white-edged metal and too much on a
+    // tinted one. Either way it scales with the deficit (1-E): 3e-4 of incident radiance at chrome's
+    // roughness 0.05, up to ~0.05 for a mid-reflectivity metal at roughness 1. No test in the suite sees it --
+    // the two-sided white furnace is f0=1 only (where it vanishes) and the coloured rows are upper-bound
+    // only (blind to a loss). Fixing it needs an F_avg over (r, g), the same shape as dielectricFresnelAvg.
     const glm::vec3 fresnelAvg = glm::mix(glm::vec3(dielectricFresnelAvg(params.ior)),
                                            schlickFresnelAvg(params.f0), params.metallic);
     // R_ss uses the same Schlick-split-with-exact-Fresnel-rescale as the coat; T_ss is the (1-fc) channel scaled by (1-f0), which is Schlick's 1-F factored exactly.
@@ -700,6 +816,8 @@ LobeProbabilities computeLobeProbabilities(const BsdfParams& params, const glm::
              .albedoAvg = splitAvg.total(),
              .coatF0 = coatF0,
              .fresnelAvg = fresnelAvg,
+             .conductorN = conductor.n,
+             .conductorK = conductor.k,
              .escapeWo = escape,
              .escapeAvg = escapeAvg,
              .escapeAvgRecip = escapeAvgRecip,
@@ -764,8 +882,16 @@ BsdfEval evaluateContinuousLobes(const BsdfParams& params, const glm::vec3& wo, 
 
 }  // namespace
 
-glm::vec3 fresnelSchlick(float cosTheta, const glm::vec3& f0) {
-    return f0 + ((glm::vec3(1.0F) - f0) * std::pow(std::clamp(1.0F - cosTheta, 0.0F, 1.0F), 5.0F));
+glm::vec3 fresnelAtViewAngle(const BsdfParams& params, float cosTheta) {
+    // Entering orientation (etaI=1): a primary-hit view-angle value is always outside the surface, so
+    // unlike evaluateSpecularLobe there is no exiting side to swap etaI/etaT for.
+    const float fDielectric = fresnelDielectric(cosTheta, 1.0F, params.ior);
+    if (params.metallic <= 0.0F) {
+        return glm::vec3(fDielectric);
+    }
+    const ConductorIor conductor = conductorIorFromReflectivity(params.f0, params.edgeTint);
+    return glm::mix(glm::vec3(fDielectric), fresnelConductor(cosTheta, conductor.n, conductor.k),
+                     params.metallic);
 }
 
 BsdfEval evaluateBsdfSplit(const BsdfParams& params, const glm::vec3& woLocal,

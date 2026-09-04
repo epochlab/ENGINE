@@ -343,6 +343,7 @@ int main(int argc, char** argv) {
         .diffuseRoughness = materialConfig->diffuseRoughness,
         .transmissionColor = materialConfig->transmissionColor,
         .transmissionDepth = materialConfig->transmissionDepth,
+        .edgeTint = materialConfig->edgeTint,
     };
     const std::optional<std::vector<engine::scene::PathTraceSettings>> perInstanceSettings =
         engine::scene::resolvePerInstanceSettings(baseSettings, model->instances,

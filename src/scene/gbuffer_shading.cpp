@@ -38,9 +38,9 @@ BsdfParams resolveBsdfParams(const Material& material, glm::vec2 uv, const glm::
     const float roughness = resolveRoughness(material, uv, settings);
     const glm::vec3 specular = glm::vec3(engine::gfx::sampleBilinear(material.specularTexture, uv));
     const glm::vec3 f0 = glm::mix(specular, baseColor, settings.metallicFactor);
-    return BsdfParams{baseColor,       settings.metallicFactor,       roughness,
-                       f0,             settings.ior,                  settings.transmissionFactor,
-                       settings.diffuseRoughness};
+    return BsdfParams{baseColor,          settings.metallicFactor, roughness,
+                       f0,                settings.edgeTint,       settings.ior,
+                       settings.transmissionFactor, settings.diffuseRoughness};
 }
 
 ShadingFrame buildShadingFrame(const ShadingVertex& shading, const Material& material,
