@@ -19,6 +19,8 @@
 #include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
+#include <OpenColorIO/OpenColorIO.h>
+
 #include "engine/config/profile_config.h"
 #include "engine/config/scene_config.h"
 #include "engine/debug/aov.h"
@@ -48,6 +50,8 @@
 #include "engine/scene/path_tracer.h"
 #include "engine/scene/rasterizer.h"
 #include "engine/scene/thread_pool.h"
+
+namespace OCIO = OCIO_NAMESPACE;
 
 namespace {
 
@@ -541,6 +545,44 @@ glm::vec3 sampleTexel(const engine::gfx::HdrImage& image, int x, int y) {
     return {image.rgba[idx + 0], image.rgba[idx + 1], image.rgba[idx + 2]};
 }
 
+// Cached CPU OCIO processors for the Beauty pixel probe -- built once, on first use, not per probe update: OCIO::Config::CreateFromBuiltinConfig/getProcessor parse the builtin config's colorspace graph, the same one-time cost OcioDisplayTransform::create() already pays for the GPU shaders at startup. Same four constants (ocio_display_transform.h) as that GPU build and as tools/render_beauty.cpp's CPU reference encode, so this reproduces the exact viewer transform rather than a second definition of it.
+const OCIO::ConstCPUProcessorRcPtr& ocioCpuProcessor(engine::gfx::OcioDisplayTransform::Lut lut) {
+    static const OCIO::ConstConfigRcPtr config =
+        OCIO::Config::CreateFromBuiltinConfig(engine::gfx::kOcioConfigName);
+    static const OCIO::ConstCPUProcessorRcPtr srgbProcessor =
+        config
+            ->getProcessor(engine::gfx::kOcioSceneColorSpace, engine::gfx::kOcioSrgbDisplay,
+                            engine::gfx::kOcioView, OCIO::TRANSFORM_DIR_FORWARD)
+            ->getDefaultCPUProcessor();
+    static const OCIO::ConstCPUProcessorRcPtr rec709Processor =
+        config
+            ->getProcessor(engine::gfx::kOcioSceneColorSpace, engine::gfx::kOcioRec709Display,
+                            engine::gfx::kOcioView, OCIO::TRANSFORM_DIR_FORWARD)
+            ->getDefaultCPUProcessor();
+    return lut == engine::gfx::OcioDisplayTransform::Lut::Rec709 ? rec709Processor : srgbProcessor;
+}
+
+// Beauty pixel probe's display transform, evaluated for one texel on the CPU instead of the whole framebuffer on the GPU: channel isolation -> exposure -> OCIO display curve (skipped in Raw mode, matching buildRawFragmentSource's passthrough) -> invert -- the same order OcioDisplayTransform's fragment shaders run (ocio_display_transform.cpp), minus the aberration UV-shift and dither, which are display artifacts rather than scene data and are intentionally not reproduced here. No clamp, no 8-bit quantize -- the point is a ground-truth readout of what's on screen, not a copy of its framebuffer precision loss.
+glm::vec3 applyBeautyDisplayTransform(glm::vec3 hdrColor, const AppResources& app) {
+    if (app.channelView == 1) {
+        hdrColor = glm::vec3(hdrColor.r);
+    } else if (app.channelView == 2) {
+        hdrColor = glm::vec3(hdrColor.g);
+    } else if (app.channelView == 3) {
+        hdrColor = glm::vec3(hdrColor.b);
+    }
+    glm::vec3 displayColor = hdrColor * std::pow(2.0F, app.debugCamera.relativeExposureEv());
+    if (app.userLut != engine::gfx::OcioDisplayTransform::Lut::Raw) {
+        std::array<float, 3> pixel{displayColor.r, displayColor.g, displayColor.b};
+        ocioCpuProcessor(app.userLut)->applyRGB(pixel.data());
+        displayColor = {pixel[0], pixel[1], pixel[2]};
+    }
+    if (app.invert) {
+        displayColor = glm::vec3(1.0F) - displayColor;
+    }
+    return displayColor;
+}
+
 // Orbit pivot picked with a single Embree ray down the view centre. Previously this read worldPos/alpha at the centre texel of the rasterizer's G-buffer, which is what forced that rasterization to run unconditionally -- two million pixels shaded to read one. A ray is also the more accurate instrument: no fill rule, no z-precision, no dependence on the resolution the G-buffer happened to be rendered at. Falls back to a fixed forward-offset pivot when the centre ray misses all geometry.
 void resolveOrbitPick(engine::platform::Window& window, AppResources& app,
                        const engine::scene::Camera& camera) {
@@ -637,15 +679,14 @@ PathTracedAovSource selectPathTracedImage(
     }
 }
 
-// Bottom-right HUD probe: Beauty and the post-filter AOVs (HSV/Luminance/Sobel/Gabor, which have no independent buffer of their own, see presentFrame's isPostFilterAov) read back the literal composited, OCIO-display-transformed pixel from framebuffer 0, since that is the value being shown.
-// Every other AOV instead samples its own raw HdrImage texel directly (sampleTexel, full float precision, no display-exposure/8-bit-quantization involved) so the readout is in that AOV's native units (metres for Depth, bounce count for BounceCount, etc.) regardless of how it's displayed.
+// Bottom-right HUD probe: the post-filter AOVs (HSV/Luminance/Sobel/Gabor, which have no independent buffer of their own, see presentFrame's isPostFilterAov) are GPU-only shader filters over Beauty with no CPU-side equivalent to sample, so they read back the literal composited, OCIO-display-transformed pixel from framebuffer 0, since that is the value being shown.
+// Every other AOV samples its own raw HdrImage texel directly (sampleTexel, full float precision, no 8-bit-quantization involved) so the readout is in that AOV's native units (metres for Depth, bounce count for BounceCount, etc.) regardless of how it's displayed. Beauty samples its raw texel the same way but then runs it through applyBeautyDisplayTransform -- the viewer's own exposure/LUT/invert pipeline evaluated for one pixel on the CPU -- so the probe matches what's on screen without framebuffer 0's clamp/quantize (the histogram's over-range stats, updateOverRangeStats, hit the identical clamp and are fixed the same way: off the pre-quantization float value).
 // cursorPosition()/windowSize() are screen points; the framebuffer path scales by framebufferSize() (not windowSize() directly, wrong by DPI factor on Retina) and flips Y (GL's origin is bottom-left, cursor's is top-left).
 // The raw-texel path instead scales by the sampled image's own resolution (robust to a resize race, same precedent as resolveOrbitPick) and needs no flip: HdrImage row 0 is documented top, already matching cursor space's top-left origin.
 engine::debug::PixelProbeSample samplePixelProbe(
     const engine::platform::Window& window,
     const std::shared_ptr<const engine::scene::PathTraceResult>& pathTraceSnapshot,
-    const std::shared_ptr<engine::scene::RasterGBuffer>& rasterGBuffer,
-    engine::debug::AovId aovId) {
+    const AppResources& app, engine::debug::AovId aovId) {
     const auto [windowWidth, windowHeight] = window.windowSize();
     if (windowWidth <= 0 || windowHeight <= 0) {
         return {};
@@ -658,8 +699,9 @@ engine::debug::PixelProbeSample samplePixelProbe(
     const bool isPostFilterAov =
         aovId == engine::debug::AovId::HSV || aovId == engine::debug::AovId::Luminance ||
         aovId == engine::debug::AovId::Sobel || aovId == engine::debug::AovId::Gabor;
-    if (aovId != engine::debug::AovId::Beauty && !isPostFilterAov) {
-        const PathTracedAovSource source = selectPathTracedImage(pathTraceSnapshot, rasterGBuffer, aovId);
+    if (!isPostFilterAov) {
+        const PathTracedAovSource source =
+            selectPathTracedImage(pathTraceSnapshot, app.rasterGBuffer, aovId);
         if (source.image == nullptr) {
             return {};
         }
@@ -667,7 +709,10 @@ engine::debug::PixelProbeSample samplePixelProbe(
                                    static_cast<int>(cursorX / windowWidth * source.image->width));
         const int imgY = std::min(source.image->height - 1,
                                    static_cast<int>(cursorY / windowHeight * source.image->height));
-        return {true, glm::vec4(sampleTexel(*source.image, imgX, imgY), 1.0F)};
+        const glm::vec3 texel = sampleTexel(*source.image, imgX, imgY);
+        const glm::vec3 color =
+            aovId == engine::debug::AovId::Beauty ? applyBeautyDisplayTransform(texel, app) : texel;
+        return {true, glm::vec4(color, 1.0F)};
     }
 
     const auto [fbWidth, fbHeight] = window.framebufferSize();
@@ -950,7 +995,7 @@ void updateHud(AppResources& app, const engine::platform::Window& window,
     float shutterSeconds = app.debugCamera.shutterSeconds();
     float iso = app.debugCamera.iso();
     const engine::debug::PixelProbeSample pixelProbe = samplePixelProbe(
-        window, pathTraceSnapshot, app.rasterGBuffer, static_cast<engine::debug::AovId>(app.aov));
+        window, pathTraceSnapshot, app, static_cast<engine::debug::AovId>(app.aov));
     if (app.showHud) {
         app.hud.draw(hudFrameData, app.aov, focalLengthMm, aperture, shutterSeconds, iso, app.showSky,
                      app.envRotationDegrees, app.envExposureStops, app.aberrationStrength,

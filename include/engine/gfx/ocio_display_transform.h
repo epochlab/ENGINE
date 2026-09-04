@@ -12,6 +12,7 @@ inline constexpr const char* kOcioConfigName = "cg-config-v1.0.0_aces-v1.3_ocio-
 inline constexpr const char* kOcioSceneColorSpace = "Linear Rec.709 (sRGB)";
 inline constexpr const char* kOcioView = "Un-tone-mapped";
 inline constexpr const char* kOcioSrgbDisplay = "sRGB - Display";
+inline constexpr const char* kOcioRec709Display = "Rec.1886 Rec.709 - Display";
 
 // Owns three display shaders: sRGB LUT, Rec.1886/Rec.709 LUT, and a raw (unencoded) passthrough. Compiled once at startup, switched at runtime via the debug 'L' key (cycles sRGB -> Rec709 -> Raw). Holds no OCIO::Const*RcPtr members: Config/Processor/GpuShaderDesc are only needed transiently in create() to generate GLSL text. No custom move semantics needed either: ShaderProgram is already move-only, and the rest are trivial scalars.
 class OcioDisplayTransform {
