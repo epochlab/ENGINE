@@ -207,28 +207,39 @@ struct AlbedoSplit {
     [[nodiscard]] float at(float f0) const { return (f0 * a) + b; }
 };
 
+// One axis of an edge-aligned table: the lower entry to interpolate from and the weight toward the next.
+// The [0, resolution-1] bound is applied here as `> 0` rather than std::clamp because it must also be the
+// NaN test: std::clamp passes a NaN straight through (every comparison against one is false) and
+// static_cast<int> of a NaN is undefined behaviour, in practice a wild index and an out-of-bounds read of
+// the table. Every lookup below routes through this, so no caller can reintroduce that.
+struct AxisCoord {
+    int index;   // lower entry, in [0, resolution-2]
+    float frac;  // weight toward index+1, in [0,1]
+};
+
+AxisCoord axisCoord(float coordinate, int resolution) {
+    const float bounded =
+        coordinate > 0.0F ? std::min(coordinate, static_cast<float>(resolution - 1)) : 0.0F;
+    const int index = std::min(static_cast<int>(bounded), resolution - 2);
+    return {index, bounded - static_cast<float>(index)};
+}
+
 // Bilinear lookup. E climbs steeply as mu->0 (0.31 at mu=1, ~1.0 at grazing, alpha=1), so the first mu bin carries the largest interpolation error, harmless since every integral consuming E weights grazing by cos(theta).
 AlbedoSplit directionalAlbedo(float mu, float roughness) {
-    const float rf = std::clamp(roughness, 0.0F, 1.0F) * (kAlbedoRes - 1);
-    const float mf = std::clamp(mu, 0.0F, 1.0F) * (kAlbedoRes - 1);
-    const int r0 = std::min(static_cast<int>(rf), kAlbedoRes - 2);
-    const int m0 = std::min(static_cast<int>(mf), kAlbedoRes - 2);
-    const float rt = rf - static_cast<float>(r0);
-    const float mt = mf - static_cast<float>(m0);
-    const int i0 = (r0 * kAlbedoRes) + m0;
-    const int i1 = ((r0 + 1) * kAlbedoRes) + m0;
-    return {lerp1(lerp1(kAlbedo.a[i0], kAlbedo.a[i0 + 1], mt),
-                   lerp1(kAlbedo.a[i1], kAlbedo.a[i1 + 1], mt), rt),
-             lerp1(lerp1(kAlbedo.b[i0], kAlbedo.b[i0 + 1], mt),
-                   lerp1(kAlbedo.b[i1], kAlbedo.b[i1 + 1], mt), rt)};
+    const AxisCoord r = axisCoord(roughness * (kAlbedoRes - 1), kAlbedoRes);
+    const AxisCoord m = axisCoord(mu * (kAlbedoRes - 1), kAlbedoRes);
+    const int i0 = (r.index * kAlbedoRes) + m.index;
+    const int i1 = ((r.index + 1) * kAlbedoRes) + m.index;
+    return {lerp1(lerp1(kAlbedo.a[i0], kAlbedo.a[i0 + 1], m.frac),
+                   lerp1(kAlbedo.a[i1], kAlbedo.a[i1 + 1], m.frac), r.frac),
+             lerp1(lerp1(kAlbedo.b[i0], kAlbedo.b[i0 + 1], m.frac),
+                   lerp1(kAlbedo.b[i1], kAlbedo.b[i1 + 1], m.frac), r.frac)};
 }
 
 AlbedoSplit averageAlbedo(float roughness) {
-    const float rf = std::clamp(roughness, 0.0F, 1.0F) * (kAlbedoRes - 1);
-    const int r0 = std::min(static_cast<int>(rf), kAlbedoRes - 2);
-    const float rt = rf - static_cast<float>(r0);
-    return {lerp1(kAlbedo.aavg[r0], kAlbedo.aavg[r0 + 1], rt),
-             lerp1(kAlbedo.bavg[r0], kAlbedo.bavg[r0 + 1], rt)};
+    const AxisCoord r = axisCoord(roughness * (kAlbedoRes - 1), kAlbedoRes);
+    return {lerp1(kAlbedo.aavg[r.index], kAlbedo.aavg[r.index + 1], r.frac),
+             lerp1(kAlbedo.bavg[r.index], kAlbedo.bavg[r.index + 1], r.frac)};
 }
 
 // Fractional index into the log-spaced eta axis, clamped to the tabulated range.
@@ -247,39 +258,31 @@ struct EscapeSplit {
 
 // Trilinear over (roughness, mu, eta).
 EscapeSplit escapeAlbedo(float mu, float roughness, float eta) {
-    const float rf = std::clamp(roughness, 0.0F, 1.0F) * (kAlbedoRes - 1);
-    const float mf = std::clamp(mu, 0.0F, 1.0F) * (kAlbedoRes - 1);
-    const float ef = etaAxisCoord(eta);
-    const int r0 = std::min(static_cast<int>(rf), kAlbedoRes - 2);
-    const int m0 = std::min(static_cast<int>(mf), kAlbedoRes - 2);
-    const int e0 = std::min(static_cast<int>(ef), kEtaRes - 2);
-    const float rt = rf - static_cast<float>(r0);
-    const float mt = mf - static_cast<float>(m0);
-    const float et = ef - static_cast<float>(e0);
-    const auto fetch = [&](const auto& channel, int r, int m) {
-        const int base = (((r * kAlbedoRes) + m) * kEtaRes) + e0;
-        return lerp1(channel[base], channel[base + 1], et);
+    const AxisCoord r = axisCoord(roughness * (kAlbedoRes - 1), kAlbedoRes);
+    const AxisCoord m = axisCoord(mu * (kAlbedoRes - 1), kAlbedoRes);
+    const AxisCoord e = axisCoord(etaAxisCoord(eta), kEtaRes);
+    const auto fetch = [&](const auto& channel, int ri, int mi) {
+        const int base = (((ri * kAlbedoRes) + mi) * kEtaRes) + e.index;
+        return lerp1(channel[base], channel[base + 1], e.frac);
     };
     const auto bilinear = [&](const auto& channel) {
-        return lerp1(lerp1(fetch(channel, r0, m0), fetch(channel, r0, m0 + 1), mt),
-                      lerp1(fetch(channel, r0 + 1, m0), fetch(channel, r0 + 1, m0 + 1), mt), rt);
+        return lerp1(
+            lerp1(fetch(channel, r.index, m.index), fetch(channel, r.index, m.index + 1), m.frac),
+            lerp1(fetch(channel, r.index + 1, m.index), fetch(channel, r.index + 1, m.index + 1), m.frac),
+            r.frac);
     };
     return {bilinear(kAlbedo.r), bilinear(kAlbedo.t)};
 }
 
 EscapeSplit averageEscapeAlbedo(float roughness, float eta) {
-    const float rf = std::clamp(roughness, 0.0F, 1.0F) * (kAlbedoRes - 1);
-    const float ef = etaAxisCoord(eta);
-    const int r0 = std::min(static_cast<int>(rf), kAlbedoRes - 2);
-    const int e0 = std::min(static_cast<int>(ef), kEtaRes - 2);
-    const float rt = rf - static_cast<float>(r0);
-    const float et = ef - static_cast<float>(e0);
-    const auto fetch = [&](const auto& channel, int r) {
-        const int base = (r * kEtaRes) + e0;
-        return lerp1(channel[base], channel[base + 1], et);
+    const AxisCoord r = axisCoord(roughness * (kAlbedoRes - 1), kAlbedoRes);
+    const AxisCoord e = axisCoord(etaAxisCoord(eta), kEtaRes);
+    const auto fetch = [&](const auto& channel, int ri) {
+        const int base = (ri * kEtaRes) + e.index;
+        return lerp1(channel[base], channel[base + 1], e.frac);
     };
-    return {lerp1(fetch(kAlbedo.ravg, r0), fetch(kAlbedo.ravg, r0 + 1), rt),
-             lerp1(fetch(kAlbedo.tavg, r0), fetch(kAlbedo.tavg, r0 + 1), rt)};
+    return {lerp1(fetch(kAlbedo.ravg, r.index), fetch(kAlbedo.ravg, r.index + 1), r.frac),
+             lerp1(fetch(kAlbedo.tavg, r.index), fetch(kAlbedo.tavg, r.index + 1), r.frac)};
 }
 
 // Cosine-weighted average Fresnel, the normalisation both the multiple-scattering tint and the reciprocal diffuse coupling need. Schlick's average is exact in closed form (Karis); the dielectric one is the standard rational fit, accurate to 0.0065 absolute over ior in [1.1, 3.0] against exact quadrature; it enters only as the 1/(1-Favg) normalisation, a 0.25% effect at ior 1.5.
@@ -529,9 +532,15 @@ float eonUniformMixWeight(float mu, float r) {
 // Samples EON's importance-sampling distribution (paper Sec. 4): one-sample MIS between the CLTC lobe
 // and a uniform hemisphere lobe. Direction only -- pdfEon below is the single source of truth for the
 // resulting density, called via evaluateDiffuseLobe regardless of which strategy produced wi.
+// Strict <, not <=: at r == 0 (Lambertian, the default material) pUniform is exactly 0, and a u.x of
+// exactly 0.0 -- which Sampler does produce, the Cranley-Patterson rotation landing on an integer --
+// then took the uniform branch and divided 0 by 0. The resulting NaN direction passed every
+// `wi.z <= 0` guard downstream (NaN compares false) and reached directionalAlbedo's static_cast<int>
+// of a NaN: an out-of-bounds table read, observed as a segfault. Strict < gives the empty branch zero
+// measure, and the CLTC branch it falls through to is the exact cosine distribution at r == 0.
 glm::vec3 sampleEon(const glm::vec3& woLocal, float r, glm::vec2 u) {
     const float pUniform = eonUniformMixWeight(woLocal.z, r);
-    if (u.x <= pUniform) {
+    if (u.x < pUniform) {
         u.x /= pUniform;
         return sampleUniformHemisphereEon(u);
     }
