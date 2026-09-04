@@ -62,6 +62,11 @@ struct BsdfEval {
 // Sole consumer is the rasterizer's Fresnel G-buffer AOV (rasterizer.cpp). It exists so that AOV shows the Fresnel the renderer actually shades with: it used to be Schlick against f0, which for a metal is a different curve entirely -- Schlick is monotone in cos by construction, so it cannot show the reflectance dip an authored edgeTint produces.
 [[nodiscard]] glm::vec3 fresnelAtViewAngle(const BsdfParams& params, float cosTheta);
 
+// Cosine-weighted average Fresnel of each interface, 2*int_0^1 F(mu)*mu dmu -- what the Kulla-Conty multiple-scattering tint attenuates each repeated microfacet bounce by. Exported for tools/bsdf_validate.cpp's checkAverageFresnel, which is the only instrument that can see an error here: the two-sided white furnace runs at f0=1 where every candidate average agrees, and the coloured-metal furnace rows are upper-bound-only and so blind to a loss.
+// conductorFresnelAvg takes the complex IOR rather than (reflectivity, edgeTint) because callers have already inverted it for the single-scatter term and must not invert twice; bsdf.cpp's conductorIorFromReflectivity is the inversion.
+[[nodiscard]] glm::vec3 conductorFresnelAvg(const glm::vec3& n, const glm::vec3& k);
+[[nodiscard]] float dielectricFresnelAvg(float ior);
+
 // Value and pdf of the continuous lobes at wiLocal, split by transport type. Piecewise, since reflection and transmission occupy disjoint hemispheres: wiLocal on wo's side gives the specular-reflection + diffuse mixture, the far side gives the rough transmission lobe. Transmission is excluded only when it is a delta (roughness below the smooth threshold, zero-measure). woLocal.z sign: entering (>0) vs exiting (<0) a dielectric. One call rather than the four separate lobe evaluations NEE used to make -- the lobe probabilities, the GGX/Fresnel terms and the albedo-table lookups are all computed once and shared.
 [[nodiscard]] BsdfEval evaluateBsdfSplit(const BsdfParams& params, const glm::vec3& woLocal,
                                           const glm::vec3& wiLocal);
