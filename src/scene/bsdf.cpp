@@ -352,6 +352,7 @@ struct LobeProbabilities {
     // The two formulations are therefore blended by transmissionFactor rather than unified, so an opaque material keeps exactly the measured behaviour the opaque compensation already has.
     float escapeWo;         // R_ss(mu_o) + T_ss(mu_o), the Fresnel-weighted escaping fraction
     float escapeAvg;
+    float escapeAvgRecip;   // averageEscapeAlbedo at the reciprocal eta (etaT/etaI) -- see multiScatterShape
     float transmitShare;    // of the multiple-scattered energy, the fraction leaving refracted
     float etaSq;            // (etaI/etaT)^2, the radiance compression the transmit lobe must carry
     // effectiveTransmission*(1-metallic): how much transmission actually happens. Scales both the single-scatter and the multiple-scattering transmit value; the delta branch carries the same factors through transmitPhysicalValue.
@@ -360,29 +361,32 @@ struct LobeProbabilities {
 
 // kd carries the wo-side (1-F)/(1-Favg) coupling; the matching wi-side (1-F) factor is applied here, so the lobe is reciprocal (A4) while its directional albedo still integrates to (1-F(mu_o)), same total energy as the old one-sided form, correctly distributed.
 // pdf must not be gated on kd: sampleBsdf still selects this lobe with probability lobes.diffuse (independent of kd, see computeLobeProbabilities), so the pdf side of the MIS mixture must match that selection density regardless of how little/no value the lobe carries; gating pdf on kd starves the mixture denominator and inflates throughput for metals (kd=0 but diffuseProb>0).
-// Shared shape of the multiple-scattering lobe, on whichever hemisphere wi lies. Cosine-distributed and symmetric in wo/wi. Integrates over one full hemisphere to exactly (1 - escape(mu_o)), since escapeAvg is the cosine-weighted mean of the same escape(mu) looked up here at the same eta, so the reflected share (1 - transmitShare) and the transmitted share transmitShare sum to the deficit across the two.
+// Shared shape of the multiple-scattering lobe, on whichever hemisphere wi lies. Cosine-distributed and symmetric in wo/wi. eta/deficitAvg are passed in rather than read off lobes because the two callers below need different orientations: a reflected wi stays in wo's medium (eta = etaI/etaT, lobes.escapeAvg), but a transmitted wi has crossed into the far medium and its escape must be looked up in the reciprocal orientation (eta = etaT/etaI, lobes.escapeAvgRecip) -- averageEscapeAlbedo is only a self-normalising cosine mean of escapeAlbedo when both are evaluated at the same eta, so pairing the wrong eta with the wrong average would perturb the total-energy identity below rather than merely mis-shape it.
+// Integrates over one full hemisphere to exactly (1 - escapeWo), since deficitAvg is the cosine-weighted mean of the same escape(mu) looked up here at the same eta, so the reflected share (1 - transmitShare) and the transmitted share transmitShare sum to the deficit across the two.
 // Both shares are delivered over their whole hemisphere, which requires the transmitted one to sit outside evaluateTransmissionLobe's half-vector rejections. It can only live there because lobes.msTransmit gives it a sampling density over that whole hemisphere; without one, energy outside the refraction cone would be unsamplable and bias the estimator rather than merely darken it.
-float multiScatterShape(const BsdfParams& params, float wiZ, const LobeProbabilities& lobes) {
+float multiScatterShape(const BsdfParams& params, float wiZ, float escapeWo, float eta,
+                         float deficitAvg) {
     // Guarded rather than clamped: every deficit tends to zero together as roughness falls and the ratio
     // stays finite, but flooring the denominator alone breaks that cancellation and turns a vanishing lobe
     // into a huge one. computeLobeProbabilities gates selection mass on the identical test, so the mixture
     // never allocates to a lobe that is identically zero.
-    const float deficitAvg = 1.0F - lobes.escapeAvg;
     if (deficitAvg <= kMinDeficit) {
         return 0.0F;
     }
     const float mu = std::abs(wiZ);
-    const float escapeWi = escapeAlbedo(mu, params.roughness, lobes.etaI / lobes.etaT).total();
-    return (std::max(1.0F - lobes.escapeWo, 0.0F) * std::max(1.0F - escapeWi, 0.0F)) /
-           (kPi * deficitAvg);
+    const float escapeWi = escapeAlbedo(mu, params.roughness, eta).total();
+    return (std::max(1.0F - escapeWo, 0.0F) * std::max(1.0F - escapeWi, 0.0F)) / (kPi * deficitAvg);
 }
 
 // The transmitted share of the multiple-scattering energy, for ANY wi on the far side -- deliberately
 // free of evaluateTransmissionLobe's half-vector rejections, which describe single scattering only.
 // Carries the same eta^2 radiance compression and baseColor tint the single-scatter transmission does.
+// wi has crossed the interface, so its escape is looked up in the reciprocal orientation (etaT/etaI,
+// escapeAvgRecip) -- see multiScatterShape's doc comment.
 glm::vec3 transmitMultiScatter(const BsdfParams& params, float wiZ, const LobeProbabilities& lobes) {
     return params.baseColor * lobes.transmitWeight * lobes.transmitShare * lobes.etaSq *
-           multiScatterShape(params, wiZ, lobes);
+           multiScatterShape(params, wiZ, lobes.escapeWo, lobes.etaT / lobes.etaI,
+                              1.0F - lobes.escapeAvgRecip);
 }
 
 // The full reciprocal coupling factor at wi: the wo-side half is precomputed into lobes.diffuseKd, the
@@ -589,7 +593,9 @@ LobeEval evaluateSpecularLobe(const BsdfParams& params, const glm::vec3& wo, con
     const glm::vec3 multiScatter =
         lobes.transmitWeight > 0.0F
             ? glm::mix(opaqueMs,
-                        glm::vec3((1.0F - lobes.transmitShare) * multiScatterShape(params, wi.z, lobes)),
+                        glm::vec3((1.0F - lobes.transmitShare) *
+                                  multiScatterShape(params, wi.z, lobes.escapeWo, lobes.etaI / lobes.etaT,
+                                                     1.0F - lobes.escapeAvg)),
                         lobes.transmitWeight)
             : opaqueMs;
 
@@ -657,6 +663,7 @@ LobeProbabilities computeLobeProbabilities(const BsdfParams& params, const glm::
     // waste on the common diffuse+specular case.
     float escape = 0.0F;
     float escapeAvg = 0.0F;
+    float escapeAvgRecip = 0.0F;
     float transmitShare = 0.0F;
     float msFraction = 0.0F;
     if (params.transmissionFactor > 0.0F) {
@@ -664,6 +671,8 @@ LobeProbabilities computeLobeProbabilities(const BsdfParams& params, const glm::
         const EscapeSplit escapeMean = averageEscapeAlbedo(params.roughness, eta);
         escape = escapeWo.total();
         escapeAvg = escapeMean.total();
+        // The far medium's own average escape, at the reciprocal eta -- see multiScatterShape's doc comment.
+        escapeAvgRecip = averageEscapeAlbedo(params.roughness, 1.0F / eta).total();
         const float transmitSsAvg = transmitWeight * escapeMean.transmit;
         transmitShare = transmitSsAvg / std::max(escapeAvg, 1e-4F);
 
@@ -694,6 +703,7 @@ LobeProbabilities computeLobeProbabilities(const BsdfParams& params, const glm::
              .fresnelAvg = fresnelAvg,
              .escapeWo = escape,
              .escapeAvg = escapeAvg,
+             .escapeAvgRecip = escapeAvgRecip,
              .transmitShare = transmitShare,
              .etaSq = eta * eta,
              .transmitWeight = transmitWeight};

@@ -4,7 +4,7 @@
         "height": 576
     },
     "camera": {
-        "position": [0.0, 0.15, 5.0],
+        "position": [0.0, 0.0, 6.0],
         "yawDegrees": 0.0,
         "pitchDegrees": 0.0,
         "filmBack": { "widthMm": 23.76, "heightMm": 13.37 },
@@ -27,8 +27,8 @@
     },
     "pathTracer": {
         "samplesPerPixel": 1,
-        "maxBounces": 1,
+        "maxBounces": 8,
         "russianRouletteStartBounce": 3,
-        "maxSamples": 4
+        "maxSamples": 32
     }
 }
