@@ -401,17 +401,22 @@ int main(int argc, char** argv) {
         }
         int maxDelta = 0;
         double squaredSum = 0.0;
+        // Signed mean alongside RMS: the direction of an energy change, not just its magnitude. Near-zero mean against non-zero RMS means light moved rather than appeared or vanished.
+        double signedSum = 0.0;
         std::size_t differing = 0;
         for (std::size_t i = 0; i < encoded.size(); ++i) {
-            const int delta = std::abs(static_cast<int>(encoded[i]) - static_cast<int>(reference[i]));
+            const int signedDelta = static_cast<int>(encoded[i]) - static_cast<int>(reference[i]);
+            const int delta = std::abs(signedDelta);
             maxDelta = std::max(maxDelta, delta);
             squaredSum += static_cast<double>(delta) * delta;
+            signedSum += signedDelta;
             differing += delta != 0 ? 1 : 0;
         }
         const double rms = std::sqrt(squaredSum / static_cast<double>(encoded.size()));
+        const double meanSigned = signedSum / static_cast<double>(encoded.size());
         std::cout << "render_beauty: vs " << options.comparePath << " -- max channel delta "
-                  << maxDelta << "/255, RMS " << rms << ", " << differing << "/" << encoded.size()
-                  << " channels differ\n";
+                  << maxDelta << "/255, RMS " << rms << ", mean signed " << meanSigned << ", "
+                  << differing << "/" << encoded.size() << " channels differ\n";
     }
     return EXIT_SUCCESS;
 }
