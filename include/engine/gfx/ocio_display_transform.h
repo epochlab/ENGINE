@@ -6,6 +6,13 @@
 
 namespace engine::gfx {
 
+// The colour pipeline's definition, exposed so any CPU-side consumer reproduces the exact transform the viewer displays rather than restating it. tools/render_beauty.cpp builds an OCIO CPU processor from these same four values; a comparison render encoded through a separately-declared curve would drift from the viewer the moment either side was repinned.
+// kBuiltinConfigName is pinned, not "-latest": empirically verified (compiled + ran against the installed library) that this config's "Un-tone-mapped" view is a pure colorimetric pass (0->0, 1->1, zero LUT textures), no filmic rolloff. Pinning avoids a future brew upgrade silently resolving "-latest" to a structurally different config.
+inline constexpr const char* kOcioConfigName = "cg-config-v1.0.0_aces-v1.3_ocio-v2.1";
+inline constexpr const char* kOcioSceneColorSpace = "Linear Rec.709 (sRGB)";
+inline constexpr const char* kOcioView = "Un-tone-mapped";
+inline constexpr const char* kOcioSrgbDisplay = "sRGB - Display";
+
 // Owns three display shaders: sRGB LUT, Rec.1886/Rec.709 LUT, and a raw (unencoded) passthrough. Compiled once at startup, switched at runtime via the debug 'L' key (cycles sRGB -> Rec709 -> Raw). Holds no OCIO::Const*RcPtr members: Config/Processor/GpuShaderDesc are only needed transiently in create() to generate GLSL text. No custom move semantics needed either: ShaderProgram is already move-only, and the rest are trivial scalars.
 class OcioDisplayTransform {
 public:
