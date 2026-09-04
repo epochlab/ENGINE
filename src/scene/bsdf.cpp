@@ -531,7 +531,8 @@ float eonUniformMixWeight(float mu, float r) {
 // resulting density, called via evaluateDiffuseLobe regardless of which strategy produced wi.
 glm::vec3 sampleEon(const glm::vec3& woLocal, float r, glm::vec2 u) {
     const float pUniform = eonUniformMixWeight(woLocal.z, r);
-    if (u.x <= pUniform) {
+    // Strict: pUniform is exactly 0 at r=0 (pow(0,0.1)), where an inclusive test admits u.x==0 -- reachable from Sampler's Cranley-Patterson wrap -- and reshuffles it as 0/0. The resulting NaN direction passes every downstream guard (NaN fails all ordered comparisons) and poisons the pixel for the rest of the progressive render.
+    if (u.x < pUniform) {
         u.x /= pUniform;
         return sampleUniformHemisphereEon(u);
     }
