@@ -70,7 +70,7 @@ bool checkPdfNormalization() {
                     integral += engine::scene::pdfBsdf(params, wo, wi) / kUniformPdf;
                 }
                 integral /= kSampleCount;
-                if (integral > 1.0 + kTolerance) {
+                if (!(integral <= 1.0 + kTolerance)) {
                     std::cerr << "bsdf_validate: FAILED pdf normalization UPPER bound at roughness="
                               << roughness << " metallic=" << metallic << " ndotV=" << ndotV
                               << " integral=" << integral << " (expected <= 1.0)\n";
@@ -98,6 +98,11 @@ glm::vec3 furnaceLo(const BsdfParams& params, const glm::vec3& wo, int sampleCou
 float maxChannel(const glm::vec3& v) { return std::max({v.x, v.y, v.z}); }
 float minChannel(const glm::vec3& v) { return std::min({v.x, v.y, v.z}); }
 
+// Asserts the PASS condition rather than testing for the failure condition: NaN compares false against every ordered operator, so `min < lo || max > hi` is satisfied by no NaN and lets one through silently. A NaN reading used to pass this whole suite (measured: two nan rows in the white furnace, exit 0).
+bool withinBand(const glm::vec3& value, float centre, float tolerance) {
+    return minChannel(value) >= centre - tolerance && maxChannel(value) <= centre + tolerance;
+}
+
 // Furnace test through sampleBsdf: uniform radiance L0=1 from every direction (both hemispheres, since transmission can receive from the far side); estimator Lo = mean(throughputWeight) since throughputWeight already folds in f*cosTheta/pdf.
 // ndotV sweep includes negative values (woLocal.z<0, the exiting side of a transmissive dielectric) and a value past the ior=1.5 critical angle (~41.8deg, cosTheta~0.745) to force total internal reflection.
 // Energy bound is 1.0 (L0) everywhere except the exiting side (ndotV<0) of a transmissive material below the critical angle, where sampleBsdf's eta^2 non-symmetric radiance-compression factor (Veach 1997 sec. 5.2, see bsdf.cpp's transmission branch) legitimately raises Lo above L0: L/n^2 is the invariant along a ray, so radiance increases going from a denser medium (ior=1.5, inside) into a rarer one (1.0, outside) by up to ior^2.
@@ -124,7 +129,7 @@ bool checkFurnace() {
                     const float maxLo = maxChannel(furnaceLo(params, wo, kSampleCount, seed));
                     const bool exitingTransmissive = ndotV < 0.0F && transmission > 0.0F;
                     const float energyBound = exitingTransmissive ? kIor * kIor : 1.0F;
-                    if (maxLo > energyBound + kTolerance) {
+                    if (!(maxLo <= energyBound + kTolerance)) {
                         std::cerr << "bsdf_validate: FAILED furnace test at roughness=" << roughness
                                   << " metallic=" << metallic << " transmission=" << transmission
                                   << " ndotV=" << ndotV << " Lo=" << maxLo
@@ -143,7 +148,7 @@ bool checkFurnace() {
             const BsdfParams params = makeColoredMetalParams(roughness);
             const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (ndotV * ndotV))), 0.0F, ndotV);
             const float maxLo = maxChannel(furnaceLo(params, wo, kSampleCount, seed));
-            if (maxLo > 1.0F + kTolerance) {
+            if (!(maxLo <= 1.0F + kTolerance)) {
                 std::cerr << "bsdf_validate: FAILED colored-metal furnace test at roughness="
                           << roughness << " ndotV=" << ndotV << " Lo=" << maxLo
                           << " (expected <= 1.0)\n";
@@ -204,7 +209,7 @@ bool checkWhiteFurnaceTwoSided() {
         const std::array<std::pair<const char*, glm::vec3>, 2> measured = {
             {{"conductor", conductor}, {"dielectric", dielectric}}};
         for (const auto& [label, value] : measured) {
-            if (minChannel(value) < 1.0F - kTolerance || maxChannel(value) > 1.0F + kTolerance) {
+            if (!withinBand(value, 1.0F, kTolerance)) {
                 std::cerr << "bsdf_validate: FAILED white-" << label
                           << " furnace energy conservation at roughness=" << entry.roughness
                           << " ndotV=" << entry.ndotV << " Lo=[" << minChannel(value) << ", "
@@ -243,7 +248,7 @@ bool checkEonDiffuseFurnace() {
             const glm::vec3 lo = furnaceLo(params, wo, kSampleCount, seed);
             std::cout << "  " << diffuseRoughness << "              " << ndotV << "    "
                       << minChannel(lo) << '\n';
-            if (minChannel(lo) < 1.0F - kTolerance || maxChannel(lo) > 1.0F + kTolerance) {
+            if (!withinBand(lo, 1.0F, kTolerance)) {
                 std::cerr << "bsdf_validate: FAILED EON diffuse furnace energy at diffuseRoughness="
                           << diffuseRoughness << " ndotV=" << ndotV << " Lo=[" << minChannel(lo) << ", "
                           << maxChannel(lo) << "] (expected 1.0 +/- " << kTolerance << ")\n";
@@ -303,7 +308,7 @@ bool checkTransmissiveEnergyBalance() {
                     const glm::vec3 lo = transmissiveEnergyLo(params, wo, kSampleCount, seed);
                     std::cout << "  " << roughness << "        " << ndotV << "     " << transmission
                               << "           " << metallic << "       " << minChannel(lo) << '\n';
-                    if (minChannel(lo) < 1.0F - kTolerance || maxChannel(lo) > 1.0F + kTolerance) {
+                    if (!withinBand(lo, 1.0F, kTolerance)) {
                         std::cerr << "bsdf_validate: FAILED transmissive energy balance at roughness="
                                   << roughness << " ndotV=" << ndotV
                                   << " transmission=" << transmission << " metallic=" << metallic
@@ -341,8 +346,8 @@ bool checkReciprocity() {
                     const glm::vec3 forward = engine::scene::evaluateBsdf(params, wo, wi);
                     const glm::vec3 reverse = engine::scene::evaluateBsdf(params, wi, wo);
                     const float scale = std::max(maxChannel(forward), maxChannel(reverse));
-                    if (maxChannel(glm::abs(forward - reverse)) >
-                        kRelativeTolerance * std::max(scale, 1e-4F)) {
+                    if (!(maxChannel(glm::abs(forward - reverse)) <=
+                          kRelativeTolerance * std::max(scale, 1e-4F))) {
                         std::cerr << "bsdf_validate: FAILED reciprocity at roughness=" << roughness
                                   << " metallic=" << metallic << " muO=" << muA << " muI=" << muB
                                   << " f(wo->wi)=" << forward.x << " f(wi->wo)=" << reverse.x << '\n';
@@ -402,7 +407,7 @@ bool checkTransmissionReciprocity() {
                             continue;
                         }
                         ++pairsSeen;
-                        if (maxChannel(glm::abs(forward - reverse)) > kRelativeTolerance * scale) {
+                        if (!(maxChannel(glm::abs(forward - reverse)) <= kRelativeTolerance * scale)) {
                             std::cerr << "bsdf_validate: FAILED transmission reciprocity at roughness="
                                       << roughness << " ior=" << ior << " muO=" << mu
                                       << " offset=" << offset << "*alpha"
@@ -452,7 +457,7 @@ bool checkTransmissionRoundTrip() {
         std::cout << "  transmission round trip ndotV=" << ndotV << ": " << entering << " x "
                   << exiting << " = " << roundTrip << '\n';
         // Two-sided deliberately: an upper bound alone catches the eta^2 factors compounding but is blind to them under-cancelling, which loses energy on every round trip through glass, the same blind spot the white furnace test above exists to close.
-        if (roundTrip > 1.0F + kTolerance || roundTrip < 1.0F - kTolerance) {
+        if (!(roundTrip >= 1.0F - kTolerance && roundTrip <= 1.0F + kTolerance)) {
             std::cerr << "bsdf_validate: FAILED transmission round trip at ndotV=" << ndotV
                       << " -- entering " << entering << " x exiting " << exiting << " = " << roundTrip
                       << "; the eta^2 radiance-compression factors must cancel over a round trip "

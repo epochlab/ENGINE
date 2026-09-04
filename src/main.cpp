@@ -7,7 +7,6 @@
 #include <iostream>
 #include <limits>
 #include <memory>
-#include <map>
 #include <optional>
 #include <string>
 #include <utility>
@@ -44,6 +43,7 @@
 #include "engine/scene/environment_map.h"
 #include "engine/scene/false_color.h"
 #include "engine/scene/gltf_loader.h"
+#include "engine/scene/material_binding.h"
 #include "engine/scene/path_trace_driver.h"
 #include "engine/scene/path_tracer.h"
 #include "engine/scene/rasterizer.h"
@@ -356,22 +356,6 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         return std::nullopt;
     }
 
-    // Load each distinct override material once, keyed by its scene-config path (not by node name --
-    // several nodes may share one override path).
-    std::map<std::string, engine::config::MaterialConfig> overrideMaterialsByPath;
-    for (const auto& [nodeName, path] : sceneConfig.materialOverrides) {
-        if (overrideMaterialsByPath.contains(path)) {
-            continue;
-        }
-        std::optional<engine::config::MaterialConfig> overrideMaterial =
-            engine::config::loadMaterialConfig(std::string(ASSET_ROOT_DIR) + "/" + path);
-        if (!overrideMaterial) {
-            std::cerr << "main: materialOverrides entry '" << path << "' failed to load, aborting startup\n";
-            return std::nullopt;
-        }
-        overrideMaterialsByPath.emplace(path, std::move(*overrideMaterial));
-    }
-
     engine::gfx::PostProcessPass postProcess;
     engine::debug::HudOverlay hud(window.nativeHandle());
     engine::debug::FrameStats frameStats;
@@ -415,30 +399,12 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         .transmissionDepth = materialConfig->transmissionDepth,
     };
 
-    // One entry per stumpModel->instances, in the same order -- ShadingTriangle::instanceIndex indexes
-    // both. Renderer-only fields (samplesPerPixel/maxBounces/RR) are always basePathTraceSettings's;
-    // only the 11 material fields vary per instance.
-    std::vector<engine::scene::PathTraceSettings> perInstanceSettings;
-    perInstanceSettings.reserve(stumpModel->instances.size());
-    for (const engine::scene::MeshInstance& instance : stumpModel->instances) {
-        engine::scene::PathTraceSettings settings = basePathTraceSettings;
-        if (const auto overrideIt = sceneConfig.materialOverrides.find(instance.name);
-            overrideIt != sceneConfig.materialOverrides.end()) {
-            const engine::config::MaterialConfig& overrideMaterial =
-                overrideMaterialsByPath.at(overrideIt->second);
-            settings.bumpStrength = overrideMaterial.bumpStrength;
-            settings.roughnessMin = overrideMaterial.roughnessMin;
-            settings.roughnessMax = overrideMaterial.roughnessMax;
-            settings.diffuseColour = overrideMaterial.diffuseColour;
-            settings.ior = overrideMaterial.ior;
-            settings.transmissionFactor = overrideMaterial.transmissionFactor;
-            settings.metallicFactor = overrideMaterial.metallicFactor;
-            settings.roughnessFactor = overrideMaterial.roughnessFactor;
-            settings.diffuseRoughness = overrideMaterial.diffuseRoughness;
-            settings.transmissionColor = overrideMaterial.transmissionColor;
-            settings.transmissionDepth = overrideMaterial.transmissionDepth;
-        }
-        perInstanceSettings.push_back(settings);
+    std::optional<std::vector<engine::scene::PathTraceSettings>> perInstanceSettings =
+        engine::scene::resolvePerInstanceSettings(basePathTraceSettings, stumpModel->instances,
+                                                   sceneConfig.materialOverrides, ASSET_ROOT_DIR);
+    if (!perInstanceSettings) {
+        std::cerr << "main: material override resolution failed, aborting startup\n";
+        return std::nullopt;
     }
 
     return AppResources{
@@ -479,7 +445,7 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         .showHud = true,
         .aberrationStrength = 0.0F,
         .pathTraceSettings = basePathTraceSettings,
-        .perInstanceSettings = std::move(perInstanceSettings),
+        .perInstanceSettings = std::move(*perInstanceSettings),
         .maxSamples = profileConfig.pathTracer.maxSamples,
         // Constructed in main() right after initializeApp() returns -- see path_trace_driver.h's constructor precondition (its reference members must bind to sceneAccel/environmentMap/stumpModel at their final, permanent address, which this designated-initializer expression, still local-variable-based and one AppResources move away from that address, cannot yet guarantee).
         .pathTraceDriver = nullptr,
