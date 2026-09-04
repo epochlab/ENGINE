@@ -1,6 +1,6 @@
-build/
 .DS_Store
-compile_commands.json
-*.exr
+build/
 *.gltf
 *.bin
+!**/cornell/*
+*.exr
