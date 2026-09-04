@@ -154,7 +154,7 @@ std::optional<OcioDisplayTransform> OcioDisplayTransform::create() {
     const std::string rawFragSrc = buildRawFragmentSource();
     const std::string srgbFragSrc = buildOcioFragmentSource(kOcioSrgbDisplay, "OCIODisplaySRGB");
     const std::string rec709FragSrc =
-        buildOcioFragmentSource("Rec.1886 Rec.709 - Display", "OCIODisplayRec709");
+        buildOcioFragmentSource(kOcioRec709Display, "OCIODisplayRec709");
 
     std::optional<ShaderProgram> rawShader = ShaderProgram::loadFromSource(*vertSrc, rawFragSrc);
     std::optional<ShaderProgram> srgbShader = ShaderProgram::loadFromSource(*vertSrc, srgbFragSrc);
