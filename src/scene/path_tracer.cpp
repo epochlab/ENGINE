@@ -20,6 +20,9 @@ namespace {
 
 constexpr float kRayEpsilon = 1e-4F;
 
+// Offsets the AO sampler's seed from the path sampler's so the two streams are independent and the eight pre-existing images stay bit-identical. 2^32/phi, the standard decorrelating odd constant (Knuth; boost::hash_combine); any fixed offset would do, since hashSeed's SplitMix64 avalanche is what actually separates the streams.
+constexpr std::uint32_t kAoSeedOffset = 0x9E3779B9U;
+
 // pbrt's ShadowEpsilon convention (Pharr/Jakob/Humphreys Sec 6.8.6): a relative back-off on a finite
 // shadow ray's own tMax, needed now that a light can be real geometry sitting in the BVH -- an
 // unshortened tMax lets the light's own front face register as its own occluder at t == distance.
@@ -69,8 +72,8 @@ constexpr int kFilterExtent = 1;  // how many pixels either side of a sample its
 constexpr int kFilterTableSize = 64;
 // Square destination tiles, each owned outright by one worker: splatting crosses pixel boundaries, so the row-disjoint invariant the rasterizer still relies on cannot hold here. Size trades halo waste against load-balancing granularity -- the halo re-traces (size+2*kFilterExtent)^2/size^2 of a tile, 4.2% here against 6.3% at 64, while doubling to 128 quarters the number of work items a small render has to spread across its workers. 96 and 128 measured indistinguishable at 1080p; 64 measurably worse.
 constexpr int kTileSize = 96;
-// Per-tile accumulator lanes: beauty.rgb, termination bounce, shadow, then the five transport buckets' rgb -- the scalars take one lane each and are broadcast to RGB at write-out, matching writeTexel's convention.
-constexpr int kSampleLanes = 20;
+// Per-tile accumulator lanes: beauty.rgb, termination bounce, shadow, the five transport buckets' rgb, then ambient occlusion -- the scalars take one lane each and are broadcast to RGB at write-out, matching writeTexel's convention. AO is appended rather than placed beside shadow so no existing lane index moves.
+constexpr int kSampleLanes = 21;
 constexpr int kTileLanes = kSampleLanes + 1;  // plus the per-pixel filter weight the lanes above are normalised by
 
 // Sampled at |x| = i/(kFilterTableSize-1) * kFilterRadius and read back by truncating lookup, the same table trick PBRT uses: the filter is smooth over 1.5px, and this replaces three cos() per tap on the renderer's hottest inner loop.
@@ -105,6 +108,7 @@ struct TraceResult {
     glm::vec3 radiance;
     int terminationBounce;  // bounce index the path stopped at (== maxBounces + 1 if depth-capped)
     float shadow;           // 1.0 = shadowed/occluded, 0.0 = lit or no primary hit at all (background)
+    float ao;               // 1.0 = unoccluded, 0.0 = occluded within aoMaxDistance -- inverted relative to shadow above, see PathTraceResult
 
     // Transport-component breakdown -- see PathTraceResult's doc comment for the bucketing rule.
     glm::vec3 directDiffuse{0.0F};
@@ -123,7 +127,7 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
                        const std::vector<int>& instanceLightIndex, const LightSet& lights,
                        bool showSky, const PathTraceSettings& settings,
                        const std::vector<PathTraceSettings>& perInstanceSettings,
-                       Sampler& sampler) {
+                       Sampler& sampler, glm::vec2 aoSample) {
     glm::vec3 radiance(0.0F);
     glm::vec3 throughput(1.0F);
     Ray ray = primaryRay;
@@ -161,6 +165,7 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
         }
     };
     float gShadow = 0.0F;  // default: no surface hit at all -- not "shadowed", just background
+    float gAo = 1.0F;      // default: background is fully unoccluded, matching the polarity in PathTraceResult
 
     // MIS state for the *previous* bounce's BSDF sample (the one that produced `ray`) -- used to reweight this bounce's miss contribution against NEE's light-sampling pdf, so a direction reachable by both strategies isn't double-counted. Meaningless at bounce==0 (ray is the primary/camera ray, not a BSDF sample -- its miss is a pure camera-visibility event, not part of the two-strategy light-transport estimator NEE/MIS balances).
     float lastBsdfPdf = 0.0F;
@@ -279,6 +284,17 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
 
         if (bounce == 0) {
             gShadow = 1.0F;  // assume shadowed once we know there's a real surface; the NEE check below may clear this
+            // Cosine-weighted AO (Miller 1994; Landis 2002): AO = (1/pi) * int V(w) cos(theta) dw, and sampling at pdf = cos/pi cancels both factors, so a single visibility test IS an unbiased one-sample estimate. The driver's pass accumulation does the averaging, which is why there is no ray-count setting here.
+            // Negating the sampled direction maps the hemisphere about the shading normal onto the one about its opposite -- the cosine density is symmetric, so this is exact -- and points a back-facing primary hit's ray outward instead of into the surface it sits on.
+            const bool frontSide = glm::dot(geoNormal, woWorld) > 0.0F;
+            const glm::vec3 aoDir =
+                frame.toWorld(sampleCosineHemisphere(aoSample)) * (frontSide ? 1.0F : -1.0F);
+            // NEE's near-side origin verbatim: the shading-terminator offset plus a geometric-normal back-off, on whichever side wo is.
+            const glm::vec3 aoOrigin = shadowTerminatorOffset(triangle, hit->u, hit->v, frontSide) +
+                                        (geoNormal * kRayEpsilon * (frontSide ? 1.0F : -1.0F));
+            gAo = accel.occluded(Ray{aoOrigin, aoDir, kRayEpsilon, settings.aoMaxDistance})
+                       ? 0.0F
+                       : 1.0F;
         }
 
         const glm::vec3 woLocal = frame.toLocal(woWorld);
@@ -413,7 +429,7 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
         ray = Ray{offsetOrigin, wiWorld, offsetEpsilon, std::numeric_limits<float>::max()};
     }
 
-    return {radiance,           bounce,               gShadow,
+    return {radiance,           bounce,               gShadow,             gAo,
             directDiffuseAccum, indirectDiffuseAccum, directSpecularAccum,
             indirectSpecularAccum, refractionAccum};
 }
@@ -421,10 +437,10 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
 }  // namespace
 
 PathTraceResult makePathTraceResult(int width, int height) {
-    // 8 fields (beauty/bounceHeatmap/shadow + 5 transport-component AOVs) -- see PathTraceResult's declaration order in path_tracer.h, which this positional init must match.
+    // 9 fields (beauty/bounceHeatmap/ao/shadow + 5 transport-component AOVs) -- see PathTraceResult's declaration order in path_tracer.h, which this positional init must match.
     return {makeImage(width, height), makeImage(width, height), makeImage(width, height),
             makeImage(width, height), makeImage(width, height), makeImage(width, height),
-            makeImage(width, height), makeImage(width, height)};
+            makeImage(width, height), makeImage(width, height), makeImage(width, height)};
 }
 
 void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
@@ -466,9 +482,12 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                     // HdrImage row 0 is the top (EXR/glTF convention); NDC +Y is up -- flip.
                     const float ndcY = 1.0F - ((filmY / static_cast<float>(height)) * 2.0F);
                     const Ray primary = camera.primaryRay(basis, ndcX, ndcY);
+                    // AO draws from its own stream, not `sampler`: taking two dimensions from the path's sampler would shift every later dimension and move all eight pre-existing images. Passing the drawn pair rather than the sampler makes it provable that AO consumes exactly two dimensions and cannot drift. Seeding stays a pure function of (x, y, s, seed), which is what the halo determinism above rests on.
+                    Sampler aoSampler(x, y, s, runSeed ^ kAoSeedOffset);
+                    const glm::vec2 aoSample = aoSampler.next2D();
                     const TraceResult trace =
                         tracePath(primary, accel, shadingTriangles, instances, instanceLightIndex,
-                                  lights, showSky, settings, perInstanceSettings, sampler);
+                                  lights, showSky, settings, perInstanceSettings, sampler, aoSample);
                     const std::array<float, kSampleLanes> values{
                         trace.radiance.x,          trace.radiance.y,
                         trace.radiance.z,          static_cast<float>(trace.terminationBounce),
@@ -479,7 +498,8 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                         trace.directSpecular.y,    trace.directSpecular.z,
                         trace.indirectSpecular.x,  trace.indirectSpecular.y,
                         trace.indirectSpecular.z,  trace.refraction.x,
-                        trace.refraction.y,        trace.refraction.z};
+                        trace.refraction.y,        trace.refraction.z,
+                        trace.ao};
 
                     // Clipped to this tile: the taps falling outside it belong to a neighbouring tile, which traces this same sample itself rather than receiving it.
                     const int splatX0 = std::max(tileX0, static_cast<int>(std::ceil(filmX - 0.5F - kFilterRadius)));
@@ -527,6 +547,7 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                 writeTexel(out.directSpecular, x, y, glm::vec3(lanes[11], lanes[12], lanes[13]) * invWeight);
                 writeTexel(out.indirectSpecular, x, y, glm::vec3(lanes[14], lanes[15], lanes[16]) * invWeight);
                 writeTexel(out.refraction, x, y, glm::vec3(lanes[17], lanes[18], lanes[19]) * invWeight);
+                writeTexel(out.ao, x, y, glm::vec3(lanes[20] * invWeight));
             }
         }
     };

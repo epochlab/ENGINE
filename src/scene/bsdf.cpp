@@ -159,12 +159,6 @@ glm::vec3 sampleGGXVNDF(const glm::vec3& wo, float alpha, glm::vec2 u) {
     return glm::normalize(glm::vec3(alpha * nh.x, alpha * nh.y, std::max(0.0F, nh.z)));
 }
 
-glm::vec3 sampleCosineHemisphere(glm::vec2 u) {
-    const float r = std::sqrt(u.x);
-    const float phi = 2.0F * kPi * u.y;
-    return {r * std::cos(phi), r * std::sin(phi), std::sqrt(std::max(0.0F, 1.0F - u.x))};
-}
-
 // Directional albedo of the single-scattering GGX lobe with Fresnel forced to 1, the fraction of energy smithG2 lets through, so 1-E is exactly what multiple scattering must return (Kulla & Conty 2017, "Revisiting Physically Based Shading at Imageworks").
 // Depends on nothing but (mu, alpha): Fresnel, metallic, baseColor, and lobe-selection probabilities are all applied by the caller, never baked in here.
 // Indexed by perceptual roughness rather than alpha: E is far better distributed in sqrt(alpha), and it is what callers already hold. Grid is edge-aligned so roughness 0 / mu 1 are exact table entries.
@@ -374,6 +368,13 @@ EscapeSplit averageEscapeAlbedo(float roughness, float eta) {
 }
 
 }  // namespace
+
+// Malley's method: a uniform point on the unit disk lifted to the hemisphere, which is exactly the cosine distribution (PBR 4th ed. 13.6.3). External linkage for path_tracer.cpp's AO lane, whose estimator is only the mean of visibility because this pdf cancels the cosine -- see the header.
+glm::vec3 sampleCosineHemisphere(glm::vec2 u) {
+    const float r = std::sqrt(u.x);
+    const float phi = 2.0F * kPi * u.y;
+    return {r * std::cos(phi), r * std::sin(phi), std::sqrt(std::max(0.0F, 1.0F - u.x))};
+}
 
 // The two average-Fresnel terms have external linkage: bsdf.h declares them for tools/bsdf_validate.cpp's checkAverageFresnel, the only instrument in the suite that can see an error in either (see the header comment). Everything around them stays internal.
 // Cosine-weighted average Fresnel, the normalisation both the multiple-scattering tint and the reciprocal diffuse coupling need. The dielectric one is the standard rational fit, accurate to 0.0065 absolute over ior in [1.1, 3.0] against exact quadrature (measured, and asserted by checkAverageFresnel); it enters as the 1/(1-Favg) normalisation, a 0.25% effect at ior 1.5, and as the coat's own multiple-scattering attenuation in coatAlbedo.
