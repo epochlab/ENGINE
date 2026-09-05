@@ -38,9 +38,10 @@ struct MaterialConfig {
     float roughnessFactor;         // multiplies the roughness texture sample, before roughnessMin/Max clamp
     // EON rough-diffuse parameter r in [0,1]; 0 = Lambertian, see bsdf.cpp's evaluateDiffuseLobe. Optional, default 0.0: dead once metallicFactor=1 or transmissionFactor=1, so glass.json/chrome.json need not declare it.
     float diffuseRoughness = 0.0F;
-    // Beer-Lambert volumetric absorption while a path travels inside this material (transmissionFactor>0 only). Optional, default [1,1,1]: -log(1)=0, so absorption is a true no-op regardless of transmissionDepth unless a material opts in. See path_tracer.cpp's sigmaAFromTransmission.
+    // The transmission lobe's only tint (transmissionFactor>0 only); baseColor tints reflection alone, see bsdf.h's BsdfParams. Optional, default [1,1,1]: -log(1)=0 and a white on-surface tint is the identity, so both regimes below are a true no-op unless a material opts in.
     glm::vec3 transmissionColor = glm::vec3(1.0F);
-    float transmissionDepth = 1.0F;  // distance (world units) at which transmittance reaches transmissionColor
+    // Distance (world units) at which transmittance reaches transmissionColor by Beer's law, i.e. the interior medium's density -- see path_tracer.cpp's sigmaAFromTransmission. Optional, default 0.0 = no interior medium, matching Arnold's and OpenPBR's own default, where transmissionColor is instead a constant on-surface tint applied once per interface crossing.
+    float transmissionDepth = 0.0F;
     // Gulbrandsen 2014 edgetint for the conductor lobe (metallicFactor>0 only). Optional, default [1,1,1]: white is the no-dip edge Schlick always produced, so an existing material file loads unchanged. See bsdf.cpp's conductorIorFromReflectivity.
     glm::vec3 edgeTint = glm::vec3(1.0F);
 };

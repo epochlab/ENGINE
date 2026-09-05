@@ -368,7 +368,8 @@ bool runCases() {
         const BsdfParams params{glm::vec3(1.0F),      testCase.metallic, testCase.roughness,
                                  testCase.f0,          glm::vec3(1.0F),   /*ior=*/1.5F,
                                  /*transmissionFactor=*/0.0F, /*diffuseRoughness=*/0.0F,
-                                 engine::scene::eonAlbedoInversion(glm::vec3(1.0F), 0.0F)};
+                                 engine::scene::eonAlbedoInversion(glm::vec3(1.0F), 0.0F),
+                                 /*transmissionTint=*/glm::vec3(1.0F)};
         const float reference = referenceLo(params, glm::vec3(0.0F, 0.0F, 1.0F), kReferenceSamples,
                                              referenceRng);
 
@@ -595,6 +596,66 @@ bool checkBeerLambert() {
                           << ". transmissionDepth is the distance at which transmittance reaches "
                              "transmissionColor, so with the medium index-matched to vacuum nothing "
                              "but exp(-sigma_a*d) can move this reading.\n";
+                ok = false;
+            }
+        }
+    }
+    return ok;
+}
+
+// The other half of the transmission-tint convention: transmissionDepth == 0 means there is no interior medium at all, and transmissionColor is a constant on-surface tint instead -- OpenPBR, "if zero, acts as a constant (on-surface) transmission tint"; Arnold renders it as a flat filter colour.
+// Complementary to checkBeerLambert above rather than a restatement of it. That one authors a colour at depth > 0 and requires exactly transmissionColor after one traversal, so an on-surface tint leaking into the volumetric regime would read colour^3 there; this one authors depth 0 and requires exactly transmissionColor^2, one factor per interface crossed, entering and exiting.
+// A flat slab and a sphere, whose traversal distances differ by construction: an on-surface tint is a property of the interface, so it must read the SAME square on both, which is exactly what distinguishes it from absorption. checkBeerLambert's sphere row reads systematically high because the offset epsilon shortens its in-medium path; no reading here depends on distance, so that bias cannot appear at all.
+// ior 1.0 for the same reason as checkBeerLambert: an index-matched interface neither bends nor reflects the ray, and the delta transmission lobe contributes nothing through NEE, so the tint is the only mechanism left that can move the reading off 1.0.
+bool checkOnSurfaceTransmissionTint() {
+    constexpr int kBounces = 8;
+    constexpr float kSlabThickness = 0.5F;
+    // Relative, and tight: with no absorption and no refraction there is no distance-dependent bias, so both rows carry only the estimator's own residual -- measured at 3.3e-4 in every channel of both, the same residual checkBeerLambert's flat rows show. 6x headroom on that, not a band wide enough to hide a leaked factor.
+    constexpr float kRelativeTolerance = 0.002F;
+    const glm::vec3 colour(0.5F, 0.25F, 0.75F);
+    const glm::vec3 expected = colour * colour;   // two interfaces crossed, one factor each
+
+    struct TintCase {
+        const char* name;
+        bool sphere;
+    };
+    const std::array<TintCase, 2> cases{{{"flat slab, depth 0", false}, {"sphere, depth 0", true}}};
+
+    const EnvironmentMap env = makeUniformEnvironment();
+    engine::scene::ThreadPool pool;
+    bool ok = true;
+
+    std::cout << "integrator_validate: on-surface transmission tint at transmissionDepth 0\n";
+    for (const TintCase& testCase : cases) {
+        const TestScene scene = testCase.sphere
+                                     ? makeSphereScene(0.02F, glm::vec3(0.04F))
+                                     : makeSlabScene(0.02F, glm::vec3(0.04F), kSlabThickness);
+        std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
+        if (!accel.has_value()) {
+            std::cerr << "integrator_validate: FAILED to build Embree scene for " << testCase.name
+                      << '\n';
+            return false;
+        }
+        PathTraceSettings settings = makeSettings(kBounces, 999, /*metallic=*/0.0F, /*transmission=*/1.0F);
+        settings.ior = 1.0F;
+        settings.transmissionColor = colour;
+        settings.transmissionDepth = 0.0F;
+        const glm::vec3 lo = centreMean(renderPass(scene, env, settings, *accel, pool, true).beauty);
+
+        std::cout << "  " << testCase.name;
+        for (std::size_t pad = std::string(testCase.name).size(); pad < 36; ++pad) {
+            std::cout << ' ';
+        }
+        std::cout << "measured [" << lo.x << ", " << lo.y << ", " << lo.z << "]   expected ["
+                  << expected.x << ", " << expected.y << ", " << expected.z << "]\n";
+        for (int c = 0; c < 3; ++c) {
+            if (std::fabs(lo[c] - expected[c]) > kRelativeTolerance * expected[c]) {
+                std::cerr << "integrator_validate: FAILED on-surface transmission tint at "
+                          << testCase.name << " channel " << c << " -- measured " << lo[c]
+                          << ", expected " << expected[c]
+                          << ". At transmissionDepth 0 there is no medium to absorb in, so "
+                             "transmissionColor tints each interface crossing once and nothing "
+                             "else can move this reading.\n";
                 ok = false;
             }
         }
@@ -886,10 +947,12 @@ int main() {
     const bool slabOk = checkTransmissiveSlab();
     const bool sphereOk = checkTransmissiveSphere();
     const bool absorptionOk = checkBeerLambert();
+    const bool onSurfaceTintOk = checkOnSurfaceTransmissionTint();
     const bool bindingOk = checkPerInstanceMaterials();
     const bool resolveOk = checkMaterialBinding();
     const bool partitionOk = checkTransportPartition();
-    if (!casesOk || !slabOk || !sphereOk || !absorptionOk || !bindingOk || !resolveOk || !partitionOk) {
+    if (!casesOk || !slabOk || !sphereOk || !absorptionOk || !onSurfaceTintOk || !bindingOk ||
+        !resolveOk || !partitionOk) {
         std::cerr << "integrator_validate: FAILED\n";
         return EXIT_FAILURE;
     }
