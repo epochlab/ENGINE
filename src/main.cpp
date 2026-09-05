@@ -46,6 +46,7 @@
 #include "engine/scene/environment_map.h"
 #include "engine/scene/false_color.h"
 #include "engine/scene/gltf_loader.h"
+#include "engine/scene/light.h"
 #include "engine/scene/material_binding.h"
 #include "engine/scene/path_trace_driver.h"
 #include "engine/scene/path_tracer.h"
@@ -165,6 +166,11 @@ struct AppResources {
     // stumpModel.shadingTriangles indexes sceneAccel's triangles 1:1, no separate field needed.
     engine::scene::EnvironmentMap environmentMap;
     engine::scene::LoadedModel stumpModel;
+    // Parallel to stumpModel.instances: -1 for ordinary geometry, else the index into quadLights this
+    // instance's two triangles emit as (see light.h, path_tracer.cpp's tracePath). Empty quadLights
+    // today -- no scene authors one yet -- so every entry is -1.
+    std::vector<int> instanceLightIndex;
+    std::vector<engine::scene::QuadLight> quadLights;
     int totalTriangles;
     int totalPoints;
 
@@ -371,8 +377,12 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - loadStart)
             .count();
     int totalTriangles = 0;
+    // No scene authors a quad light yet -- every instance is ordinary geometry, and quadLights stays
+    // empty (see AppResources::instanceLightIndex/quadLights).
+    std::vector<int> instanceLightIndex;
     if (stumpModel) {
         totalTriangles = static_cast<int>(stumpModel->worldTriangles.size());
+        instanceLightIndex.assign(stumpModel->instances.size(), -1);
         std::cout << "loadGltf: " << stumpModel->instances.size() << " instance(s), "
                   << totalTriangles << " triangles, " << loadMs << " ms\n"
                   << std::flush;
@@ -453,6 +463,8 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         .sceneAccel = std::move(*sceneAccel),
         .environmentMap = std::move(environmentMap),
         .stumpModel = std::move(*stumpModel),
+        .instanceLightIndex = std::move(instanceLightIndex),
+        .quadLights = {},
         .totalTriangles = totalTriangles,
         .totalPoints = totalPoints,
         .postProcess = std::move(postProcess),
@@ -1169,7 +1181,8 @@ int main(int argc, char** argv) {
                     // Constructed here, not as part of AppResources's designated-initializer list: app (this std::optional<AppResources> local) is where sceneAccel/environmentMap/stumpModel/perInstanceSettings first reach their final, permanent address (initializeApp's own return-type conversion to std::optional<AppResources> move-constructs once en route), so this is the first point at which PathTraceDriver's reference members can safely bind to them -- see path_trace_driver.h's constructor comment.
                     app->pathTraceDriver = std::make_unique<engine::scene::PathTraceDriver>(
                         app->sceneAccel, app->stumpModel.shadingTriangles, app->stumpModel.instances,
-                        app->environmentMap, app->perInstanceSettings);
+                        app->instanceLightIndex, app->environmentMap, app->quadLights,
+                        app->perInstanceSettings);
 
                     wireCallbacks(window, *app);
 
