@@ -20,6 +20,13 @@ namespace {
 
 constexpr float kRayEpsilon = 1e-4F;
 
+// pbrt's ShadowEpsilon convention (Pharr/Jakob/Humphreys Sec 6.8.6): a relative back-off on a finite
+// shadow ray's own tMax, needed now that a light can be real geometry sitting in the BVH -- an
+// unshortened tMax lets the light's own front face register as its own occluder at t == distance.
+// A no-op for the environment (distance == FLT_MAX): FLT_MAX * (1 - 1e-3) is still a normal,
+// effectively-unbounded float, so one formula covers both light kinds with no branch.
+constexpr float kShadowDistanceEpsilon = 1e-3F;
+
 // Beer-Lambert absorption coefficient (Arnold standard_surface / OpenPBR convention): sigma_a = -ln(transmissionColor)/transmissionDepth, transmissionColor being the colour white light reaches after travelling transmissionDepth inside the medium.
 // depth == 0 means there is no interior medium at all, not an infinitely dense one: transmissionColor is then the on-surface tint BsdfParams::transmissionTint carries, so absorption here is exactly zero rather than the -ln(c)/1e-4 a floored divide used to return, which rendered any coloured depth-0 material black.
 // Zero rather than an absent medium, so tracePath's enter/exit toggle below stays symmetric across a depth == 0 interface.
@@ -197,17 +204,15 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
             break;
         }
 
-        // Depth cap. The extra iteration past maxBounces exists solely so the final BSDF-sampled ray can collect its MIS-weighted light contribution in the miss/emitter-hit branches above/below; a ray reaching ordinary (non-emitting) geometry here contributes nothing and must not shade. Without it, NEE at the final vertex is MIS-weighted down against a BSDF-sampling counterpart that never fires, losing bsdfPdf^2/(bsdfPdf^2 + lightPdf^2) of that vertex's direct lighting -- approaching 100% where bsdfPdf >> lightPdf, and applying to every second surface vertex at maxBounces==1. Breaking here keeps terminationBounce == maxBounces + 1 for a depth-capped path, unchanged from before.
-        if (bounce > settings.maxBounces) {
-            break;
-        }
-
         const ShadingTriangle& triangle =
             shadingTriangles[static_cast<std::size_t>(hit->triangleIndex)];
 
         // An emitter hit (a quad light's own two triangles, injected into the BVH so they occlude and
         // are BSDF-hittable): Le, MIS-weighted exactly like the environment miss above, then terminate --
-        // a pure emitter has no BSDF to continue sampling from (Arnold quad_light semantics).
+        // a pure emitter has no BSDF to continue sampling from (Arnold quad_light semantics). Checked
+        // BEFORE the depth cap below, symmetric with the miss branch above: the extra iteration past
+        // maxBounces exists so the final BSDF-sampled ray can still collect ITS light contribution,
+        // whichever light it reaches, and an emitter hit is exactly as eligible as a miss is.
         const int lightIndex = instanceLightIndex[static_cast<std::size_t>(triangle.instanceIndex)];
         if (lightIndex >= 0) {
             const glm::vec3 emitted = lights.quadRadianceToward(lightIndex, ray.dir);
@@ -220,6 +225,11 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
             const glm::vec3 hitRadiance = throughput * emitted * misWeight;
             radiance += hitRadiance;
             addToBucket(hitRadiance, /*isDirect=*/bounce == 1);
+            break;
+        }
+
+        // Depth cap. The extra iteration past maxBounces exists solely so the final BSDF-sampled ray can collect its MIS-weighted light contribution in the miss/emitter-hit branches above; a ray reaching ordinary (non-emitting) geometry here contributes nothing and must not shade. Without it, NEE at the final vertex is MIS-weighted down against a BSDF-sampling counterpart that never fires, losing bsdfPdf^2/(bsdfPdf^2 + lightPdf^2) of that vertex's direct lighting -- approaching 100% where bsdfPdf >> lightPdf, and applying to every second surface vertex at maxBounces==1. Breaking here keeps terminationBounce == maxBounces + 1 for a depth-capped path, unchanged from before.
+        if (bounce > settings.maxBounces) {
             break;
         }
 
@@ -331,7 +341,7 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
                         shadowTerminatorOffset(triangle, hit->u, hit->v, geoCos > 0.0F) +
                         (geoNormal * shadowEpsilon * (geoCos > 0.0F ? 1.0F : -1.0F));
                     const Ray shadowRay{shadowOrigin, lightSample->direction, shadowEpsilon,
-                                         lightSample->distance};
+                                         lightSample->distance * (1.0F - kShadowDistanceEpsilon)};
                     if (!accel.occluded(shadowRay)) {
                         if (bounce == 0) {
                             gShadow = 0.0F;

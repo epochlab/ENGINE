@@ -28,6 +28,20 @@ std::optional<SceneConfig> loadSceneConfig(const std::string& path) {
             materialOverrides = it->get<std::map<std::string, std::string>>();
         }
 
+        std::vector<QuadLightConfig> lights;
+        if (const auto it = j.find("lights"); it != j.end()) {
+            for (const nlohmann::json& light : *it) {
+                lights.push_back(QuadLightConfig{
+                    light.at("origin").get<glm::vec3>(),
+                    light.at("edge0").get<glm::vec3>(),
+                    light.at("edge1").get<glm::vec3>(),
+                    light.at("color").get<glm::vec3>(),
+                    light.at("intensity").get<float>(),
+                    light.value("twoSided", false),
+                });
+            }
+        }
+
         return SceneConfig{
             ModelConfig{
                 model.at("gltfPath").get<std::string>(),
@@ -37,9 +51,11 @@ std::optional<SceneConfig> loadSceneConfig(const std::string& path) {
             },
             EnvironmentConfig{
                 environment.at("hdriPath").get<std::string>(),
+                environment.value("lightEnabled", true),
             },
             j.at("materialPath").get<std::string>(),
             std::move(materialOverrides),
+            std::move(lights),
         };
     } catch (const nlohmann::json::exception& e) {
         std::cerr << "loadSceneConfig: " << path << ": " << e.what() << '\n';

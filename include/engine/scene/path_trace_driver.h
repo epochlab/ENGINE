@@ -27,6 +27,9 @@ public:
         int height = 0;
         float envRotationRadians = 0.0F;
         bool showSky = true;
+        // Whether the environment is in the light set at all (NEE, MIS, miss radiance) -- distinct
+        // from showSky, which only gates the camera ray's own miss. See LightSet (light.h).
+        bool envLightEnabled = true;
         float envExposure = 1.0F;
         PathTraceSettings settings;  // samplesPerPixel is "samples per pass", see path_tracer.h
         int maxSamples = 0;  // accumulated-pass cap; 0 = unbounded

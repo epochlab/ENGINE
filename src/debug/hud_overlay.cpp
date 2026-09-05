@@ -373,10 +373,15 @@ void drawCameraSection(const HudFrameData& frame, float& focalLengthMm, float& a
     ImGui::Separator();
 }
 
-void drawHdriSection(bool& showSky, int& envRotationDegrees, float& envExposureStops) {
+void drawHdriSection(bool& showSky, bool& envLightEnabled, int& envRotationDegrees,
+                      float& envExposureStops) {
     ImGui::TextColored(kCyan, "HDRI");
     // Only visibly affects the Beauty AOV (main.cpp's render loop gates the actual sky draw on aov==0) -- left interactive regardless of the active AOV rather than grayed out, simplest for a checkbox whose effect is just "no-op elsewhere".
     ImGui::Checkbox("Show/Hide Background", &showSky);
+    // Removes the environment from LightSet entirely (NEE, MIS, miss radiance) -- distinct from
+    // showSky above, which only ever hides the camera-visible background. Off is what makes the
+    // classic Goral 1984 Cornell (light-panel-only, no IBL) reachable interactively.
+    ImGui::Checkbox("Environment Light", &envLightEnabled);
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
     ImGui::SliderInt("##envRotation", &envRotationDegrees, 0, 359, "Y-Axis  %d deg");
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
@@ -490,8 +495,9 @@ void HudOverlay::beginFrame() const {
 void HudOverlay::draw(const HudFrameData& frame, int& aov, float& focalLengthMm, float& aperture,
                        float& shutterSeconds, float& iso, int& filmBackPresetIndex,
                        const std::vector<const char*>& filmBackPresetNames, bool& showSky,
-                       int& envRotationDegrees, float& envExposureStops, float& aberrationStrength,
-                       const FramingOverlayState& framing, const PixelProbeSample& pixelProbe) const {
+                       bool& envLightEnabled, int& envRotationDegrees, float& envExposureStops,
+                       float& aberrationStrength, const FramingOverlayState& framing,
+                       const PixelProbeSample& pixelProbe) const {
     ImGui::SetNextWindowPos(ImVec2(8, 8), ImGuiCond_Always);
     constexpr ImGuiWindowFlags flags =
         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
@@ -513,7 +519,7 @@ void HudOverlay::draw(const HudFrameData& frame, int& aov, float& focalLengthMm,
     drawAovSection(aov);
     drawCameraSection(frame, focalLengthMm, aperture, shutterSeconds, iso, filmBackPresetIndex,
                        filmBackPresetNames, aberrationStrength);
-    drawHdriSection(showSky, envRotationDegrees, envExposureStops);
+    drawHdriSection(showSky, envLightEnabled, envRotationDegrees, envExposureStops);
 
     ImGui::End();
 

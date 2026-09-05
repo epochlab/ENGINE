@@ -76,12 +76,13 @@ public:
     // Call after window.pollEvents(), before any GL draw calls.
     void beginFrame() const;
 
-    // Call after beginFrame(), before render(). aov/focalLengthMm/aperture/shutterSeconds/iso/filmBackPresetIndex/showSky/envRotationDegrees/envExposureStops/aberrationStrength are widget-bound out-params (Camera/HDRI/AOV sections). filmBackPresetNames is read-only, index-parallel to the caller's film-back preset list (same "ImGui::Combo needs int&, const char* names" shape as aov/kAovNames). envExposureStops is EV; main.cpp's requestPathTrace does exp2(). pixelProbe is read-only, rendered bottom-right. framing.crosshair gates the centre-crosshair foreground overlay.
+    // Call after beginFrame(), before render(). aov/focalLengthMm/aperture/shutterSeconds/iso/filmBackPresetIndex/showSky/envLightEnabled/envRotationDegrees/envExposureStops/aberrationStrength are widget-bound out-params (Camera/HDRI/AOV sections). filmBackPresetNames is read-only, index-parallel to the caller's film-back preset list (same "ImGui::Combo needs int&, const char* names" shape as aov/kAovNames). envExposureStops is EV; main.cpp's requestPathTrace does exp2(). envLightEnabled: whether the environment is a light at all (LightSet), distinct from showSky which only gates the camera ray's own miss. pixelProbe is read-only, rendered bottom-right. framing.crosshair gates the centre-crosshair foreground overlay.
     void draw(const HudFrameData& frame, int& aov, float& focalLengthMm, float& aperture,
               float& shutterSeconds, float& iso, int& filmBackPresetIndex,
               const std::vector<const char*>& filmBackPresetNames, bool& showSky,
-              int& envRotationDegrees, float& envExposureStops, float& aberrationStrength,
-              const FramingOverlayState& framing, const PixelProbeSample& pixelProbe) const;
+              bool& envLightEnabled, int& envRotationDegrees, float& envExposureStops,
+              float& aberrationStrength, const FramingOverlayState& framing,
+              const PixelProbeSample& pixelProbe) const;
 
     // ImGui::Render + backend draw-data submit. Call after the post-process blit, before window.swapBuffers().
     void render() const;
