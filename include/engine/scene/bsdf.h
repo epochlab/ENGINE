@@ -10,6 +10,8 @@ namespace engine::scene {
 
 // Resolved shading parameters at a hit point (textures already sampled by the caller).
 struct BsdfParams {
+    // OpenPBR's base_color, "the observed reflection color (viewed at normal incidence under uniform illumination)" -- a REFLECTION quantity, and the authored colour resolveBsdfParams derives both f0 and diffuseRho from before this struct exists.
+    // It deliberately does not tint transmission, which transmissionTint below does, so the rasterizer's albedo AOV is now the only reader of the field itself.
     glm::vec3 baseColor;
     float metallic;
     float roughness;            // perceptual; alpha = roughness^2, floored to avoid a delta lobe
@@ -28,9 +30,13 @@ struct BsdfParams {
     // reproduces it once the multiple-scattering lobe's saturation is accounted for. Resolved once per
     // hit by gbuffer_shading.cpp's resolveBsdfParams via bsdf.cpp's eonAlbedoInversion, which is the
     // sole source of this value; the two coincide exactly at diffuseRoughness 0 and at baseColor 1.
-    // Kept separate rather than folded into baseColor, which the transmission lobe and the rasterizer's
-    // albedo AOV both still consume as the authored colour.
+    // Kept separate rather than folded into baseColor, which stays the authored colour f0 is derived from and the rasterizer's albedo AOV reports.
     glm::vec3 diffuseRho;
+    // The transmission lobe's only tint, and the transmission-side counterpart to baseColor above: OpenPBR/Arnold's convention, the one path_tracer.cpp's sigmaAFromTransmission already cited by name.
+    // transmissionColor is realized either IN the volume or ON the surface and never both, selected by transmissionDepth: at depth > 0 it is Beer-Lambert extinction over that distance and this is white, at depth == 0 there is no interior medium and this is OpenPBR's "constant (on-surface) transmission tint", applied once per interface crossing.
+    // glTF KHR_materials_transmission tints with baseColor instead, but only for want of a transmission colour of its own: it is defined for "infinitely thin surfaces" whose absorption "is constant and equal to 1.0 - baseColor", which is the depth == 0 case under another name rather than a competing convention.
+    // Resolved once per hit by gbuffer_shading.cpp's resolveBsdfParams, the sole source of this value.
+    glm::vec3 transmissionTint;
 };
 
 // Local shading frame (z = shading normal) for world<->local direction transforms.

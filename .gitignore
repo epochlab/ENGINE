@@ -3,5 +3,7 @@ build/
 renders/
 *.gltf
 *.bin
-!**/cornell/*
+# cornell is the one checked-in mesh; un-ignore exactly the two files it needs, not the whole directory, which also re-admitted .DS_Store
+!**/cornell/*.gltf
+!**/cornell/*.bin
 *.exr

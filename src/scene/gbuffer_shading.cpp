@@ -46,10 +46,13 @@ BsdfParams resolveBsdfParams(const Material& material, glm::vec2 uv, const glm::
     const float ior = heroChannel.has_value()
                           ? cauchyIor(settings.ior, settings.abbe, kRgbWavelengthsNm[*heroChannel])
                           : settings.ior;
+    // OpenPBR's two regimes for transmissionColor, exclusive by construction: at transmissionDepth > 0 it is the interior medium's Beer-Lambert extinction (path_tracer.cpp's sigmaAFromTransmission) and the interface itself is untinted, at 0 there is no medium and it is the on-surface tint instead.
+    const glm::vec3 transmissionTint =
+        settings.transmissionDepth > 0.0F ? glm::vec3(1.0F) : settings.transmissionColor;
     return BsdfParams{baseColor,          settings.metallicFactor, roughness,
                        f0,                settings.edgeTint,       ior,
                        settings.transmissionFactor, settings.diffuseRoughness,
-                       eonAlbedoInversion(baseColor, settings.diffuseRoughness)};
+                       eonAlbedoInversion(baseColor, settings.diffuseRoughness), transmissionTint};
 }
 
 ShadingFrame buildShadingFrame(const ShadingVertex& shading, const Material& material,
