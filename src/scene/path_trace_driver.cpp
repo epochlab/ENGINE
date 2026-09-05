@@ -15,15 +15,17 @@ constexpr std::chrono::milliseconds kIdlePollInterval{5};
 // Incremental running mean, out of place: newMean = previousMean + (sample - previousMean)/n, computed in the freshly rendered pass buffer so the published set is only ever READ. That is what lets the publish below be a pointer assignment instead of the whole-image copy it used to hold resultMutex_ for, and what keeps a render thread holding the previous set from seeing a half-updated image. Running mean rather than a running sum: no separate sum buffer, and the result is always already display-ready with no final division. Row-parallel over the same pool the pass just finished with, which is otherwise idle at this moment.
 void accumulateMean(PathTraceResult& sample, const PathTraceResult& previousMean, int n,
                      ThreadPool& threadPool) {
-    const std::array<engine::gfx::HdrImage*, 8> destinations{
-        &sample.beauty,          &sample.bounceHeatmap,    &sample.shadow,
-        &sample.directDiffuse,   &sample.indirectDiffuse,  &sample.directSpecular,
-        &sample.indirectSpecular, &sample.refraction};
-    const std::array<const engine::gfx::HdrImage*, 8> sources{
+    // Index-aligned with `sources` below, and every PathTraceResult image must appear: unlike rasterizer.cpp's aovImages() there is no compile-time guard here, so a missing entry silently publishes that image's last pass instead of the running mean.
+    const std::array<engine::gfx::HdrImage*, 9> destinations{
+        &sample.beauty,          &sample.bounceHeatmap,    &sample.ao,
+        &sample.shadow,          &sample.directDiffuse,    &sample.indirectDiffuse,
+        &sample.directSpecular,  &sample.indirectSpecular, &sample.refraction};
+    const std::array<const engine::gfx::HdrImage*, 9> sources{
         &previousMean.beauty,          &previousMean.bounceHeatmap,
-        &previousMean.shadow,          &previousMean.directDiffuse,
-        &previousMean.indirectDiffuse, &previousMean.directSpecular,
-        &previousMean.indirectSpecular, &previousMean.refraction};
+        &previousMean.ao,              &previousMean.shadow,
+        &previousMean.directDiffuse,   &previousMean.indirectDiffuse,
+        &previousMean.directSpecular,  &previousMean.indirectSpecular,
+        &previousMean.refraction};
     const float invN = 1.0F / static_cast<float>(n);
     const auto rowFloats = static_cast<std::size_t>(sample.beauty.width) * 4;
     threadPool.parallelFor(sample.beauty.height, [&](int y) {
