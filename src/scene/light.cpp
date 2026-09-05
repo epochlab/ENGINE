@@ -132,9 +132,8 @@ float LightSet::pdfEnvironment(const glm::vec3& dir) const {
 
 glm::vec3 LightSet::quadRadianceToward(int quadIndex, const glm::vec3& direction) const {
     const QuadLight& quad = quads_[static_cast<std::size_t>(quadIndex)];
-    const glm::vec3 normal = glm::normalize(glm::cross(quad.edge0, quad.edge1));
     // Front face: a ray travelling toward the light (direction) opposes its outward normal.
-    if (glm::dot(direction, normal) < 0.0F || quad.twoSided) {
+    if (glm::dot(direction, quad.normal) < 0.0F || quad.twoSided) {
         return quad.radiance;
     }
     return glm::vec3(0.0F);
@@ -173,11 +172,13 @@ std::optional<LightSample> LightSet::sample(const glm::vec3& p, Sampler& sampler
 
     const int quadIndex = index - (envPresent ? 1 : 0);
     const QuadLight& quad = quads_[static_cast<std::size_t>(quadIndex)];
+    // Drawn before the degeneracy check, not after: returning early without consuming this 2D would shift every later dimension on that path relative to its neighbours, and randomized Halton's low-discrepancy property (sampler.h) rests on paths agreeing about which dimension is which. Both branches now consume the same 2D regardless of degeneracy; the selection 1D above is drawn only when count() > 1, so a single-light scene consumes 2D alone.
+    const glm::vec2 u = sampler.next2D();
     const std::optional<SphericalRectangle> rect = buildSphericalRectangle(quad, p);
     if (!rect.has_value()) {
         return std::nullopt;
     }
-    const glm::vec3 pointOnQuad = rect->sample(sampler.next2D());
+    const glm::vec3 pointOnQuad = rect->sample(u);
     const glm::vec3 toLight = pointOnQuad - p;
     const float distance = glm::length(toLight);
     if (!(distance > 0.0F)) {

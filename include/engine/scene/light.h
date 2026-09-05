@@ -10,17 +10,20 @@
 
 namespace engine::scene {
 
-// A rectangular emitter: origin is one corner, edge0/edge1 span the two sides. Ureña/Fajardo/King's
-// spherical-rectangle sampling below assumes edge0 perpendicular to edge1, matching how every
-// production quad_light is authored. Emits uniformly from the face whose outward normal is
-// normalize(cross(edge0, edge1)); the back face emits nothing unless twoSided (Arnold quad_light
-// semantics).
+// A rectangular emitter: origin is one corner, edge0/edge1 span the two sides. Urena/Fajardo/King's spherical-rectangle sampling below is exact only for a rectangle, so edge0 must be perpendicular to edge1 -- enforced for authored scenes by loadSceneConfig (scene_config.h), assumed for lights built directly in the validators.
+// Emits uniformly from the face whose outward normal is normalize(cross(edge0, edge1)); the back face emits nothing unless twoSided (Arnold quad_light semantics).
 struct QuadLight {
+    QuadLight(glm::vec3 origin, glm::vec3 edge0, glm::vec3 edge1, glm::vec3 radiance, bool twoSided = false)
+        : origin(origin), edge0(edge0), edge1(edge1), radiance(radiance), twoSided(twoSided),
+          normal(glm::normalize(glm::cross(edge0, edge1))) {}
+
     glm::vec3 origin;
     glm::vec3 edge0;
     glm::vec3 edge1;
     glm::vec3 radiance;  // constant Le over the emitting face, colour * intensity
-    bool twoSided = false;
+    bool twoSided;
+    // Derived from edge0/edge1 once here rather than per query: quadRadianceToward runs on every NEE sample and every emitter hit, and appendQuadLights needs the same vector again when it injects the light's triangles. Production light types precompute their frame at build for the same reason.
+    glm::vec3 normal;
 };
 
 // Ureña, Fajardo & King, "An Area-Preserving Parametrization for Spherical Rectangles" (EGSR 2013),
@@ -62,8 +65,7 @@ struct LightSample {
 // draw at all when there is exactly 1 (a degenerate one-element categorical needs no random
 // variate), which is what keeps a single-environment/no-quad scene's sample sequence -- and
 // therefore its rendered image -- bit-identical to a renderer with no light-selection mechanism at
-// all. A value type: built once per renderPathTraced() pass from that pass's env/quad state, held by
-// const reference through the whole tile loop.
+// all. Built once per renderPathTraced() pass from that pass's env/quad state and held by const reference through the whole tile loop -- a non-owning view, not a value type: it holds references, so it is non-assignable and every referent must outlive it.
 class LightSet {
 public:
     // environment == nullptr excludes it from the set entirely (no NEE, no MIS, no miss radiance at

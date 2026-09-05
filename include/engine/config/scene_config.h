@@ -28,9 +28,8 @@ struct EnvironmentConfig {
     bool lightEnabled = true;
 };
 
-// A rectangular area light (Arnold quad_light semantics): origin is one corner, edge0/edge1 span the
-// two sides (perpendicular, matching every production quad_light), radiance = color * intensity is
-// emitted from the face whose outward normal is normalize(cross(edge0, edge1)). See engine::scene::QuadLight.
+// A rectangular area light (Arnold quad_light semantics): origin is one corner, edge0/edge1 span the two sides, radiance = color * intensity is emitted from the face whose outward normal is normalize(cross(edge0, edge1)). See engine::scene::QuadLight.
+// edge0 must be perpendicular to edge1 (the spherical-rectangle sampler is exact only for a rectangle) and intensity/color must be non-negative -- both ENFORCED by loadSceneConfig, which rejects the scene rather than sampling a quad off its own geometry. twoSided is optional, default false.
 struct QuadLightConfig {
     glm::vec3 origin;
     glm::vec3 edge0;

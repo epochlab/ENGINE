@@ -166,6 +166,8 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
     float lastBsdfPdf = 0.0F;
     // A delta lobe has no density for NEE to double-count against, so its miss takes full weight. Derived from lastBsdfPdf rather than the lobe type: pdfBsdf returns exactly 0 only for the smooth-glass transmission branch, and sampleBsdf rejects pdf <= 1e-8 on every other lobe.
     bool lastSampleWasDelta = false;
+    // The previous vertex's SHADING position, not ray.origin: an emitter hit's MIS weight must use the pdf NEE would actually have had, and NEE samples from shading.position (see the NEE block below) while ray.origin carries the epsilon offset that keeps the continuation ray off the surface. Solid angle measured from two points ~1e-4 apart differs, so weighting from ray.origin leaves the two strategies' weights not summing to 1 -- a small but real bias. pbrt carries the previous interaction for the same reason.
+    glm::vec3 lastShadingPosition(0.0F);
 
     // bounce 0 (the primary/camera ray, direct lighting via NEE) always traces regardless of maxBounces -- maxBounces counts secondary/indirect bounces beyond it, so maxBounces==0 means direct lighting only, no continuation rays. The loop runs one iteration PAST maxBounces so the final BSDF-sampled ray can still collect its MIS-weighted environment contribution via the miss branch below; that extra iteration breaks at the depth guard before any surface interaction -- see the guard for why the terminal ray must be traced rather than dropped.
     for (; bounce <= settings.maxBounces + 1; ++bounce) {
@@ -218,7 +220,7 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
             const glm::vec3 emitted = lights.quadRadianceToward(lightIndex, ray.dir);
             float misWeight = 1.0F;
             if (bounce > 0 && !lastSampleWasDelta) {
-                const float lightPdf = lights.pdfQuad(lightIndex, ray.origin);
+                const float lightPdf = lights.pdfQuad(lightIndex, lastShadingPosition);
                 const float bsdfPdf2 = lastBsdfPdf * lastBsdfPdf;
                 misWeight = bsdfPdf2 / (bsdfPdf2 + (lightPdf * lightPdf));
             }
@@ -374,6 +376,7 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
 
         lastBsdfPdf = sample->pdf;
         lastSampleWasDelta = lastBsdfPdf <= 0.0F;
+        lastShadingPosition = shading.position;
 
         const glm::vec3 wiWorld = frame.toWorld(sample->wiLocal);
 

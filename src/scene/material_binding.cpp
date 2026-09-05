@@ -64,4 +64,20 @@ std::optional<std::vector<PathTraceSettings>> resolvePerInstanceSettings(
     return perInstanceSettings;
 }
 
+std::vector<QuadLight> buildQuadLights(const std::vector<engine::config::QuadLightConfig>& lights,
+                                        const glm::mat4& sceneTransform) {
+    std::vector<QuadLight> quadLights;
+    quadLights.reserve(lights.size());
+    for (const engine::config::QuadLightConfig& light : lights) {
+        quadLights.push_back(QuadLight{
+            glm::vec3(sceneTransform * glm::vec4(light.origin, 1.0F)),
+            glm::vec3(sceneTransform * glm::vec4(light.edge0, 0.0F)),
+            glm::vec3(sceneTransform * glm::vec4(light.edge1, 0.0F)),
+            light.color * light.intensity,
+            light.twoSided,
+        });
+    }
+    return quadLights;
+}
+
 }  // namespace engine::scene

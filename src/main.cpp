@@ -167,9 +167,7 @@ struct AppResources {
     // stumpModel.shadingTriangles indexes sceneAccel's triangles 1:1, no separate field needed.
     engine::scene::EnvironmentMap environmentMap;
     engine::scene::LoadedModel stumpModel;
-    // Parallel to stumpModel.instances: -1 for ordinary geometry, else the index into quadLights this
-    // instance's two triangles emit as (see light.h, path_tracer.cpp's tracePath). Empty quadLights
-    // today -- no scene authors one yet -- so every entry is -1.
+    // Parallel to stumpModel.instances: -1 for ordinary geometry, else the index into quadLights this instance's two triangles emit as (see light.h, path_tracer.cpp's tracePath). Entries for the scene's own geometry are all -1; appendQuadLights appends one entry per authored light (cornell.json authors one).
     std::vector<int> instanceLightIndex;
     std::vector<engine::scene::QuadLight> quadLights;
     int totalTriangles;
@@ -387,18 +385,7 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
     std::vector<engine::scene::QuadLight> quadLights;
     if (stumpModel) {
         instanceLightIndex.assign(stumpModel->instances.size(), -1);
-        // Same sceneTransform as the model's own geometry: origin is a point (full transform,
-        // including translation), edge0/edge1 are displacement vectors (linear part only, w=0).
-        quadLights.reserve(sceneConfig.lights.size());
-        for (const engine::config::QuadLightConfig& light : sceneConfig.lights) {
-            quadLights.push_back(engine::scene::QuadLight{
-                glm::vec3(sceneTransform * glm::vec4(light.origin, 1.0F)),
-                glm::vec3(sceneTransform * glm::vec4(light.edge0, 0.0F)),
-                glm::vec3(sceneTransform * glm::vec4(light.edge1, 0.0F)),
-                light.color * light.intensity,
-                light.twoSided,
-            });
-        }
+        quadLights = engine::scene::buildQuadLights(sceneConfig.lights, sceneTransform);
         engine::scene::appendQuadLights(*stumpModel, quadLights, instanceLightIndex);
 
         totalTriangles = static_cast<int>(stumpModel->worldTriangles.size());
