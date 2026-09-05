@@ -516,11 +516,11 @@ float multiScatterShape(const BsdfParams& params, float wiZ, float escapeWo, flo
 
 // The transmitted share of the multiple-scattering energy, for ANY wi on the far side -- deliberately
 // free of evaluateTransmissionLobe's half-vector rejections, which describe single scattering only.
-// Carries the same eta^2 radiance compression and baseColor tint the single-scatter transmission does.
+// Carries the same eta^2 radiance compression and transmissionTint the single-scatter transmission does.
 // wi has crossed the interface, so its escape is looked up in the reciprocal orientation (etaT/etaI,
 // escapeAvgRecip) -- see multiScatterShape's doc comment.
 glm::vec3 transmitMultiScatter(const BsdfParams& params, float wiZ, const LobeProbabilities& lobes) {
-    return params.baseColor * lobes.transmitWeight * lobes.transmitShare * lobes.etaSq *
+    return params.transmissionTint * lobes.transmitWeight * lobes.transmitShare * lobes.etaSq *
            multiScatterShape(params, wiZ, lobes.escapeWo, lobes.etaT / lobes.etaI,
                               1.0F - lobes.escapeAvgRecip);
 }
@@ -739,7 +739,7 @@ LobeEval evaluateSpecularLobe(const BsdfParams& params, const glm::vec3& wo, con
     // white conductor conserves, up to the table's own interpolation and quadrature error (measured
     // under 1% by the white furnace test). Symmetric in wo/wi, so it preserves reciprocity.
     // Reflected share of the multiple-scattering energy. The tint blends to 1 as the interface becomes
-    // fully transmissive: a lossless dielectric returns all of it, tinted only by baseColor on the far
+    // fully transmissive: a lossless dielectric returns all of it, tinted only by transmissionTint on the far
     // side, whereas a conductor's repeated bounces are attenuated by Favg each time.
     const glm::vec3 fms(multiScatterTint(lobes.fresnelAvg.x, lobes.albedoAvg),
                          multiScatterTint(lobes.fresnelAvg.y, lobes.albedoAvg),
@@ -911,7 +911,7 @@ LobeEval evaluateTransmissionLobe(const BsdfParams& params, const glm::vec3& wo,
     const float g1 = smithG1(wo.z, alpha);
     const float vndfPdf = (g1 * woDotH * d) / std::max(wo.z, 1e-6F);
     // transmitWeight, the same factors the delta branch carries via transmitPhysicalValue: (1-metallic), since a conductor transmits nothing however its transmissionFactor is set, and the entering side's transmissionFactor, without which this refracted at full strength on top of a diffuse substrate already scaled by (1-transmissionFactor).
-    return {params.baseColor * (1.0F - fresnel) * lobes.transmitWeight * common,
+    return {params.transmissionTint * (1.0F - fresnel) * lobes.transmitWeight * common,
              vndfPdf * etaR * etaR * std::abs(wiDotH) / denom2};
 }
 
@@ -1041,7 +1041,7 @@ std::optional<BsdfSample> sampleBsdf(const BsdfParams& params, const glm::vec3& 
     const glm::vec3 wt(-eta * wo.x, -eta * wo.y, -cosThetaT);
     // Non-symmetric radiance-compression factor for camera-originated (Veach 1997 sec. 5.2, PBRT's SpecularTransmission::Sample_f under TransportMode::Radiance) transport: eta^2 = (etaI/etaT)^2, the squared ratio of the medium the ray is leaving to the medium it's entering. Self-consistent under round trips -- entering (eta=1/ior) times exiting (eta=ior/1) squared multiplies to 1, so a ray that enters and exits the same surface loses no net energy (tools/bsdf_validate.cpp's furnace test).
     const glm::vec3 throughput =
-        params.baseColor * (lobes.transmitPhysicalValue / lobes.transmit) * (eta * eta);
+        params.transmissionTint * (lobes.transmitPhysicalValue / lobes.transmit) * (eta * eta);
     // pdf 0: a delta lobe has no density for NEE to double-count against, which is exactly the test path_tracer.cpp's MIS weighting makes.
     return BsdfSample{glm::vec3(wt.x, wt.y, wt.z * sign), throughput, LobeType::Transmission, 0.0F};
 }

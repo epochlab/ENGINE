@@ -70,7 +70,7 @@ std::optional<MaterialConfig> loadMaterialConfig(const std::string& path) {
             j.at("roughnessFactor").get<float>(),
             j.value("diffuseRoughness", 0.0F),
             j.value("transmissionColor", glm::vec3(1.0F)),
-            j.value("transmissionDepth", 1.0F),
+            j.value("transmissionDepth", 0.0F),
             j.value("edgeTint", glm::vec3(1.0F)),
         };
     } catch (const nlohmann::json::exception& e) {

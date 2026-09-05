@@ -35,9 +35,9 @@ struct PathTraceSettings {
     float metallicFactor;
     float roughnessFactor;
     float diffuseRoughness;  // EON rough-diffuse parameter r in [0,1]; 0 = Lambertian, see bsdf.h's BsdfParams
-    // Beer-Lambert volumetric absorption while a path travels inside this material (transmissionFactor>0 only). See tracePath's mediumSigmaA (path_tracer.cpp).
+    // The transmission lobe's only tint (transmissionFactor>0 only), realized either in the volume or on the surface by transmissionDepth -- see scene_config.h's MaterialConfig and bsdf.h's BsdfParams.
     glm::vec3 transmissionColor = glm::vec3(1.0F);
-    float transmissionDepth = 1.0F;
+    float transmissionDepth = 0.0F;
     // Gulbrandsen 2014 edgetint for the conductor lobe; 1 = white edge, see bsdf.h's BsdfParams.
     glm::vec3 edgeTint = glm::vec3(1.0F);
 };
