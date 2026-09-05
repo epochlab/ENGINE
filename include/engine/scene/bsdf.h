@@ -78,6 +78,13 @@ struct BsdfEval {
 // EON's Appendix A albedo inversion: the rho whose EON directional albedo at normal incidence equals albedo, under uniform illumination. The identity at r=0 and at albedo=1. Every BsdfParams::diffuseRho comes from here -- see that field, and bsdf.cpp for the derivation and the numerical form.
 [[nodiscard]] glm::vec3 eonAlbedoInversion(const glm::vec3& albedo, float r);
 
+// Representative wavelength of each RGB channel, from OpenPBR_BaseRgbWavelengths_nm in Adobe's OpenPBR BSDF reference implementation (openpbr_constants.h) -- the same standard this pipeline already takes edgeTint and EON from.
+// Known error, in that implementation's own words: one fixed wavelength per channel makes dispersion "produce ... discrete RGB bands" rather than natural rainbow colours, because an RGB channel integrates a band and cannot be represented by a line. Its documented remedy is a stochastically drawn lambda per path, which needs only this lookup replaced by a draw -- see the README roadmap.
+inline constexpr glm::vec3 kRgbWavelengthsNm(620.0F, 540.0F, 450.0F);
+
+// Cauchy dispersion n(lambda) inverted from an authored (ior at the d line, Abbe number V_d), per Khronos KHR_materials_dispersion. abbe <= 0 returns iorD unchanged, which is how a non-dispersive material stays bit-identical. Exported for tools/bsdf_validate.cpp's checkCauchyDispersion; taken per-wavelength rather than per-channel so the Fraunhofer identities it is defined by are directly assertable.
+[[nodiscard]] float cauchyIor(float iorD, float abbe, float lambdaNm);
+
 // Value and pdf of the continuous lobes at wiLocal, split by transport type. Piecewise, since reflection and transmission occupy disjoint hemispheres: wiLocal on wo's side gives the specular-reflection + diffuse mixture, the far side gives the rough transmission lobe. Transmission is excluded only when it is a delta (roughness below the smooth threshold, zero-measure). woLocal.z sign: entering (>0) vs exiting (<0) a dielectric. One call rather than the four separate lobe evaluations NEE used to make -- the lobe probabilities, the GGX/Fresnel terms and the albedo-table lookups are all computed once and shared.
 [[nodiscard]] BsdfEval evaluateBsdfSplit(const BsdfParams& params, const glm::vec3& woLocal,
                                           const glm::vec3& wiLocal);

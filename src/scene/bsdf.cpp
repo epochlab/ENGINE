@@ -375,7 +375,7 @@ EscapeSplit averageEscapeAlbedo(float roughness, float eta) {
 
 }  // namespace
 
-// The two average-Fresnel terms are the file's only helpers with external linkage: bsdf.h declares them for tools/bsdf_validate.cpp's checkAverageFresnel, the only instrument in the suite that can see an error in either (see the header comment). Everything around them stays internal.
+// The two average-Fresnel terms have external linkage: bsdf.h declares them for tools/bsdf_validate.cpp's checkAverageFresnel, the only instrument in the suite that can see an error in either (see the header comment). Everything around them stays internal.
 // Cosine-weighted average Fresnel, the normalisation both the multiple-scattering tint and the reciprocal diffuse coupling need. The dielectric one is the standard rational fit, accurate to 0.0065 absolute over ior in [1.1, 3.0] against exact quadrature (measured, and asserted by checkAverageFresnel); it enters as the 1/(1-Favg) normalisation, a 0.25% effect at ior 1.5, and as the coat's own multiple-scattering attenuation in coatAlbedo.
 float dielectricFresnelAvg(float ior) { return (ior - 1.0F) / ((4.08567F + (1.00071F * ior))); }
 
@@ -392,6 +392,24 @@ glm::vec3 conductorFresnelAvg(const glm::vec3& n, const glm::vec3& k) {
         sum += kFresnelAvgWeights[i] * fresnelConductor(kFresnelAvgNodes[i], n, k);
     }
     return sum;
+}
+
+// Fraunhofer d, F and C lines: the three wavelengths the Abbe number is defined at, V_d = (n_d-1)/(n_F-n_C), and the only wavelengths (ior, abbe) actually pins. Physical constants of the definition, not tuning.
+constexpr float kLambdaDNm = 587.56F;
+constexpr float kLambdaFNm = 486.13F;
+constexpr float kLambdaCNm = 656.27F;
+
+// Cauchy's two-term dispersion n(lambda) = A + B/lambda^2, with (A, B) inverted from the authored (n_d, V_d) -- the construction Khronos KHR_materials_dispersion specifies normatively. Two terms is the right order here: the material supplies exactly two numbers, so a Sellmeier form would have to invent its remaining coefficients.
+// B follows from the Abbe definition applied to the Cauchy form, n_F - n_C = B*(lambda_F^-2 - lambda_C^-2), and A from pinning n(lambda_d) = n_d. Written in that general form rather than the spec's composite one, which pre-multiplies 1/(lambda_F^-2 - lambda_C^-2) into a literal 523655 and hides both Fraunhofer lines inside it.
+// abbe <= 0 is the documented off switch (Arnold's transmission_dispersion_abbe and OpenPBR's dispersion scale use the same convention) and is also what keeps 1/abbe off the hot path for every non-dispersive material. No clamp on the result: n_d = 1 already gives B = 0 exactly, so an index-matched medium is non-dispersive out of the algebra rather than by special case.
+float cauchyIor(float iorD, float abbe, float lambdaNm) {
+    if (abbe <= 0.0F) {
+        return iorD;
+    }
+    const float b = (iorD - 1.0F) /
+                    (abbe * ((1.0F / (kLambdaFNm * kLambdaFNm)) - (1.0F / (kLambdaCNm * kLambdaCNm))));
+    const float a = iorD - (b / (kLambdaDNm * kLambdaDNm));
+    return a + (b / (lambdaNm * lambdaNm));
 }
 
 namespace {

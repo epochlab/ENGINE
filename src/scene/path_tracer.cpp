@@ -123,6 +123,10 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
     // clears it) -- sufficient for one glass object; would need generalising to a real stack before a
     // second, overlapping transmissive object entered the scene.
     std::optional<glm::vec3> mediumSigmaA;
+    // The RGB channel this path has committed to, once it reaches a dispersive interface -- unset means
+    // full RGB transport, which is every path in a scene authoring no Abbe number. See the selection
+    // block below for the estimator, and gbuffer_shading.cpp's resolveBsdfParams for what it selects.
+    std::optional<int> heroChannel;
     glm::vec3 directDiffuseAccum(0.0F);
     glm::vec3 indirectDiffuseAccum(0.0F);
     glm::vec3 directSpecularAccum(0.0F);
@@ -202,10 +206,39 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
         const PathTraceSettings& instanceSettings =
             perInstanceSettings[static_cast<std::size_t>(triangle.instanceIndex)];
 
+        // Dispersion: commit the path to one RGB channel on first reaching a dispersive interface, before
+        // any BSDF work at this vertex, since it is the whole interaction that is wavelength dependent --
+        // Fresnel and the lobe probabilities as much as the refraction direction -- and every later vertex
+        // then stays on that wavelength, medium included. Committing here rather than at path start, as a
+        // spectral hero-wavelength renderer must (Wilkie et al. 2014), is strictly cheaper: a path that
+        // never meets dispersive glass keeps full RGB and pays nothing.
+        // One-sample channel estimator with probabilities proportional to the throughput carried so far
+        // (OpenPBR implementation note, arXiv:2512.23696): the surviving channel takes T_c/p_c, which is
+        // sum(T) for every c, so the estimator is unbiased AND the path's magnitude -- hence Russian
+        // roulette's continuation probability below -- no longer depends on which channel was drawn.
+        // The heroChannel guard is a draw the estimator does not need, not a correctness gate: masking
+        // leaves two channels exactly zero, so a throughput-weighted redraw at a later dispersive vertex
+        // can only return the same channel (measured: 400k redraws, zero changed). What it buys is one
+        // fewer sampler dimension per later crossing. Under uniform 1/3 selection it WOULD be load-bearing.
+        // sum == 0 is reachable, not impossible: rrMinProb floors the roulette, so a zero-throughput path
+        // survives rather than being killed. It carries no energy to any channel, so there is nothing to
+        // commit and the draw is skipped.
+        if (!heroChannel.has_value() && instanceSettings.abbe > 0.0F &&
+            instanceSettings.transmissionFactor > 0.0F) {
+            const float sum = throughput.x + throughput.y + throughput.z;
+            if (sum > 0.0F) {
+                const float u = sampler.next1D() * sum;
+                const int channel = u < throughput.x ? 0 : (u < throughput.x + throughput.y ? 1 : 2);
+                throughput = glm::vec3(0.0F);
+                throughput[channel] = sum;
+                heroChannel = channel;
+            }
+        }
+
         const ShadingVertex shading = interpolateShading(triangle, hit->u, hit->v);
         const ShadingFrame frame = buildShadingFrame(shading, material, instanceSettings);
         const BsdfParams params =
-            resolveBsdfParams(material, shading.uv, shading.colour, instanceSettings);
+            resolveBsdfParams(material, shading.uv, shading.colour, instanceSettings, heroChannel);
         const glm::vec3 woWorld = -ray.dir;
         // True flat per-triangle plane normal -- used below for the normal-map light-leak rejection and for offsetting shadow/continuation ray origins off the surface, both of which need the actual geometry rather than the interpolated or normal-mapped shading normal.
         const glm::vec3 geoNormal = geometricNormalOf(triangle);
@@ -285,7 +318,7 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
                         const glm::vec3 neeContribution = bsdfValue * common;
                         radiance += neeContribution;
                         if (bounce == 0) {
-                            // Bounce 0's NEE contribution is split across the buckets by the LOBE THAT CARRIED IT, deterministically and at its own physical value -- never routed by sample->type, which is the lobe the continuation ray happened to draw and has nothing to do with NEE. The three components partition eval.total() exactly (bsdf.h), so this writes the same energy `radiance` just took, only attributed. throughput is still (1,1,1) here -- it isn't multiplied until after this block -- so `common` is unaffected by it.
+                            // Bounce 0's NEE contribution is split across the buckets by the LOBE THAT CARRIED IT, deterministically and at its own physical value -- never routed by sample->type, which is the lobe the continuation ray happened to draw and has nothing to do with NEE. The three components partition eval.total() exactly (bsdf.h), so this writes the same energy `radiance` just took, only attributed. `common` carries throughput as a factor shared by `radiance` and all three accumulators, so the partition holds whatever throughput is -- including the two exactly-zero channels a dispersive path is masked to, which the hero-channel block above can set before this point at bounce 0 (measured: 132461 of 2000000 bounce-0 NEE splits reach here non-unit).
                             directDiffuseAccum += eval.diffuse * common;
                             directSpecularAccum += eval.specular * common;
                             refractionAccum += eval.transmission * common;

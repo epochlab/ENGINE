@@ -551,6 +551,107 @@ bool checkAverageFresnel() {
     return ok;
 }
 
+// Cauchy dispersion (bsdf.cpp's cauchyIor), asserted against the contract it exists to satisfy rather than
+// against a restatement of its own formula: (ior, abbe) means "index n_d at the d line, and an Abbe number
+// V_d = (n_d-1)/(n_F-n_C)", so those two identities ARE the specification, and a test that recomputed
+// A + B/lambda^2 here would only prove the expression was typed twice.
+// Nothing else in the suite can see an error here. Every render-based transmissive check runs at ior 1.0,
+// where B is exactly 0 and dispersion is identically the no-op -- deliberately, since that is what lets
+// checkBeerLambert isolate the channel estimator from the refraction geometry. This check carries the
+// whole proof of the optics.
+bool checkCauchyDispersion() {
+    // Both bands are float32 rounding headroom, not fit error: the algebra is exact. The Abbe band is
+    // relative because n_F - n_C is a ~0.008 difference of two ~1.5 quantities, so it carries the ~187x
+    // cancellation amplification of their own ulp; the d-line band is absolute since nothing cancels there.
+    constexpr float kDLineTolerance = 1e-6F;
+    constexpr float kAbbeRelativeTolerance = 1e-4F;
+
+    struct Glass {
+        const char* name;
+        float iorD;
+        float abbe;
+    };
+    // Real catalogue materials spanning the physical range: crown, dense flint, and the two the OpenPBR
+    // spec names as the common mid-dispersion cases. Nothing here is fitted; they are published constants.
+    const std::array<Glass, 4> glasses{{
+        {"Schott N-BK7 (crown)", 1.5168F, 64.17F},
+        {"Schott SF10 (dense flint)", 1.72825F, 28.53F},
+        {"water, 20C", 1.333F, 55.4F},
+        {"diamond", 2.417F, 55.3F},
+    }};
+    constexpr float kLambdaDNm = 587.56F;
+    constexpr float kLambdaFNm = 486.13F;
+    constexpr float kLambdaCNm = 656.27F;
+
+    bool ok = true;
+    std::cout << "bsdf_validate: Cauchy dispersion inverted from (ior, abbe)\n";
+    for (const Glass& glass : glasses) {
+        const float nD = engine::scene::cauchyIor(glass.iorD, glass.abbe, kLambdaDNm);
+        const float nF = engine::scene::cauchyIor(glass.iorD, glass.abbe, kLambdaFNm);
+        const float nC = engine::scene::cauchyIor(glass.iorD, glass.abbe, kLambdaCNm);
+        const float measuredAbbeDifference = nF - nC;
+        // The Abbe number's definition, rearranged. Computed here from the authored inputs alone.
+        const float expectedAbbeDifference = (glass.iorD - 1.0F) / glass.abbe;
+
+        const float nRed = engine::scene::cauchyIor(glass.iorD, glass.abbe,
+                                                     engine::scene::kRgbWavelengthsNm.x);
+        const float nGreen = engine::scene::cauchyIor(glass.iorD, glass.abbe,
+                                                       engine::scene::kRgbWavelengthsNm.y);
+        const float nBlue = engine::scene::cauchyIor(glass.iorD, glass.abbe,
+                                                      engine::scene::kRgbWavelengthsNm.z);
+
+        std::cout << "  " << glass.name;
+        for (std::size_t pad = std::string(glass.name).size(); pad < 28; ++pad) {
+            std::cout << ' ';
+        }
+        std::cout << "n_d " << nD << "   n_F-n_C " << measuredAbbeDifference << " (expected "
+                  << expectedAbbeDifference << ")   RGB [" << nRed << ", " << nGreen << ", " << nBlue
+                  << "]   dn(B-R) " << (nBlue - nRed) << '\n';
+
+        if (!(std::fabs(nD - glass.iorD) <= kDLineTolerance)) {
+            std::cerr << "bsdf_validate: FAILED d-line index for " << glass.name << " -- n(lambda_d) "
+                      << nD << ", authored ior " << glass.iorD
+                      << ". The authored ior IS the index at the d line; a dispersion curve that does not"
+                         " pass through it has changed the material, not just spread it.\n";
+            ok = false;
+        }
+        if (!(std::fabs(measuredAbbeDifference - expectedAbbeDifference) <=
+              kAbbeRelativeTolerance * expectedAbbeDifference)) {
+            std::cerr << "bsdf_validate: FAILED Abbe difference for " << glass.name << " -- n_F - n_C "
+                      << measuredAbbeDifference << ", expected " << expectedAbbeDifference
+                      << " = (ior-1)/abbe. That equation is the definition of the Abbe number, so the"
+                         " authored abbe does not mean what it says.\n";
+            ok = false;
+        }
+        // Normal dispersion: index falls with wavelength, so blue bends most. Pins the sign of B and the
+        // ordering of kRgbWavelengthsNm together, which is exactly the pair the refraction direction needs.
+        if (!(nBlue > nGreen && nGreen > nRed)) {
+            std::cerr << "bsdf_validate: FAILED normal dispersion ordering for " << glass.name
+                      << " -- RGB indices [" << nRed << ", " << nGreen << ", " << nBlue
+                      << "] are not increasing toward blue. A transparent dielectric has no anomalous"
+                         " dispersion in the visible band.\n";
+            ok = false;
+        }
+    }
+
+    // abbe = 0 is the off switch every non-dispersive material in the repo relies on, and it must be
+    // exact rather than merely close: any drift here changes every existing render.
+    std::cout << "  abbe 0 returns the authored ior unchanged at every wavelength\n";
+    for (const Glass& glass : glasses) {
+        for (float lambda : {kLambdaFNm, engine::scene::kRgbWavelengthsNm.z, kLambdaDNm,
+                             engine::scene::kRgbWavelengthsNm.x, kLambdaCNm}) {
+            const float n = engine::scene::cauchyIor(glass.iorD, 0.0F, lambda);
+            if (n != glass.iorD) {
+                std::cerr << "bsdf_validate: FAILED abbe=0 no-op at ior " << glass.iorD << " lambda "
+                          << lambda << " -- returned " << n
+                          << ", expected the authored ior bit-for-bit.\n";
+                ok = false;
+            }
+        }
+    }
+    return ok;
+}
+
 // Conductor Fresnel (bsdf.cpp's conductorIorFromReflectivity/fresnelConductor), verified through the
 // public API.
 // At metallic=1 the diffuse lobe carries diffuseKd=0, so evaluateBsdf is the specular lobe alone:
@@ -910,13 +1011,14 @@ int main() {
     const bool transmissiveEnergyOk = checkTransmissiveEnergyBalance();
     const bool conductorFresnelOk = checkConductorFresnel();
     const bool averageFresnelOk = checkAverageFresnel();
+    const bool dispersionOk = checkCauchyDispersion();
     const bool reciprocityOk = checkReciprocity();
     const bool transmissionReciprocityOk = checkTransmissionReciprocity();
     const bool roundTripOk = checkTransmissionRoundTrip();
 
     if (!pdfOk || !furnaceOk || !whiteFurnaceOk || !eonDiffuseOk || !eonInversionOk ||
-        !transmissiveEnergyOk || !conductorFresnelOk || !averageFresnelOk || !reciprocityOk ||
-        !transmissionReciprocityOk || !roundTripOk) {
+        !transmissiveEnergyOk || !conductorFresnelOk || !averageFresnelOk || !dispersionOk ||
+        !reciprocityOk || !transmissionReciprocityOk || !roundTripOk) {
         std::cerr << "bsdf_validate: FAILED\n";
         return EXIT_FAILURE;
     }

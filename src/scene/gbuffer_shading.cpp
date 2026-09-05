@@ -33,13 +33,21 @@ LineProximity nearLineSegmentPx(glm::vec2 p, glm::vec2 a, glm::vec2 b, float thi
 }
 
 BsdfParams resolveBsdfParams(const Material& material, glm::vec2 uv, const glm::vec3& vertexColour,
-                              const PathTraceSettings& settings) {
+                              const PathTraceSettings& settings,
+                              std::optional<int> heroChannel) {
     const glm::vec3 baseColor = resolveBaseColor(material, uv, vertexColour, settings);
     const float roughness = resolveRoughness(material, uv, settings);
     const glm::vec3 specular = glm::vec3(engine::gfx::sampleBilinear(material.specularTexture, uv));
     const glm::vec3 f0 = glm::mix(specular, baseColor, settings.metallicFactor);
+    // Dispersion enters here and nowhere else: every ior consumer downstream -- Fresnel, the lobe
+    // probabilities, the escape-albedo tables, the refraction direction -- reads this one scalar, so
+    // resolving it per hero channel makes the whole vertex spectrally consistent with no second
+    // mechanism. Unset (rasterizer preview, any non-dispersive path) leaves the authored d-line index.
+    const float ior = heroChannel.has_value()
+                          ? cauchyIor(settings.ior, settings.abbe, kRgbWavelengthsNm[*heroChannel])
+                          : settings.ior;
     return BsdfParams{baseColor,          settings.metallicFactor, roughness,
-                       f0,                settings.edgeTint,       settings.ior,
+                       f0,                settings.edgeTint,       ior,
                        settings.transmissionFactor, settings.diffuseRoughness,
                        eonAlbedoInversion(baseColor, settings.diffuseRoughness)};
 }
