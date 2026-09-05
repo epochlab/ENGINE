@@ -1,6 +1,6 @@
-// Standalone correctness check: path_tracer.cpp's NEE+MIS combination (Veach & Guibas 1995 power heuristic) against EnvironmentMap's importance sampling.
+// Standalone correctness check: path_tracer.cpp's NEE+MIS combination (Veach & Guibas 1995 power heuristic) against EnvironmentMap's importance sampling, and (below) against LightSet's rectangular-emitter sampling.
 // Exercises the exact estimator tracePath uses: NEE via importanceSampleDirection + evaluateBsdf/pdfBsdf, BSDF-sampled env hit via sampleBsdf + EnvironmentMap::pdf, MIS-weighted by the power heuristic.
-// Needs no scene geometry/BVH/GPU resources (integrator_validate.cpp covers the full renderPathTraced path, including Material/MeshInstance construction; both are plain data, no GL context required).
+// Needs no scene geometry/BVH/GPU resources (integrator_validate.cpp covers the full renderPathTraced path, including Material/MeshInstance construction; both are plain data, no GL context required). The quad-light checks below need no BVH either: directionHitsQuad is a closed-form ray/rectangle test.
 // Reference: a flat unoccluded surface under a uniform-radiance (L0=1) environment has exact Lo(wo) = integral over the hemisphere of evaluateBsdf(wo,wi)*cos(wi) dwi, computed via independent uniform-hemisphere Monte Carlo (same convention as furnace_test.cpp/bsdf_validate.cpp).
 // The MIS-combined estimator mirrors tracePath's single-bounce case (no occlusion, so NEE's shadow ray and the BSDF-sampled continuation both always reach the environment) and must converge to the reference; a mismatch means a double- or under-counting bug in the MIS weighting.
 // Restricted to opaque materials (transmissionFactor=0): the delta transmission lobe has no continuous pdf, so it's excluded from evaluateBsdf/NEE and always takes MIS weight 1.0 on the BSDF-sampled side (path_tracer.cpp); no double-counting question there, only in the two continuous lobes this check covers.
@@ -12,19 +12,25 @@
 #include <iostream>
 #include <optional>
 #include <random>
+#include <vector>
 
 #include <glm/glm.hpp>
+#include <glm/gtc/constants.hpp>
 
 #include "engine/gfx/hdr_image.h"
 #include "engine/scene/bsdf.h"
 #include "engine/scene/environment_map.h"
+#include "engine/scene/light.h"
 #include "engine/scene/sampler.h"
 
 namespace {
 
 using engine::scene::BsdfParams;
 using engine::scene::EnvironmentMap;
+using engine::scene::LightSample;
+using engine::scene::LightSet;
 using engine::scene::LobeType;
+using engine::scene::QuadLight;
 using engine::scene::Sampler;
 
 constexpr float kPi = 3.14159265F;
@@ -198,12 +204,199 @@ bool checkMisAgreement() {
     return ok;
 }
 
+// Uniform over the FULL sphere (unlike sampleUniformHemisphere above), for the quad-light checks
+// below: a rectangle can subtend solid angle on either side of the shading point's tangent plane once
+// it's a light rather than a BSDF lobe, so the independent oracle must search the whole sphere.
+glm::vec3 sampleUniformSphere(std::mt19937& rng) {
+    std::uniform_real_distribution<float> unit(0.0F, 1.0F);
+    const float z = 1.0F - (2.0F * unit(rng));
+    const float r = std::sqrt(std::max(0.0F, 1.0F - (z * z)));
+    const float phi = 2.0F * kPi * unit(rng);
+    return {r * std::cos(phi), r * std::sin(phi), z};
+}
+
+// Independent of SphericalRectangle's own internal frame: re-derives the ray/rectangle intersection
+// directly from the quad's world-space geometry (assumes edge0 perpendicular to edge1, true of every
+// rectangle this file authors), so a sign/axis bug in buildSphericalRectangle's local frame cannot
+// also be present here by construction. This is the oracle checkQuadLightSolidAngle measures against.
+bool directionHitsQuad(const QuadLight& quad, const glm::vec3& p, const glm::vec3& dir) {
+    const glm::vec3 normal = glm::normalize(glm::cross(quad.edge0, quad.edge1));
+    const float denom = glm::dot(dir, normal);
+    if (std::fabs(denom) < 1e-8F) {
+        return false;  // parallel to the plane
+    }
+    const float t = glm::dot(quad.origin - p, normal) / denom;
+    if (t <= 0.0F) {
+        return false;  // plane is behind p
+    }
+    const glm::vec3 hit = (p + (t * dir)) - quad.origin;
+    const float u = glm::dot(hit, quad.edge0) / glm::dot(quad.edge0, quad.edge0);
+    const float v = glm::dot(hit, quad.edge1) / glm::dot(quad.edge1, quad.edge1);
+    return u >= 0.0F && u <= 1.0F && v >= 0.0F && v <= 1.0F;
+}
+
+// buildSphericalRectangle's solid angle (Girard's theorem on the four internal angles) checked against
+// an independent Monte Carlo oracle -- uniform-sphere direction sampling plus directionHitsQuad, which
+// shares no code with the analytic formula -- and every direction SphericalRectangle::sample() itself
+// draws checked against the same oracle, which catches a bug in the xu/yv inversion even if the scalar
+// solid angle above happens to come out right.
+bool checkQuadLightSolidAngle() {
+    const QuadLight quad{glm::vec3(-0.5F, 1.0F, -0.5F), glm::vec3(1.0F, 0.0F, 0.0F),
+                         glm::vec3(0.0F, 0.0F, 1.0F), glm::vec3(1.0F), false};
+    const glm::vec3 p(0.0F, 0.0F, 0.0F);
+    const std::optional<engine::scene::SphericalRectangle> rect =
+        engine::scene::buildSphericalRectangle(quad, p);
+    if (!rect.has_value()) {
+        std::cerr << "nee_validate: FAILED quad solid angle -- buildSphericalRectangle returned "
+                     "nullopt for a valid configuration\n";
+        return false;
+    }
+
+    constexpr int kSampleCount = 2000000;
+    std::mt19937 rng(42);
+    int hits = 0;
+    for (int i = 0; i < kSampleCount; ++i) {
+        if (directionHitsQuad(quad, p, sampleUniformSphere(rng))) {
+            ++hits;
+        }
+    }
+    const float hitFraction = static_cast<float>(hits) / static_cast<float>(kSampleCount);
+    const float mcSolidAngle = 4.0F * kPi * hitFraction;
+    // Binomial standard error on the hit fraction, propagated to solid angle -- the tolerance comes
+    // from the estimator's own statistics, not a hand-picked constant.
+    const float stderrSolidAngle =
+        4.0F * kPi * std::sqrt(hitFraction * (1.0F - hitFraction) / static_cast<float>(kSampleCount));
+    const float tolerance = 6.0F * stderrSolidAngle;  // ~6 sigma
+
+    bool ok = true;
+    if (std::fabs(mcSolidAngle - rect->solidAngle) > tolerance) {
+        std::cerr << "nee_validate: FAILED quad solid angle -- analytic " << rect->solidAngle
+                  << " vs Monte Carlo " << mcSolidAngle << " (tolerance " << tolerance << ")\n";
+        ok = false;
+    }
+
+    std::uniform_real_distribution<float> unit(0.0F, 1.0F);
+    constexpr int kDrawCount = 20000;
+    for (int i = 0; i < kDrawCount; ++i) {
+        const glm::vec2 u(unit(rng), unit(rng));
+        const glm::vec3 point = rect->sample(u);
+        const glm::vec3 dir = glm::normalize(point - p);
+        if (!directionHitsQuad(quad, p, dir)) {
+            std::cerr << "nee_validate: FAILED quad solid angle -- sample() at u=(" << u.x << ", "
+                      << u.y << ") produced a direction missing the rectangle\n";
+            ok = false;
+            break;
+        }
+    }
+    return ok;
+}
+
+// Same brute-force reference method as referenceLo, restricted to the hemisphere directions the quad
+// actually subtends (via directionHitsQuad) rather than a uniform environment -- Lo(wo) = integral
+// over the hemisphere of evaluateBsdf(wo,wi) * Le(wi) * cos(wi) dwi, Le being the quad's constant
+// radiance where it's visible and 0 elsewhere.
+float referenceLoQuad(const BsdfParams& params, const glm::vec3& wo, const QuadLight& quad,
+                       const glm::vec3& p, int sampleCount, std::mt19937& rng) {
+    constexpr float kUniformPdf = 1.0F / (2.0F * kPi);
+    glm::vec3 accum(0.0F);
+    for (int i = 0; i < sampleCount; ++i) {
+        const glm::vec3 wi = sampleUniformHemisphere(rng);
+        if (directionHitsQuad(quad, p, wi)) {
+            accum += engine::scene::evaluateBsdf(params, wo, wi) * wi.z * quad.radiance / kUniformPdf;
+        }
+    }
+    return std::max({accum.x, accum.y, accum.z}) / static_cast<float>(sampleCount);
+}
+
+// Mirrors misCombinedLo's structure exactly, with LightSet(nullptr, ..., {quad}) in place of the
+// uniform environment and directionHitsQuad in place of "always reaches the environment" (a
+// BSDF-sampled ray can miss a finite rectangle where it could never miss an infinite environment).
+float misCombinedLoQuad(const BsdfParams& params, const glm::vec3& wo, const QuadLight& quad,
+                         const glm::vec3& p, int sampleCount, std::uint32_t seed) {
+    const std::vector<QuadLight> quads{quad};
+    const LightSet lights(nullptr, 0.0F, 1.0F, quads);
+    glm::vec3 accum(0.0F);
+    for (int i = 0; i < sampleCount; ++i) {
+        Sampler sampler(0, 0, i, seed);
+
+        // NEE.
+        const std::optional<LightSample> lightSample = lights.sample(p, sampler);
+        if (lightSample.has_value() && lightSample->direction.z > 0.0F) {
+            const glm::vec3 bsdfValue = engine::scene::evaluateBsdf(params, wo, lightSample->direction);
+            const float bsdfPdf = engine::scene::pdfBsdf(params, wo, lightSample->direction);
+            if (bsdfPdf > 0.0F && (bsdfValue.x > 0.0F || bsdfValue.y > 0.0F || bsdfValue.z > 0.0F)) {
+                const float lightPdf2 = lightSample->pdf * lightSample->pdf;
+                const float bsdfPdf2 = bsdfPdf * bsdfPdf;
+                const float misWeight = lightPdf2 / (lightPdf2 + bsdfPdf2);
+                accum += bsdfValue * lightSample->direction.z * misWeight * lightSample->radiance /
+                         lightSample->pdf;
+            }
+        }
+
+        // BSDF-sampled.
+        const std::optional<engine::scene::BsdfSample> sample =
+            engine::scene::sampleBsdf(params, wo, sampler);
+        if (sample.has_value() && sample->type != LobeType::Transmission &&
+            directionHitsQuad(quad, p, sample->wiLocal)) {
+            const float bsdfPdf = engine::scene::pdfBsdf(params, wo, sample->wiLocal);
+            const float lightPdf = lights.pdfQuad(0, p);
+            const float bsdfPdf2 = bsdfPdf * bsdfPdf;
+            const float lightPdf2 = lightPdf * lightPdf;
+            const float misWeight = bsdfPdf2 / (bsdfPdf2 + lightPdf2);
+            accum += sample->throughputWeight * lights.quadRadianceToward(0, sample->wiLocal) * misWeight;
+        }
+    }
+    return std::max({accum.x, accum.y, accum.z}) / static_cast<float>(sampleCount);
+}
+
+bool checkQuadLightMisAgreement() {
+    constexpr int kSampleCount = 200000;
+    constexpr float kTolerance = 0.05F;
+    const std::array<float, 3> roughnesses = {0.25F, 0.5F, 1.0F};
+    const std::array<float, 2> metallics = {0.0F, 1.0F};
+    const std::array<float, 3> ndotVs = {0.2F, 0.6F, 1.0F};
+
+    // Directly overhead: a 1x1 rectangle at height 2, subtending a modest solid angle -- large enough
+    // that BSDF sampling alone finds it often enough to converge in this many samples, small enough
+    // that light sampling still matters at grazing wo, so both one-strategy estimators (folded into
+    // misCombinedLoQuad above) are load-bearing here, not just the combined one.
+    const QuadLight quad{glm::vec3(-0.5F, -0.5F, 2.0F), glm::vec3(0.0F, 1.0F, 0.0F),
+                         glm::vec3(1.0F, 0.0F, 0.0F), glm::vec3(3.0F), false};
+    const glm::vec3 p(0.0F);
+
+    bool ok = true;
+    std::uint32_t seed = 1000;
+    std::mt19937 referenceRng(7);
+    for (float roughness : roughnesses) {
+        for (float metallic : metallics) {
+            for (float ndotV : ndotVs) {
+                ++seed;
+                const BsdfParams params = makeParams(roughness, metallic);
+                const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (ndotV * ndotV))), 0.0F, ndotV);
+
+                const float reference = referenceLoQuad(params, wo, quad, p, kSampleCount, referenceRng);
+                const float combined = misCombinedLoQuad(params, wo, quad, p, kSampleCount, seed);
+
+                if (std::fabs(combined - reference) > kTolerance * std::max(reference, 0.1F)) {
+                    std::cerr << "nee_validate: FAILED quad MIS agreement at roughness=" << roughness
+                              << " metallic=" << metallic << " ndotV=" << ndotV
+                              << " reference=" << reference << " misCombined=" << combined << '\n';
+                    ok = false;
+                }
+            }
+        }
+    }
+    return ok;
+}
+
 }  // namespace
 
 int main() {
     const bool envPdfOk = checkEnvPdfConsistency();
     const bool misOk = checkMisAgreement();
-    if (!envPdfOk || !misOk) {
+    const bool quadSolidAngleOk = checkQuadLightSolidAngle();
+    const bool quadMisOk = checkQuadLightMisAgreement();
+    if (!envPdfOk || !misOk || !quadSolidAngleOk || !quadMisOk) {
         std::cerr << "nee_validate: FAILED\n";
         return EXIT_FAILURE;
     }

@@ -12,6 +12,7 @@
 #include "engine/scene/embree_accel.h"
 #include "engine/scene/environment_map.h"
 #include "engine/scene/gltf_loader.h"
+#include "engine/scene/light.h"
 #include "engine/scene/path_tracer.h"
 #include "engine/scene/thread_pool.h"
 
@@ -31,10 +32,11 @@ public:
         int maxSamples = 0;  // accumulated-pass cap; 0 = unbounded
     };
 
-    // accel/shadingTriangles/instances/environmentMap/perInstanceSettings must already be at their final, permanent address and must outlive the driver (EmbreeAccel has no refit/update API -- the scene is static) -- held by reference, not copied per-request. Do not construct this as part of the same aggregate-initialization expression that also constructs those referenced objects (e.g. AppResources's designated-initializer list): a bare identifier there would still name the pre-move local, and AppResources's return-type conversion to std::optional<AppResources> move-constructs once more regardless -- either way a reference captured that early would dangle. Construct this only after the referenced object is confirmed at its final address (main.cpp emplaces AppResources::pathTraceDriver, itself a std::optional, right after initializeApp() returns).
+    // accel/shadingTriangles/instances/instanceLightIndex/environmentMap/quadLights/perInstanceSettings must already be at their final, permanent address and must outlive the driver (EmbreeAccel has no refit/update API -- the scene is static) -- held by reference, not copied per-request. Do not construct this as part of the same aggregate-initialization expression that also constructs those referenced objects (e.g. AppResources's designated-initializer list): a bare identifier there would still name the pre-move local, and AppResources's return-type conversion to std::optional<AppResources> move-constructs once more regardless -- either way a reference captured that early would dangle. Construct this only after the referenced object is confirmed at its final address (main.cpp emplaces AppResources::pathTraceDriver, itself a std::optional, right after initializeApp() returns).
     PathTraceDriver(const EmbreeAccel& accel, const std::vector<ShadingTriangle>& shadingTriangles,
                      const std::vector<MeshInstance>& instances,
-                     const EnvironmentMap& environmentMap,
+                     const std::vector<int>& instanceLightIndex,
+                     const EnvironmentMap& environmentMap, const std::vector<QuadLight>& quadLights,
                      const std::vector<PathTraceSettings>& perInstanceSettings);
     ~PathTraceDriver();
 
@@ -65,7 +67,9 @@ private:
     const EmbreeAccel& accel_;
     const std::vector<ShadingTriangle>& shadingTriangles_;
     const std::vector<MeshInstance>& instances_;
+    const std::vector<int>& instanceLightIndex_;
     const EnvironmentMap& environmentMap_;
+    const std::vector<QuadLight>& quadLights_;
     const std::vector<PathTraceSettings>& perInstanceSettings_;
 
     std::mutex requestMutex_;

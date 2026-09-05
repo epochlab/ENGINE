@@ -27,6 +27,7 @@
 #include "engine/scene/embree_accel.h"
 #include "engine/scene/environment_map.h"
 #include "engine/scene/gltf_loader.h"
+#include "engine/scene/light.h"
 #include "engine/scene/material_binding.h"
 #include "engine/scene/path_tracer.h"
 #include "engine/scene/shading_scene.h"
@@ -293,10 +294,14 @@ engine::scene::PathTraceResult renderPassPerInstance(
     const std::atomic<std::uint64_t> generation{1};
     engine::scene::PathTraceResult result =
         engine::scene::makePathTraceResult(kImageSize, kImageSize);
-    engine::scene::renderPathTraced(makeCamera(), accel, scene.shadingTriangles, scene.instances, env,
-                                     kImageSize, kImageSize, /*envRotationRadians=*/0.0F, showSky,
-                                     /*envExposure=*/1.0F, settings, perInstanceSettings, /*runSeed=*/7U,
-                                     generation, /*requestedGeneration=*/1U, pool, result);
+    // No test scene here authors an emitter -- every instance is ordinary geometry.
+    const std::vector<int> instanceLightIndex(scene.instances.size(), -1);
+    const std::vector<engine::scene::QuadLight> noQuads;
+    const engine::scene::LightSet lights(&env, /*envRotationRadians=*/0.0F, /*envExposure=*/1.0F, noQuads);
+    engine::scene::renderPathTraced(makeCamera(), accel, scene.shadingTriangles, scene.instances,
+                                     instanceLightIndex, lights, kImageSize, kImageSize, showSky,
+                                     settings, perInstanceSettings, /*runSeed=*/7U, generation,
+                                     /*requestedGeneration=*/1U, pool, result);
     return result;
 }
 

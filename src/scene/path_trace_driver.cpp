@@ -43,12 +43,16 @@ void accumulateMean(PathTraceResult& sample, const PathTraceResult& previousMean
 PathTraceDriver::PathTraceDriver(const EmbreeAccel& accel,
                                   const std::vector<ShadingTriangle>& shadingTriangles,
                                   const std::vector<MeshInstance>& instances,
+                                  const std::vector<int>& instanceLightIndex,
                                   const EnvironmentMap& environmentMap,
+                                  const std::vector<QuadLight>& quadLights,
                                   const std::vector<PathTraceSettings>& perInstanceSettings)
     : accel_(accel),
       shadingTriangles_(shadingTriangles),
       instances_(instances),
+      instanceLightIndex_(instanceLightIndex),
       environmentMap_(environmentMap),
+      quadLights_(quadLights),
       perInstanceSettings_(perInstanceSettings),
       thread_([this](std::stop_token stopToken) { driverLoop(std::move(stopToken)); }) {}
 
@@ -129,10 +133,14 @@ void PathTraceDriver::driverLoop(std::stop_token stopToken) {
 
         const int passIndex = accumulatedSamples_.load(std::memory_order_relaxed) + 1;
         const auto passStart = std::chrono::steady_clock::now();
+        // Built fresh each pass from this request's env state -- cheap (holds references/scalars, no
+        // copies) -- rather than stored, so the HUD's environment-light toggle (Phase 2) takes effect
+        // on the very next pass with no separate invalidation path.
+        const LightSet lights(&environmentMap_, activeRequest->envRotationRadians,
+                               activeRequest->envExposure, quadLights_);
         renderPathTraced(activeRequest->camera, accel_, shadingTriangles_, instances_,
-                          environmentMap_, activeRequest->width, activeRequest->height,
-                          activeRequest->envRotationRadians, activeRequest->showSky,
-                          activeRequest->envExposure, activeRequest->settings, perInstanceSettings_,
+                          instanceLightIndex_, lights, activeRequest->width, activeRequest->height,
+                          activeRequest->showSky, activeRequest->settings, perInstanceSettings_,
                           static_cast<std::uint32_t>(passIndex), generation_, activeGeneration,
                           threadPool_, *pass);
 

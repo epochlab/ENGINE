@@ -27,6 +27,7 @@
 #include "engine/scene/embree_accel.h"
 #include "engine/scene/environment_map.h"
 #include "engine/scene/gltf_loader.h"
+#include "engine/scene/light.h"
 #include "engine/scene/material_binding.h"
 #include "engine/scene/path_tracer.h"
 #include "engine/scene/thread_pool.h"
@@ -379,6 +380,12 @@ int main(int argc, char** argv) {
     const engine::scene::EnvironmentMap environmentMap(std::move(*environmentImage));
     engine::scene::ThreadPool threadPool;
 
+    // No emitter geometry yet -- every instance is ordinary geometry, and the environment is the only light.
+    const std::vector<int> instanceLightIndex(model->instances.size(), -1);
+    const std::vector<engine::scene::QuadLight> noQuads;
+    const engine::scene::LightSet lights(&environmentMap, /*envRotationRadians=*/0.0F,
+                                         /*envExposure=*/1.0F, noQuads);
+
     // Mean of `passes` independent single-sample passes, each with its own runSeed -- the same accumulation PathTraceDriver performs, done synchronously. Seeds are the pass index, so the whole render is reproducible.
     engine::scene::PathTraceResult result = engine::scene::makePathTraceResult(width, height);
     engine::gfx::HdrImage accumulated = engine::gfx::HdrImage{
@@ -387,10 +394,10 @@ int main(int argc, char** argv) {
     const std::atomic<std::uint64_t> generation{1};
     for (int pass = 0; pass < options.passes; ++pass) {
         engine::scene::renderPathTraced(camera, *accel, model->shadingTriangles, model->instances,
-                                         environmentMap, width, height, /*envRotationRadians=*/0.0F,
-                                         /*showSky=*/true, /*envExposure=*/1.0F, baseSettings,
-                                         *perInstanceSettings, static_cast<std::uint32_t>(pass),
-                                         generation, /*requestedGeneration=*/1U, threadPool, result);
+                                         instanceLightIndex, lights, width, height,
+                                         /*showSky=*/true, baseSettings, *perInstanceSettings,
+                                         static_cast<std::uint32_t>(pass), generation,
+                                         /*requestedGeneration=*/1U, threadPool, result);
         for (std::size_t i = 0; i < accumulated.rgba.size(); ++i) {
             accumulated.rgba[i] += result.beauty.rgba[i];
         }
