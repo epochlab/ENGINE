@@ -20,6 +20,13 @@ namespace {
 
 constexpr float kRayEpsilon = 1e-4F;
 
+// pbrt's ShadowEpsilon convention (Pharr/Jakob/Humphreys Sec 6.8.6): a relative back-off on a finite
+// shadow ray's own tMax, needed now that a light can be real geometry sitting in the BVH -- an
+// unshortened tMax lets the light's own front face register as its own occluder at t == distance.
+// A no-op for the environment (distance == FLT_MAX): FLT_MAX * (1 - 1e-3) is still a normal,
+// effectively-unbounded float, so one formula covers both light kinds with no branch.
+constexpr float kShadowDistanceEpsilon = 1e-3F;
+
 // Beer-Lambert absorption coefficient (Arnold standard_surface / OpenPBR convention): sigma_a = -ln(transmissionColor)/transmissionDepth, transmissionColor being the colour white light reaches after travelling transmissionDepth inside the medium.
 // depth == 0 means there is no interior medium at all, not an infinitely dense one: transmissionColor is then the on-surface tint BsdfParams::transmissionTint carries, so absorption here is exactly zero rather than the -ln(c)/1e-4 a floored divide used to return, which rendered any coloured depth-0 material black.
 // Zero rather than an absent medium, so tracePath's enter/exit toggle below stays symmetric across a depth == 0 interface.
@@ -113,8 +120,8 @@ enum class PathBucket { Diffuse, SpecularReflection, Refraction };
 TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
                        const std::vector<ShadingTriangle>& shadingTriangles,
                        const std::vector<MeshInstance>& instances,
-                       const EnvironmentMap& environmentMap, float envRotationRadians,
-                       bool showSky, float envExposure, const PathTraceSettings& settings,
+                       const std::vector<int>& instanceLightIndex, const LightSet& lights,
+                       bool showSky, const PathTraceSettings& settings,
                        const std::vector<PathTraceSettings>& perInstanceSettings,
                        Sampler& sampler) {
     glm::vec3 radiance(0.0F);
@@ -159,6 +166,8 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
     float lastBsdfPdf = 0.0F;
     // A delta lobe has no density for NEE to double-count against, so its miss takes full weight. Derived from lastBsdfPdf rather than the lobe type: pdfBsdf returns exactly 0 only for the smooth-glass transmission branch, and sampleBsdf rejects pdf <= 1e-8 on every other lobe.
     bool lastSampleWasDelta = false;
+    // The previous vertex's SHADING position, not ray.origin: an emitter hit's MIS weight must use the pdf NEE would actually have had, and NEE samples from shading.position (see the NEE block below) while ray.origin carries the epsilon offset that keeps the continuation ray off the surface. Solid angle measured from two points ~1e-4 apart differs, so weighting from ray.origin leaves the two strategies' weights not summing to 1 -- a small but real bias. pbrt carries the previous interaction for the same reason.
+    glm::vec3 lastShadingPosition(0.0F);
 
     // bounce 0 (the primary/camera ray, direct lighting via NEE) always traces regardless of maxBounces -- maxBounces counts secondary/indirect bounces beyond it, so maxBounces==0 means direct lighting only, no continuation rays. The loop runs one iteration PAST maxBounces so the final BSDF-sampled ray can still collect its MIS-weighted environment contribution via the miss branch below; that extra iteration breaks at the depth guard before any surface interaction -- see the guard for why the terminal ray must be traced rather than dropped.
     for (; bounce <= settings.maxBounces + 1; ++bounce) {
@@ -183,12 +192,11 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
             if (bounce == 0 && !showSky) {
                 break;
             }
-            const glm::vec3 envRadiance =
-                environmentMap.sampleDirection(ray.dir, envRotationRadians) * envExposure;
+            const glm::vec3 envRadiance = lights.environmentRadiance(ray.dir, /*nearest=*/false);
             // Power heuristic (Veach 1997): full weight for bounce 0 (camera ray, not part of the MIS estimator) and after a delta sample, where NEE has zero density and there is nothing to balance against. A ROUGH transmission sample is MIS-eligible like any other lobe and takes the heuristic -- NEE reaches the far side of a transmissive vertex (see the NEE block below), so weighting it at 1.0 double-counted their overlap.
             float misWeight = 1.0F;
             if (bounce > 0 && !lastSampleWasDelta) {
-                const float lightPdf = environmentMap.pdf(ray.dir, envRotationRadians);
+                const float lightPdf = lights.pdfEnvironment(ray.dir);
                 const float bsdfPdf2 = lastBsdfPdf * lastBsdfPdf;
                 misWeight = bsdfPdf2 / (bsdfPdf2 + (lightPdf * lightPdf));
             }
@@ -198,13 +206,35 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
             break;
         }
 
-        // Depth cap. The extra iteration past maxBounces exists solely so the final BSDF-sampled ray can collect its MIS-weighted environment contribution in the miss branch above; a ray reaching real geometry here contributes nothing (no emissive surfaces) and must not shade. Without it, NEE at the final vertex is MIS-weighted down against a BSDF-sampling counterpart that never fires, losing bsdfPdf^2/(bsdfPdf^2 + lightPdf^2) of that vertex's direct lighting -- approaching 100% where bsdfPdf >> lightPdf, and applying to every second surface vertex at maxBounces==1. Breaking here keeps terminationBounce == maxBounces + 1 for a depth-capped path, unchanged from before.
+        const ShadingTriangle& triangle =
+            shadingTriangles[static_cast<std::size_t>(hit->triangleIndex)];
+
+        // An emitter hit (a quad light's own two triangles, injected into the BVH so they occlude and
+        // are BSDF-hittable): Le, MIS-weighted exactly like the environment miss above, then terminate --
+        // a pure emitter has no BSDF to continue sampling from (Arnold quad_light semantics). Checked
+        // BEFORE the depth cap below, symmetric with the miss branch above: the extra iteration past
+        // maxBounces exists so the final BSDF-sampled ray can still collect ITS light contribution,
+        // whichever light it reaches, and an emitter hit is exactly as eligible as a miss is.
+        const int lightIndex = instanceLightIndex[static_cast<std::size_t>(triangle.instanceIndex)];
+        if (lightIndex >= 0) {
+            const glm::vec3 emitted = lights.quadRadianceToward(lightIndex, ray.dir);
+            float misWeight = 1.0F;
+            if (bounce > 0 && !lastSampleWasDelta) {
+                const float lightPdf = lights.pdfQuad(lightIndex, lastShadingPosition);
+                const float bsdfPdf2 = lastBsdfPdf * lastBsdfPdf;
+                misWeight = bsdfPdf2 / (bsdfPdf2 + (lightPdf * lightPdf));
+            }
+            const glm::vec3 hitRadiance = throughput * emitted * misWeight;
+            radiance += hitRadiance;
+            addToBucket(hitRadiance, /*isDirect=*/bounce == 1);
+            break;
+        }
+
+        // Depth cap. The extra iteration past maxBounces exists solely so the final BSDF-sampled ray can collect its MIS-weighted light contribution in the miss/emitter-hit branches above; a ray reaching ordinary (non-emitting) geometry here contributes nothing and must not shade. Without it, NEE at the final vertex is MIS-weighted down against a BSDF-sampling counterpart that never fires, losing bsdfPdf^2/(bsdfPdf^2 + lightPdf^2) of that vertex's direct lighting -- approaching 100% where bsdfPdf >> lightPdf, and applying to every second surface vertex at maxBounces==1. Breaking here keeps terminationBounce == maxBounces + 1 for a depth-capped path, unchanged from before.
         if (bounce > settings.maxBounces) {
             break;
         }
 
-        const ShadingTriangle& triangle =
-            shadingTriangles[static_cast<std::size_t>(hit->triangleIndex)];
         const Material& material =
             instances[static_cast<std::size_t>(triangle.instanceIndex)].material;
         const PathTraceSettings& instanceSettings =
@@ -279,17 +309,26 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
                                      instanceSettings.transmissionDepth));
         }
 
-        // Next-event estimation: sample the environment directly from this vertex (importance sampled by luminance, see EnvironmentMap::importanceSampleDirection), evaluate the combined BSDF value/pdf toward it, and add the MIS-weighted contribution if unoccluded. Independent of whichever lobe `sample` above drew for the continuing bounce -- NEE and the continuing ray are two separate estimators for two separate directions from the same vertex, only sharing this vertex's params/frame. Firing unconditionally (no lobe-type check) is deliberate: the guard below admits both sides of a transmissive vertex, so refraction is light-sampled rather than left to BSDF sampling alone, and the MIS weights above and below now balance the same two strategies over the same directions.
-        {
-            const EnvironmentMap::EnvSample lightSample =
-                environmentMap.importanceSampleDirection(sampler.next2D(), envRotationRadians);
-            const float geoCos = glm::dot(lightSample.direction, geoNormal);
-            const float shadingCos = glm::dot(lightSample.direction, frame.normal);
+        // Next-event estimation: sample a light directly from this vertex (LightSet::sample -- the
+        // environment map and/or any rectangular emitters, selected uniformly and then importance-
+        // sampled within whichever was picked, see light.h), evaluate the combined BSDF value/pdf
+        // toward it, and add the MIS-weighted contribution if unoccluded. Independent of whichever lobe
+        // `sample` above drew for the continuing bounce -- NEE and the continuing ray are two separate
+        // estimators for two separate directions from the same vertex, only sharing this vertex's
+        // params/frame. Firing unconditionally (no lobe-type check) is deliberate: the guard below
+        // admits both sides of a transmissive vertex, so refraction is light-sampled rather than left
+        // to BSDF sampling alone, and the MIS weights above and below now balance the same two
+        // strategies over the same directions. nullopt (no light in the set, or a degenerate quad at
+        // this exact vertex) simply skips NEE for this vertex -- the continuing ray still fires below.
+        const std::optional<LightSample> lightSample = lights.sample(shading.position, sampler);
+        if (lightSample.has_value()) {
+            const float geoCos = glm::dot(lightSample->direction, geoNormal);
+            const float shadingCos = glm::dot(lightSample->direction, frame.normal);
             // Both sides, not just wo's: on a transmissive surface a light behind the vertex reaches the eye through the transmission lobe, so restricting NEE to the near side left rough glass lit by BSDF sampling alone. Requiring geoCos and shadingCos to agree in sign keeps the normal-map light-leak rejection intact on either side. The lobe itself decides whether the far side carries anything -- a delta interface returns pdfBsdf == 0 there and the guard below drops it, which is correct since a delta lobe cannot be light-sampled.
             const bool nearSide = geoCos > 0.0F && shadingCos > 0.0F;
             const bool farSide = geoCos < 0.0F && shadingCos < 0.0F && params.transmissionFactor > 0.0F;
             if (nearSide || farSide) {
-                const glm::vec3 wiLocalLight = frame.toLocal(lightSample.direction);
+                const glm::vec3 wiLocalLight = frame.toLocal(lightSample->direction);
                 const float lightCos = std::abs(shadingCos);  // far-side samples carry a negative cosine
                 // One evaluation for the value, the pdf and the per-lobe split the transport AOVs need -- the four separate calls this replaced (evaluateBsdf, pdfBsdf, and one isolating call per lobe) each recomputed the same lobe probabilities, GGX/Fresnel terms and albedo-table lookups.
                 const BsdfEval eval = evaluateBsdfSplit(params, woLocal, wiLocalLight);
@@ -303,22 +342,17 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
                     const glm::vec3 shadowOrigin =
                         shadowTerminatorOffset(triangle, hit->u, hit->v, geoCos > 0.0F) +
                         (geoNormal * shadowEpsilon * (geoCos > 0.0F ? 1.0F : -1.0F));
-                    const Ray shadowRay{shadowOrigin, lightSample.direction, shadowEpsilon,
-                                         std::numeric_limits<float>::max()};
+                    const Ray shadowRay{shadowOrigin, lightSample->direction, shadowEpsilon,
+                                         lightSample->distance * (1.0F - kShadowDistanceEpsilon)};
                     if (!accel.occluded(shadowRay)) {
                         if (bounce == 0) {
                             gShadow = 0.0F;
                         }
-                        // Nearest, not bilinear: this radiance is divided by lightSample.pdf below, and that pdf is the density of one piecewise-constant texel. Bilinear here would bleed a bright texel's energy into neighbours whose density is correctly low, spiking f/pdf into fireflies at exactly the small bright features the luminance CDF exists to find. The miss path above keeps bilinear -- there the env pdf enters only a bounded MIS weight.
-                        const glm::vec3 envRadiance =
-                            environmentMap.sampleDirectionNearest(lightSample.direction,
-                                                                   envRotationRadians) *
-                            envExposure;
-                        const float lightPdf2 = lightSample.pdf * lightSample.pdf;
+                        const float lightPdf2 = lightSample->pdf * lightSample->pdf;
                         const float bsdfPdf2 = eval.pdf * eval.pdf;
                         const float misWeightLight = lightPdf2 / (lightPdf2 + bsdfPdf2);
-                        const glm::vec3 common =
-                            throughput * envRadiance * lightCos * misWeightLight / lightSample.pdf;
+                        const glm::vec3 common = throughput * lightSample->radiance * lightCos *
+                                                  misWeightLight / lightSample->pdf;
                         const glm::vec3 neeContribution = bsdfValue * common;
                         radiance += neeContribution;
                         if (bounce == 0) {
@@ -342,6 +376,7 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
 
         lastBsdfPdf = sample->pdf;
         lastSampleWasDelta = lastBsdfPdf <= 0.0F;
+        lastShadingPosition = shading.position;
 
         const glm::vec3 wiWorld = frame.toWorld(sample->wiLocal);
 
@@ -395,9 +430,8 @@ PathTraceResult makePathTraceResult(int width, int height) {
 void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                        const std::vector<ShadingTriangle>& shadingTriangles,
                        const std::vector<MeshInstance>& instances,
-                       const EnvironmentMap& environmentMap, int width, int height,
-                       float envRotationRadians, bool showSky, float envExposure,
-                       const PathTraceSettings& settings,
+                       const std::vector<int>& instanceLightIndex, const LightSet& lights,
+                       int width, int height, bool showSky, const PathTraceSettings& settings,
                        const std::vector<PathTraceSettings>& perInstanceSettings,
                        std::uint32_t runSeed, const std::atomic<std::uint64_t>& generation,
                        std::uint64_t requestedGeneration, ThreadPool& threadPool,
@@ -432,10 +466,9 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                     // HdrImage row 0 is the top (EXR/glTF convention); NDC +Y is up -- flip.
                     const float ndcY = 1.0F - ((filmY / static_cast<float>(height)) * 2.0F);
                     const Ray primary = camera.primaryRay(basis, ndcX, ndcY);
-                    const TraceResult trace = tracePath(primary, accel, shadingTriangles, instances,
-                                                         environmentMap, envRotationRadians, showSky,
-                                                         envExposure, settings, perInstanceSettings,
-                                                         sampler);
+                    const TraceResult trace =
+                        tracePath(primary, accel, shadingTriangles, instances, instanceLightIndex,
+                                  lights, showSky, settings, perInstanceSettings, sampler);
                     const std::array<float, kSampleLanes> values{
                         trace.radiance.x,          trace.radiance.y,
                         trace.radiance.z,          static_cast<float>(trace.terminationBounce),

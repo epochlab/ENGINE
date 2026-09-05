@@ -46,6 +46,7 @@
 #include "engine/scene/environment_map.h"
 #include "engine/scene/false_color.h"
 #include "engine/scene/gltf_loader.h"
+#include "engine/scene/light.h"
 #include "engine/scene/material_binding.h"
 #include "engine/scene/path_trace_driver.h"
 #include "engine/scene/path_tracer.h"
@@ -127,6 +128,7 @@ struct PathTraceInputState {
     float filmBackHeightMm = 0.0F;
     int envRotationDegrees = -1;
     bool showSky = false;
+    bool envLightEnabled = true;
     float envExposureStops = 0.0F;
     int fbWidth = 0;
     int fbHeight = 0;
@@ -165,6 +167,9 @@ struct AppResources {
     // stumpModel.shadingTriangles indexes sceneAccel's triangles 1:1, no separate field needed.
     engine::scene::EnvironmentMap environmentMap;
     engine::scene::LoadedModel stumpModel;
+    // Parallel to stumpModel.instances: -1 for ordinary geometry, else the index into quadLights this instance's two triangles emit as (see light.h, path_tracer.cpp's tracePath). Entries for the scene's own geometry are all -1; appendQuadLights appends one entry per authored light (cornell.json authors one).
+    std::vector<int> instanceLightIndex;
+    std::vector<engine::scene::QuadLight> quadLights;
     int totalTriangles;
     int totalPoints;
 
@@ -198,6 +203,11 @@ struct AppResources {
     engine::gfx::OcioDisplayTransform::Lut userLut;
     engine::debug::FramingOverlayState framingState;
     bool showSky;
+    // Whether the environment is in LightSet's light set at all (NEE, MIS, miss radiance) -- distinct
+    // from showSky, which only ever gates the camera ray's own miss. Off is what makes the classic
+    // Goral 1984 Cornell (light-panel-only, no IBL) reachable interactively. Initialised from the
+    // scene's own environment.lightEnabled (scene_config.h) in initializeApp.
+    bool envLightEnabled;
     int envRotationDegrees;
     float envExposureStops;  // stops, not a multiplier; requestPathTrace does exp2()
     bool invert;   // 1.0 - colour, applied to the final display-referred image -- the 'I' debug toggle
@@ -371,10 +381,17 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - loadStart)
             .count();
     int totalTriangles = 0;
+    std::vector<int> instanceLightIndex;
+    std::vector<engine::scene::QuadLight> quadLights;
     if (stumpModel) {
+        instanceLightIndex.assign(stumpModel->instances.size(), -1);
+        quadLights = engine::scene::buildQuadLights(sceneConfig.lights, sceneTransform);
+        engine::scene::appendQuadLights(*stumpModel, quadLights, instanceLightIndex);
+
         totalTriangles = static_cast<int>(stumpModel->worldTriangles.size());
-        std::cout << "loadGltf: " << stumpModel->instances.size() << " instance(s), "
-                  << totalTriangles << " triangles, " << loadMs << " ms\n"
+        std::cout << "loadGltf: " << stumpModel->instances.size() << " instance(s) ("
+                  << quadLights.size() << " light), " << totalTriangles << " triangles, " << loadMs
+                  << " ms\n"
                   << std::flush;
     }
     // "Points": total vertex-index count, i.e. 3 per triangle -- derived rather than tracked separately.
@@ -453,6 +470,8 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         .sceneAccel = std::move(*sceneAccel),
         .environmentMap = std::move(environmentMap),
         .stumpModel = std::move(*stumpModel),
+        .instanceLightIndex = std::move(instanceLightIndex),
+        .quadLights = std::move(quadLights),
         .totalTriangles = totalTriangles,
         .totalPoints = totalPoints,
         .postProcess = std::move(postProcess),
@@ -479,6 +498,8 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         .framingState = engine::debug::FramingOverlayState{},
         // "Show/Hide Background" HDRI-section checkbox -- off by default; only takes visible effect for the Beauty AOV, see presentFrame.
         .showSky = false,
+        // The scene's own authored default (scene_config.h's environment.lightEnabled), not a separate runtime default -- the HUD checkbox then edits this in place.
+        .envLightEnabled = sceneConfig.environment.lightEnabled,
         // HDR environment's Y-axis (world up) rotation, degrees [0,359] -- affects both the background and the environment's contribution to lighting (see environment_map.h), rotated at query time rather than re-baked.
         .envRotationDegrees = 0,
         // HDRI Exposure slider, stops. requestPathTrace does exp2() -> path_tracer.cpp miss-ray sampleDirection.
@@ -910,7 +931,8 @@ void requestPathTrace(AppResources& app, const engine::scene::Camera& camera, in
                       int winHeight) {
     app.pathTraceDriver->requestTrace(engine::scene::PathTraceDriver::Request{
         camera, winWidth, winHeight, glm::radians(static_cast<float>(app.envRotationDegrees)),
-        app.showSky, std::exp2(app.envExposureStops), app.pathTraceSettings, app.maxSamples});
+        app.showSky, app.envLightEnabled, std::exp2(app.envExposureStops), app.pathTraceSettings,
+        app.maxSamples});
 }
 
 // Called once per rendered frame. Re-traces on any input that would actually change the image, not a fixed timer, so the path-traced view stays live without retracing every frame the camera happens to sit still.
@@ -929,7 +951,7 @@ void requestPathTraceIfTriggerChanged(AppResources& app, const engine::scene::Ca
     const PathTraceInputState input{
         camera.position(),       app.debugCamera.yawDegrees(), app.debugCamera.pitchDegrees(),
         app.debugCamera.focalLengthMm(), app.debugCamera.filmBack().heightMm,
-        app.envRotationDegrees, app.showSky, app.envExposureStops,
+        app.envRotationDegrees, app.showSky, app.envLightEnabled, app.envExposureStops,
         fbWidth,                 fbHeight,                     needsLightTransport,
         app.aov};
 
@@ -1037,7 +1059,7 @@ void updateHud(AppResources& app, const engine::platform::Window& window,
         window, pathTraceSnapshot, app, static_cast<engine::debug::AovId>(app.aov));
     if (app.showHud) {
         app.hud.draw(hudFrameData, app.aov, focalLengthMm, aperture, shutterSeconds, iso,
-                     filmBackPresetIndex, app.filmBackPresetNames, app.showSky,
+                     filmBackPresetIndex, app.filmBackPresetNames, app.showSky, app.envLightEnabled,
                      app.envRotationDegrees, app.envExposureStops, app.aberrationStrength,
                      app.framingState, pixelProbe);
     }
@@ -1169,7 +1191,8 @@ int main(int argc, char** argv) {
                     // Constructed here, not as part of AppResources's designated-initializer list: app (this std::optional<AppResources> local) is where sceneAccel/environmentMap/stumpModel/perInstanceSettings first reach their final, permanent address (initializeApp's own return-type conversion to std::optional<AppResources> move-constructs once en route), so this is the first point at which PathTraceDriver's reference members can safely bind to them -- see path_trace_driver.h's constructor comment.
                     app->pathTraceDriver = std::make_unique<engine::scene::PathTraceDriver>(
                         app->sceneAccel, app->stumpModel.shadingTriangles, app->stumpModel.instances,
-                        app->environmentMap, app->perInstanceSettings);
+                        app->instanceLightIndex, app->environmentMap, app->quadLights,
+                        app->perInstanceSettings);
 
                     wireCallbacks(window, *app);
 

@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <optional>
 #include <random>
 #include <string>
@@ -27,6 +28,7 @@
 #include "engine/scene/embree_accel.h"
 #include "engine/scene/environment_map.h"
 #include "engine/scene/gltf_loader.h"
+#include "engine/scene/light.h"
 #include "engine/scene/material_binding.h"
 #include "engine/scene/path_tracer.h"
 #include "engine/scene/shading_scene.h"
@@ -293,10 +295,14 @@ engine::scene::PathTraceResult renderPassPerInstance(
     const std::atomic<std::uint64_t> generation{1};
     engine::scene::PathTraceResult result =
         engine::scene::makePathTraceResult(kImageSize, kImageSize);
-    engine::scene::renderPathTraced(makeCamera(), accel, scene.shadingTriangles, scene.instances, env,
-                                     kImageSize, kImageSize, /*envRotationRadians=*/0.0F, showSky,
-                                     /*envExposure=*/1.0F, settings, perInstanceSettings, /*runSeed=*/7U,
-                                     generation, /*requestedGeneration=*/1U, pool, result);
+    // No test scene here authors an emitter -- every instance is ordinary geometry.
+    const std::vector<int> instanceLightIndex(scene.instances.size(), -1);
+    const std::vector<engine::scene::QuadLight> noQuads;
+    const engine::scene::LightSet lights(&env, /*envRotationRadians=*/0.0F, /*envExposure=*/1.0F, noQuads);
+    engine::scene::renderPathTraced(makeCamera(), accel, scene.shadingTriangles, scene.instances,
+                                     instanceLightIndex, lights, kImageSize, kImageSize, showSky,
+                                     settings, perInstanceSettings, /*runSeed=*/7U, generation,
+                                     /*requestedGeneration=*/1U, pool, result);
     return result;
 }
 
@@ -940,6 +946,390 @@ bool checkTransportPartition() {
     return ok;
 }
 
+// Appends a QuadLight's own two emitting triangles to a TestScene, mirroring gltf_loader.cpp's
+// appendQuadLights (this file builds every scene by hand rather than through the real loader -- see
+// this file's own header comment on why no GL/cgltf context is needed here) so these checks exercise
+// the same shadow-ray self-occlusion regime (path_tracer.cpp's kShadowDistanceEpsilon) a real scene
+// does. instanceLightIndex must already be sized scene.instances.size(); quadIndex is this light's own position in the LightSet's quad vector, so a multi-light scene indexes the right emitter rather than always the first.
+void appendLightGeometry(TestScene& scene, const engine::scene::QuadLight& light, int quadIndex,
+                          std::vector<int>& instanceLightIndex) {
+    const glm::vec3& normal = light.normal;
+    const glm::vec4 tangent(glm::normalize(light.edge0), 1.0F);
+    const auto vertex = [&](const glm::vec3& position, glm::vec2 uv) {
+        return ShadingVertex{position, normal, uv, tangent};
+    };
+    const ShadingVertex p00 = vertex(light.origin, glm::vec2(0.0F, 0.0F));
+    const ShadingVertex p10 = vertex(light.origin + light.edge0, glm::vec2(1.0F, 0.0F));
+    const ShadingVertex p01 = vertex(light.origin + light.edge1, glm::vec2(0.0F, 1.0F));
+    const ShadingVertex p11 = vertex(light.origin + light.edge0 + light.edge1, glm::vec2(1.0F, 1.0F));
+    const int instanceIndex = static_cast<int>(scene.instances.size());
+    scene.worldTriangles.push_back(Triangle{p00.position, p10.position, p11.position});
+    scene.worldTriangles.push_back(Triangle{p00.position, p11.position, p01.position});
+    scene.shadingTriangles.push_back(ShadingTriangle{p00, p10, p11, instanceIndex});
+    scene.shadingTriangles.push_back(ShadingTriangle{p00, p11, p01, instanceIndex});
+    scene.instances.push_back(
+        MeshInstance{makeMaterial(1.0F, glm::vec3(0.0F)), glm::mat4(1.0F), "light"});
+    instanceLightIndex.push_back(quadIndex);
+}
+
+// Like renderPassPerInstance, but for scenes carrying real light-set state: an explicit environment
+// pointer (nullptr to disable it entirely) and emitter instances/quads, rather than the always-env,
+// never-emitter defaults every check above this point uses.
+engine::scene::PathTraceResult renderPassWithLights(const TestScene& scene,
+                                                     const std::vector<int>& instanceLightIndex,
+                                                     const std::vector<engine::scene::QuadLight>& quads,
+                                                     const EnvironmentMap* env,
+                                                     const PathTraceSettings& settings,
+                                                     EmbreeAccel& accel, engine::scene::ThreadPool& pool,
+                                                     bool showSky) {
+    const std::atomic<std::uint64_t> generation{1};
+    engine::scene::PathTraceResult result = engine::scene::makePathTraceResult(kImageSize, kImageSize);
+    const engine::scene::LightSet lights(env, /*envRotationRadians=*/0.0F, /*envExposure=*/1.0F, quads);
+    const std::vector<PathTraceSettings> perInstanceSettings(scene.instances.size(), settings);
+    engine::scene::renderPathTraced(makeCamera(), accel, scene.shadingTriangles, scene.instances,
+                                     instanceLightIndex, lights, kImageSize, kImageSize, showSky,
+                                     settings, perInstanceSettings, /*runSeed=*/7U, generation,
+                                     /*requestedGeneration=*/1U, pool, result);
+    return result;
+}
+
+// A material with EXACTLY zero specular reflectance at every angle, not merely a small one: ior=1.0
+// makes fresnelDielectric identically zero (the same device checkBeerLambert/checkOnSurfaceTransmissionTint
+// use above for an unbent, unreflected ray), metallicFactor=0 and transmissionFactor=0 keep only the
+// diffuse lobe live, and diffuseRoughness=0 is EON's own documented Lambertian limit. What survives is
+// f(wo,wi) = baseColor/pi exactly, constant in direction -- the one BRDF shape Lambert's polygon
+// irradiance formula below can be compared against in closed form, since it integrates Le*cos alone
+// and has no way to fold in an angle-dependent BSDF term.
+PathTraceSettings makeLambertianSettings(int maxBounces) {
+    PathTraceSettings settings = makeSettings(maxBounces, 999, /*metallic=*/0.0F, /*transmission=*/0.0F);
+    settings.ior = 1.0F;
+    return settings;
+}
+
+// Lambert's formula (1760) / Baum, Rushmeier & Winget 1989's closed-form polygon form factor: the
+// irradiance a uniform-radiance L planar convex polygon light produces at a Lambertian receiver point
+// p with normal n. Genuinely independent of light.cpp's spherical-rectangle solid-angle formula
+// (Girard's theorem on the polygon's INTERNAL vertex angles, for importance-sampling density) -- this
+// instead sums, over the polygon's EDGES, the great-circle angle each edge subtends as seen from p,
+// weighted by how much that edge's rotation axis aligns with the receiver normal: the PROJECTED solid
+// angle directly, which is exactly what a Lambertian receiver integrates (E = L * projected solid angle).
+float lambertPolygonIrradiance(const std::array<glm::vec3, 4>& vertices, const glm::vec3& p,
+                                const glm::vec3& n, float radiance) {
+    float sum = 0.0F;
+    for (std::size_t i = 0; i < vertices.size(); ++i) {
+        const glm::vec3 r0 = glm::normalize(vertices[i] - p);
+        const glm::vec3 r1 = glm::normalize(vertices[(i + 1) % vertices.size()] - p);
+        const float gamma = std::acos(glm::clamp(glm::dot(r0, r1), -1.0F, 1.0F));
+        // cross(r1, r0), not (r0, r1): the sign convention that makes this sum positive when `n`
+        // points toward the polygon depends on the traversal direction, fixed empirically against the
+        // renderer (which independently gets the physically-correct sign from quadRadianceToward's own
+        // front-face test) and matching Baum/Rushmeier/Winget's own vertex ordering convention.
+        const glm::vec3 axis = glm::cross(r1, r0);
+        const float axisLen = glm::length(axis);
+        if (axisLen > 1e-8F) {
+            sum += gamma * glm::dot(axis / axisLen, n);
+        }
+    }
+    return radiance * 0.5F * sum;
+}
+
+// The receiver: makeQuadScene's own z=0 quad facing +Z (camera at (0,0,5) looking down -Z, so the
+// centre pixel's wo is exactly the surface normal, as every other check in this file relies on) --
+// reused rather than re-declared so this and every analytic reference below describe the same surface.
+TestScene makeLambertianFloor() { return makeQuadScene(/*roughness=*/1.0F, glm::vec3(0.0F)); }
+
+// A one-sided quad light near the receiver, facing -Z back down toward it: cross(edge0, edge1) is
+// exactly (0, 0, -1). Offset in x (NOT centred at x=0 above the receiver): the camera sits at
+// (0,0,5) looking straight down the x=0,y=0 column, so a light straddling that column would put its
+// own (non-emitting, one-sided) back face directly in the camera's primary ray, reading black for a
+// reason unrelated to anything this check exercises. Offsetting clears the camera's narrow view cone
+// (radius ~0.2 at this depth) while staying close enough for a strong, easily-measured irradiance.
+engine::scene::QuadLight makeOverheadLight(bool twoSided = false) {
+    return engine::scene::QuadLight{glm::vec3(0.5F, -0.5F, 1.5F), glm::vec3(0.0F, 1.0F, 0.0F),
+                                     glm::vec3(1.0F, 0.0F, 0.0F), glm::vec3(3.0F), twoSided};
+}
+
+// checkQuadLightIrradiance: the receiver's centre-pixel Lo must equal (baseColor/pi) * E exactly, E
+// Lambert's closed-form polygon irradiance above -- no Monte Carlo anywhere in the reference. Several
+// light positions/sizes, since a single on-axis case cannot distinguish a mis-scaled solid angle from
+// a mis-scaled radiance (the same reasoning nee_validate.cpp's checkQuadLightSolidAngle documents for
+// why it checks more than one direction).
+// checkQuadLightOneSided: the SAME light position, edge0/edge1 swapped so the emitting face points UP
+// away from the receiver instead of down toward it -- the receiver still has geometric line of sight
+// (nearSide is true, NEE still fires), so this isolates quadRadianceToward's own front/back-face test
+// from the pre-existing near/far-side gating a light merely behind opaque geometry would exercise
+// instead. Must read exactly 0.
+// checkQuadLightOcclusion: the original (front-face-down) light, an opaque wall inserted between it
+// and the receiver -- must also read exactly 0. Paired with the irradiance check above, this brackets
+// kShadowDistanceEpsilon from both sides: too small and the light's own front face self-occludes
+// (irradiance check would read 0 when it should not), absent and this check's blocker stops working
+// (would read the unoccluded illuminance instead of 0). The wall is sized to the light's own footprint
+// as seen from the receiver, offset the same way as the light to keep clear of the camera's own ray.
+bool checkQuadLightIrradianceOneSidedOcclusion() {
+    constexpr float kTolerance = 0.02F;  // Monte Carlo NEE noise at kSamplesPerPixel, not a formula slop
+    engine::scene::ThreadPool pool;
+    bool ok = true;
+
+    struct LightCase {
+        const char* name;
+        engine::scene::QuadLight light;
+    };
+    const std::array<LightCase, 3> cases{{
+        {"close, off to one side, unit quad", makeOverheadLight()},
+        {"off-axis, unit quad",
+         engine::scene::QuadLight{glm::vec3(0.3F, 0.2F, 3.0F), glm::vec3(0.0F, 0.8F, 0.0F),
+                                   glm::vec3(0.8F, 0.0F, 0.0F), glm::vec3(5.0F), false}},
+        // Offset in x for the same camera-sightline reason as makeOverheadLight -- large enough that
+        // its NEAR edge (x=0.5) still clears the camera's view cone at this depth (~0.23 radius).
+        {"large, grazing", engine::scene::QuadLight{glm::vec3(0.5F, -3.0F, 1.2F),
+                                                      glm::vec3(0.0F, 6.0F, 0.0F),
+                                                      glm::vec3(6.0F, 0.0F, 0.0F), glm::vec3(2.0F), false}},
+    }};
+
+    std::cout << "integrator_validate: quad light irradiance vs Lambert's closed-form polygon form factor\n";
+    for (const LightCase& testCase : cases) {
+        TestScene scene = makeLambertianFloor();
+        std::vector<int> instanceLightIndex(scene.instances.size(), -1);
+        appendLightGeometry(scene, testCase.light, /*quadIndex=*/0, instanceLightIndex);
+        std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
+        if (!accel.has_value()) {
+            std::cerr << "integrator_validate: FAILED to build Embree scene for " << testCase.name << '\n';
+            return false;
+        }
+        const std::vector<engine::scene::QuadLight> quads{testCase.light};
+        const glm::vec3 lo = centreMean(renderPassWithLights(scene, instanceLightIndex, quads,
+                                                              /*env=*/nullptr,
+                                                              makeLambertianSettings(0), *accel, pool,
+                                                              /*showSky=*/false)
+                                             .beauty);
+
+        const std::array<glm::vec3, 4> corners{
+            testCase.light.origin, testCase.light.origin + testCase.light.edge0,
+            testCase.light.origin + testCase.light.edge0 + testCase.light.edge1,
+            testCase.light.origin + testCase.light.edge1};
+        const float irradiance =
+            lambertPolygonIrradiance(corners, glm::vec3(0.0F), glm::vec3(0.0F, 0.0F, 1.0F),
+                                      testCase.light.radiance.x);
+        const float reference = irradiance / kPi;
+
+        std::cout << "  " << testCase.name << "   rendered " << lo.x << "   reference " << reference
+                  << '\n';
+        if (std::fabs(lo.x - reference) > kTolerance * std::max(reference, 0.05F)) {
+            std::cerr << "integrator_validate: FAILED quad light irradiance at " << testCase.name
+                      << " -- rendered " << lo.x << ", Lambert polygon reference " << reference << '\n';
+            ok = false;
+        }
+    }
+
+    // One-sided: the SAME position/size/distance as makeOverheadLight, but edge0/edge1 swapped so
+    // cross(edge0,edge1) is (0,0,+1) -- the emitting face now points UP, away from the receiver. The
+    // receiver still has full geometric line of sight (nearSide is true, NEE still fires and evaluates
+    // the BSDF/occlusion exactly as the irradiance case does) -- only quadRadianceToward's own
+    // front/back-face test stands between this and a nonzero reading, unlike a light merely placed
+    // behind opaque geometry (which the pre-existing near/far-side gating would zero out on its own,
+    // testing nothing new). Must read exactly 0.
+    {
+        TestScene scene = makeLambertianFloor();
+        std::vector<int> instanceLightIndex(scene.instances.size(), -1);
+        const engine::scene::QuadLight light{glm::vec3(0.5F, -0.5F, 1.5F), glm::vec3(1.0F, 0.0F, 0.0F),
+                                              glm::vec3(0.0F, 1.0F, 0.0F), glm::vec3(3.0F), false};
+        appendLightGeometry(scene, light, /*quadIndex=*/0, instanceLightIndex);
+        std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
+        if (!accel.has_value()) {
+            std::cerr << "integrator_validate: FAILED to build Embree scene for one-sided check\n";
+            return false;
+        }
+        const std::vector<engine::scene::QuadLight> quads{light};
+        const glm::vec3 lo = centreMean(renderPassWithLights(scene, instanceLightIndex, quads,
+                                                              /*env=*/nullptr, makeLambertianSettings(0),
+                                                              *accel, pool, /*showSky=*/false)
+                                             .beauty);
+        std::cout << "  one-sided (light behind, facing away)   rendered [" << lo.x << ", " << lo.y
+                  << ", " << lo.z << "]\n";
+        if (lo.x > kTolerance || lo.y > kTolerance || lo.z > kTolerance) {
+            std::cerr << "integrator_validate: FAILED quad light one-sidedness -- rendered [" << lo.x
+                      << ", " << lo.y << ", " << lo.z
+                      << "], expected exactly 0. A one-sided emitter's back face must emit nothing.\n";
+            ok = false;
+        }
+    }
+
+    // Occlusion: the "close, off to one side" light from the first case, plus an opaque wall between
+    // it and the receiver -- must also read exactly 0. The wall is sized/positioned to the light's own
+    // footprint as projected from the receiver (light spans x[0.5,1.5] y[-0.5,0.5] at z=1.5; at the
+    // wall's z=1.0 that projects, by similar triangles, to x[0.333,1.0] y[-0.333,0.333] -- the wall
+    // below is oversized around that with margin) rather than kQuadExtent, which would also swallow
+    // the camera's own x=0,y=0 sightline and read the wall's lit topside instead of testing occlusion.
+    {
+        TestScene scene = makeLambertianFloor();
+        std::vector<int> instanceLightIndex(scene.instances.size(), -1);
+        const engine::scene::QuadLight light = makeOverheadLight();
+        appendLightGeometry(scene, light, /*quadIndex=*/0, instanceLightIndex);
+
+        const glm::vec3 wallNormal(0.0F, 0.0F, 1.0F);
+        const glm::vec4 wallTangent(1.0F, 0.0F, 0.0F, 1.0F);
+        const auto wallVertex = [&](float x, float y) {
+            return ShadingVertex{glm::vec3(x, y, 1.0F), wallNormal, glm::vec2(0.5F, 0.5F), wallTangent};
+        };
+        const ShadingVertex w0 = wallVertex(0.15F, -0.5F);
+        const ShadingVertex w1 = wallVertex(1.25F, -0.5F);
+        const ShadingVertex w2 = wallVertex(1.25F, 0.5F);
+        const ShadingVertex w3 = wallVertex(0.15F, 0.5F);
+        const int wallInstance = static_cast<int>(scene.instances.size());
+        scene.worldTriangles.push_back(Triangle{w0.position, w1.position, w2.position});
+        scene.worldTriangles.push_back(Triangle{w0.position, w2.position, w3.position});
+        scene.shadingTriangles.push_back(ShadingTriangle{w0, w1, w2, wallInstance});
+        scene.shadingTriangles.push_back(ShadingTriangle{w0, w2, w3, wallInstance});
+        scene.instances.push_back(
+            MeshInstance{makeMaterial(1.0F, glm::vec3(0.0F)), glm::mat4(1.0F), "wall"});
+        instanceLightIndex.push_back(-1);
+
+        std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
+        if (!accel.has_value()) {
+            std::cerr << "integrator_validate: FAILED to build Embree scene for occlusion check\n";
+            return false;
+        }
+        const std::vector<engine::scene::QuadLight> quads{light};
+        const glm::vec3 lo = centreMean(renderPassWithLights(scene, instanceLightIndex, quads,
+                                                              /*env=*/nullptr, makeLambertianSettings(0),
+                                                              *accel, pool, /*showSky=*/false)
+                                             .beauty);
+        std::cout << "  occluded (opaque wall between light and receiver)   rendered [" << lo.x << ", "
+                  << lo.y << ", " << lo.z << "]\n";
+        if (lo.x > kTolerance || lo.y > kTolerance || lo.z > kTolerance) {
+            std::cerr << "integrator_validate: FAILED quad light occlusion -- rendered [" << lo.x << ", "
+                      << lo.y << ", " << lo.z
+                      << "], expected exactly 0. An opaque wall between light and receiver must fully "
+                         "block NEE; a non-zero reading means kShadowDistanceEpsilon's back-off (or the "
+                         "shadow ray itself) is not reaching the blocker.\n";
+            ok = false;
+        }
+    }
+    return ok;
+}
+
+// checkQuadLightInverseSquare: quadratic falloff is IMPLICIT in this renderer -- NEE divides by
+// pdf = selectionPdf/solidAngle (path_tracer.cpp), so the light's subtended solid angle enters as a
+// multiplier and shrinks as A*cos(theta_l)/d^2 with distance. There is deliberately no explicit 1/d^2
+// term anywhere: that is needed only under uniform-AREA sampling, where the geometry term
+// G = cos(theta_r)*cos(theta_l)/d^2 converts the measure. Nothing asserted the limit, so this does.
+// The statement tested is the inverse-square law itself, in the form that isolates it: for a small
+// light, E * d^2 / (L * A * cos(theta_r) * cos(theta_l)) -> 1 as d grows. Measured off the RENDERED
+// irradiance (Lo * pi, the receiver being the exact-Lambertian floor the check above establishes), so
+// it constrains the renderer rather than the reference.
+// The near-field row is the conditioning guard, not decoration: a large light close up must deviate
+// from the point-source model by a wide margin, and the renderer must follow the exact Lambert polygon
+// form there rather than the point model. Without it, a renderer that had hardcoded a 1/d^2 point light
+// would pass the far-field rows while being wrong everywhere a real area light differs from a point.
+bool checkQuadLightInverseSquare() {
+    constexpr float kTolerance = 0.02F;  // same Monte Carlo NEE noise band as checkQuadLightIrradiance above, at the same kSamplesPerPixel
+    // The far row must reach the point-source limit; 1e-2 is comfortably above the MC noise on the ratio and far below the near-field deviation the guard below demands, so the two cannot be confused.
+    constexpr float kPointLimitTolerance = 1e-2F;
+    constexpr float kMinNearFieldDeviation = 0.25F;
+    engine::scene::ThreadPool pool;
+    bool ok = true;
+
+    // Small square light facing -Z at the receiver, offset in x to clear the camera's own view cone for
+    // the same reason makeOverheadLight is (a one-sided light straddling the x=0,y=0 column shows the
+    // camera its non-emitting back face). Offset is held FIXED across the sweep, so the true probe-to-
+    // light distance is sqrt(kOffsetX^2 + z^2) rather than z, and is computed as such below.
+    constexpr float kOffsetX = 0.5F;
+    constexpr float kSide = 0.2F;
+    constexpr float kRadiance = 4.0F;
+    const auto makeLight = [](float centreX, float z, float side, float radiance) {
+        return engine::scene::QuadLight{glm::vec3(centreX - (side * 0.5F), -side * 0.5F, z),
+                                         glm::vec3(0.0F, side, 0.0F), glm::vec3(side, 0.0F, 0.0F),
+                                         glm::vec3(radiance), false};
+    };
+
+    struct Row {
+        const char* name;
+        engine::scene::QuadLight light;
+        bool farField;  // true: must reach the point-source limit. false: the near-field conditioning guard.
+    };
+    const std::array<Row, 5> rows{{
+        {"z=0.5  small", makeLight(kOffsetX, 0.5F, kSide, kRadiance), false},
+        {"z=1.0  small", makeLight(kOffsetX, 1.0F, kSide, kRadiance), false},
+        {"z=2.0  small", makeLight(kOffsetX, 2.0F, kSide, kRadiance), true},
+        {"z=4.0  small", makeLight(kOffsetX, 4.0F, kSide, kRadiance), true},
+        // Near field: a light 30x wider than the small one at half the nearest distance. Its solid angle
+        // approaches the receiver's whole hemisphere, where irradiance flattens instead of following 1/d^2.
+        {"z=0.5  large (near field)", makeLight(3.5F, 0.5F, 6.0F, 1.0F), false},
+    }};
+
+    std::cout << "integrator_validate: quad light inverse-square limit (E*d^2 / (L*A*cos_r*cos_l))\n";
+    float previousRatioError = std::numeric_limits<float>::max();
+    bool sawNearFieldDeviation = false;
+    for (const Row& row : rows) {
+        TestScene scene = makeLambertianFloor();
+        std::vector<int> instanceLightIndex(scene.instances.size(), -1);
+        appendLightGeometry(scene, row.light, /*quadIndex=*/0, instanceLightIndex);
+        std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
+        if (!accel.has_value()) {
+            std::cerr << "integrator_validate: FAILED to build Embree scene for " << row.name << '\n';
+            return false;
+        }
+        const std::vector<engine::scene::QuadLight> quads{row.light};
+        const glm::vec3 lo = centreMean(renderPassWithLights(scene, instanceLightIndex, quads,
+                                                              /*env=*/nullptr,
+                                                              makeLambertianSettings(0), *accel, pool,
+                                                              /*showSky=*/false)
+                                             .beauty);
+        const float renderedIrradiance = lo.x * kPi;
+
+        const std::array<glm::vec3, 4> corners{
+            row.light.origin, row.light.origin + row.light.edge0,
+            row.light.origin + row.light.edge0 + row.light.edge1, row.light.origin + row.light.edge1};
+        const glm::vec3 receiverNormal(0.0F, 0.0F, 1.0F);
+        const float exactIrradiance = lambertPolygonIrradiance(corners, glm::vec3(0.0F), receiverNormal,
+                                                                row.light.radiance.x);
+
+        // Point-source limit: E = L * A * cos(theta_r) * cos(theta_l) / d^2, evaluated at the light's centre.
+        const glm::vec3 centre = row.light.origin + (row.light.edge0 * 0.5F) + (row.light.edge1 * 0.5F);
+        const float distance = glm::length(centre);
+        const glm::vec3 toLight = centre / distance;
+        const float area = glm::length(row.light.edge0) * glm::length(row.light.edge1);
+        const float pointIrradiance = row.light.radiance.x * area * glm::dot(toLight, receiverNormal) *
+                                       glm::dot(-toLight, row.light.normal) / (distance * distance);
+        const float ratio = renderedIrradiance / pointIrradiance;
+
+        std::cout << "  " << row.name << "   d " << distance << "   rendered E " << renderedIrradiance
+                   << "   exact E " << exactIrradiance << "   E/E_point " << ratio << '\n';
+
+        // The renderer must track the EXACT polygon irradiance at every distance, near field included.
+        if (std::fabs(renderedIrradiance - exactIrradiance) > kTolerance * std::max(exactIrradiance, 0.05F)) {
+            std::cerr << "integrator_validate: FAILED inverse-square row " << row.name
+                       << " -- rendered E " << renderedIrradiance << ", Lambert polygon reference "
+                       << exactIrradiance << '\n';
+            ok = false;
+        }
+        const float ratioError = std::fabs(ratio - 1.0F);
+        if (row.farField) {
+            // Assert the PASS condition so a NaN ratio fails rather than slipping through an ordered compare.
+            if (!(ratioError <= kPointLimitTolerance)) {
+                std::cerr << "integrator_validate: FAILED inverse-square limit at " << row.name
+                           << " -- E/E_point " << ratio << ", expected 1 within " << kPointLimitTolerance << '\n';
+                ok = false;
+            }
+            // Monotone approach, so a renderer that merely happened to land on 1 at one distance cannot pass.
+            if (!(ratioError <= previousRatioError)) {
+                std::cerr << "integrator_validate: FAILED inverse-square convergence at " << row.name
+                           << " -- |E/E_point - 1| rose to " << ratioError << " from " << previousRatioError << '\n';
+                ok = false;
+            }
+            previousRatioError = ratioError;
+        } else if (ratioError >= kMinNearFieldDeviation) {
+            sawNearFieldDeviation = true;
+        }
+    }
+    // Keeps the guard honest: if no row ever deviated from the point model, the far-field rows proved nothing.
+    if (!sawNearFieldDeviation) {
+        std::cerr << "integrator_validate: FAILED inverse-square conditioning -- no near-field row deviated from the point-source model by " << kMinNearFieldDeviation << ", so the far-field rows are vacuous\n";
+        ok = false;
+    }
+    return ok;
+}
+
 }  // namespace
 
 int main() {
@@ -951,8 +1341,10 @@ int main() {
     const bool bindingOk = checkPerInstanceMaterials();
     const bool resolveOk = checkMaterialBinding();
     const bool partitionOk = checkTransportPartition();
+    const bool quadLightOk = checkQuadLightIrradianceOneSidedOcclusion();
+    const bool inverseSquareOk = checkQuadLightInverseSquare();
     if (!casesOk || !slabOk || !sphereOk || !absorptionOk || !onSurfaceTintOk || !bindingOk ||
-        !resolveOk || !partitionOk) {
+        !resolveOk || !partitionOk || !quadLightOk || !inverseSquareOk) {
         std::cerr << "integrator_validate: FAILED\n";
         return EXIT_FAILURE;
     }

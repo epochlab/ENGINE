@@ -91,6 +91,8 @@ add_executable(engine
     src/scene/environment_map.cpp
     src/scene/gbuffer_shading.cpp
     src/scene/gltf_loader.cpp
+    src/scene/light.cpp
+    src/scene/material.cpp
     src/scene/material_binding.cpp
     src/scene/path_tracer.cpp
     src/scene/path_trace_driver.cpp
@@ -162,7 +164,7 @@ if(IPO_SUPPORTED)
 endif()
 
 add_executable(nee_validate tools/nee_validate.cpp src/scene/bsdf.cpp src/scene/sampler.cpp
-               src/scene/environment_map.cpp src/gfx/hdr_image.cpp)
+               src/scene/environment_map.cpp src/scene/light.cpp src/gfx/hdr_image.cpp)
 target_include_directories(nee_validate PRIVATE include)
 target_compile_options(nee_validate PRIVATE -Wall -Wextra -Werror -march=native)
 target_link_libraries(nee_validate PRIVATE glm::glm OpenEXR::OpenEXR Imath::Imath)
@@ -184,7 +186,7 @@ endif()
 add_executable(integrator_validate tools/integrator_validate.cpp src/scene/path_tracer.cpp
                src/scene/gbuffer_shading.cpp src/scene/embree_accel.cpp src/scene/ray_types.cpp
                src/scene/shading_scene.cpp src/scene/bsdf.cpp src/scene/sampler.cpp
-               src/scene/environment_map.cpp src/scene/camera.cpp src/scene/thread_pool.cpp
+               src/scene/environment_map.cpp src/scene/light.cpp src/scene/camera.cpp src/scene/thread_pool.cpp
                src/scene/material_binding.cpp src/config/scene_config.cpp src/gfx/hdr_image.cpp)
 # material_binding/scene_config and the asset root are for checkMaterialBinding, which resolves real assets/materials/*.json files against named instances -- the materialOverrides path no other validator touches.
 target_include_directories(integrator_validate PRIVATE include ${JSON_DIR})
@@ -200,8 +202,8 @@ endif()
 add_executable(render_beauty tools/render_beauty.cpp src/scene/path_tracer.cpp
                src/scene/gbuffer_shading.cpp src/scene/embree_accel.cpp src/scene/ray_types.cpp
                src/scene/shading_scene.cpp src/scene/bsdf.cpp src/scene/sampler.cpp
-               src/scene/environment_map.cpp src/scene/camera.cpp src/scene/thread_pool.cpp
-               src/scene/gltf_loader.cpp src/scene/material_binding.cpp
+               src/scene/environment_map.cpp src/scene/light.cpp src/scene/camera.cpp src/scene/thread_pool.cpp
+               src/scene/gltf_loader.cpp src/scene/material.cpp src/scene/material_binding.cpp
                src/config/scene_config.cpp src/config/profile_config.cpp src/gfx/hdr_image.cpp
                $<TARGET_OBJECTS:vendored_no_tidy>)
 target_include_directories(render_beauty PRIVATE include ${CGLTF_DIR} ${JSON_DIR})

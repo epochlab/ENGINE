@@ -27,6 +27,7 @@
 #include "engine/scene/embree_accel.h"
 #include "engine/scene/environment_map.h"
 #include "engine/scene/gltf_loader.h"
+#include "engine/scene/light.h"
 #include "engine/scene/material_binding.h"
 #include "engine/scene/path_tracer.h"
 #include "engine/scene/thread_pool.h"
@@ -43,6 +44,9 @@ struct Options {
     int height = 0;
     int passes = 64;
     float exposureEv = 0.0F;
+    // -1 = use the scene's own authored environment.lightEnabled default; 0/1 override it -- lets a
+    // headless capture of the classic (env-off) Cornell variant not need a second scene.json.
+    int envLight = -1;
 };
 
 // Big-endian u32 append -- PNG is network byte order throughout.
@@ -263,6 +267,9 @@ bool parseArgs(int argc, char** argv, Options& options) {
         } else if (std::strcmp(argv[i], "--exposure") == 0) {
             if (!needsValue("--exposure")) { return false; }
             options.exposureEv = static_cast<float>(std::atof(argv[++i]));
+        } else if (std::strcmp(argv[i], "--env-light") == 0) {
+            if (!needsValue("--env-light")) { return false; }
+            options.envLight = std::atoi(argv[++i]) != 0 ? 1 : 0;
         } else {
             std::cerr << "render_beauty: unknown argument '" << argv[i]
                       << "'\nusage: render_beauty [--scene scenes/x.json] --out out.png "
@@ -317,6 +324,10 @@ int main(int argc, char** argv) {
     if (!model) {
         return EXIT_FAILURE;
     }
+    std::vector<int> instanceLightIndex(model->instances.size(), -1);
+    const std::vector<engine::scene::QuadLight> quadLights =
+        engine::scene::buildQuadLights(sceneConfig->lights, rootTransform);
+    engine::scene::appendQuadLights(*model, quadLights, instanceLightIndex);
 
     // Resolved the same way as main.cpp's initializeApp: profile.json names a preset, assets/config/camera.json supplies its dimensions.
     const std::optional<std::vector<engine::scene::Camera::FilmBackPreset>> filmBackPresets =
@@ -379,6 +390,12 @@ int main(int argc, char** argv) {
     const engine::scene::EnvironmentMap environmentMap(std::move(*environmentImage));
     engine::scene::ThreadPool threadPool;
 
+    // --env-light overrides the scene's own authored default (-1 = no override).
+    const bool envLightEnabled =
+        options.envLight >= 0 ? options.envLight != 0 : sceneConfig->environment.lightEnabled;
+    const engine::scene::LightSet lights(envLightEnabled ? &environmentMap : nullptr,
+                                         /*envRotationRadians=*/0.0F, /*envExposure=*/1.0F, quadLights);
+
     // Mean of `passes` independent single-sample passes, each with its own runSeed -- the same accumulation PathTraceDriver performs, done synchronously. Seeds are the pass index, so the whole render is reproducible.
     engine::scene::PathTraceResult result = engine::scene::makePathTraceResult(width, height);
     engine::gfx::HdrImage accumulated = engine::gfx::HdrImage{
@@ -387,10 +404,10 @@ int main(int argc, char** argv) {
     const std::atomic<std::uint64_t> generation{1};
     for (int pass = 0; pass < options.passes; ++pass) {
         engine::scene::renderPathTraced(camera, *accel, model->shadingTriangles, model->instances,
-                                         environmentMap, width, height, /*envRotationRadians=*/0.0F,
-                                         /*showSky=*/true, /*envExposure=*/1.0F, baseSettings,
-                                         *perInstanceSettings, static_cast<std::uint32_t>(pass),
-                                         generation, /*requestedGeneration=*/1U, threadPool, result);
+                                         instanceLightIndex, lights, width, height,
+                                         /*showSky=*/true, baseSettings, *perInstanceSettings,
+                                         static_cast<std::uint32_t>(pass), generation,
+                                         /*requestedGeneration=*/1U, threadPool, result);
         for (std::size_t i = 0; i < accumulated.rgba.size(); ++i) {
             accumulated.rgba[i] += result.beauty.rgba[i];
         }
