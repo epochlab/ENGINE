@@ -440,6 +440,7 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         .samplesPerPixel = profileConfig.pathTracer.samplesPerPixel,
         .maxBounces = profileConfig.pathTracer.maxBounces,
         .russianRouletteStartBounce = profileConfig.pathTracer.russianRouletteStartBounce,
+        .aoMaxDistance = profileConfig.pathTracer.aoMaxDistance,
         .bumpStrength = materialConfig->bumpStrength,
         .roughnessMin = materialConfig->roughnessMin,
         .roughnessMax = materialConfig->roughnessMax,

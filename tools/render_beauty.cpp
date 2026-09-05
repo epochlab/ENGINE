@@ -360,6 +360,7 @@ int main(int argc, char** argv) {
         .samplesPerPixel = 1,  // one sample per pass; convergence comes from accumulating passes below
         .maxBounces = profileConfig->pathTracer.maxBounces,
         .russianRouletteStartBounce = profileConfig->pathTracer.russianRouletteStartBounce,
+        .aoMaxDistance = profileConfig->pathTracer.aoMaxDistance,
         .bumpStrength = materialConfig->bumpStrength,
         .roughnessMin = materialConfig->roughnessMin,
         .roughnessMax = materialConfig->roughnessMax,

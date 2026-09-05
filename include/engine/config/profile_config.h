@@ -50,6 +50,7 @@ struct PathTracerConfig {
     int maxBounces;        // path tracer startup default; secondary/indirect bounces beyond the primary hit, 0 = direct lighting only
     int russianRouletteStartBounce;  // 0-based bounce index RR kicks in from
     int maxSamples;  // accumulated-pass cap for PathTraceDriver; 0 = unbounded
+    float aoMaxDistance;  // ray-traced AO occlusion range, scene units; occluders beyond it don't darken
 };
 
 // Session-wide defaults: engine::scene::DebugCameraController's initial (and reset-to) pose, lens/exposure params, and interactive tuning constants, plus everything else main.cpp needs at startup that isn't specific to one scene/asset (that's SceneConfig, which also owns the HDRI path) -- window size, initial debug-view state, and path-tracer settings. Externalized so these can be edited without recompiling; see assets/config/profile.json for the checked-in defaults. Grouped into window/camera/controls/render/pathTracer sub-objects, matching profile.json's shape.

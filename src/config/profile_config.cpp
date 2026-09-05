@@ -74,6 +74,7 @@ std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
         const int maxBounces = pathTracer.at("maxBounces").get<int>();
         const int russianRouletteStartBounce = pathTracer.at("russianRouletteStartBounce").get<int>();
         const int maxSamples = pathTracer.at("maxSamples").get<int>();
+        const float aoMaxDistance = pathTracer.at("aoMaxDistance").get<float>();
 
         // These feed Camera::verticalFovRadians()/ev100() as denominators or bases of a physically meaningful quantity -- a zero/negative value would silently produce inf/NaN there instead of failing at this asset-load boundary. filmBack itself is validated by loadFilmBackPresets, not here -- this function never loads that file.
         if (focalLengthMm <= 0.0F || aperture <= 0.0F || shutterSeconds <= 0.0F || iso <= 0.0F) {
@@ -86,6 +87,11 @@ std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
             interactiveRenderScale > 1.0F) {
             std::cerr << "loadProfileConfig: " << path
                        << " has a renderScale/interactiveRenderScale outside (0,1]\n";
+            return std::nullopt;
+        }
+        // AO ray tfar. At or below zero every occlusion ray is degenerate (tfar < tnear), Embree reports no hit, and the AO AOV reads a uniform 1.0 -- the inert white this feature exists to replace.
+        if (aoMaxDistance <= 0.0F) {
+            std::cerr << "loadProfileConfig: " << path << " has a non-positive aoMaxDistance\n";
             return std::nullopt;
         }
 
@@ -121,6 +127,7 @@ std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
                 maxBounces,
                 russianRouletteStartBounce,
                 maxSamples,
+                aoMaxDistance,
             },
         };
     } catch (const nlohmann::json::exception& e) {
