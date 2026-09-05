@@ -50,6 +50,7 @@ std::optional<std::vector<PathTraceSettings>> resolvePerInstanceSettings(
             settings.roughnessMax = overrideMaterial.roughnessMax;
             settings.diffuseColour = overrideMaterial.diffuseColour;
             settings.ior = overrideMaterial.ior;
+            settings.abbe = overrideMaterial.abbe;
             settings.transmissionFactor = overrideMaterial.transmissionFactor;
             settings.metallicFactor = overrideMaterial.metallicFactor;
             settings.roughnessFactor = overrideMaterial.roughnessFactor;

@@ -161,7 +161,8 @@ bool checkPose(const char* poseName, const Camera& camera, const EmbreeAccel& ac
                 perInstanceSettings[static_cast<std::size_t>(triangle.instanceIndex)];
             const ShadingVertex shading = interpolateShading(triangle, hit->u, hit->v);
             const ShadingFrame frame = buildShadingFrame(shading, material, settings);
-            const BsdfParams params = resolveBsdfParams(material, shading.uv, shading.colour, settings);
+            const BsdfParams params =
+                resolveBsdfParams(material, shading.uv, shading.colour, settings, std::nullopt);
             const glm::vec3 woWorld = -ray.dir;
             const float ndotV = std::max(glm::dot(frame.normal, woWorld), 1e-4F);
             const float fresnelVal = fresnelAtViewAngle(params, ndotV).x;

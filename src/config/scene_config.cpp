@@ -64,6 +64,7 @@ std::optional<MaterialConfig> loadMaterialConfig(const std::string& path) {
             j.at("roughnessMax").get<float>(),
             j.at("diffuseColour").get<glm::vec3>(),
             j.value("ior", 1.5F),
+            j.value("abbe", 0.0F),
             j.value("transmissionFactor", 0.0F),
             j.value("metallicFactor", 0.0F),
             j.at("roughnessFactor").get<float>(),
