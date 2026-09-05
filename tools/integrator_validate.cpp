@@ -475,6 +475,52 @@ bool checkTransmissiveSphere() {
             ok = false;
         }
     }
+
+    // The same invariant again, now with the dielectric dispersive: a white non-absorbing sphere is
+    // invisible whatever its index, and a wavelength-varying index is still, at each wavelength, an index.
+    // This is what makes it the gate on the one-sample channel estimator (path_tracer.cpp's hero-channel
+    // block). Each channel is an independent estimate of the same 1.0, so a missing or mis-scaled 1/p
+    // reads ~1/3 in every channel, and a hero channel that is re-drawn instead of sticky loses another
+    // factor on each further interface crossing -- neither of which any analytic BSDF test can see, since
+    // the estimator lives in the integrator and not in the BSDF.
+    // Read per channel rather than through renderCentre's max, which would hide a per-channel loss behind
+    // whichever channel happened to read highest.
+    // Real catalogue pairs, and N-BK7 is the material assets/materials/glass.json ships: the suite asserts
+    // the invariant for the glass the renderer actually renders, not for a plausible-looking stand-in.
+    struct DispersiveGlass {
+        const char* name;
+        float ior;
+        float abbe;
+    };
+    const std::array<DispersiveGlass, 2> dispersive{{
+        {"Schott N-BK7", 1.5168F, 64.17F},
+        {"Schott SF10", 1.72825F, 28.53F},
+    }};
+    std::cout << "  dispersive (per channel, the one-sample hero-channel estimator)\n";
+    for (const DispersiveGlass& glass : dispersive) {
+        const TestScene scene = makeSphereScene(0.02F, glm::vec3(0.04F));
+        std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
+        if (!accel.has_value()) {
+            std::cerr << "integrator_validate: FAILED to build Embree sphere scene\n";
+            return false;
+        }
+        PathTraceSettings settings =
+            makeSettings(kSphereBounces, 999, /*metallic=*/0.0F, /*transmission=*/1.0F);
+        settings.ior = glass.ior;
+        settings.abbe = glass.abbe;
+        const glm::vec3 lo = centreMean(renderPass(scene, env, settings, *accel, pool, true).beauty);
+        std::cout << "    " << glass.name << " (ior " << glass.ior << ", abbe " << glass.abbe << ")   Lo ["
+                  << lo.x << ", " << lo.y << ", " << lo.z << "]\n";
+        for (int c = 0; c < 3; ++c) {
+            if (std::fabs(lo[c] - 1.0F) > kTolerance) {
+                std::cerr << "integrator_validate: FAILED dispersive glass sphere transparency for "
+                          << glass.name << " channel " << c << " -- rendered " << lo[c]
+                          << ", expected 1.0. Energy conservation does not depend on wavelength, so this "
+                             "is the channel estimator losing or gaining energy, not the optics.\n";
+                ok = false;
+            }
+        }
+    }
     return ok;
 }
 
@@ -495,11 +541,21 @@ bool checkBeerLambert() {
         bool sphere;
         float depth;
         glm::vec3 expected;
+        float abbe;
     };
-    const std::array<AbsorptionCase, 3> cases{{
-        {"flat slab, depth == thickness", false, kSlabThickness, colour},
-        {"flat slab, depth == half thickness", false, kSlabThickness * 0.5F, colour * colour},
-        {"sphere, depth == chord", true, 2.0F * kSphereRadius, colour},
+    // The dispersive row is the hero channel crossed with the already-per-channel sigmaA, and it isolates
+    // the channel estimator from the refraction geometry: at ior 1.0 the Cauchy B coefficient is exactly 0
+    // (see bsdf.cpp's cauchyIor), so n(lambda) == 1 at every wavelength and the interface stays exactly
+    // index-matched -- the ray path, the traversal distance and the expected reading are all unchanged --
+    // while the hero-channel selection still fires, since it keys on abbe and transmissionFactor alone.
+    // What it asserts is that the two mechanisms do not interact: the surviving channel is attenuated by
+    // its OWN sigma_a and the two masked-out channels stay exactly zero, so the reading is still the
+    // authored transmissionColor rather than a channel-averaged or channel-swapped version of it.
+    const std::array<AbsorptionCase, 4> cases{{
+        {"flat slab, depth == thickness", false, kSlabThickness, colour, 0.0F},
+        {"flat slab, depth == half thickness", false, kSlabThickness * 0.5F, colour * colour, 0.0F},
+        {"sphere, depth == chord", true, 2.0F * kSphereRadius, colour, 0.0F},
+        {"flat slab, dispersive (abbe 64.17)", false, kSlabThickness, colour, 64.17F},
     }};
 
     const EnvironmentMap env = makeUniformEnvironment();
@@ -519,6 +575,7 @@ bool checkBeerLambert() {
         }
         PathTraceSettings settings = makeSettings(kBounces, 999, /*metallic=*/0.0F, /*transmission=*/1.0F);
         settings.ior = 1.0F;
+        settings.abbe = testCase.abbe;
         settings.transmissionColor = colour;
         settings.transmissionDepth = testCase.depth;
         const glm::vec3 lo = centreMean(renderPass(scene, env, settings, *accel, pool, true).beauty);
@@ -618,7 +675,7 @@ bool checkMaterialBinding() {
         return false;
     }
 
-    // How many of the 12 fields resolvePerInstanceSettings copies currently match the material file. A count rather than a bool so the base settings below can be required to match ZERO of them, which is what makes each individual copy observable. Exact equality is right: this is a copy, not a computation.
+    // How many of the 13 fields resolvePerInstanceSettings copies currently match the material file. A count rather than a bool so the base settings below can be required to match ZERO of them, which is what makes each individual copy observable. Exact equality is right: this is a copy, not a computation.
     const auto matchingFields = [](const PathTraceSettings& s,
                                     const engine::config::MaterialConfig& m) {
         return static_cast<int>(s.bumpStrength == m.bumpStrength) +
@@ -626,6 +683,7 @@ bool checkMaterialBinding() {
                static_cast<int>(s.roughnessMax == m.roughnessMax) +
                static_cast<int>(s.diffuseColour == m.diffuseColour) +
                static_cast<int>(s.ior == m.ior) +
+               static_cast<int>(s.abbe == m.abbe) +
                static_cast<int>(s.transmissionFactor == m.transmissionFactor) +
                static_cast<int>(s.metallicFactor == m.metallicFactor) +
                static_cast<int>(s.roughnessFactor == m.roughnessFactor) +
@@ -634,7 +692,7 @@ bool checkMaterialBinding() {
                static_cast<int>(s.transmissionDepth == m.transmissionDepth) +
                static_cast<int>(s.edgeTint == m.edgeTint);
     };
-    constexpr int kMaterialFields = 12;
+    constexpr int kMaterialFields = 13;
 
     const std::vector<MeshInstance> instances = {
         MeshInstance{makeMaterial(1.0F, glm::vec3(0.04F)), glm::mat4(1.0F), "alpha"},
@@ -647,6 +705,9 @@ bool checkMaterialBinding() {
     base.roughnessMax = 0.9F;
     base.diffuseColour = glm::vec3(0.3F, 0.4F, 0.5F);
     base.ior = 1.33F;
+    // Required, not cosmetic: at the commit that introduced abbe, glass.json did not yet declare one, so it
+    // loaded as the 0.0 default -- which is also makeSettings' value, and the non-vacuity gate below fires.
+    base.abbe = 40.0F;
     base.roughnessFactor = 0.75F;
     base.diffuseRoughness = 0.6F;
     base.transmissionColor = glm::vec3(0.5F);
@@ -734,14 +795,21 @@ bool checkTransportPartition() {
         float metallic;
         float transmission;
         int maxBounces;
+        float abbe;
     };
-    const std::array<PartitionCase, 6> cases{{
-        {"quad diffuse (rough 1.0)", Geometry::Quad, 1.0F, 0.0F, 0.0F, 1},
-        {"quad glossy dielectric (rough 0.35)", Geometry::Quad, 0.35F, 0.0F, 0.0F, 1},
-        {"quad rough conductor (rough 0.5)", Geometry::Quad, 0.5F, 1.0F, 0.0F, 2},
-        {"corner diffuse (rough 1.0)", Geometry::Corner, 1.0F, 0.0F, 0.0F, 4},
-        {"slab smooth glass (rough 0.02)", Geometry::Slab, 0.02F, 0.0F, 1.0F, 8},
-        {"slab rough glass (rough 0.4)", Geometry::Slab, 0.4F, 0.0F, 1.0F, 8},
+    // The dispersive row exists because the hero channel is the one mechanism that writes a DIFFERENT
+    // value into different channels of the same throughput -- it zeroes two of them. The partition is a
+    // per-channel identity, so a mask applied to beauty but not to the bucket accumulators (or vice versa)
+    // breaks it in exactly the two zeroed channels, which is invisible to every furnace in the suite:
+    // a furnace measures the total that arrives, and this asks where it was filed.
+    const std::array<PartitionCase, 7> cases{{
+        {"quad diffuse (rough 1.0)", Geometry::Quad, 1.0F, 0.0F, 0.0F, 1, 0.0F},
+        {"quad glossy dielectric (rough 0.35)", Geometry::Quad, 0.35F, 0.0F, 0.0F, 1, 0.0F},
+        {"quad rough conductor (rough 0.5)", Geometry::Quad, 0.5F, 1.0F, 0.0F, 2, 0.0F},
+        {"corner diffuse (rough 1.0)", Geometry::Corner, 1.0F, 0.0F, 0.0F, 4, 0.0F},
+        {"slab smooth glass (rough 0.02)", Geometry::Slab, 0.02F, 0.0F, 1.0F, 8, 0.0F},
+        {"slab rough glass (rough 0.4)", Geometry::Slab, 0.4F, 0.0F, 1.0F, 8, 0.0F},
+        {"slab dispersive glass (rough 0.4)", Geometry::Slab, 0.4F, 0.0F, 1.0F, 8, 64.17F},
     }};
 
     const EnvironmentMap env = makeUniformEnvironment();
@@ -761,10 +829,11 @@ bool checkTransportPartition() {
             std::cerr << "integrator_validate: FAILED to build Embree scene for " << testCase.name << '\n';
             return false;
         }
-        const engine::scene::PathTraceResult result = renderPass(
-            scene, env,
-            makeSettings(testCase.maxBounces, 999, testCase.metallic, testCase.transmission), *accel,
-            pool, /*showSky=*/false);
+        PathTraceSettings settings =
+            makeSettings(testCase.maxBounces, 999, testCase.metallic, testCase.transmission);
+        settings.abbe = testCase.abbe;
+        const engine::scene::PathTraceResult result =
+            renderPass(scene, env, settings, *accel, pool, /*showSky=*/false);
 
         float worstGap = 0.0F;
         float worstBeauty = 0.0F;

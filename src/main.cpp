@@ -428,6 +428,7 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         .roughnessMax = materialConfig->roughnessMax,
         .diffuseColour = materialConfig->diffuseColour,
         .ior = materialConfig->ior,
+        .abbe = materialConfig->abbe,
         .transmissionFactor = materialConfig->transmissionFactor,
         .metallicFactor = materialConfig->metallicFactor,
         .roughnessFactor = materialConfig->roughnessFactor,

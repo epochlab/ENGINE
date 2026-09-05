@@ -30,6 +30,7 @@ struct PathTraceSettings {
     // Global material override, sourced from the scene's material file (SceneConfig::materialPath, loaded via loadMaterialConfig) -- see resolveBsdfParams (path_tracer.cpp).
     glm::vec3 diffuseColour;
     float ior;
+    float abbe = 0.0F;  // Abbe number pairing with ior for dispersion; 0 = none, see bsdf.h's cauchyIor
     float transmissionFactor;
     float metallicFactor;
     float roughnessFactor;

@@ -29,6 +29,8 @@ struct MaterialConfig {
     glm::vec3 diffuseColour;      // multiplies baseColorTexture
     // Dielectric IOR, non-metal lobes only. Optional, default 1.5: nullified by (1-metallic) at metallicFactor=1, so a pure conductor (e.g. chrome.json) need not declare it.
     float ior = 1.5F;
+    // Abbe number V_d = (n_d-1)/(n_F-n_C) of the dielectric, pairing with ior to give it a wavelength dependence (transmissionFactor>0 only). Optional, default 0.0 = no dispersion, matching Arnold and OpenPBR; a real catalogue glass runs ~20 (dense flint) to ~65 (crown), water and diamond both ~55, and lower means more dispersion. See bsdf.cpp's cauchyIor.
+    float abbe = 0.0F;
     // KHR_materials_transmission-style factor, 0 = opaque. Optional, default 0.0: a true no-op (transmitProb=0), so a material with no transmission lobe (e.g. clay.json, chrome.json) need not declare it.
     float transmissionFactor = 0.0F;
     // Optional, default 0.0: a true no-op, so a non-metal material (e.g. clay.json, glass.json) need not declare it.
