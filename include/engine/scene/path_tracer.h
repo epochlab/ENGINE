@@ -20,6 +20,8 @@ struct PathTraceSettings {
     int samplesPerPixel;
     int maxBounces;  // secondary/indirect bounces beyond the always-traced primary hit; 0 = direct lighting only
     int russianRouletteStartBounce;
+    // Ambient-occlusion ray length bound (Miller 1994; Landis 2002): a hard cutoff, no falloff curve, so the AO AOV measures local contact rather than whole-room enclosure. Scene-scale dependent, sourced from profile.json. Defaulted because the validation tools build settings by value-init plus assignment, where an undefaulted field would silently be 0 and disable every AO ray.
+    float aoMaxDistance = 0.25F;
     float rrMinProb = 0.05F;  // floor: stops a near-zero-throughput path being killed with near-certainty
     // Ceiling of exactly 1.0: a path carrying full throughput must never be terminated. Any lower caps survival for no gain -- it saves a fraction of deep-path tracing and pays for it with variance costing more than that fraction in extra samples.
     float rrMaxProb = 1.0F;
