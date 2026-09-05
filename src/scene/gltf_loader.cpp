@@ -381,7 +381,7 @@ void appendQuadLights(LoadedModel& model, const std::vector<QuadLight>& lights,
                        std::vector<int>& instanceLightIndex) {
     for (std::size_t i = 0; i < lights.size(); ++i) {
         const QuadLight& light = lights[i];
-        const glm::vec3 normal = glm::normalize(glm::cross(light.edge0, light.edge1));
+        const glm::vec3& normal = light.normal;
         const glm::vec4 tangent(glm::normalize(light.edge0), 1.0F);
         const auto vertex = [&](const glm::vec3& position, glm::vec2 uv) {
             return ShadingVertex{position, normal, uv, tangent};

@@ -325,19 +325,8 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
     std::vector<int> instanceLightIndex(model->instances.size(), -1);
-    // Same transform convention as main.cpp's initializeApp: origin is a point, edge0/edge1 are
-    // displacement vectors (w=0, no translation).
-    std::vector<engine::scene::QuadLight> quadLights;
-    quadLights.reserve(sceneConfig->lights.size());
-    for (const engine::config::QuadLightConfig& light : sceneConfig->lights) {
-        quadLights.push_back(engine::scene::QuadLight{
-            glm::vec3(rootTransform * glm::vec4(light.origin, 1.0F)),
-            glm::vec3(rootTransform * glm::vec4(light.edge0, 0.0F)),
-            glm::vec3(rootTransform * glm::vec4(light.edge1, 0.0F)),
-            light.color * light.intensity,
-            light.twoSided,
-        });
-    }
+    const std::vector<engine::scene::QuadLight> quadLights =
+        engine::scene::buildQuadLights(sceneConfig->lights, rootTransform);
     engine::scene::appendQuadLights(*model, quadLights, instanceLightIndex);
 
     // Resolved the same way as main.cpp's initializeApp: profile.json names a preset, assets/config/camera.json supplies its dimensions.
