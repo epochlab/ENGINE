@@ -19,9 +19,15 @@ struct LineProximity {
 };
 [[nodiscard]] LineProximity nearLineSegmentPx(glm::vec2 p, glm::vec2 a, glm::vec2 b, float thicknessPx);
 
+// heroChannel: the RGB channel a dispersive path has committed to, which selects the wavelength the
+// ior is resolved at (bsdf.h's cauchyIor/kRgbWavelengthsNm). nullopt -- the rasterizer's non-spectral
+// preview, and every path that has not crossed a dispersive interface -- keeps the authored d-line ior.
+// No default argument: the two non-path-tracer callers pass nullopt explicitly, so a third caller has
+// to decide rather than inherit silence.
 [[nodiscard]] BsdfParams resolveBsdfParams(const Material& material, glm::vec2 uv,
                                             const glm::vec3& vertexColour,
-                                            const PathTraceSettings& settings);
+                                            const PathTraceSettings& settings,
+                                            std::optional<int> heroChannel);
 
 // Gram-Schmidt re-orthogonalized tangent frame, normal- and bump-mapped.
 [[nodiscard]] ShadingFrame buildShadingFrame(const ShadingVertex& shading, const Material& material,
