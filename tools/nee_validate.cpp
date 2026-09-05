@@ -34,7 +34,8 @@ BsdfParams makeParams(float roughness, float metallic) {
     const glm::vec3 f0 = glm::mix(glm::vec3(0.04F), baseColor, metallic);
     return BsdfParams{baseColor,   metallic, roughness, f0, /*edgeTint=*/glm::vec3(1.0F),
                        /*ior=*/1.5F, /*transmissionFactor=*/0.0F, /*diffuseRoughness=*/0.0F,
-                       engine::scene::eonAlbedoInversion(baseColor, 0.0F)};
+                       engine::scene::eonAlbedoInversion(baseColor, 0.0F),
+                       /*transmissionTint=*/glm::vec3(1.0F)};
 }
 
 glm::vec3 sampleUniformHemisphere(std::mt19937& rng) {

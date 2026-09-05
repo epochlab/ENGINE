@@ -8,6 +8,7 @@
 #include <complex>
 #include <cstdlib>
 #include <iostream>
+#include <optional>
 #include <random>
 
 #include <glm/glm.hpp>
@@ -29,7 +30,8 @@ BsdfParams makeParams(float roughness, float metallic, float transmissionFactor,
     const glm::vec3 f0 = glm::mix(glm::vec3(0.04F), baseColor, metallic);
     return BsdfParams{baseColor,          metallic, roughness,          f0, edgeTint,
                        /*ior=*/1.5F, transmissionFactor, diffuseRoughness,
-                       engine::scene::eonAlbedoInversion(baseColor, diffuseRoughness)};
+                       engine::scene::eonAlbedoInversion(baseColor, diffuseRoughness),
+                       /*transmissionTint=*/glm::vec3(1.0F)};
 }
 
 // A colored/dark conductor (f0=0.5, not the white f0=baseColor=1 makeParams gives at metallic=1): the case that caught evaluateDiffuseLobe's pdf-gating bug.
@@ -38,7 +40,8 @@ BsdfParams makeColoredMetalParams(float roughness, glm::vec3 edgeTint = glm::vec
     const glm::vec3 baseColor(1.0F);
     return BsdfParams{baseColor,    1.0F, roughness, glm::vec3(0.5F), edgeTint,
                        /*ior=*/1.5F, /*transmissionFactor=*/0.0F, /*diffuseRoughness=*/0.0F,
-                       engine::scene::eonAlbedoInversion(baseColor, 0.0F)};
+                       engine::scene::eonAlbedoInversion(baseColor, 0.0F),
+                       /*transmissionTint=*/glm::vec3(1.0F)};
 }
 
 // Uniform-solid-angle hemisphere sample (PBRT-style inversion, same as furnace_test.cpp): z=u1, r=sqrt(1-u1^2), phi=2*pi*u2, pdf=1/(2*pi).
@@ -289,7 +292,8 @@ BsdfParams makeDiffuseParams(const glm::vec3& baseColor, float diffuseRoughness)
     return BsdfParams{baseColor,          /*metallic=*/0.0F,          /*roughness=*/0.5F,
                        glm::vec3(0.0F),    /*edgeTint=*/glm::vec3(1.0F), /*ior=*/1.0F,
                        /*transmissionFactor=*/0.0F, diffuseRoughness,
-                       engine::scene::eonAlbedoInversion(baseColor, diffuseRoughness)};
+                       engine::scene::eonAlbedoInversion(baseColor, diffuseRoughness),
+                       /*transmissionTint=*/glm::vec3(1.0F)};
 }
 
 struct AlbedoEstimate {
@@ -432,6 +436,123 @@ bool checkTransmissiveEnergyBalance() {
                 }
             }
         }
+    }
+    return ok;
+}
+
+// A white, non-absorbing transmissive dielectric with an explicit baseColor and transmissionTint -- the one configuration this suite never had, makeParams above hardcoding baseColor 1 and every transmissive row leaving the tint white.
+BsdfParams makeTransmissiveTintParams(float roughness, const glm::vec3& baseColor,
+                                       const glm::vec3& transmissionTint) {
+    return BsdfParams{baseColor,          /*metallic=*/0.0F,            roughness,
+                       glm::vec3(0.04F),   /*edgeTint=*/glm::vec3(1.0F), /*ior=*/1.5F,
+                       /*transmissionFactor=*/1.0F, /*diffuseRoughness=*/0.0F,
+                       engine::scene::eonAlbedoInversion(baseColor, 0.0F), transmissionTint};
+}
+
+// Snell refraction of wo about +z, transcribed here independently of bsdf.cpp: the direction the interface actually refracts into, where the single-scattering transmission lobe is strongest.
+glm::vec3 refractAboutZ(const glm::vec3& wo, float eta) {
+    const float sin2ThetaT = eta * eta * std::max(0.0F, 1.0F - (wo.z * wo.z));
+    const float cosThetaT = std::sqrt(std::max(0.0F, 1.0F - sin2ThetaT));
+    return {-eta * wo.x, -eta * wo.y, -cosThetaT};
+}
+
+// Throughput of sampleBsdf's smooth delta transmission branch, which carries its tint on a different code path from the continuous lobes and so needs measuring separately.
+// pdf == 0 identifies the delta branch: a rough transmission sample returns a real density. The seed is fixed and the lobe-selection probabilities are colourless, so every params variation below draws the identical lobe and the identical direction.
+std::optional<glm::vec3> deltaTransmitThroughput(const BsdfParams& params, const glm::vec3& wo,
+                                                  std::uint32_t seed) {
+    for (int i = 0; i < 64; ++i) {
+        engine::scene::Sampler sampler(0, 0, i, seed);
+        const std::optional<engine::scene::BsdfSample> sample =
+            engine::scene::sampleBsdf(params, wo, sampler);
+        if (sample.has_value() && sample->type == engine::scene::LobeType::Transmission &&
+            sample->pdf == 0.0F) {
+            return sample->throughputWeight;
+        }
+    }
+    return std::nullopt;
+}
+
+// The transmission-tint convention, and the only instrument in this suite that can see it: every other transmissive case here runs at baseColor 1 and transmissionTint 1, where both are exactly the identity.
+// OpenPBR and Arnold both make transmissionColor the sole tint of transmitted light -- realized in the volume at transmissionDepth > 0, on the surface at 0 -- while base_color is "the observed reflection color (viewed at normal incidence under uniform illumination)" and leaves transmitted light "unaffected". glTF KHR_materials_transmission tints with baseColor only for want of a transmission colour of its own, its own text defining that tint as the infinitely-thin absorption "1.0 - baseColor", which is the depth == 0 case under another name.
+// Two complementary assertions per row. Independence of baseColor is asserted EXACTLY: at metallic 0 baseColor reaches f0 not at all, and the diffuse lobe is identically zero on the far side, so no term of the transmission value can legitimately move by one bit.
+// Linearity in the tint carries a few-ULP relative band instead, because the rough lobe sums a single-scattering and a multiple-scattering term and FP multiplication does not distribute over a sum. That band is numerical, not physical slack: a tint applied to only one of the two terms misses by the other term's whole share.
+// Rows span both code paths a tint must travel: the rough continuous lobe (evaluateTransmissionLobe plus transmitMultiScatter, which share one returned value here) and sampleBsdf's smooth delta branch.
+bool checkTransmissionTint() {
+    constexpr float kUlpBand = 1e-6F;
+    constexpr float kSmoothRoughness = 0.005F;   // below bsdf.cpp's smooth threshold, so transmission is the delta branch
+    const glm::vec3 baseColour(0.2F, 0.5F, 0.9F);
+    const glm::vec3 tint(0.3F, 0.6F, 0.9F);
+    const glm::vec3 white(1.0F);
+    const std::array<float, 3> roughnesses = {0.3F, 0.6F, 1.0F};
+    const std::array<float, 3> ndotVs = {0.95F, 0.7F, 0.35F};
+
+    bool ok = true;
+    int measured = 0;
+    std::uint32_t seed = 31000;
+
+    // One row's pair of assertions, shared by the rough and smooth paths: T must not move with baseColor at all, and must scale exactly with the tint.
+    const auto assertRow = [&](const char* lobe, float roughness, float ndotV,
+                                const glm::vec3& tWhite, const glm::vec3& tBaseColoured,
+                                const glm::vec3& tTinted, const glm::vec3& tBoth) {
+        if (maxChannel(tWhite) <= 0.0F) {
+            return;   // no transmission at this configuration; the backstop below catches an all-skipped run
+        }
+        ++measured;
+        const glm::vec3 expected = tint * tWhite;
+        std::cout << "  " << lobe << "  roughness " << roughness << "  ndotV " << ndotV
+                  << "   T(white) [" << tWhite.x << ", " << tWhite.y << ", " << tWhite.z
+                  << "]   tinted/expected [" << tTinted.x / expected.x << ", "
+                  << tTinted.y / expected.y << ", " << tTinted.z / expected.z << "]\n";
+        for (int c = 0; c < 3; ++c) {
+            if (tBaseColoured[c] != tWhite[c] || tBoth[c] != tTinted[c]) {
+                std::cerr << "bsdf_validate: FAILED transmission tint at " << lobe << " roughness="
+                          << roughness << " ndotV=" << ndotV << " channel " << c
+                          << " -- baseColor moved the transmitted value from " << tWhite[c]
+                          << " to " << tBaseColoured[c]
+                          << ". baseColor is a reflection quantity (OpenPBR base_color) and must not "
+                             "reach the transmission lobe; transmissionTint is what tints it.\n";
+                ok = false;
+            }
+            if (std::fabs(tTinted[c] - expected[c]) > kUlpBand * std::fabs(expected[c])) {
+                std::cerr << "bsdf_validate: FAILED transmission tint linearity at " << lobe
+                          << " roughness=" << roughness << " ndotV=" << ndotV << " channel " << c
+                          << " -- measured " << tTinted[c] << ", expected " << expected[c]
+                          << ". transmissionTint multiplies the transmitted value once, so the lobe "
+                             "must be exactly linear in it.\n";
+                ok = false;
+            }
+        }
+    };
+
+    std::cout << "bsdf_validate: transmission tint convention (transmissionColor tints transmission, baseColor does not)\n";
+    for (float ndotV : ndotVs) {
+        ++seed;
+        const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (ndotV * ndotV))), 0.0F, ndotV);
+        const glm::vec3 wi = refractAboutZ(wo, 1.0F / 1.5F);
+        for (float roughness : roughnesses) {
+            const auto rough = [&](const glm::vec3& bc, const glm::vec3& tn) {
+                return engine::scene::evaluateBsdfSplit(makeTransmissiveTintParams(roughness, bc, tn),
+                                                         wo, wi)
+                    .transmission;
+            };
+            assertRow("rough ", roughness, ndotV, rough(white, white), rough(baseColour, white),
+                       rough(white, tint), rough(baseColour, tint));
+        }
+        // The delta branch does not depend on the roughness sweep above -- it is selected by being below the smooth threshold -- so it is measured once per view angle rather than once per row.
+        const auto smooth = [&](const glm::vec3& bc, const glm::vec3& tn) {
+            return deltaTransmitThroughput(makeTransmissiveTintParams(kSmoothRoughness, bc, tn), wo,
+                                            seed)
+                .value_or(glm::vec3(0.0F));
+        };
+        assertRow("smooth", kSmoothRoughness, ndotV, smooth(white, white), smooth(baseColour, white),
+                   smooth(white, tint), smooth(baseColour, tint));
+    }
+
+    // Backstop: every assertion above is skipped where the interface transmits nothing, so a change that silently zeroed the transmission lobe would otherwise pass this check by vacuum.
+    if (measured == 0) {
+        std::cerr << "bsdf_validate: FAILED transmission tint -- no row transmitted anything, so "
+                     "nothing was asserted\n";
+        ok = false;
     }
     return ok;
 }
@@ -706,7 +827,8 @@ bool checkConductorFresnel() {
             return BsdfParams{glm::vec3(1.0F),          1.0F, roughness, glm::vec3(reflectivity),
                                edgeTint,                 /*ior=*/1.5F,
                                /*transmissionFactor=*/0.0F, /*diffuseRoughness=*/0.0F,
-                               engine::scene::eonAlbedoInversion(glm::vec3(1.0F), 0.0F)};
+                               engine::scene::eonAlbedoInversion(glm::vec3(1.0F), 0.0F),
+                               /*transmissionTint=*/glm::vec3(1.0F)};
         };
         // R(theta=0) == r, independent of edgeTint: wo == wi == +z puts woDotNh at exactly 1.
         const glm::vec3 normalIncidence(0.0F, 0.0F, 1.0F);
@@ -914,7 +1036,8 @@ bool checkTransmissionReciprocity() {
             const BsdfParams params{glm::vec3(1.0F), 0.0F, roughness,
                                      glm::vec3(0.04F), glm::vec3(1.0F), ior,
                                      /*transmissionFactor=*/1.0F, /*diffuseRoughness=*/0.0F,
-                                     engine::scene::eonAlbedoInversion(glm::vec3(1.0F), 0.0F)};
+                                     engine::scene::eonAlbedoInversion(glm::vec3(1.0F), 0.0F),
+                                     /*transmissionTint=*/glm::vec3(1.0F)};
             for (float mu : cosines) {
                 const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (mu * mu))), 0.0F, mu);
                 const glm::vec3 refracted =
@@ -1009,6 +1132,7 @@ int main() {
     const bool eonDiffuseOk = checkEonDiffuseFurnace();
     const bool eonInversionOk = checkEonAlbedoInversion();
     const bool transmissiveEnergyOk = checkTransmissiveEnergyBalance();
+    const bool transmissionTintOk = checkTransmissionTint();
     const bool conductorFresnelOk = checkConductorFresnel();
     const bool averageFresnelOk = checkAverageFresnel();
     const bool dispersionOk = checkCauchyDispersion();
@@ -1017,7 +1141,7 @@ int main() {
     const bool roundTripOk = checkTransmissionRoundTrip();
 
     if (!pdfOk || !furnaceOk || !whiteFurnaceOk || !eonDiffuseOk || !eonInversionOk ||
-        !transmissiveEnergyOk || !conductorFresnelOk || !averageFresnelOk || !dispersionOk ||
+        !transmissiveEnergyOk || !transmissionTintOk || !conductorFresnelOk || !averageFresnelOk || !dispersionOk ||
         !reciprocityOk || !transmissionReciprocityOk || !roundTripOk) {
         std::cerr << "bsdf_validate: FAILED\n";
         return EXIT_FAILURE;

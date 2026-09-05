@@ -20,11 +20,15 @@ namespace {
 
 constexpr float kRayEpsilon = 1e-4F;
 
-// Beer-Lambert absorption coefficient (Arnold standard_surface convention): the color read at
-// transmissionDepth. Floored against user-authored JSON reaching color==0 (-log(0)=+inf) or depth==0
-// (divide by zero) -- both are reachable material-file inputs, not internal invariants.
+// Beer-Lambert absorption coefficient (Arnold standard_surface / OpenPBR convention): sigma_a = -ln(transmissionColor)/transmissionDepth, transmissionColor being the colour white light reaches after travelling transmissionDepth inside the medium.
+// depth == 0 means there is no interior medium at all, not an infinitely dense one: transmissionColor is then the on-surface tint BsdfParams::transmissionTint carries, so absorption here is exactly zero rather than the -ln(c)/1e-4 a floored divide used to return, which rendered any coloured depth-0 material black.
+// Zero rather than an absent medium, so tracePath's enter/exit toggle below stays symmetric across a depth == 0 interface.
+// The colour floor stays: color == 0 is a reachable material-file input and -log(0) = +inf would meet a t = +inf as 0*inf on a miss.
 glm::vec3 sigmaAFromTransmission(const glm::vec3& color, float depth) {
-    return -glm::log(glm::max(color, glm::vec3(1e-6F))) / std::max(depth, 1e-4F);
+    if (depth <= 0.0F) {
+        return glm::vec3(0.0F);
+    }
+    return -glm::log(glm::max(color, glm::vec3(1e-6F))) / depth;
 }
 
 // Reflection/diffuse continuation rays stay close to the geometric normal's hemisphere, where
