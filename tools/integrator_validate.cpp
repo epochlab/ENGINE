@@ -367,7 +367,8 @@ bool runCases() {
 
         const BsdfParams params{glm::vec3(1.0F),      testCase.metallic, testCase.roughness,
                                  testCase.f0,          glm::vec3(1.0F),   /*ior=*/1.5F,
-                                 /*transmissionFactor=*/0.0F, /*diffuseRoughness=*/0.0F};
+                                 /*transmissionFactor=*/0.0F, /*diffuseRoughness=*/0.0F,
+                                 engine::scene::eonAlbedoInversion(glm::vec3(1.0F), 0.0F)};
         const float reference = referenceLo(params, glm::vec3(0.0F, 0.0F, 1.0F), kReferenceSamples,
                                              referenceRng);
 

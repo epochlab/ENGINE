@@ -541,10 +541,26 @@ float evalFonAlbedoApprox(float mu, float r) {
     return (1.0F + (r * gOverPi)) * af;
 }
 
+}  // namespace
+
+// Paper Appendix A: the rho achieving a desired observed albedo, so diffuseColour means what OpenPBR says base_color means -- "the observed reflection color (viewed at normal incidence under uniform illumination) in areas where the Fresnel reflection is negligible". OpenPBR declares that meaning but then sets rho = C directly, which does not deliver it at high diffuseRoughness; this closes the gap, measured at 9% relative for C=0.5 at r=1.
+// Eq. 29 gives the normalised FON albedos at normal incidence, E_F(N) = 1/(1+c1*r) and <E_F> = (1+c2*r)/(1+c1*r). Setting eq. 28's E_EON(N) = C yields the quadratic a*rho^2 + b*rho - C = 0 with eq. 31's a = <E_F> - E_F(N) and b = E_F(N) + C*(1-<E_F>), both non-negative over the whole domain.
+// Eq. 30 states the root as (-b + sqrt(b*b + 4ac))/(2a), which is the UNSTABLE one: a is proportional to r, so as r -> 0 a vanishing denominator divides a difference of near-equal quantities. The paper's remedy is a Taylor form switched in below some roughness; the conjugate-multiplied root used here is algebraically identical, needs no such threshold, and cancels nothing since b > 0 throughout (Press et al., Numerical Recipes 5.6). Constants and both coefficients are the appendix's, untouched.
+// Hence the whole domain is one branch-free expression: r=0 gives a=0, b=1 and so rho=C -- the Lambertian identity, out of the algebra rather than special-cased -- and C=1 gives rho=1 exactly, leaving the white furnace untouched.
+// Exported for tools/bsdf_validate.cpp's checkEonAlbedoInversion; resolved once per hit in gbuffer_shading.cpp rather than per lobe evaluation, since evaluateBsdfSplit runs repeatedly per vertex.
+glm::vec3 eonAlbedoInversion(const glm::vec3& albedo, float r) {
+    const float eFonNormal = 1.0F / (1.0F + (kConstant1Fon * r));
+    const float avgEFon = eFonNormal * (1.0F + (kConstant2Fon * r));
+    const float a = avgEFon - eFonNormal;
+    const glm::vec3 b = glm::vec3(eFonNormal) + (albedo * (1.0F - avgEFon));
+    return (2.0F * albedo) / (b + glm::sqrt((b * b) + (4.0F * a * albedo)));
+}
+
+namespace {
+
 // EON BRDF value (paper eq. 16-19): FON single scatter plus an analytic multiple-scattering lobe. rho
-// is the single-scattering albedo; using baseColor directly here (rather than white + post-tint) means
-// the multi-scatter term's saturation at high roughness/chromatic albedo is left in, per the paper's
-// simpler alternative to its Appendix A albedo inversion.
+// is the single-scattering albedo, NOT the authored colour: eonAlbedoInversion above maps one to the
+// other, so that the albedo this lobe is observed to have is the albedo the material asked for.
 glm::vec3 evaluateEon(const glm::vec3& rho, float r, const glm::vec3& wi, const glm::vec3& wo) {
     const float muI = wi.z;
     const float muO = wo.z;
@@ -671,7 +687,7 @@ LobeEval evaluateDiffuseLobe(const BsdfParams& params, const glm::vec3& wo, cons
     if (wi.z <= 0.0F || wo.z <= 0.0F) {
         return {glm::vec3(0.0F), 0.0F};
     }
-    const glm::vec3 f = evaluateEon(params.baseColor, params.diffuseRoughness, wi, wo);
+    const glm::vec3 f = evaluateEon(params.diffuseRho, params.diffuseRoughness, wi, wo);
     return {f * diffuseKdAt(params, wi, lobes), pdfEon(wo, wi, params.diffuseRoughness)};
 }
 

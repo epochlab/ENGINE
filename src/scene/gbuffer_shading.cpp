@@ -40,7 +40,8 @@ BsdfParams resolveBsdfParams(const Material& material, glm::vec2 uv, const glm::
     const glm::vec3 f0 = glm::mix(specular, baseColor, settings.metallicFactor);
     return BsdfParams{baseColor,          settings.metallicFactor, roughness,
                        f0,                settings.edgeTint,       settings.ior,
-                       settings.transmissionFactor, settings.diffuseRoughness};
+                       settings.transmissionFactor, settings.diffuseRoughness,
+                       eonAlbedoInversion(baseColor, settings.diffuseRoughness)};
 }
 
 ShadingFrame buildShadingFrame(const ShadingVertex& shading, const Material& material,

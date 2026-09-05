@@ -28,14 +28,17 @@ BsdfParams makeParams(float roughness, float metallic, float transmissionFactor,
     const glm::vec3 baseColor(1.0F);  // worst case: full white albedo
     const glm::vec3 f0 = glm::mix(glm::vec3(0.04F), baseColor, metallic);
     return BsdfParams{baseColor,          metallic, roughness,          f0, edgeTint,
-                       /*ior=*/1.5F, transmissionFactor, diffuseRoughness};
+                       /*ior=*/1.5F, transmissionFactor, diffuseRoughness,
+                       engine::scene::eonAlbedoInversion(baseColor, diffuseRoughness)};
 }
 
 // A colored/dark conductor (f0=0.5, not the white f0=baseColor=1 makeParams gives at metallic=1): the case that caught evaluateDiffuseLobe's pdf-gating bug.
 // A white f0 clamps specularProb to 0.95, leaving only 5% diffuse selection mass to hide a diffuse-pdf bug under this test's tolerance; f0=0.5 leaves ~50%, large enough for the same bug to fail loudly.
 BsdfParams makeColoredMetalParams(float roughness, glm::vec3 edgeTint = glm::vec3(1.0F)) {
-    return BsdfParams{glm::vec3(1.0F), 1.0F, roughness, glm::vec3(0.5F), edgeTint,
-                       /*ior=*/1.5F, /*transmissionFactor=*/0.0F, /*diffuseRoughness=*/0.0F};
+    const glm::vec3 baseColor(1.0F);
+    return BsdfParams{baseColor,    1.0F, roughness, glm::vec3(0.5F), edgeTint,
+                       /*ior=*/1.5F, /*transmissionFactor=*/0.0F, /*diffuseRoughness=*/0.0F,
+                       engine::scene::eonAlbedoInversion(baseColor, 0.0F)};
 }
 
 // Uniform-solid-angle hemisphere sample (PBRT-style inversion, same as furnace_test.cpp): z=u1, r=sqrt(1-u1^2), phi=2*pi*u2, pdf=1/(2*pi).
@@ -262,6 +265,106 @@ bool checkEonDiffuseFurnace() {
                 std::cerr << "bsdf_validate: FAILED EON diffuse furnace energy at diffuseRoughness="
                           << diffuseRoughness << " ndotV=" << ndotV << " Lo=[" << minChannel(lo) << ", "
                           << maxChannel(lo) << "] (expected 1.0 +/- " << kTolerance << ")\n";
+                ok = false;
+            }
+        }
+    }
+    return ok;
+}
+
+// Paper Listing 1's E_EON at normal incidence, the EON directional albedo rho*E_F + rho_ms*(1-E_F), transcribed here independently of bsdf.cpp's evaluateEon and re-deriving c1/c2 from literals, so the check is not the same arithmetic tested against itself -- the discipline checkAverageFresnel applies to the Fresnel averages.
+// Normal incidence needs no FON G-term: the exact albedo's G (eq. 13) and the renderer's quartic fit (evalFonAlbedoApprox) BOTH vanish at mu=1, leaving AF = 1/(1+c1*r) either way. That is why eq. 29, and so the inversion built on it, is exact here rather than inheriting the fit's <0.1% error -- and why that error reaches this check only through measureDiffuseAlbedo, which integrates over every mu, where kFitTolerance covers it.
+glm::vec3 referenceEonAlbedo(const glm::vec3& rho, float r) {
+    const float c1 = 0.5F - (2.0F / (3.0F * kPi));
+    const float c2 = (2.0F / 3.0F) - (28.0F / (15.0F * kPi));
+    const float eFon = 1.0F / (1.0F + (c1 * r));
+    const float avgEFon = eFon * (1.0F + (c2 * r));
+    const glm::vec3 rhoMs = (rho * rho) * avgEFon / (glm::vec3(1.0F) - (rho * (1.0F - avgEFon)));
+    return (rho * eFon) + (rhoMs * (1.0F - eFon));
+}
+
+// A bare EON diffuse surface. ior=1 is what makes the measurement below exact rather than approximate: exact dielectric Fresnel is identically zero there while Schlick's (1-c)^5 tail is not, so coatFresnelRatio and dielectricFresnelAvg both collapse, diffuseKdAt becomes exactly 1, and evaluateBsdfSplit's diffuse channel is the raw EON lobe with no coupling factor multiplying it. Same device checkBeerLambert uses to remove the interface from a transmission measurement.
+// f0 is 0 to match ior=1 rather than for effect: it feeds the specular lobe only, which this check never reads.
+BsdfParams makeDiffuseParams(const glm::vec3& baseColor, float diffuseRoughness) {
+    return BsdfParams{baseColor,          /*metallic=*/0.0F,          /*roughness=*/0.5F,
+                       glm::vec3(0.0F),    /*edgeTint=*/glm::vec3(1.0F), /*ior=*/1.0F,
+                       /*transmissionFactor=*/0.0F, diffuseRoughness,
+                       engine::scene::eonAlbedoInversion(baseColor, diffuseRoughness)};
+}
+
+struct AlbedoEstimate {
+    glm::vec3 mean;
+    glm::vec3 stdError;
+};
+
+// Cosine-weighted hemispherical integral of the SHIPPED diffuse lobe at normal incidence -- the directional albedo the renderer actually produces. Uniform-hemisphere estimator (pdf 1/2pi), so the integrand is f*cos*2pi.
+// The second moment is accumulated alongside the first so the assertion band can be the estimator's own standard error, computed from the run, rather than a tolerance picked until the suite went green.
+AlbedoEstimate measureDiffuseAlbedo(const BsdfParams& params, int sampleCount, std::mt19937& rng) {
+    const glm::vec3 wo(0.0F, 0.0F, 1.0F);
+    glm::vec3 sum(0.0F);
+    glm::vec3 sumSq(0.0F);
+    for (int i = 0; i < sampleCount; ++i) {
+        const glm::vec3 wi = sampleUniformHemisphere(rng);
+        const glm::vec3 sample =
+            engine::scene::evaluateBsdfSplit(params, wo, wi).diffuse * wi.z * 2.0F * kPi;
+        sum += sample;
+        sumSq += sample * sample;
+    }
+    const auto n = static_cast<float>(sampleCount);
+    const glm::vec3 mean = sum / n;
+    const glm::vec3 variance = glm::max((sumSq / n) - (mean * mean), glm::vec3(0.0F));
+    return {mean, glm::sqrt(variance / n)};
+}
+
+// The observed albedo must equal the AUTHORED albedo: the property EON's Appendix A inversion exists to provide, and the one thing nothing else in this suite can see. Every other case in every validator runs at either baseColor 1 or diffuseRoughness 0, where the inversion is exactly the identity -- measured, by reverting it and finding all five validators byte-identical -- so without this check the inversion could be deleted silently.
+// Two assertions per row, complementary rather than redundant. The analytic one is closed-form against closed-form and catches an error in the inversion algebra; the Monte Carlo one integrates the shipped lobe and additionally catches a diffuseRho that is computed and never consumed, which no closed-form identity can.
+// The chromatic row carries the weight: the multiple-scattering saturation the inversion undoes is per-channel, so a grey row cannot distinguish a correct inversion from one that merely preserves overall brightness. r=0 and baseColor=1 rows must read the identity exactly, which is what proves this change is a strict superset of the old behaviour rather than a shift of it.
+bool checkEonAlbedoInversion() {
+    constexpr int kSampleCount = 400000;
+    // Two named, bounded residuals and nothing else. kSigmaBand is a confidence level on the estimator's own measured standard error; kFitTolerance is the paper's stated <0.1% bound on evalFonAlbedoApprox, the quartic the renderer evaluates in place of the exact FON albedo this check's reference uses. Neither is a tuned number: the first is derived per row from the run, the second is the documented error of an approximation the renderer deliberately ships.
+    constexpr float kSigmaBand = 5.0F;
+    constexpr float kFitTolerance = 0.001F;
+    constexpr float kAnalyticTolerance = 1e-5F;
+    const std::array<float, 5> diffuseRoughnesses = {0.0F, 0.25F, 0.5F, 0.75F, 1.0F};
+    const std::array<glm::vec3, 3> albedos = {glm::vec3(1.0F), glm::vec3(0.5F),
+                                               glm::vec3(0.8F, 0.3F, 0.1F)};
+
+    bool ok = true;
+    std::mt19937 rng(31337);
+    std::cout << "bsdf_validate: EON albedo inversion, observed vs authored albedo at normal incidence\n";
+    std::cout << "  diffuseRoughness  authored              rho                   observed              worst err\n";
+    for (const glm::vec3& authored : albedos) {
+        for (float diffuseRoughness : diffuseRoughnesses) {
+            const BsdfParams params = makeDiffuseParams(authored, diffuseRoughness);
+            const glm::vec3 analytic = referenceEonAlbedo(params.diffuseRho, diffuseRoughness);
+            const AlbedoEstimate measured = measureDiffuseAlbedo(params, kSampleCount, rng);
+
+            const glm::vec3 analyticErr = glm::abs(analytic - authored);
+            const glm::vec3 band =
+                (kSigmaBand * measured.stdError) + (kFitTolerance * glm::max(authored, 0.01F));
+            const glm::vec3 measuredErr = glm::abs(measured.mean - authored);
+
+            std::cout << "  " << diffuseRoughness << "               [" << authored.x << ", "
+                       << authored.y << ", " << authored.z << "]   [" << params.diffuseRho.x << ", "
+                       << params.diffuseRho.y << ", " << params.diffuseRho.z << "]   ["
+                       << measured.mean.x << ", " << measured.mean.y << ", " << measured.mean.z
+                       << "]   " << maxChannel(measuredErr) << '\n';
+
+            if (maxChannel(analyticErr) > kAnalyticTolerance) {
+                std::cerr << "bsdf_validate: FAILED EON albedo inversion (analytic) at diffuseRoughness="
+                           << diffuseRoughness << " authored=[" << authored.x << ", " << authored.y
+                           << ", " << authored.z << "] E_EON=[" << analytic.x << ", " << analytic.y
+                           << ", " << analytic.z << "] err=" << maxChannel(analyticErr)
+                           << " (expected <= " << kAnalyticTolerance << ")\n";
+                ok = false;
+            }
+            if (!glm::all(glm::lessThanEqual(measuredErr, band))) {
+                std::cerr << "bsdf_validate: FAILED EON albedo inversion (measured) at diffuseRoughness="
+                           << diffuseRoughness << " authored=[" << authored.x << ", " << authored.y
+                           << ", " << authored.z << "] observed=[" << measured.mean.x << ", "
+                           << measured.mean.y << ", " << measured.mean.z
+                           << "] err=" << maxChannel(measuredErr) << " (expected <= "
+                           << maxChannel(band) << ")\n";
                 ok = false;
             }
         }
@@ -501,7 +604,8 @@ bool checkConductorFresnel() {
         const auto params = [&](float roughness, glm::vec3 edgeTint) {
             return BsdfParams{glm::vec3(1.0F),          1.0F, roughness, glm::vec3(reflectivity),
                                edgeTint,                 /*ior=*/1.5F,
-                               /*transmissionFactor=*/0.0F, /*diffuseRoughness=*/0.0F};
+                               /*transmissionFactor=*/0.0F, /*diffuseRoughness=*/0.0F,
+                               engine::scene::eonAlbedoInversion(glm::vec3(1.0F), 0.0F)};
         };
         // R(theta=0) == r, independent of edgeTint: wo == wi == +z puts woDotNh at exactly 1.
         const glm::vec3 normalIncidence(0.0F, 0.0F, 1.0F);
@@ -708,7 +812,8 @@ bool checkTransmissionReciprocity() {
         for (float ior : iors) {
             const BsdfParams params{glm::vec3(1.0F), 0.0F, roughness,
                                      glm::vec3(0.04F), glm::vec3(1.0F), ior,
-                                     /*transmissionFactor=*/1.0F, /*diffuseRoughness=*/0.0F};
+                                     /*transmissionFactor=*/1.0F, /*diffuseRoughness=*/0.0F,
+                                     engine::scene::eonAlbedoInversion(glm::vec3(1.0F), 0.0F)};
             for (float mu : cosines) {
                 const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (mu * mu))), 0.0F, mu);
                 const glm::vec3 refracted =
@@ -801,6 +906,7 @@ int main() {
     const bool furnaceOk = checkFurnace();
     const bool whiteFurnaceOk = checkWhiteFurnaceTwoSided();
     const bool eonDiffuseOk = checkEonDiffuseFurnace();
+    const bool eonInversionOk = checkEonAlbedoInversion();
     const bool transmissiveEnergyOk = checkTransmissiveEnergyBalance();
     const bool conductorFresnelOk = checkConductorFresnel();
     const bool averageFresnelOk = checkAverageFresnel();
@@ -808,9 +914,9 @@ int main() {
     const bool transmissionReciprocityOk = checkTransmissionReciprocity();
     const bool roundTripOk = checkTransmissionRoundTrip();
 
-    if (!pdfOk || !furnaceOk || !whiteFurnaceOk || !eonDiffuseOk || !transmissiveEnergyOk ||
-        !conductorFresnelOk || !averageFresnelOk || !reciprocityOk || !transmissionReciprocityOk ||
-        !roundTripOk) {
+    if (!pdfOk || !furnaceOk || !whiteFurnaceOk || !eonDiffuseOk || !eonInversionOk ||
+        !transmissiveEnergyOk || !conductorFresnelOk || !averageFresnelOk || !reciprocityOk ||
+        !transmissionReciprocityOk || !roundTripOk) {
         std::cerr << "bsdf_validate: FAILED\n";
         return EXIT_FAILURE;
     }

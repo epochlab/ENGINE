@@ -23,6 +23,14 @@ struct BsdfParams {
     // the specular GGX lobe: these are different microsurface statistics even on the same material.
     // 0 = Lambertian (EON's exact r->0 limit), see evaluateDiffuseLobe.
     float diffuseRoughness;
+    // EON's single-scattering albedo parameter rho, which is what the diffuse lobe evaluates -- NOT the
+    // authored colour. baseColor is the albedo the surface is asked to be observed to have; rho is what
+    // reproduces it once the multiple-scattering lobe's saturation is accounted for. Resolved once per
+    // hit by gbuffer_shading.cpp's resolveBsdfParams via bsdf.cpp's eonAlbedoInversion, which is the
+    // sole source of this value; the two coincide exactly at diffuseRoughness 0 and at baseColor 1.
+    // Kept separate rather than folded into baseColor, which the transmission lobe and the rasterizer's
+    // albedo AOV both still consume as the authored colour.
+    glm::vec3 diffuseRho;
 };
 
 // Local shading frame (z = shading normal) for world<->local direction transforms.
@@ -66,6 +74,9 @@ struct BsdfEval {
 // conductorFresnelAvg takes the complex IOR rather than (reflectivity, edgeTint) because callers have already inverted it for the single-scatter term and must not invert twice; bsdf.cpp's conductorIorFromReflectivity is the inversion.
 [[nodiscard]] glm::vec3 conductorFresnelAvg(const glm::vec3& n, const glm::vec3& k);
 [[nodiscard]] float dielectricFresnelAvg(float ior);
+
+// EON's Appendix A albedo inversion: the rho whose EON directional albedo at normal incidence equals albedo, under uniform illumination. The identity at r=0 and at albedo=1. Every BsdfParams::diffuseRho comes from here -- see that field, and bsdf.cpp for the derivation and the numerical form.
+[[nodiscard]] glm::vec3 eonAlbedoInversion(const glm::vec3& albedo, float r);
 
 // Value and pdf of the continuous lobes at wiLocal, split by transport type. Piecewise, since reflection and transmission occupy disjoint hemispheres: wiLocal on wo's side gives the specular-reflection + diffuse mixture, the far side gives the rough transmission lobe. Transmission is excluded only when it is a delta (roughness below the smooth threshold, zero-measure). woLocal.z sign: entering (>0) vs exiting (<0) a dielectric. One call rather than the four separate lobe evaluations NEE used to make -- the lobe probabilities, the GGX/Fresnel terms and the albedo-table lookups are all computed once and shared.
 [[nodiscard]] BsdfEval evaluateBsdfSplit(const BsdfParams& params, const glm::vec3& woLocal,
