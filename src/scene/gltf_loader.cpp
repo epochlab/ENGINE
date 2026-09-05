@@ -214,16 +214,6 @@ std::optional<std::vector<unsigned int>> readIndices(const cgltf_accessor* indic
     return indices;
 }
 
-// Neutral, non-file defaults for a material with no texture authored for this slot -- see
-// gbuffer_shading.cpp for how each is consumed. 1x1 avoids a div-by-zero in buildShadingFrame's
-// bump texel-size calc; the constant value makes bump's finite-difference exactly zero regardless.
-engine::gfx::HdrImage defaultBaseColor() { return {1, 1, {1.0F, 1.0F, 1.0F, 1.0F}}; }
-engine::gfx::HdrImage defaultNormal() { return {1, 1, {0.5F, 0.5F, 1.0F, 1.0F}}; }  // decodes to (0,0,1) tangent-space up
-engine::gfx::HdrImage defaultRoughness() { return {1, 1, {1.0F, 1.0F, 1.0F, 1.0F}}; }  // roughnessFactor/min/max fully control the result
-engine::gfx::HdrImage defaultSpecular() { return {1, 1, {0.04F, 0.04F, 0.04F, 1.0F}}; }  // standard dielectric f0; inert whenever metallicFactor=0
-engine::gfx::HdrImage defaultBump() { return {1, 1, {0.5F, 0.5F, 0.5F, 1.0F}}; }  // any constant -> zero finite-difference
-engine::gfx::HdrImage defaultAo() { return {1, 1, {1.0F, 1.0F, 1.0F, 1.0F}}; }  // fully unoccluded
-
 // A slot with no texture referenced at all is not a failure -- substitutes fallback. A slot that
 // DOES reference a texture but fails to resolve/decode it (bad path, corrupt file) is a real
 // error and must still propagate as nullopt, not silently default -- distinguishing these two
@@ -249,16 +239,17 @@ std::optional<engine::gfx::HdrImage> resolveTextureByIndex(const cgltf_data* dat
 
 std::optional<Material> loadMaterialTextures(const cgltf_data* data, const cgltf_material& mat,
                                               const std::string& dir) {
-    auto baseColor =
-        resolveTexture(mat.pbr_metallic_roughness.base_color_texture.texture, dir, defaultBaseColor());
-    auto normal = resolveTexture(mat.normal_texture.texture, dir, defaultNormal());
-    auto ao = resolveTexture(mat.occlusion_texture.texture, dir, defaultAo());
+    const Material defaults = makeDefaultMaterial();
+    auto baseColor = resolveTexture(mat.pbr_metallic_roughness.base_color_texture.texture, dir,
+                                     defaults.baseColorTexture);
+    auto normal = resolveTexture(mat.normal_texture.texture, dir, defaults.normalTexture);
+    auto ao = resolveTexture(mat.occlusion_texture.texture, dir, defaults.aoTexture);
     auto roughness = resolveTextureByIndex(
-        data, extrasTextureIndex(mat.extras.data, "roughnessTexture"), dir, defaultRoughness());
+        data, extrasTextureIndex(mat.extras.data, "roughnessTexture"), dir, defaults.roughnessTexture);
     auto specular = resolveTextureByIndex(
-        data, extrasTextureIndex(mat.extras.data, "specularTexture"), dir, defaultSpecular());
+        data, extrasTextureIndex(mat.extras.data, "specularTexture"), dir, defaults.specularTexture);
     auto bump = resolveTextureByIndex(data, extrasTextureIndex(mat.extras.data, "bumpTexture"), dir,
-                                       defaultBump());
+                                       defaults.bumpTexture);
     if (!baseColor || !normal || !ao || !roughness || !specular || !bump) {
         std::cerr << "loadGltf: material '" << (mat.name != nullptr ? mat.name : "<unnamed>")
                    << "' references a texture that failed to load\n";
@@ -384,6 +375,34 @@ std::optional<LoadedModel> loadGltf(const std::string& path, const glm::mat4& ro
         return std::nullopt;
     }
     return model;
+}
+
+void appendQuadLights(LoadedModel& model, const std::vector<QuadLight>& lights,
+                       std::vector<int>& instanceLightIndex) {
+    for (std::size_t i = 0; i < lights.size(); ++i) {
+        const QuadLight& light = lights[i];
+        const glm::vec3 normal = glm::normalize(glm::cross(light.edge0, light.edge1));
+        const glm::vec4 tangent(glm::normalize(light.edge0), 1.0F);
+        const auto vertex = [&](const glm::vec3& position, glm::vec2 uv) {
+            return ShadingVertex{position, normal, uv, tangent};
+        };
+        // Corners: p00 = origin, p10/p01 along edge0/edge1, p11 the far corner -- split along the
+        // p00-p11 diagonal into two triangles, both wound so cross(v1-v0, v2-v0) reproduces `normal`
+        // (matching geometricNormalOf's convention, gbuffer_shading.cpp).
+        const ShadingVertex p00 = vertex(light.origin, glm::vec2(0.0F, 0.0F));
+        const ShadingVertex p10 = vertex(light.origin + light.edge0, glm::vec2(1.0F, 0.0F));
+        const ShadingVertex p01 = vertex(light.origin + light.edge1, glm::vec2(0.0F, 1.0F));
+        const ShadingVertex p11 = vertex(light.origin + light.edge0 + light.edge1, glm::vec2(1.0F, 1.0F));
+
+        const int instanceIndex = static_cast<int>(model.instances.size());
+        model.worldTriangles.push_back(Triangle{p00.position, p10.position, p11.position});
+        model.worldTriangles.push_back(Triangle{p00.position, p11.position, p01.position});
+        model.shadingTriangles.push_back(ShadingTriangle{p00, p10, p11, instanceIndex});
+        model.shadingTriangles.push_back(ShadingTriangle{p00, p11, p01, instanceIndex});
+        model.instances.push_back(MeshInstance{makeDefaultMaterial(), glm::mat4(1.0F),
+                                                 "__quadLight" + std::to_string(i)});
+        instanceLightIndex.push_back(static_cast<int>(i));
+    }
 }
 
 }  // namespace engine::scene

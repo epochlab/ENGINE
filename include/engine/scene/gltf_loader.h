@@ -6,6 +6,7 @@
 
 #include <glm/glm.hpp>
 
+#include "engine/scene/light.h"
 #include "engine/scene/material.h"
 #include "engine/scene/ray_types.h"
 #include "engine/scene/shading_scene.h"
@@ -31,5 +32,16 @@ struct LoadedModel {
 std::optional<LoadedModel> loadGltf(const std::string& path,
                                      const glm::mat4& rootTransform = glm::mat4(1.0F),
                                      const std::string& textureDir = "");
+
+// Appends each light's own emitting geometry (2 triangles, 1 MeshInstance with makeDefaultMaterial()'s
+// neutral fallback -- see material.h) to `model`, in the same world space its own worldTriangles are
+// already in. The path tracer's emitter-hit branch (path_tracer.cpp's tracePath) never reads this
+// Material -- it returns Le and terminates before resolveBsdfParams -- but the CPU rasterizer walks
+// every triangle unconditionally for the primary-hit AOVs, where a neutral fallback is a harmless
+// (if uninteresting) value for a light panel. Appends one entry per light to `instanceLightIndex`,
+// which must already be sized model.instances.size() (one entry per pre-existing instance, all -1) --
+// see AppResources::instanceLightIndex's own convention in main.cpp.
+void appendQuadLights(LoadedModel& model, const std::vector<QuadLight>& lights,
+                       std::vector<int>& instanceLightIndex);
 
 }  // namespace engine::scene

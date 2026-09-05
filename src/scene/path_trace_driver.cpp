@@ -134,10 +134,11 @@ void PathTraceDriver::driverLoop(std::stop_token stopToken) {
         const int passIndex = accumulatedSamples_.load(std::memory_order_relaxed) + 1;
         const auto passStart = std::chrono::steady_clock::now();
         // Built fresh each pass from this request's env state -- cheap (holds references/scalars, no
-        // copies) -- rather than stored, so the HUD's environment-light toggle (Phase 2) takes effect
-        // on the very next pass with no separate invalidation path.
-        const LightSet lights(&environmentMap_, activeRequest->envRotationRadians,
-                               activeRequest->envExposure, quadLights_);
+        // copies) -- rather than stored, so the HUD's environment-light toggle takes effect on the
+        // very next pass with no separate invalidation path.
+        const LightSet lights(activeRequest->envLightEnabled ? &environmentMap_ : nullptr,
+                               activeRequest->envRotationRadians, activeRequest->envExposure,
+                               quadLights_);
         renderPathTraced(activeRequest->camera, accel_, shadingTriangles_, instances_,
                           instanceLightIndex_, lights, activeRequest->width, activeRequest->height,
                           activeRequest->showSky, activeRequest->settings, perInstanceSettings_,

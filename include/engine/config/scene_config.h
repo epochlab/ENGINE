@@ -3,6 +3,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include <glm/glm.hpp>
 
@@ -16,9 +17,27 @@ struct ModelConfig {
     glm::vec3 rotation;  // degrees, order X,Y,Z, see main.cpp's loadGltf call
 };
 
-// What lights the scene.
+// What lights the scene, IBL half.
 struct EnvironmentConfig {
     std::string hdriPath;  // environment map, relative to ASSET_ROOT_DIR
+    // Whether the environment is a LIGHT (NEE-sampled, MIS-weighted, contributes to every miss) as
+    // opposed to just the camera-visible background -- see engine::scene::LightSet. Optional, default
+    // true: an existing scene.json with no key keeps today's IBL-only behaviour. main.cpp's HUD
+    // "Environment Light" checkbox (AppResources::envLightEnabled) edits this scene's authored
+    // default at runtime; render_beauty.cpp's --env-light flag overrides it for a headless capture.
+    bool lightEnabled = true;
+};
+
+// A rectangular area light (Arnold quad_light semantics): origin is one corner, edge0/edge1 span the
+// two sides (perpendicular, matching every production quad_light), radiance = color * intensity is
+// emitted from the face whose outward normal is normalize(cross(edge0, edge1)). See engine::scene::QuadLight.
+struct QuadLightConfig {
+    glm::vec3 origin;
+    glm::vec3 edge0;
+    glm::vec3 edge1;
+    glm::vec3 color;
+    float intensity;
+    bool twoSided = false;
 };
 
 // Tunable shading constants that shape how a material's textures get turned into BSDF input -- externalized so these can be edited without recompiling. diffuseColour/ior/transmissionFactor/metallicFactor/roughnessFactor/diffuseRoughness are a single global material definition applied to every mesh in the scene, replacing what used to be read per-object off each glTF's material block. Loaded from its own file (see loadMaterialConfig) rather than inline in scene.json, so a shader library of named material files (assets/materials/*.json) can grow without a scene.json schema change. Only diffuseColour/roughnessFactor/roughnessMin/roughnessMax/bumpStrength are always live; the rest default to a no-op value so a bespoke material (e.g. clay.json) need only declare what its archetype actually uses -- see materials/principled.json for the full parameter surface.
@@ -53,6 +72,10 @@ struct SceneConfig {
     std::string materialPath;  // relative to ASSET_ROOT_DIR, points to a material JSON file (e.g. materials/clay.json), matching ModelConfig::gltfPath's convention
     // glTF node name -> material JSON path (relative to ASSET_ROOT_DIR), overriding materialPath for that instance's triangles. Optional key; absent in the scene JSON means an empty map, i.e. every instance uses materialPath. Keyed by MeshInstance::name (gltf_loader.h).
     std::map<std::string, std::string> materialOverrides;
+    // Rectangular area lights, in the same space as the glTF's own vertices (ModelConfig::position/
+    // rotation applies to these too -- see main.cpp's sceneTransform). Optional key; absent means none,
+    // matching every scene authored before this field existed.
+    std::vector<QuadLightConfig> lights;
 };
 
 // Reads and parses path. Returns nullopt and logs to stderr if the file is missing, unreadable, or any required field can't be found/parsed. User-editable input, not an internal invariant: failure is expected and surfaced rather than defaulted around.

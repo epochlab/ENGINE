@@ -92,6 +92,7 @@ add_executable(engine
     src/scene/gbuffer_shading.cpp
     src/scene/gltf_loader.cpp
     src/scene/light.cpp
+    src/scene/material.cpp
     src/scene/material_binding.cpp
     src/scene/path_tracer.cpp
     src/scene/path_trace_driver.cpp
@@ -202,7 +203,7 @@ add_executable(render_beauty tools/render_beauty.cpp src/scene/path_tracer.cpp
                src/scene/gbuffer_shading.cpp src/scene/embree_accel.cpp src/scene/ray_types.cpp
                src/scene/shading_scene.cpp src/scene/bsdf.cpp src/scene/sampler.cpp
                src/scene/environment_map.cpp src/scene/light.cpp src/scene/camera.cpp src/scene/thread_pool.cpp
-               src/scene/gltf_loader.cpp src/scene/material_binding.cpp
+               src/scene/gltf_loader.cpp src/scene/material.cpp src/scene/material_binding.cpp
                src/config/scene_config.cpp src/config/profile_config.cpp src/gfx/hdr_image.cpp
                $<TARGET_OBJECTS:vendored_no_tidy>)
 target_include_directories(render_beauty PRIVATE include ${CGLTF_DIR} ${JSON_DIR})
