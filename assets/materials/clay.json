@@ -3,7 +3,7 @@
     "roughnessFactor": 0.5,
     "roughnessMin": 0.045,
     "roughnessMax": 1.0,
-    "ior": 1.5,
+    "ior": 1.55,
     "bumpStrength": 0.0,
     "diffuseRoughness": 0.3
 }
