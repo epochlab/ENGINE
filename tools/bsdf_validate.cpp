@@ -6,6 +6,7 @@
 #include <array>
 #include <cmath>
 #include <complex>
+#include <cstdint>
 #include <cstdlib>
 #include <iostream>
 #include <optional>
@@ -53,20 +54,29 @@ glm::vec3 sampleUniformHemisphere(std::mt19937& rng) {
     return {sinTheta * std::cos(phi), sinTheta * std::sin(phi), cosTheta};
 }
 
-// Integrates pdfBsdf(wo, .) over the hemisphere via uniform-hemisphere Monte Carlo; for an opaque material (transmissionFactor=0) this must not exceed 1.0, since all sampling probability mass is in the two continuous lobes the pdf covers.
-// Upper-bound only, not a tight equality check: uniform hemisphere sampling under-samples a sharp GGX lobe at low roughness (same accepted limitation as furnace_test.cpp's checkPunctualSweep), so a low reading there is expected noise; only exceeding 1.0 indicates a real double-counted pdf.
+// Integrates pdfBsdf(wo, .) over the hemisphere; for an opaque material (transmissionFactor=0) this must not exceed 1.0, since all sampling probability mass is in the two continuous lobes the pdf covers.
+// Multiple importance sampling with the balance heuristic (Veach 1997 sec. 9.2) over two proposals that between them cover both regimes: uniform hemisphere for the tails, sampleBsdf's own density for the lobe. Uniform alone stops working once the lobe is narrow -- at roughness 0.05 it spans ~2e-5 sr, which 200k uniform draws hit a handful of times at O(100) weight each, and the estimate is then too noisy to bound at all (measured 1.67 against a truth of <= 1, and still 1.17 at a hundred times the samples).
+// sampleBsdf draws from exactly pdfBsdf, so the second proposal's density IS the integrand and the combined balance-heuristic density collapses to N1/(2*pi) + N2*p(x): one pdf evaluation per sample, bounded below by the uniform term and above by N2*p, so it is well conditioned at every roughness. Unbiased despite that density being sub-normalised (sampleBsdf returns nullopt below the horizon), because the heuristic needs only the expected sample count per solid angle, which is N2*q2 either way.
+// Upper-bound only, not an equality: VNDF reflection sampling discards samples reflected below the horizon, so the true integral is the horizon-clipped mass, which has no closed form. The estimator is now tight enough that a real double-counted pdf shows up as an excess rather than drowning in variance.
 // diffuseRoughness is swept because at 0 -- the only value this used to test, and the one principled.json ships -- eonUniformMixWeight is pow(0, 0.1) = 0 exactly, so pdfEon degenerates to cltcPdf alone and CLTC itself degenerates to plain cosine. Neither the LTC fit's own normalisation nor the uniform/CLTC one-sample MIS mixture was reached at all. The metallic=1 rows matter most here: metallic zeroes diffuseKd but NOT diffuseProb, so a conductor still carries the full CLTC density with none of its value, and a mis-normalised fit shows up in the mixture denominator rather than in any picture.
 bool checkPdfNormalization() {
     std::mt19937 rng(7);
-    constexpr int kSampleCount = 200000;
+    constexpr int kUniformSamples = 200000;
+    constexpr int kBsdfSamples = 200000;
+    constexpr std::uint32_t kBsdfSeed = 7;
     constexpr float kTolerance = 0.05F;
-    constexpr float kUniformPdf = 1.0F / (2.0F * kPi);
+    constexpr double kUniformPdf = 1.0 / (2.0 * kPi);
+    // The balance-heuristic denominator, shared by both proposals: N1*q1 + N2*q2 with q2 == pdfBsdf.
+    const auto combinedDensity = [](double p) {
+        return (kUniformSamples * kUniformPdf) + (kBsdfSamples * p);
+    };
     const std::array<float, 4> roughnesses = {0.05F, 0.25F, 0.5F, 1.0F};
     const std::array<float, 2> metallics = {0.0F, 1.0F};
     const std::array<float, 4> ndotVs = {0.2F, 0.6F, 1.0F, -0.6F};
     const std::array<float, 3> diffuseRoughnesses = {0.0F, 0.5F, 1.0F};
 
     bool ok = true;
+    double worstIntegral = 0.0;
     for (float roughness : roughnesses) {
         for (float metallic : metallics) {
             for (float diffuseRoughness : diffuseRoughnesses) {
@@ -74,16 +84,26 @@ bool checkPdfNormalization() {
                     const BsdfParams params = makeParams(roughness, metallic, 0.0F, diffuseRoughness);
                     const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (ndotV * ndotV))), 0.0F, ndotV);
                     double integral = 0.0;
-                    for (int i = 0; i < kSampleCount; ++i) {
+                    for (int i = 0; i < kUniformSamples; ++i) {
                         glm::vec3 wi = sampleUniformHemisphere(rng);
                         // pdfBsdf mirrors wi into wo's hemisphere, so for a below-surface wo the density over the +z hemisphere is identically zero.
                         // Integrating the +z hemisphere there measured 0 and passed the <=1.0 assertion vacuously, so the exiting-side rows tested nothing; flip the sampled hemisphere to match wo's side.
                         if (ndotV < 0.0F) {
                             wi.z = -wi.z;
                         }
-                        integral += engine::scene::pdfBsdf(params, wo, wi) / kUniformPdf;
+                        const double p = engine::scene::pdfBsdf(params, wo, wi);
+                        integral += p / combinedDensity(p);
                     }
-                    integral /= kSampleCount;
+                    // sampleBsdf returns wi in woLocal's own convention and reports the density it drew from, so no second pdfBsdf evaluation is needed and none of the mirroring above applies.
+                    for (int i = 0; i < kBsdfSamples; ++i) {
+                        engine::scene::Sampler sampler(0, 0, i, kBsdfSeed);
+                        const std::optional<engine::scene::BsdfSample> sample =
+                            engine::scene::sampleBsdf(params, wo, sampler);
+                        if (sample.has_value()) {
+                            integral += sample->pdf / combinedDensity(sample->pdf);
+                        }
+                    }
+                    worstIntegral = std::max(worstIntegral, integral);
                     if (!(integral <= 1.0 + kTolerance)) {
                         std::cerr << "bsdf_validate: FAILED pdf normalization UPPER bound at roughness="
                                   << roughness << " metallic=" << metallic
@@ -95,6 +115,8 @@ bool checkPdfNormalization() {
             }
         }
     }
+    std::cout << "bsdf_validate: pdf normalization, worst integral " << worstIntegral << " (must be <= "
+              << 1.0 + kTolerance << ")\n";
     return ok;
 }
 
