@@ -11,6 +11,7 @@ struct Material {
     engine::gfx::HdrImage bumpTexture;
     engine::gfx::HdrImage roughnessTexture;
     engine::gfx::HdrImage specularTexture;
+    // Loaded from glTF's occlusion_texture but read by nothing: AO is ray-traced per sample now (path_tracer.h's PathTraceResult::ao), which the baked texture cannot express. Kept so the asset pipeline stays lossless and a future baked/traced blend has the map to hand.
     engine::gfx::HdrImage aoTexture;
 };
 

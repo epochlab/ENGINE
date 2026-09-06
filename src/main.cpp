@@ -96,7 +96,7 @@ std::array<float, 100> buildGaborKernel() {
     return kernel;
 }
 
-// True for AOVs needing light-transport data (Beauty, transport-component AOVs, post-filter AOVs reading Beauty) -- false for the 15 primary-hit-only AOVs the rasterizer covers (rasterizer.h). Avoids restarting PathTraceDriver's accumulation for an AOV that will never show it.
+// True for AOVs needing light-transport data (Beauty, transport-component AOVs, post-filter AOVs reading Beauty) -- false for the 14 primary-hit-only AOVs the rasterizer covers (rasterizer.h). Avoids restarting PathTraceDriver's accumulation for an AOV that will never show it.
 bool aovNeedsLightTransport(engine::debug::AovId aov) {
     using engine::debug::AovId;
     switch (aov) {
@@ -105,6 +105,7 @@ bool aovNeedsLightTransport(engine::debug::AovId aov) {
         case AovId::Luminance:
         case AovId::Sobel:
         case AovId::Gabor:
+        case AovId::AO:
         case AovId::BounceCount:
         case AovId::Shadow:
         case AovId::DirectDiffuse:
@@ -234,7 +235,7 @@ struct AppResources {
     float interactiveRenderScale;
     std::chrono::steady_clock::time_point lastInputChange;
 
-    // Synchronous per-frame CPU rasterizer for the 15 primary-hit-only G-buffer AOVs (rasterizer.h) -- their only producer, decoupled from PathTraceDriver's async convergence loop. unique_ptr for the same reason as pathTraceDriver: ThreadPool's copy/move are deleted (owns worker threads), so a by-value member would break AppResources's movability.
+    // Synchronous per-frame CPU rasterizer for the 14 primary-hit-only G-buffer AOVs (rasterizer.h) -- their only producer, decoupled from PathTraceDriver's async convergence loop. unique_ptr for the same reason as pathTraceDriver: ThreadPool's copy/move are deleted (owns worker threads), so a by-value member would break AppResources's movability.
     std::unique_ptr<engine::scene::ThreadPool> rasterThreadPool;
     // Allocated once and rendered into in place (rasterizer.h), never republished -- its `generation` field, not its address, is what tells one render from the next. Refreshed synchronously in requestPathTraceIfTriggerChanged whenever a rasterizer-backed AOV is selected and an input changed; generation stays 0 while only light-transport AOVs are ever shown, because then it never runs at all.
     std::shared_ptr<engine::scene::RasterGBuffer> rasterGBuffer;
@@ -440,6 +441,7 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         .samplesPerPixel = profileConfig.pathTracer.samplesPerPixel,
         .maxBounces = profileConfig.pathTracer.maxBounces,
         .russianRouletteStartBounce = profileConfig.pathTracer.russianRouletteStartBounce,
+        .aoMaxDistance = profileConfig.pathTracer.aoMaxDistance,
         .bumpStrength = materialConfig->bumpStrength,
         .roughnessMin = materialConfig->roughnessMin,
         .roughnessMax = materialConfig->roughnessMax,
@@ -667,16 +669,16 @@ void resolveOrbitPick(engine::platform::Window& window, AppResources& app,
 struct PathTracedAovSource {
     const engine::gfx::HdrImage* image = nullptr;
     std::shared_ptr<const void> owner;
-    // RasterGBuffer's render counter for the 15 rasterizer-backed AOVs, 0 for the path-traced ones. The rasterizer's buffer is now reused in place, so its address is constant and `owner` alone can no longer tell one render from the next; a PathTraceResult is still a fresh object per pass and needs no counter.
+    // RasterGBuffer's render counter for the 14 rasterizer-backed AOVs, 0 for the path-traced ones. The rasterizer's buffer is now reused in place, so its address is constant and `owner` alone can no longer tell one render from the next; a PathTraceResult is still a fresh object per pass and needs no counter.
     std::uint64_t generation = 0;
 };
 
-// Returns a default (null image) if the specific source an AOV needs hasn't published yet -- callers show black instead. The 15 primary-hit-only AOVs read rasterGBuffer (refreshed synchronously whenever one of them is selected, requestPathTraceIfTriggerChanged); Beauty and the light-transport AOVs read the driver's asynchronously published PathTraceResult. Extended as RasterGBuffer/PathTraceResult grow more buffers.
+// Returns a default (null image) if the specific source an AOV needs hasn't published yet -- callers show black instead. The 14 primary-hit-only AOVs read rasterGBuffer (refreshed synchronously whenever one of them is selected, requestPathTraceIfTriggerChanged); Beauty and the light-transport AOVs read the driver's asynchronously published PathTraceResult. Extended as RasterGBuffer/PathTraceResult grow more buffers.
 PathTracedAovSource selectPathTracedImage(
     const std::shared_ptr<const engine::scene::PathTraceResult>& snapshot,
     const std::shared_ptr<engine::scene::RasterGBuffer>& rasterGBuffer,
     engine::debug::AovId aov) {
-    // One construction site for all 15 rasterizer-backed AOVs, so the generation stamp cannot be omitted at one of them. The buffer is allocated for the process's life now, so a null check no longer distinguishes "no render yet" -- generation 0 does.
+    // One construction site for all 14 rasterizer-backed AOVs, so the generation stamp cannot be omitted at one of them. The buffer is allocated for the process's life now, so a null check no longer distinguishes "no render yet" -- generation 0 does.
     const auto fromRaster = [&rasterGBuffer](const engine::gfx::HdrImage& image) {
         return rasterGBuffer->generation == 0
                    ? PathTracedAovSource{}
@@ -717,7 +719,7 @@ PathTracedAovSource selectPathTracedImage(
         case engine::debug::AovId::Fresnel:
             return fromRaster(rasterGBuffer->fresnel);
         case engine::debug::AovId::AO:
-            return fromRaster(rasterGBuffer->ao);
+            return snapshot ? fromSnapshot(snapshot->ao) : PathTracedAovSource{};
         case engine::debug::AovId::Shadow:
             return snapshot ? fromSnapshot(snapshot->shadow) : PathTracedAovSource{};
         case engine::debug::AovId::Wireframe:
@@ -941,7 +943,7 @@ void requestPathTrace(AppResources& app, const engine::scene::Camera& camera, in
 // Both the path trace and the rasterization run at renderScale/interactiveRenderScale of the framebuffer rather than at the framebuffer itself (profile_config.h), dropping to the interactive scale on any input change and promoting back kInteractiveSettleSeconds after the last one.
 // The promotion needs no separate code path: it changes the trigger, and a changed trigger is already what dispatches.
 // The display blit upscales for free: glViewport targets the framebuffer and the display texture samples GL_LINEAR, so nothing downstream is aware of the resolution the image arrived at.
-// Also refreshes app.rasterGBuffer synchronously on the same trigger, on the calling (render) thread; unlike the path-traced request, this blocks briefly rather than handing off to a background driver, since the point of the rasterizer is a same-frame update for its 15 AOVs (rasterizer.h).
+// Also refreshes app.rasterGBuffer synchronously on the same trigger, on the calling (render) thread; unlike the path-traced request, this blocks briefly rather than handing off to a background driver, since the point of the rasterizer is a same-frame update for its 14 AOVs (rasterizer.h).
 // Gated on one of those AOVs being selected, symmetrically with the path-trace request: it is not cheap (a full-screen shade, measured at ~150ms per call at 2048x1152).
 // The three things that once justified running it unconditionally no longer need it: orbit-pick now casts its own ray, the pixel probe only reaches these buffers for an AOV that is displaying them, and an AOV switch is itself a trigger change, so switching into a rasterizer AOV rasterizes on that same frame.
 void requestPathTraceIfTriggerChanged(AppResources& app, const engine::scene::Camera& camera,
@@ -973,7 +975,7 @@ void requestPathTraceIfTriggerChanged(AppResources& app, const engine::scene::Ca
     if (needsLightTransport) {
         requestPathTrace(app, camera, renderWidth, renderHeight);
     }
-    // The complement of needsLightTransport is exactly the rasterizer's 15 AOVs: aovNeedsLightTransport covers 12 of AovId::Count's 27 and selectPathTracedImage routes the other 15 here, so the two sets partition the enum and no AOV needs neither producer. On Beauty -- the default -- the rasterizer now does not run at all, where before it rasterized the full framebuffer on the render thread every frame of camera interaction to produce 15 images nobody was looking at.
+    // The complement of needsLightTransport is exactly the rasterizer's 14 AOVs: aovNeedsLightTransport covers 13 of AovId::Count's 27 and selectPathTracedImage routes the other 14 here, so the two sets partition the enum and no AOV needs neither producer. On Beauty -- the default -- the rasterizer now does not run at all, where before it rasterized the full framebuffer on the render thread every frame of camera interaction to produce 14 images nobody was looking at.
     if (!needsLightTransport && renderWidth > 0 && renderHeight > 0) {
         engine::scene::renderRasterGBuffer(camera, app.sceneAccel, app.stumpModel.shadingTriangles,
                                             app.stumpModel.instances, app.perInstanceSettings,
