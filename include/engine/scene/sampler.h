@@ -6,30 +6,47 @@
 
 namespace engine::scene {
 
-// PCG32 (O'Neill 2014). Fallback generator once a path's dimension count exceeds Sampler's Halton budget.
-class Pcg32 {
-public:
-    Pcg32(std::uint64_t seed, std::uint64_t sequence);
-    [[nodiscard]] std::uint32_t nextU32();
-    [[nodiscard]] float nextFloat();  // [0,1)
-
-private:
-    std::uint64_t state_;
-    std::uint64_t inc_;
-};
-
-// Per-pixel-per-sample sampler: randomized Halton (radical inverse, Cranley-Patterson rotated per pixel) for the first 32 scalar dimensions, PCG32 beyond that -- low variance for primary dimensions (pixel jitter, early bounces), correct-by-construction for unbounded path depth beyond the fixed dimension budget.
+// Per-pixel-per-sample sampler: Owen-scrambled, shuffled Sobol (Sobol 1967; Joe & Kuo 2008 direction numbers; Burley
+// 2020 hash-based scrambling, shuffling and padding).
+//
+// Every draw is an independently randomized copy of the SAME low Sobol dimensions rather than a slice of one
+// high-dimensional sequence -- "padding", Burley 2020 Sec. 5, and what Cycles ships. Each draw gets its own Owen
+// scramble and its own Owen-shuffled sample index, so consecutive draws are uncorrelated while each one individually
+// keeps the best stratification the sequence offers. That matters because Sobol's 2D projections degrade as the
+// dimension pair climbs -- measured here, dimensions (0,1) are a perfect (0,7,2)-net while (62,63) is only a (4,7,2)-net,
+// sixteen points per cell instead of one -- so a deep path drawing dimensions 50+ for its last bounces samples them
+// worse than white noise would. Padding means a 12-bounce path's last bounce is stratified exactly as well as its first,
+// and it removes any dimension budget: there is no depth past which the sampler degrades.
+//
+// The two trailing constructor arguments have distinct, non-interchangeable roles, and getting them the wrong way round
+// silently degrades this to white noise (which is what it was before -- see sampler.cpp):
+//   sampleIndex   ADVANCES per accumulated sample. It selects the point along the sequence, and it is what makes a
+//                 pixel's accumulated point set stratified rather than N independent points.
+//   scrambleSeed  is FIXED across an accumulation and fresh per render/generation. It randomizes the sequence (Owen
+//                 1995) so different pixels and different renders decorrelate without disturbing stratification.
+// Averaging N independently randomized copies of a SINGLE point is plain Monte Carlo no matter which sequence produced
+// the point, so a scrambleSeed that varies per sample -- or a sampleIndex that does not advance -- forfeits the entire
+// benefit. sampler_validate's pass-direction check is the gate on exactly that mistake.
+// sampleCount is the total this image will accumulate, and it bounds the sequence the sampler draws from (Burley 2020
+// Sec. 5.2; Cycles calls it shuffled_index_mask). It is a performance parameter, not a correctness one -- an overstated
+// count only costs speed -- but understating it would alias two sample indices onto one sequence point, so the sampler
+// floors the bound at the index it is actually given. Pass 0 when the accumulation is unbounded: that selects the full
+// 32-bit sequence, which is correct and simply the slowest option.
 class Sampler {
 public:
-    Sampler(int pixelX, int pixelY, int sampleIndex, std::uint32_t runSeed);
+    Sampler(int pixelX, int pixelY, int sampleIndex, int sampleCount, std::uint32_t scrambleSeed);
+    // Each call consumes one padded dimension set. next2D's pair is jointly stratified; two next1D calls are not, so
+    // draw a 2D quantity with next2D rather than two next1D calls.
     [[nodiscard]] float next1D();
     [[nodiscard]] glm::vec2 next2D();
 
 private:
-    Pcg32 rng_;
-    Pcg32 rotationRng_;
-    int sampleIndex_;
-    int dimension_ = 0;
+    int pixelX_;
+    int pixelY_;
+    std::uint32_t sampleIndex_;
+    std::uint32_t indexMask_;
+    std::uint32_t scrambleSeed_;
+    int dimensionSet_ = 0;
 };
 
 }  // namespace engine::scene
