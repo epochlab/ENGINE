@@ -990,6 +990,96 @@ bool checkConductorFresnel() {
     return ok;
 }
 
+// The specular lobe's closed form at the mirrored pair, in double: nh is exactly +z there, so sin(theta_h) is 0 and the GGX denominator collapses to alpha^2, giving D = 1/(pi*alpha^2) without evaluating the shipped D at all.
+// G2 is Smith height-correlated with both lambdas at the same cosine, matching bsdf.cpp's smithLambda/smithG2.
+double specularGeometry(double alpha, double cosine) {
+    constexpr double kPiDouble = 3.14159265358979324;
+    const double alpha2 = alpha * alpha;
+    const double d = 1.0 / (kPiDouble * alpha2);
+    const double tan2 = (1.0 - (cosine * cosine)) / (cosine * cosine);
+    const double lambda = 0.5 * (-1.0 + std::sqrt(1.0 + (alpha2 * tan2)));
+    const double g2 = 1.0 / (1.0 + (2.0 * lambda));
+    return (d * g2) / (4.0 * cosine * cosine);
+}
+
+// The only instrument in this file that reads the specular lobe's ABSOLUTE magnitude, and the only one that can: sampleBsdf returns f/pdf and both carry D, so every furnace, reciprocity and round-trip check cancels a constant factor on it; checkConductorFresnel's normalised ratio cancels the geometry term by construction; checkPdfNormalization asserts an upper bound, which a suppressed pdf passes vacuously.
+// That gap let distributionGGX ship two independent errors, both invisible in throughput and both wrong wherever the value is read absolutely -- which is NEE's f and the MIS pdf weights, i.e. every direct highlight on a smooth surface. Measured here: a denominator floor suppressing D by 124340x at roughness 0.02 and 81.5x at 0.05, and float32 cancellation in ndotH^2*(alpha^2-1)+1 costing a further 20% at 0.02 and 3.3e-4 at 0.1.
+// f(cos) = K*F(cos) + M, with K = D*G2/(4*muO*muI) pure geometry and M the Kulla-Conty multiple-scattering term; dividing the measured lobe by the K above recovers the Fresnel reflectance, comparable directly against referenceDielectricFresnel. This couples the check to D and G2 as well as to Fresnel, and the coupling IS the coverage: absolute magnitude is the axis nothing else in the suite tests.
+// metallic=0 gates the conductor path (and params.f0) off entirely, transmissionFactor=0 leaves the reflection lobe as the only thing present, and reading .specular off BsdfEval isolates it from the diffuse substrate, so no black-baseColor trick is needed.
+// Roughness stays at or below checkConductorFresnel's kMsNegligibleRoughness so M sits under the tolerance -- it measures below float32 noise here, two orders under it; the two lowest rows are glass.json's and chrome.json's own values, which is what makes this the regression test for both D errors.
+// The sweep only reaches nh = +z, so it pins D at the lobe peak and says nothing about the tails; that is the right trade, since the peak is what a direct highlight is made of and the tails carry no absolute reference to compare against.
+// The grazing end stops at cos=0.02, where singleScatter's 4*muO*muI is 1.6e-3 -- three orders above its own 1e-6 floor, so the reference K's unfloored 4*c^2 is the divisor the lobe actually used and the row is a real comparison rather than a clamped one.
+bool checkDielectricFresnel() {
+    // Float32 round-off in the shipped lobe against a double reference, nothing else: M is not resolvable at these roughnesses. Measured worst 2.57e-7 at ior 1.5, roughness 0.1, cos 0.08, plus ~17% headroom. A fit-shaped error cannot hide under a bound this tight -- Schlick misses by 0.02 at ior 1.5168 cos 0.5, five orders above it.
+    constexpr double kFresnelTolerance = 3e-7;
+    // Normal incidence is an exact identity, not a fit: referenceDielectricFresnel(1, n) is ((n-1)/(n+1))^2 with both polarisations equal, and nh, woDotNh and G2 are all exactly 1 there, so the only residual is float32 evaluation of F itself. Measured worst 2.54e-8 at ior 2.5, plus ~18% headroom.
+    constexpr double kNormalIncidenceTolerance = 3e-8;
+    constexpr float kMinAlpha = 0.02F * 0.02F;   // bsdf.cpp's roughness floor, mirrored so K uses the alpha the lobe actually used
+    const std::array<double, 4> iors = {1.1, 1.5, 1.5168, 2.5};   // 1.5168 is glass.json's own N-BK7 value
+    const std::array<float, 3> roughnesses = {0.02F, 0.05F, 0.1F};
+    const std::array<float, 9> cosines = {1.0F, 0.9F, 0.7F, 0.5F, 0.35F, 0.25F, 0.15F, 0.08F, 0.02F};
+
+    bool ok = true;
+    int rowsChecked = 0;
+    std::cout << "bsdf_validate: dielectric Fresnel, absolute lobe magnitude vs exact unpolarized\n";
+    std::cout << "  ior      rough   worst |err|   F(cos=0.02) measured / exact\n";
+    for (double ior : iors) {
+        for (float roughness : roughnesses) {
+            const double alpha =
+                std::max(static_cast<double>(roughness) * roughness, static_cast<double>(kMinAlpha));
+            const glm::vec3 baseColor(1.0F);
+            const BsdfParams params{baseColor,
+                                     /*metallic=*/0.0F,
+                                     roughness,
+                                     /*f0=*/glm::vec3(0.04F),
+                                     /*edgeTint=*/glm::vec3(1.0F),
+                                     static_cast<float>(ior),
+                                     /*transmissionFactor=*/0.0F,
+                                     /*diffuseRoughness=*/0.0F,
+                                     engine::scene::eonAlbedoInversion(baseColor, 0.0F),
+                                     /*transmissionTint=*/glm::vec3(1.0F)};
+            double worstError = 0.0;
+            double previous = -1.0;
+            double atGrazing = 0.0;
+            for (float cosine : cosines) {
+                const float sine = std::sqrt(std::max(0.0F, 1.0F - (cosine * cosine)));
+                const glm::vec3 wo(sine, 0.0F, cosine);
+                const glm::vec3 wi(-sine, 0.0F, cosine);
+                const double measured =
+                    static_cast<double>(engine::scene::evaluateBsdfSplit(params, wo, wi).specular.x) /
+                    specularGeometry(alpha, cosine);
+                const double expected = referenceDielectricFresnel(cosine, ior);
+                const double tolerance = cosine == 1.0F ? kNormalIncidenceTolerance : kFresnelTolerance;
+                ++rowsChecked;
+                worstError = std::max(worstError, std::abs(measured - expected));
+                atGrazing = measured;
+                if (!(std::abs(measured - expected) <= tolerance)) {
+                    std::cerr << "bsdf_validate: FAILED dielectric Fresnel at ior=" << ior
+                              << " roughness=" << roughness << " cos=" << cosine << " measured " << measured
+                              << " vs reference " << expected << " (tolerance " << tolerance
+                              << "); the lobe's absolute magnitude is D*G2*F/(4*muO*muI), so this fires on an "
+                                 "error in any of the three\n";
+                    ok = false;
+                }
+                // Strict, no epsilon: unpolarized external reflection is monotone in theta for every n > 1, and the smallest real step here is cos 1.0 -> 0.9 at 1.9e-2 relative, five orders above float32's own precision. Strictness is what makes a Fresnel pinned to its normal-incidence value fail rather than round into a pass.
+                if (previous >= 0.0 && !(measured > previous)) {
+                    std::cerr << "bsdf_validate: FAILED dielectric Fresnel monotonicity at ior=" << ior
+                              << " roughness=" << roughness << " cos=" << cosine << " gave " << measured
+                              << " after " << previous
+                              << "; reflectance must rise strictly as the view approaches grazing\n";
+                    ok = false;
+                }
+                previous = measured;
+            }
+            std::cout << "  " << ior << "      " << roughness << "    " << worstError << "    " << atGrazing
+                      << " / " << referenceDielectricFresnel(cosines.back(), ior) << '\n';
+        }
+    }
+    // No conditioning skip anywhere above, unlike checkConductorFresnel's normalised ratio: every row of the sweep is compared, and the count is printed so that stays visible.
+    std::cout << "  dielectric Fresnel: " << rowsChecked << " points vs reference\n";
+    return ok;
+}
+
 // Helmholtz reciprocity: f(wo->wi) == f(wi->wo). The continuous lobes are symmetric by construction after the directional-albedo diffuse coupling landed: D and G2 are symmetric, Fresnel is evaluated at the shared half-vector, and both the coupling and the multiple-scattering lobe are products of matching wo-side and wi-side factors, so this is an equality to float precision, not a statistical bound.
 // It fails hard on the pre-coupling code, where the diffuse lobe carried (1 - F(mu_o)) alone; not an energy error (the furnace passed throughout) but a misdistribution across view/light geometry, and the blocker for every bidirectional transport algorithm (BDPT, VCM, light tracing, photon mapping), all of which require symmetric f.
 // Transmission is excluded (transmissionFactor=0, both cosines positive): radiance transport across a refracting interface is genuinely non-symmetric, so f(wo->wi)==f(wi->wo) is the wrong invariant there; the eta^2-corrected one it does satisfy lives in checkTransmissionReciprocity below.
@@ -1156,6 +1246,7 @@ int main() {
     const bool transmissiveEnergyOk = checkTransmissiveEnergyBalance();
     const bool transmissionTintOk = checkTransmissionTint();
     const bool conductorFresnelOk = checkConductorFresnel();
+    const bool dielectricFresnelOk = checkDielectricFresnel();
     const bool averageFresnelOk = checkAverageFresnel();
     const bool dispersionOk = checkCauchyDispersion();
     const bool reciprocityOk = checkReciprocity();
@@ -1163,7 +1254,7 @@ int main() {
     const bool roundTripOk = checkTransmissionRoundTrip();
 
     if (!pdfOk || !furnaceOk || !whiteFurnaceOk || !eonDiffuseOk || !eonInversionOk ||
-        !transmissiveEnergyOk || !transmissionTintOk || !conductorFresnelOk || !averageFresnelOk || !dispersionOk ||
+        !transmissiveEnergyOk || !transmissionTintOk || !conductorFresnelOk || !dielectricFresnelOk || !averageFresnelOk || !dispersionOk ||
         !reciprocityOk || !transmissionReciprocityOk || !roundTripOk) {
         std::cerr << "bsdf_validate: FAILED\n";
         return EXIT_FAILURE;
