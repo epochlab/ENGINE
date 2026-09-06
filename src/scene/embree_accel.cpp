@@ -1,5 +1,7 @@
 #include "engine/scene/embree_accel.h"
 
+#include <atomic>
+#include <cstdint>
 #include <cstring>
 #include <iostream>
 #include <utility>
@@ -14,7 +16,21 @@ void logEmbreeError(void* /*userPtr*/, RTCError code, const char* str) {
     std::cerr << "EmbreeAccel: " << rtcGetErrorString(code) << ": " << str << "\n";
 }
 
+// Signed: Embree passes a negative delta on free. Relaxed because the counter carries no other data, and it is only ever read after rtcCommitScene has returned, which has already joined the build threads that wrote it.
+std::atomic<std::int64_t> gEmbreeBytes{0};
+
+// Embree's own documented BVH accounting (the mechanism its RTCore stats use), not an estimate from triangle count. Invoked concurrently from Embree's internal build threads, hence the atomic. Returning true permits the allocation -- this is a monitor, not a budget.
+bool embreeMemoryMonitor(void* /*userPtr*/, ssize_t bytes, bool /*post*/) {
+    gEmbreeBytes.fetch_add(static_cast<std::int64_t>(bytes), std::memory_order_relaxed);
+    return true;
+}
+
 }  // namespace
+
+std::size_t embreeAllocatedBytes() {
+    const std::int64_t bytes = gEmbreeBytes.load(std::memory_order_relaxed);
+    return bytes > 0 ? static_cast<std::size_t>(bytes) : 0;
+}
 
 EmbreeAccel::EmbreeAccel(RTCDeviceTy* device, RTCSceneTy* scene, std::vector<Triangle> triangles)
     : device_(device), scene_(scene), triangles_(std::move(triangles)),
@@ -57,6 +73,7 @@ std::optional<EmbreeAccel> EmbreeAccel::build(std::vector<Triangle> triangles) {
         return std::nullopt;
     }
     rtcSetDeviceErrorFunction(device, logEmbreeError, nullptr);
+    rtcSetDeviceMemoryMonitorFunction(device, embreeMemoryMonitor, nullptr);
 
     RTCScene scene = rtcNewScene(device);
     const int triangleCount = static_cast<int>(triangles.size());

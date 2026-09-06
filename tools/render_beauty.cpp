@@ -481,12 +481,13 @@ int main(int argc, char** argv) {
         width, height, std::vector<float>(static_cast<std::size_t>(width) *
                                            static_cast<std::size_t>(height) * 4, 0.0F)};
     const std::atomic<std::uint64_t> generation{1};
+    engine::debug::PassStats stats;  // required by renderPathTraced; this tool writes an image, not a timing report
     for (int pass = 0; pass < options.passes; ++pass) {
         engine::scene::renderPathTraced(camera, *accel, model->shadingTriangles, model->instances,
                                          instanceLightIndex, lights, width, height,
                                          /*showSky=*/true, baseSettings, *perInstanceSettings,
                                          static_cast<std::uint32_t>(pass), generation,
-                                         /*requestedGeneration=*/1U, threadPool, result);
+                                         /*requestedGeneration=*/1U, threadPool, stats, result);
         for (std::size_t i = 0; i < accumulated.rgba.size(); ++i) {
             accumulated.rgba[i] += (result.*options.lane).rgba[i];
         }
