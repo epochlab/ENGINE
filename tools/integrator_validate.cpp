@@ -300,10 +300,11 @@ engine::scene::PathTraceResult renderPassPerInstance(
     const std::vector<int> instanceLightIndex(scene.instances.size(), -1);
     const std::vector<engine::scene::QuadLight> noQuads;
     const engine::scene::LightSet lights(&env, /*envRotationRadians=*/0.0F, /*envExposure=*/1.0F, noQuads);
+    engine::debug::PassStats stats;  // required by renderPathTraced; this tool checks radiance, not throughput
     engine::scene::renderPathTraced(makeCamera(), accel, scene.shadingTriangles, scene.instances,
                                      instanceLightIndex, lights, kImageSize, kImageSize, showSky,
                                      settings, perInstanceSettings, /*runSeed=*/7U, generation,
-                                     /*requestedGeneration=*/1U, pool, result);
+                                     /*requestedGeneration=*/1U, pool, stats, result);
     return result;
 }
 
@@ -987,10 +988,11 @@ engine::scene::PathTraceResult renderPassWithLights(const TestScene& scene,
     engine::scene::PathTraceResult result = engine::scene::makePathTraceResult(kImageSize, kImageSize);
     const engine::scene::LightSet lights(env, /*envRotationRadians=*/0.0F, /*envExposure=*/1.0F, quads);
     const std::vector<PathTraceSettings> perInstanceSettings(scene.instances.size(), settings);
+    engine::debug::PassStats stats;  // required by renderPathTraced; this tool checks radiance, not throughput
     engine::scene::renderPathTraced(makeCamera(), accel, scene.shadingTriangles, scene.instances,
                                      instanceLightIndex, lights, kImageSize, kImageSize, showSky,
                                      settings, perInstanceSettings, /*runSeed=*/7U, generation,
-                                     /*requestedGeneration=*/1U, pool, result);
+                                     /*requestedGeneration=*/1U, pool, stats, result);
     return result;
 }
 

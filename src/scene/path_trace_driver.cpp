@@ -40,6 +40,10 @@ void accumulateMean(PathTraceResult& sample, const PathTraceResult& previousMean
     });
 }
 
+double millisecondsSince(std::chrono::steady_clock::time_point start) {
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+}
+
 }  // namespace
 
 PathTraceDriver::PathTraceDriver(const EmbreeAccel& accel,
@@ -94,6 +98,31 @@ std::shared_ptr<PathTraceResult> PathTraceDriver::acquireFreeBuffer(int width, i
 }
 
 // Runs until destruction (jthread's stop token), picking up the latest requested state whenever its generation changes and otherwise repeatedly re-tracing the same request, accumulating each pass into a running mean that converges over time. A pass superseded mid-flight (renderPathTraced's own generation check, polled once per row) is discarded whole, never partially merged.
+engine::debug::PassRecord PathTraceDriver::lastPassRecord() const {
+    const std::lock_guard<std::mutex> lock(statsMutex_);
+    return lastPass_;
+}
+
+// Driver-thread-only. passStats_ is read here rather than inside driverLoop so both the completed and the cancelled call site share one definition of what a PassRecord contains.
+void PathTraceDriver::publishPassRecord(std::uint64_t generation, int passIndex, int width,
+                                         int height, double traceMs, double accumulateMs,
+                                         double publishMs, double passMs, bool cancelled) {
+    const engine::debug::PassRecord record{generation,
+                                            passIndex,
+                                            width,
+                                            height,
+                                            traceMs,
+                                            accumulateMs,
+                                            publishMs,
+                                            passMs,
+                                            passStats_.rays(),
+                                            passStats_.tilesCompleted(),
+                                            passStats_.tilesCancelled(),
+                                            cancelled};
+    const std::lock_guard<std::mutex> lock(statsMutex_);
+    lastPass_ = record;
+}
+
 void PathTraceDriver::driverLoop(std::stop_token stopToken) {
     std::shared_ptr<PathTraceResult> currentMean;  // the pool slot holding the last published mean of the active generation -- read as the previous mean by the next pass, never written again
     std::optional<Request> activeRequest;
@@ -135,37 +164,46 @@ void PathTraceDriver::driverLoop(std::stop_token stopToken) {
 
         const int passIndex = accumulatedSamples_.load(std::memory_order_relaxed) + 1;
         const auto passStart = std::chrono::steady_clock::now();
+        passStats_.reset();
         // Built fresh each pass from this request's env state -- cheap (holds references/scalars, no
         // copies) -- rather than stored, so the HUD's environment-light toggle takes effect on the
         // very next pass with no separate invalidation path.
         const LightSet lights(activeRequest->envLightEnabled ? &environmentMap_ : nullptr,
                                activeRequest->envRotationRadians, activeRequest->envExposure,
                                quadLights_);
+        const auto traceStart = std::chrono::steady_clock::now();
         renderPathTraced(activeRequest->camera, accel_, shadingTriangles_, instances_,
                           instanceLightIndex_, lights, activeRequest->width, activeRequest->height,
                           activeRequest->showSky, activeRequest->settings, perInstanceSettings_,
                           static_cast<std::uint32_t>(passIndex), generation_, activeGeneration,
-                          threadPool_, *pass);
+                          threadPool_, passStats_, *pass);
+        const double traceMs = millisecondsSince(traceStart);
 
         if (generation_.load(std::memory_order_relaxed) != activeGeneration) {
+            // Published before the discard, not skipped: a camera drag cancels passes continuously, and rays traced for a discarded pass were still paid for. Reporting only completed passes would show an idle tracer during exactly the interaction that loads it hardest.
+            publishPassRecord(activeGeneration, passIndex, pass->beauty.width, pass->beauty.height,
+                               traceMs, 0.0, 0.0, millisecondsSince(passStart), /*cancelled=*/true);
             continue;  // superseded mid-pass -- discard, next iteration picks up the new request
         }
 
         const int n = accumulatedSamples_.fetch_add(1, std::memory_order_relaxed) + 1;
         // n == 1 leaves the pass exactly as rendered: the running mean of one sample is that sample, and it is also the only case with no previous mean of this generation to read.
+        const auto accumulateStart = std::chrono::steady_clock::now();
         if (n > 1) {
             accumulateMean(*pass, *currentMean, n, threadPool_);
         }
+        const double accumulateMs = millisecondsSince(accumulateStart);
         currentMean = pass;
 
-        lastPassSeconds_.store(
-            std::chrono::duration<double>(std::chrono::steady_clock::now() - passStart).count(),
-            std::memory_order_relaxed);
-
+        const auto publishStart = std::chrono::steady_clock::now();
         {
             const std::lock_guard<std::mutex> lock(resultMutex_);
             result_ = currentMean;
         }
+        const double publishMs = millisecondsSince(publishStart);
+
+        publishPassRecord(activeGeneration, n, pass->beauty.width, pass->beauty.height, traceMs,
+                           accumulateMs, publishMs, millisecondsSince(passStart), /*cancelled=*/false);
     }
 }
 
