@@ -188,6 +188,14 @@ if(IPO_SUPPORTED)
     set_target_properties(bsdf_validate PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
 endif()
 
+add_executable(sampler_validate tools/sampler_validate.cpp src/scene/sampler.cpp)
+target_include_directories(sampler_validate PRIVATE include)
+target_compile_options(sampler_validate PRIVATE -Wall -Wextra -Werror -march=native)
+target_link_libraries(sampler_validate PRIVATE glm::glm)
+if(IPO_SUPPORTED)
+    set_target_properties(sampler_validate PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
+endif()
+
 add_executable(nee_validate tools/nee_validate.cpp src/scene/bsdf.cpp src/scene/sampler.cpp
                src/scene/environment_map.cpp src/scene/light.cpp src/gfx/hdr_image.cpp)
 target_include_directories(nee_validate PRIVATE include)
@@ -254,6 +262,6 @@ endif()
 
 # All five correctness tools run under `ctest --test-dir build`; previously buildable but unrun, so a regression only surfaced if someone remembered to invoke them by hand.
 enable_testing()
-foreach(validator embree_validate bsdf_validate nee_validate rasterizer_validate integrator_validate)
+foreach(validator embree_validate bsdf_validate nee_validate rasterizer_validate integrator_validate sampler_validate)
     add_test(NAME ${validator} COMMAND ${validator})
 endforeach()
