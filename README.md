@@ -236,11 +236,10 @@ Grouped by area of design, each group ordered by importance (most important firs
 - **Expand terminal output (launch + loop)**: startup logs GL/camera/model/BVH stats (`main.cpp:286-361`); no per-frame stdout during the loop (`main.cpp:990`) -- sample/pass/convergence stats reach only the HUD (`hud_overlay.cpp`).
 - **Expand reset (`0`) to full launch state**: `DebugCameraController::resetToDefault()` (`debug_camera_controller.cpp:122-127`, bound at `main.cpp:494-495`) resets only camera position/yaw/pitch/orbiting.
   - Exposure-triangle defaults are already stored but never applied (`defaultAperture_`/`defaultShutterSeconds_`/`defaultIso_`, `debug_camera_controller.h:77-79`).
-  - Also not reset: `app.aov`, `userLut`, `channelView`, `invert`, `showHud`, `envRotationDegrees`, `showSky`, `envExposureStops`, `envLightEnabled` (`main.cpp:153-233`).
+  - Also not reset: `app.aov`, `userLut`, `channelView`, `invert` (`main.cpp:153-233`).
 - **PNG capture tool hardening**: `tools/render_beauty.cpp`'s `writePng` (lines 68-111) pipeline order is correct (exposure → OCIO display transform → dither → clamp → quantize, lines 198-234). Two gaps: RGB-only, no alpha (`colour type 2`, line 95); scanline filter hardcoded to type 0/None despite a comment claiming adaptive filtering (lines 70-74). Fix the comment or implement real adaptive filtering; add alpha output if a future consumer needs it.
 - **Benchmark log**: `raster_bench` (`tools/raster_bench.cpp:252`) prints one-shot timing to stdout only, nothing persists between runs. Append each run (git SHA, CLI args, scene, timing) to a log so regressions are visible across runs.
 - **Example images of engine technology**: no gallery of the renderer's own output in this README. Build small demo scenes each isolating one feature (a material, GI behaviour, transmission), render with `render_beauty`, embed a curated set here.
-- **Nuke-equivalent exposure/gamma control**: extend `OcioDisplayTransform` with live numeric control, beyond today's LUT cycling (`L`).
 
 ### 7. Testing & validation infrastructure
 
