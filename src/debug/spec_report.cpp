@@ -72,7 +72,6 @@ void printSpec(const EngineSpec& spec, const GpuInfo& gpu) {
         std::printf("max samples unbounded   ao range %.2f   raster %u threads\n\n",
                      static_cast<double>(spec.aoMaxDistance), spec.rasterThreads);
     }
-    printHotkeys();
     std::fflush(stdout);
 }
 
@@ -92,6 +91,8 @@ void printHotkeys() {
         std::printf("%s\n", row);
     }
     std::printf("\n");
+    // Flushed here rather than by the caller: on a '?' press this is the only thing printed, and a piped run would otherwise hold it until exit.
+    std::fflush(stdout);
 }
 
 }  // namespace engine::debug

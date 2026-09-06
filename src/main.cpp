@@ -489,6 +489,10 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         engine::debug::gpuTimerQueryAvailable(),
     };
     engine::debug::printSpec(spec, gpuInfo);
+    // The map trails the spec block only when nothing else will host it. Under -stats the dashboard owns the rest of the terminal, so a copy here would sit stranded between the two blocks; there it is a '?' section beneath the perf block instead.
+    if (!statsEnabled) {
+        engine::debug::printHotkeys();
+    }
 
     return AppResources{
         .edgeFilterShader = std::move(shaders->edgeFilterShader),

@@ -354,8 +354,9 @@ void PerfDashboard::drawFooter(const DashboardFrame& frame) {
     append("\x1b[2K RENDER  window %dx%d   scale %.2f%s   render %dx%d\n", frame.windowWidth,
             frame.windowHeight, static_cast<double>(frame.renderScale),
             frame.interactiveScale ? " interactive" : "", frame.renderWidth, frame.renderHeight);
-    // Bursty stages show their last real cost and how often they fire, never a per-frame mean: averaging a 150ms stall that happens 1 frame in 88 reports 1.7ms for something that drops a frame every time it runs.
     append("\x1b[2K==============================================================================\n");
+    // Blank line inside the block, not after it: it separates the table from whatever follows (the '?' map, or the shell cursor) and is still a line the next redraw's cursor-up accounts for and erases.
+    append("\x1b[2K\n");
     if (frame.showHotkeys) {
         for (const char* row : hotkeyRows()) {
             append("\x1b[2K %s\n", row);
