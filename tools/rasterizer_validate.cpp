@@ -42,14 +42,14 @@ engine::gfx::HdrImage constantTexture(glm::vec4 color) {
     return image;
 }
 
-Material makeMaterial(glm::vec3 baseColor, float roughness, float ao) {
+Material makeMaterial(glm::vec3 baseColor, float roughness) {
     Material material;
     material.baseColorTexture = constantTexture(glm::vec4(baseColor, 1.0F));
     material.normalTexture = constantTexture(glm::vec4(0.5F, 0.5F, 1.0F, 1.0F));  // tangent-space (0,0,1)
     material.bumpTexture = constantTexture(glm::vec4(0.5F));
     material.roughnessTexture = constantTexture(glm::vec4(roughness));
     material.specularTexture = constantTexture(glm::vec4(0.04F));
-    material.aoTexture = constantTexture(glm::vec4(ao));
+    material.aoTexture = constantTexture(glm::vec4(1.0F));  // unread since AO became path-traced; kept a valid 1x1 so every slot matches makeDefaultMaterial
     return material;
 }
 
@@ -166,7 +166,6 @@ bool checkPose(const char* poseName, const Camera& camera, const EmbreeAccel& ac
             const glm::vec3 woWorld = -ray.dir;
             const float ndotV = std::max(glm::dot(frame.normal, woWorld), 1e-4F);
             const float fresnelVal = fresnelAtViewAngle(params, ndotV).x;
-            const float aoVal = engine::gfx::sampleBilinear(material.aoTexture, shading.uv).r;
             const float depth = glm::dot(shading.position - camPos, camForward);
 
             const std::vector<FieldCheck> fields{
@@ -181,7 +180,6 @@ bool checkPose(const char* poseName, const Camera& camera, const EmbreeAccel& ac
                 {"tangent", texelAt(raster.tangent, x, y), frame.tangent, kUnitEpsilon},
                 {"objectId", texelAt(raster.objectId, x, y), falseColorForId(triangle.instanceIndex), kUnitEpsilon},
                 {"fresnel", texelAt(raster.fresnel, x, y), glm::vec3(fresnelVal, 1.0F - fresnelVal, 0.0F), kUnitEpsilon},
-                {"ao", texelAt(raster.ao, x, y), glm::vec3(aoVal), kUnitEpsilon},
                 {"iorAov", texelAt(raster.iorAov, x, y), glm::vec3(settings.ior), kUnitEpsilon},
             };
             valueMismatches += checkFields(fields, x, y, poseName);
@@ -276,7 +274,7 @@ bool checkBoundingBoxOcclusion(ThreadPool& threadPool) {
     settings.roughnessFactor = 1.0F;
 
     std::vector<MeshInstance> instances;
-    instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.5F), 0.5F, 1.0F), glm::mat4(1.0F), ""});
+    instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.5F), 0.5F), glm::mat4(1.0F), ""});
     const std::vector<PathTraceSettings> perInstanceSettings(instances.size(), settings);
 
     const ShadingTriangle farMarker = makeTinyTriangle(glm::vec3(-0.5F, -0.5F, -15.0F), 0.05F, 0);
@@ -374,10 +372,10 @@ int main() {
     }
 
     std::vector<MeshInstance> instances;
-    instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.8F, 0.2F, 0.2F), 0.2F, 1.0F), glm::mat4(1.0F), ""});
-    instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.2F, 0.8F, 0.2F), 0.5F, 0.6F), glm::mat4(1.0F), ""});
-    instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.2F, 0.2F, 0.8F), 0.8F, 0.3F), glm::mat4(1.0F), ""});
-    instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.8F, 0.8F, 0.2F), 1.0F, 0.9F), glm::mat4(1.0F), ""});
+    instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.8F, 0.2F, 0.2F), 0.2F), glm::mat4(1.0F), ""});
+    instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.2F, 0.8F, 0.2F), 0.5F), glm::mat4(1.0F), ""});
+    instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.2F, 0.2F, 0.8F), 0.8F), glm::mat4(1.0F), ""});
+    instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.8F, 0.8F, 0.2F), 1.0F), glm::mat4(1.0F), ""});
 
     PathTraceSettings settings{};
     settings.samplesPerPixel = 1;

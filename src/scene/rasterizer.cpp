@@ -304,7 +304,6 @@ void shadePixel(RasterGBuffer& result, int x, int y, float viewZ, float origU, f
     const glm::vec3 woWorld = glm::normalize(camPos - shading.position);
     const float ndotV = std::max(glm::dot(frame.normal, woWorld), 1e-4F);
     const float fresnelVal = fresnelAtViewAngle(params, ndotV).x;
-    const float aoVal = engine::gfx::sampleBilinear(material.aoTexture, shading.uv).r;
 
     const glm::vec2 p(static_cast<float>(x) + 0.5F, static_cast<float>(y) + 0.5F);
     const glm::vec2 p0(v0.sx, v0.sy);
@@ -326,12 +325,11 @@ void shadePixel(RasterGBuffer& result, int x, int y, float viewZ, float origU, f
     writeTexel(result.objectId, x, y, falseColorForId(triangle.instanceIndex));
     writeTexel(result.alpha, x, y, glm::vec3(1.0F));
     writeTexel(result.fresnel, x, y, glm::vec3(fresnelVal, 1.0F - fresnelVal, 0.0F));
-    writeTexel(result.ao, x, y, glm::vec3(aoVal));
     writeTexel(result.wireframe, x, y, wire ? kWireframeColor : glm::vec3(0.0F));
     writeTexel(result.iorAov, x, y, glm::vec3(settings.ior));
 }
 
-// Pass one of two: resolves visibility for the row without shading anything, recording each pixel's depth and the sub-triangle index that owns it. Splitting this out is what bounds shading to one evaluation per visible pixel -- the single-pass form shaded on every depth improvement, so a pixel behind N nearer-in-list surfaces paid N full shades (8 bilinear fetches, a shading frame and 15 texel writes each) to keep one.
+// Pass one of two: resolves visibility for the row without shading anything, recording each pixel's depth and the sub-triangle index that owns it. Splitting this out is what bounds shading to one evaluation per visible pixel -- the single-pass form shaded on every depth improvement, so a pixel behind N nearer-in-list surfaces paid N full shades (8 bilinear fetches, a shading frame and 14 texel writes each) to keep one.
 // Keeps the single-pass tie-break exactly: `>=` rejects equal depth, so the first sub-triangle in row order still wins a tie, and row order is the sub-triangle list order buildRowBuckets preserves.
 void depthPassRow(int y, const std::vector<RasterSubTriangle>& subTriangles,
                    const RowBuckets& rowBuckets, float* zRow, int* winnerRow) {
@@ -356,7 +354,7 @@ void depthPassRow(int y, const std::vector<RasterSubTriangle>& subTriangles,
     }
 }
 
-// Pass two of two: shades each covered pixel exactly once from the winner the depth pass recorded. Walks the row in x order rather than in triangle order, so the 15 AOV writes advance linearly through each image instead of scattering across it.
+// Pass two of two: shades each covered pixel exactly once from the winner the depth pass recorded. Walks the row in x order rather than in triangle order, so the 14 AOV writes advance linearly through each image instead of scattering across it.
 // viewZ is read back from the depth buffer rather than recomputed: it is the value this same winner stored, so reading it is both cheaper and exact where a recomputation would only be exact by argument.
 void shadeRow(RasterGBuffer& result, int y, int width, const std::vector<RasterSubTriangle>& subTriangles,
                const std::vector<ShadingTriangle>& shadingTriangles,
@@ -408,10 +406,10 @@ void drawBoxEdgesRow(RasterGBuffer& result, int y, const std::vector<RasterLineS
 }
 
 // Every AOV image in one place, so the reallocation and the per-row clear below cannot disagree about which fields exist -- adding an AOV to RasterGBuffer without adding it here leaves it uncleared, which this array's fixed size catches at compile time.
-std::array<engine::gfx::HdrImage*, 15> aovImages(RasterGBuffer& g) {
+std::array<engine::gfx::HdrImage*, 14> aovImages(RasterGBuffer& g) {
     return {&g.iorAov, &g.depth,    &g.worldPos, &g.uv,      &g.normal,
             &g.geomNormal, &g.albedo, &g.metallic, &g.roughness, &g.tangent,
-            &g.objectId, &g.alpha,  &g.fresnel,  &g.ao,      &g.wireframe};
+            &g.objectId, &g.alpha,  &g.fresnel,  &g.wireframe};
 }
 
 }  // namespace
@@ -421,7 +419,7 @@ void renderRasterGBuffer(const Camera& camera, const EmbreeAccel& accel,
                           const std::vector<MeshInstance>& instances,
                           const std::vector<PathTraceSettings>& perInstanceSettings, int width,
                           int height, ThreadPool& threadPool, RasterGBuffer& result) {
-    const std::array<engine::gfx::HdrImage*, 15> images = aovImages(result);
+    const std::array<engine::gfx::HdrImage*, 14> images = aovImages(result);
     // Reallocated only on a resolution change; every other call reuses the storage and relies on renderRow's clear. makeImage's own zeroing is redundant against that clear but runs once per resize, not once per frame.
     if (result.depth.width != width || result.depth.height != height) {
         for (engine::gfx::HdrImage* image : images) {
@@ -443,7 +441,7 @@ void renderRasterGBuffer(const Camera& camera, const EmbreeAccel& accel,
     const glm::vec3 camPos = camera.position();
 
     const auto renderRow = [&](int y) {
-        // Clearing this row of every AOV is what makes the buffers reusable across calls: the worker that is about to overwrite the row zeroes it first, in parallel and while it is already cache-warm, instead of 15 sequential full-image memsets before the dispatch. An uncovered pixel therefore still reads back zero (alpha 0, the miss test every consumer uses) exactly as a freshly allocated image did.
+        // Clearing this row of every AOV is what makes the buffers reusable across calls: the worker that is about to overwrite the row zeroes it first, in parallel and while it is already cache-warm, instead of 14 sequential full-image memsets before the dispatch. An uncovered pixel therefore still reads back zero (alpha 0, the miss test every consumer uses) exactly as a freshly allocated image did.
         const std::size_t rowStart = static_cast<std::size_t>(y) * static_cast<std::size_t>(width);
         for (engine::gfx::HdrImage* image : images) {
             float* row = image->rgba.data() + (rowStart * 4);
