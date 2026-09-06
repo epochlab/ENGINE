@@ -76,6 +76,9 @@ struct BsdfEval {
 // Sole consumer is the rasterizer's Fresnel G-buffer AOV (rasterizer.cpp). It exists so that AOV shows the Fresnel the renderer actually shades with: it used to be Schlick against f0, which for a metal is a different curve entirely -- Schlick is monotone in cos by construction, so it cannot show the reflectance dip an authored edgeTint produces.
 [[nodiscard]] glm::vec3 fresnelAtViewAngle(const BsdfParams& params, float cosTheta);
 
+// Cosine-weighted hemisphere direction about +z, pdf = cos(theta)/pi. Promoted from bsdf.cpp for path_tracer.cpp's ambient-occlusion lane, the same reason fresnelAtViewAngle above is exported: that pdf cancels the cosine in Miller 1994's AO integral, collapsing the estimator to the mean of the visibility term.
+[[nodiscard]] glm::vec3 sampleCosineHemisphere(glm::vec2 u);
+
 // Cosine-weighted average Fresnel of each interface, 2*int_0^1 F(mu)*mu dmu -- what the Kulla-Conty multiple-scattering tint attenuates each repeated microfacet bounce by. Exported for tools/bsdf_validate.cpp's checkAverageFresnel, which is the only instrument that can see an error here: the two-sided white furnace runs at f0=1 where every candidate average agrees, and the coloured-metal furnace rows are upper-bound-only and so blind to a loss.
 // conductorFresnelAvg takes the complex IOR rather than (reflectivity, edgeTint) because callers have already inverted it for the single-scatter term and must not invert twice; bsdf.cpp's conductorIorFromReflectivity is the inversion.
 [[nodiscard]] glm::vec3 conductorFresnelAvg(const glm::vec3& n, const glm::vec3& k);
