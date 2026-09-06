@@ -1,4 +1,4 @@
-// Headless beauty render, for before/after comparison across a code change. Loads a scene exactly as main.cpp does, accumulates N path-traced passes, and writes the Beauty AOV as an 8-bit PNG through the same OCIO display transform the viewer shows.
+// Headless beauty render, for before/after comparison across a code change. Loads a scene exactly as main.cpp does, accumulates N path-traced passes, and writes one path-traced AOV (--aov, Beauty by default) as an 8-bit PNG through the same display encoding the viewer shows it under.
 // Exists because the renderer is a GLFW application: comparing two revisions otherwise means two manual screenshots, which cannot be pixel-differenced and cannot be trusted to share a camera. Everything here is deterministic -- fixed camera from profile.json, fixed runSeed per pass, no interaction -- so two runs over unchanged code produce a byte-identical file, which is what makes a non-zero diff meaningful.
 // --compare takes a previously written PNG and reports max/RMS channel deviation against the render just produced, so "did this change the picture, and where" is answered numerically rather than by eye.
 // Same standalone-CLI convention as the validate tools: no test framework, non-zero exit on failure.
@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <cctype>
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -21,6 +22,7 @@
 
 #include "engine/config/profile_config.h"
 #include "engine/config/scene_config.h"
+#include "engine/debug/aov.h"
 #include "engine/gfx/hdr_image.h"
 #include "engine/gfx/ocio_display_transform.h"
 #include "engine/scene/camera.h"
@@ -36,6 +38,26 @@ namespace OCIO = OCIO_NAMESPACE;
 
 namespace {
 
+// Which PathTraceResult image an AOV reads, null for the AOVs renderPathTraced does not produce. Keyed off AovId rather than a private name list so --aov and the viewer's dropdown name the same 27 AOVs by the same names; which buffer each one displays is main.cpp's selectPathTracedImage and is not restated here.
+using PathTracedLane = engine::gfx::HdrImage engine::scene::PathTraceResult::*;
+
+PathTracedLane pathTracedLane(engine::debug::AovId aov) {
+    using engine::debug::AovId;
+    using Result = engine::scene::PathTraceResult;
+    switch (aov) {
+        case AovId::Beauty:           return &Result::beauty;
+        case AovId::BounceCount:      return &Result::bounceHeatmap;
+        case AovId::AO:               return &Result::ao;
+        case AovId::Shadow:           return &Result::shadow;
+        case AovId::DirectDiffuse:    return &Result::directDiffuse;
+        case AovId::IndirectDiffuse:  return &Result::indirectDiffuse;
+        case AovId::DirectSpecular:   return &Result::directSpecular;
+        case AovId::IndirectSpecular: return &Result::indirectSpecular;
+        case AovId::Refraction:       return &Result::refraction;
+        default:                      return nullptr;
+    }
+}
+
 struct Options {
     std::string scenePath = "scenes/cornell.json";
     std::string outPath;
@@ -47,7 +69,50 @@ struct Options {
     // -1 = use the scene's own authored environment.lightEnabled default; 0/1 override it -- lets a
     // headless capture of the classic (env-off) Cornell variant not need a second scene.json.
     int envLight = -1;
+    // Resolved by --aov. Defaulting to Beauty keeps every existing invocation -- and the bit-identity gate built on them -- unchanged.
+    PathTracedLane lane = &engine::scene::PathTraceResult::beauty;
+    std::string aovName = "Beauty";
 };
+
+// Case- and separator-insensitive match against kAovNames, whose entries are HUD labels ("Bounce Count", "Indirect Specular"): the CLI takes bounce-count, bounce_count or bouncecount for the same AOV rather than introducing a second vocabulary to keep in sync.
+std::string normalizeAovName(const std::string& name) {
+    std::string out;
+    for (const char c : name) {
+        if (c == ' ' || c == '-' || c == '_') {
+            continue;
+        }
+        out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    }
+    return out;
+}
+
+// Rejects by category so the message says why an AOV is unavailable rather than that it is unknown: the primary-hit AOVs live in rasterizer.h's RasterGBuffer and HSV/Luminance/Sobel/Gabor are GPU filters over Beauty, and this tool runs neither the rasterizer nor a GL context.
+bool resolveAov(const std::string& requested, Options& options) {
+    const std::string wanted = normalizeAovName(requested);
+    for (int i = 0; i < static_cast<int>(engine::debug::AovId::Count); ++i) {
+        if (normalizeAovName(engine::debug::kAovNames[i]) != wanted) {
+            continue;
+        }
+        const PathTracedLane lane = pathTracedLane(static_cast<engine::debug::AovId>(i));
+        if (lane == nullptr) {
+            std::cerr << "render_beauty: AOV \"" << engine::debug::kAovNames[i]
+                      << "\" is not path-traced -- it is a rasterizer G-buffer AOV or a post-filter "
+                         "over Beauty, neither of which this tool runs\n";
+            return false;
+        }
+        options.lane = lane;
+        options.aovName = engine::debug::kAovNames[i];
+        return true;
+    }
+    std::cerr << "render_beauty: unknown AOV \"" << requested << "\"; path-traced AOVs are:";
+    for (int i = 0; i < static_cast<int>(engine::debug::AovId::Count); ++i) {
+        if (pathTracedLane(static_cast<engine::debug::AovId>(i)) != nullptr) {
+            std::cerr << ' ' << normalizeAovName(engine::debug::kAovNames[i]);
+        }
+    }
+    std::cerr << '\n';
+    return false;
+}
 
 // Big-endian u32 append -- PNG is network byte order throughout.
 void appendBe32(std::vector<unsigned char>& out, std::uint32_t value) {
@@ -198,34 +263,43 @@ glm::vec3 ditherOffset(float u, float v) {
     return {d, d, d};
 }
 
-// Scene-referred beauty -> display-referred 8-bit, matching the viewer's pipeline exactly: exposure multiply, the OCIO Display/View transform, then dither and quantize. The OCIO processor is built from the same config/colorspace/display/view constants the display shaders are generated from (ocio_display_transform.h), so this is the same transform evaluated on the CPU rather than a second definition of it.
-std::vector<unsigned char> encodeForDisplay(const engine::gfx::HdrImage& beauty, float exposureEv) {
-    std::vector<float> rgb(static_cast<std::size_t>(beauty.width) *
-                            static_cast<std::size_t>(beauty.height) * 3);
-    const float exposure = std::pow(2.0F, exposureEv);
-    for (std::size_t i = 0; i < rgb.size() / 3; ++i) {
-        rgb[(i * 3) + 0] = beauty.rgba[(i * 4) + 0] * exposure;
-        rgb[(i * 3) + 1] = beauty.rgba[(i * 4) + 1] * exposure;
-        rgb[(i * 3) + 2] = beauty.rgba[(i * 4) + 2] * exposure;
-    }
-
+// The viewer's sRGB display path, evaluated on the CPU. Built from the same config/colorspace/display/view constants the display shaders are generated from (ocio_display_transform.h), so this is the same transform rather than a second definition of it. In place, RGB triples.
+void applyOcioDisplayTransform(std::vector<float>& rgb, int width, int height) {
     const OCIO::ConstConfigRcPtr config =
         OCIO::Config::CreateFromBuiltinConfig(engine::gfx::kOcioConfigName);
     const OCIO::ConstProcessorRcPtr processor =
         config->getProcessor(engine::gfx::kOcioSceneColorSpace, engine::gfx::kOcioSrgbDisplay,
                               engine::gfx::kOcioView, OCIO::TRANSFORM_DIR_FORWARD);
-    OCIO::PackedImageDesc desc(rgb.data(), beauty.width, beauty.height, OCIO::CHANNEL_ORDERING_RGB);
+    OCIO::PackedImageDesc desc(rgb.data(), width, height, OCIO::CHANNEL_ORDERING_RGB);
     processor->getDefaultCPUProcessor()->apply(desc);
+}
+
+// Scene-referred image -> display-referred 8-bit, matching the viewer's pipeline exactly: exposure multiply, the display curve, then dither and quantize.
+// applyDisplayTransform mirrors presentFrame's `isBeauty ? userLut : Raw`: only Beauty is scene-referred radiance, and putting a data AOV like AO or Shadow through a display curve would distort values that are already display-ready. Raw is the OCIO-free branch, exactly what buildRawFragmentSource does -- exposure, then dither and quantize.
+std::vector<unsigned char> encodeForDisplay(const engine::gfx::HdrImage& image, float exposureEv,
+                                             bool applyDisplayTransform) {
+    std::vector<float> rgb(static_cast<std::size_t>(image.width) *
+                            static_cast<std::size_t>(image.height) * 3);
+    const float exposure = std::pow(2.0F, exposureEv);
+    for (std::size_t i = 0; i < rgb.size() / 3; ++i) {
+        rgb[(i * 3) + 0] = image.rgba[(i * 4) + 0] * exposure;
+        rgb[(i * 3) + 1] = image.rgba[(i * 4) + 1] * exposure;
+        rgb[(i * 3) + 2] = image.rgba[(i * 4) + 2] * exposure;
+    }
+
+    if (applyDisplayTransform) {
+        applyOcioDisplayTransform(rgb, image.width, image.height);
+    }
 
     std::vector<unsigned char> out(rgb.size());
-    for (int y = 0; y < beauty.height; ++y) {
-        for (int x = 0; x < beauty.width; ++x) {
+    for (int y = 0; y < image.height; ++y) {
+        for (int x = 0; x < image.width; ++x) {
             const std::size_t i = ((static_cast<std::size_t>(y) *
-                                     static_cast<std::size_t>(beauty.width)) +
+                                     static_cast<std::size_t>(image.width)) +
                                     static_cast<std::size_t>(x)) * 3;
             const glm::vec3 dither =
-                ditherOffset((static_cast<float>(x) + 0.5F) / static_cast<float>(beauty.width),
-                              (static_cast<float>(y) + 0.5F) / static_cast<float>(beauty.height));
+                ditherOffset((static_cast<float>(x) + 0.5F) / static_cast<float>(image.width),
+                              (static_cast<float>(y) + 0.5F) / static_cast<float>(image.height));
             for (int c = 0; c < 3; ++c) {
                 const float value = std::clamp(rgb[i + static_cast<std::size_t>(c)] + dither[c],
                                                 0.0F, 1.0F);
@@ -267,13 +341,17 @@ bool parseArgs(int argc, char** argv, Options& options) {
         } else if (std::strcmp(argv[i], "--exposure") == 0) {
             if (!needsValue("--exposure")) { return false; }
             options.exposureEv = static_cast<float>(std::atof(argv[++i]));
+        } else if (std::strcmp(argv[i], "--aov") == 0) {
+            if (!needsValue("--aov")) { return false; }
+            if (!resolveAov(argv[++i], options)) { return false; }
         } else if (std::strcmp(argv[i], "--env-light") == 0) {
             if (!needsValue("--env-light")) { return false; }
             options.envLight = std::atoi(argv[++i]) != 0 ? 1 : 0;
         } else {
             std::cerr << "render_beauty: unknown argument '" << argv[i]
                       << "'\nusage: render_beauty [--scene scenes/x.json] --out out.png "
-                         "[--compare ref.png] [--passes N] [--width W] [--height H] [--exposure EV]\n";
+                         "[--compare ref.png] [--passes N] [--width W] [--height H] [--exposure EV] "
+                         "[--aov name]\n";
             return false;
         }
     }
@@ -397,7 +475,7 @@ int main(int argc, char** argv) {
     const engine::scene::LightSet lights(envLightEnabled ? &environmentMap : nullptr,
                                          /*envRotationRadians=*/0.0F, /*envExposure=*/1.0F, quadLights);
 
-    // Mean of `passes` independent single-sample passes, each with its own runSeed -- the same accumulation PathTraceDriver performs, done synchronously. Seeds are the pass index, so the whole render is reproducible.
+    // Mean of `passes` independent single-sample passes, each with its own runSeed -- the same accumulation PathTraceDriver performs, done synchronously. Seeds are the pass index, so the whole render is reproducible. Every lane is traced regardless of which one --aov selects: they share the sample set and the reconstruction filter, so producing one alone would not be cheaper.
     engine::scene::PathTraceResult result = engine::scene::makePathTraceResult(width, height);
     engine::gfx::HdrImage accumulated = engine::gfx::HdrImage{
         width, height, std::vector<float>(static_cast<std::size_t>(width) *
@@ -410,19 +488,21 @@ int main(int argc, char** argv) {
                                          static_cast<std::uint32_t>(pass), generation,
                                          /*requestedGeneration=*/1U, threadPool, result);
         for (std::size_t i = 0; i < accumulated.rgba.size(); ++i) {
-            accumulated.rgba[i] += result.beauty.rgba[i];
+            accumulated.rgba[i] += (result.*options.lane).rgba[i];
         }
     }
     for (float& v : accumulated.rgba) {
         v /= static_cast<float>(options.passes);
     }
 
-    const std::vector<unsigned char> encoded = encodeForDisplay(accumulated, options.exposureEv);
+    const bool isBeauty = options.lane == &engine::scene::PathTraceResult::beauty;
+    const std::vector<unsigned char> encoded =
+        encodeForDisplay(accumulated, options.exposureEv, isBeauty);
     if (!writePng(options.outPath, width, height, encoded)) {
         return EXIT_FAILURE;
     }
-    std::cout << "render_beauty: wrote " << options.outPath << " (" << width << "x" << height << ", "
-              << options.passes << " passes)\n";
+    std::cout << "render_beauty: wrote " << options.outPath << " (" << options.aovName << ", " << width
+              << "x" << height << ", " << options.passes << " passes)\n";
 
     if (!options.comparePath.empty()) {
         int refWidth = 0;
