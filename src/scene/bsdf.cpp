@@ -12,10 +12,13 @@ namespace {
 constexpr float kPi = 3.14159265F;
 constexpr float kMinAlpha = 0.02F * 0.02F;  // roughness floor, avoids a degenerate GGX delta lobe
 
-float distributionGGX(float ndotH, float alpha) {
+// Trowbridge-Reitz/GGX D in the cancellation-free form (Filament 4.4.2, Google 2018): the textbook denominator ndotH^2*(alpha^2-1)+1 subtracts two near-equal numbers wherever the half-vector is near the normal, which at low roughness is the entire lobe -- measured 20% of D lost at the peak at alpha=4e-4, and 3.3e-4 at alpha=1e-2.
+// nh is in the local shading frame (N = +z), so nh.x^2 + nh.y^2 IS sin^2(theta_h): every term of the sum is then non-negative and the peak value 1/(pi*alpha^2) is exact.
+// The denominator needs no floor: d = alpha^2*cos^2 + sin^2 is minimised at alpha^2, and callers enforce alpha >= kMinAlpha, so kPi*d*d >= 8e-14 -- twenty-four orders above float32 underflow. The floor that used to stand here engaged for every roughness below 0.0867 and suppressed D by 124340x at 0.02 and 81.5x at 0.05.
+float distributionGGX(const glm::vec3& nh, float alpha) {
     const float alpha2 = alpha * alpha;
-    const float d = ((ndotH * ndotH) * (alpha2 - 1.0F)) + 1.0F;
-    return alpha2 / std::max(kPi * d * d, 1e-8F);
+    const float d = (alpha2 * nh.z * nh.z) + (nh.x * nh.x) + (nh.y * nh.y);
+    return alpha2 / (kPi * d * d);
 }
 
 float smithLambda(float ndotV, float alpha) {
@@ -723,7 +726,7 @@ LobeEval evaluateSpecularLobe(const BsdfParams& params, const glm::vec3& wo, con
     if (woDotNh <= 0.0F) {
         return {glm::vec3(0.0F), 0.0F};
     }
-    const float d = distributionGGX(nh.z, alpha);
+    const float d = distributionGGX(nh, alpha);
     const float g2 = smithG2(wo.z, wi.z, alpha);
     const float fDielectric = fresnelDielectric(woDotNh, lobes.etaI, lobes.etaT);
     // Gated, not mixed away at weight 0: glm::mix is a + t*(b-a), so a non-finite conductor term would
@@ -905,7 +908,7 @@ LobeEval evaluateTransmissionLobe(const BsdfParams& params, const glm::vec3& wo,
     if (denom2 < 1e-12F) {
         return {glm::vec3(0.0F), 0.0F};
     }
-    const float d = distributionGGX(ht.z, alpha);
+    const float d = distributionGGX(ht, alpha);
     const float g2 = smithG2(wo.z, -wi.z, alpha);
     const float fresnel = fresnelDielectric(woDotH, lobes.etaI, lobes.etaT);
     const float common = (d * g2 * std::abs(wiDotH) * woDotH) / (wo.z * -wi.z * denom2);
