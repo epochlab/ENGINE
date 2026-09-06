@@ -347,9 +347,6 @@ void drawCameraSection(const HudFrameData& frame, float& focalLengthMm, float& a
     const glm::vec3 camPos = frame.camera.position();
     ImGui::Text("pos  x %.2f  y %.2f  z %.2f", camPos.x, camPos.y, camPos.z);
     ImGui::Text("rot  x %.1f  y %.1f", frame.cameraPitchDegrees, frame.cameraYawDegrees);
-    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
-    ImGui::Combo("##filmBackPreset", &filmBackPresetIndex, filmBackPresetNames.data(),
-                 static_cast<int>(filmBackPresetNames.size()));
     const engine::scene::Camera::FilmBack filmBack = frame.camera.filmBack();
     // heightMm > 0 is guaranteed by loadFilmBackPresets's boundary validation (profile_config.cpp), so this division is always well-defined.
     ImGui::Text("Filmback  %.2f x %.2f mm  (%.2f:1)", filmBack.widthMm, filmBack.heightMm,
@@ -358,6 +355,9 @@ void drawCameraSection(const HudFrameData& frame, float& focalLengthMm, float& a
     if (frame.cameraOrbiting) {
         ImGui::TextColored(kCyan, "orbiting");
     }
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+    ImGui::Combo("##filmBackPreset", &filmBackPresetIndex, filmBackPresetNames.data(),
+                 static_cast<int>(filmBackPresetNames.size()));
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
     ImGui::SliderFloat("##focalLength", &focalLengthMm, 10.0F, 300.0F, "Focal Length  %.0f mm");
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
@@ -376,17 +376,19 @@ void drawCameraSection(const HudFrameData& frame, float& focalLengthMm, float& a
 void drawHdriSection(bool& showSky, bool& envLightEnabled, int& envRotationDegrees,
                       float& envExposureStops) {
     ImGui::TextColored(kCyan, "HDRI");
-    // Only visibly affects the Beauty AOV (main.cpp's render loop gates the actual sky draw on aov==0) -- left interactive regardless of the active AOV rather than grayed out, simplest for a checkbox whose effect is just "no-op elsewhere".
-    ImGui::Checkbox("Show/Hide Background", &showSky);
     // Removes the environment from LightSet entirely (NEE, MIS, miss radiance) -- distinct from
-    // showSky above, which only ever hides the camera-visible background. Off is what makes the
+    // showSky below, which only ever hides the camera-visible background. Off is what makes the
     // classic Goral 1984 Cornell (light-panel-only, no IBL) reachable interactively.
     ImGui::Checkbox("Environment Light", &envLightEnabled);
+    ImGui::BeginDisabled(!envLightEnabled);
+    // Beauty-AOV-only (main.cpp gates the sky draw on aov==0); no-op elsewhere, and no-op with Environment Light off since that already removes the environment from every miss.
+    ImGui::Checkbox("Show/Hide Background", &showSky);
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
     ImGui::SliderInt("##envRotation", &envRotationDegrees, 0, 359, "Y-Axis  %d deg");
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
     // Stops, not a multiplier. main.cpp's requestPathTrace does exp2().
     ImGui::SliderFloat("##envExposureStops", &envExposureStops, -6.0F, 6.0F, "Exposure  %+.2f EV");
+    ImGui::EndDisabled();
     ImGui::Separator();
 }
 
