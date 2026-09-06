@@ -8,6 +8,7 @@
 #include <thread>
 #include <vector>
 
+#include "engine/debug/render_stats.h"
 #include "engine/scene/camera.h"
 #include "engine/scene/embree_accel.h"
 #include "engine/scene/environment_map.h"
@@ -61,10 +62,15 @@ public:
     // How many passes have been accumulated into the currently-published result's generation -- HUD convergence readout.
     [[nodiscard]] int accumulatedSamples() const { return accumulatedSamples_.load(std::memory_order_relaxed); }
 
-    [[nodiscard]] double lastPassSeconds() const { return lastPassSeconds_.load(std::memory_order_relaxed); }
+    // Render-thread-only. The most recent pass's phase timings and ray counts, including one that was cancelled mid-flight -- generation == 0 until the first pass of the app's life finishes. One POD copy under statsMutex_, cheap enough to call per frame, though the dashboard only asks at its own refresh rate.
+    [[nodiscard]] engine::debug::PassRecord lastPassRecord() const;
 
 private:
     void driverLoop(std::stop_token stopToken);
+    // width/height come from the rendered buffer, not the Request that asked for it: the same numbers, and it describes the image that actually exists.
+    void publishPassRecord(std::uint64_t generation, int passIndex, int width, int height,
+                            double traceMs, double accumulateMs, double publishMs, double passMs,
+                            bool cancelled);
     std::shared_ptr<PathTraceResult> acquireFreeBuffer(int width, int height);
 
     const EmbreeAccel& accel_;
@@ -84,7 +90,13 @@ private:
     // Set by setSuspended; polled by driverLoop, which idles instead of dispatching while it is true.
     std::atomic<bool> suspended_{false};
     std::atomic<int> accumulatedSamples_{0};
-    std::atomic<double> lastPassSeconds_{0.0};
+
+    // Ray/tile counters for the pass in flight, reset before each dispatch and read after it returns -- driver-thread-owned, reused for the driver's life, so a pass allocates nothing. Declared before thread_, like threadPool_, so it exists before driverLoop starts.
+    engine::debug::PassStats passStats_;
+
+    // Republished on every finished pass, cancelled ones included, guarded against the render thread's lastPassRecord() read. Separate from resultMutex_ so a dashboard read never contends with the image publish.
+    mutable std::mutex statsMutex_;
+    engine::debug::PassRecord lastPass_;
 
     // Republished on every completed pass, guarded by resultMutex_ against latestResult()'s render-thread read.
     mutable std::mutex resultMutex_;

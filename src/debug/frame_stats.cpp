@@ -47,4 +47,18 @@ float FrameStats::maxMs() const {
     return *std::max_element(history_.begin(), history_.begin() + filledCount_);
 }
 
+float FrameStats::percentileMs(float fraction) const {
+    if (filledCount_ == 0) {
+        return 0.0F;
+    }
+    std::array<float, kHistoryLength> sorted{};
+    std::copy(history_.begin(), history_.begin() + filledCount_, sorted.begin());
+    // Clamped rather than trusted: fraction is a caller-supplied ratio, and an index of filledCount_ would read one past the copied span.
+    const int index = std::clamp(static_cast<int>(fraction * static_cast<float>(filledCount_)), 0,
+                                  filledCount_ - 1);
+    const auto nth = sorted.begin() + index;
+    std::nth_element(sorted.begin(), nth, sorted.begin() + filledCount_);
+    return *nth;
+}
+
 }  // namespace engine::debug

@@ -6,6 +6,7 @@
 
 #include <glm/glm.hpp>
 
+#include "engine/debug/render_stats.h"
 #include "engine/gfx/hdr_image.h"
 #include "engine/scene/camera.h"
 #include "engine/scene/embree_accel.h"
@@ -14,6 +15,10 @@
 #include "engine/scene/thread_pool.h"
 
 namespace engine::scene {
+
+// Square destination tiles, each owned outright by one worker: splatting crosses pixel boundaries, so the row-disjoint invariant the rasterizer still relies on cannot hold here. Size trades halo waste against load-balancing granularity -- the halo re-traces (size+2*kFilterExtent)^2/size^2 of a tile, 4.2% here against 6.3% at 64, while doubling to 128 quarters the number of work items a small render has to spread across its workers. 96 and 128 measured indistinguishable at 1080p; 64 measurably worse.
+// In the header rather than path_tracer.cpp only so the startup spec block can report the real value instead of duplicating the literal.
+inline constexpr int kPathTraceTileSize = 96;
 
 // samplesPerPixel is "samples per renderPathTraced() call" -- when driven progressively by PathTraceDriver, that's samples per accumulated pass (typically 1), not the total sample count of the converged image; convergence comes from the driver accumulating many passes, not from a large value here.
 struct PathTraceSettings {
@@ -65,7 +70,7 @@ struct PathTraceResult {
 // All 9 images zeroed at width x height -- what renderPathTraced's `out` parameter must be, allocated once by the caller and reused across passes.
 [[nodiscard]] PathTraceResult makePathTraceResult(int width, int height);
 
-// Blocking, multithreaded (one thread per hardware core, dynamically scheduled square tiles) unidirectional path trace: BSDF-sampled recursive bounces with next-event estimation against `lights` (a LightSet -- the environment map and/or zero or more rectangular emitters, MIS power heuristic against BSDF sampling), Russian roulette from russianRouletteStartBounce. Samples are reconstructed through a Blackman-Harris filter of 1.5px radius rather than accumulated per pixel, so each one contributes to several pixels and every output image is a weighted mean over the filter's support; all 9 images share one weight, which is what keeps the transport buckets an exact partition of beauty through filtering. showSky: gates only the primary ray's own miss (the camera seeing the background directly) -- indirect bounces and NEE always sample real light radiance regardless, so hiding the background doesn't unlight the scene. instanceLightIndex: parallel to `instances`, -1 for ordinary geometry, the index into `lights`' quads for an emitter instance -- a hit on one is Le, not a BSDF vertex (see tracePath). out: caller-owned destination, which MUST already be sized width x height (see makePathTraceResult) -- taken by reference rather than returned so a progressive driver allocates its buffers once instead of 9 fresh images per pass. Every pixel of every image is written, so no pre-clear is needed and a reused buffer carries nothing over from the previous pass. generation/requestedGeneration: cooperative cancellation for PathTraceDriver's async use -- each worker checks generation.load() != requestedGeneration once per tile (cheap, same polling idiom as the index-stealing atomic inside ThreadPool) and returns early if a newer request has superseded this one, leaving `out`'s unwritten tiles however the previous pass left them, which is safe precisely because a cancelled pass is discarded whole and the next pass rewrites every tile. A direct/synchronous caller not using cancellation can pass a generation atomic holding requestedGeneration's own value, which never goes stale. threadPool: parallel dispatch, owned by the caller and reused across calls (PathTraceDriver keeps one alive for its whole lifetime) -- avoids paying OS thread-creation/join cost on every pass.
+// Blocking, multithreaded (one thread per hardware core, dynamically scheduled square tiles) unidirectional path trace: BSDF-sampled recursive bounces with next-event estimation against `lights` (a LightSet -- the environment map and/or zero or more rectangular emitters, MIS power heuristic against BSDF sampling), Russian roulette from russianRouletteStartBounce. Samples are reconstructed through a Blackman-Harris filter of 1.5px radius rather than accumulated per pixel, so each one contributes to several pixels and every output image is a weighted mean over the filter's support; all 9 images share one weight, which is what keeps the transport buckets an exact partition of beauty through filtering. showSky: gates only the primary ray's own miss (the camera seeing the background directly) -- indirect bounces and NEE always sample real light radiance regardless, so hiding the background doesn't unlight the scene. instanceLightIndex: parallel to `instances`, -1 for ordinary geometry, the index into `lights`' quads for an emitter instance -- a hit on one is Le, not a BSDF vertex (see tracePath). out: caller-owned destination, which MUST already be sized width x height (see makePathTraceResult) -- taken by reference rather than returned so a progressive driver allocates its buffers once instead of 9 fresh images per pass. Every pixel of every image is written, so no pre-clear is needed and a reused buffer carries nothing over from the previous pass. generation/requestedGeneration: cooperative cancellation for PathTraceDriver's async use -- each worker checks generation.load() != requestedGeneration once per tile (cheap, same polling idiom as the index-stealing atomic inside ThreadPool) and returns early if a newer request has superseded this one, leaving `out`'s unwritten tiles however the previous pass left them, which is safe precisely because a cancelled pass is discarded whole and the next pass rewrites every tile. A direct/synchronous caller not using cancellation can pass a generation atomic holding requestedGeneration's own value, which never goes stale. stats: ray/tile counters for this pass, owned by the caller and reused across calls exactly as threadPool is -- reset() before the call, read after it returns (see render_stats.h for why the reads are safe without an explicit fence). threadPool: parallel dispatch, owned by the caller and reused across calls (PathTraceDriver keeps one alive for its whole lifetime) -- avoids paying OS thread-creation/join cost on every pass.
 void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                        const std::vector<ShadingTriangle>& shadingTriangles,
                        const std::vector<MeshInstance>& instances,
@@ -74,6 +79,6 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                        const std::vector<PathTraceSettings>& perInstanceSettings,
                        std::uint32_t runSeed, const std::atomic<std::uint64_t>& generation,
                        std::uint64_t requestedGeneration, ThreadPool& threadPool,
-                       PathTraceResult& out);
+                       engine::debug::PassStats& stats, PathTraceResult& out);
 
 }  // namespace engine::scene
