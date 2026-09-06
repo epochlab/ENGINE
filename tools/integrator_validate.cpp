@@ -133,13 +133,14 @@ TestScene makeSlabScene(float roughness, glm::vec3 f0, float thickness) {
     return scene;
 }
 
-// The quad above plus an opaque wall at x=1 facing -X, the only scene here where a non-transmissive path reaches a second surface: the wall sits outside the narrow view frustum (primary rays land within |x|<0.31 at z=0) so it is never primary-visible, but it catches the floor's +X-going bounce rays, and NEE fires there at bounce>=1, the only way anything reaches the Indirect buckets.
-TestScene makeCornerScene(float roughness, glm::vec3 f0) {
+// The quad above plus an opaque wall at x=wallX facing -X, the only scene here where a non-transmissive path reaches a second surface: the wall sits outside the narrow view frustum (primary rays land within |x|<0.31 at z=0) so it is never primary-visible, but it catches the floor's +X-going bounce rays, and NEE fires there at bounce>=1, the only way anything reaches the Indirect buckets.
+// wallX defaults to the transport checks' original 1, and the AO checks push it out to kAoWallDistance -- see there for why that distance is load-bearing for them and irrelevant here.
+TestScene makeCornerScene(float roughness, glm::vec3 f0, float wallX = 1.0F) {
     TestScene scene = makeQuadScene(roughness, f0);
     const glm::vec3 wallNormal(-1.0F, 0.0F, 0.0F);
     const glm::vec4 wallTangent(0.0F, 1.0F, 0.0F, 1.0F);
     const auto vertex = [&](float y, float z) {
-        return ShadingVertex{glm::vec3(1.0F, y, z), wallNormal, glm::vec2(0.5F, 0.5F), wallTangent};
+        return ShadingVertex{glm::vec3(wallX, y, z), wallNormal, glm::vec2(0.5F, 0.5F), wallTangent};
     };
     // Wound so geometricNormalOf gives -X, i.e. facing back across the floor rather than away from it.
     const ShadingVertex w0 = vertex(-kQuadExtent, 0.0F);
@@ -1330,6 +1331,114 @@ bool checkQuadLightInverseSquare() {
     return ok;
 }
 
+// --- Ray-traced ambient occlusion (path_tracer.cpp's AO lane) ---------------------------------------
+
+// Wall distance for the AO checks, ten times makeCornerScene's default. Both reasons are quantitative. AO(c) is nonlinear, so the measured block's spatial spread in d biases its mean by about AO''(c)*Var(d/D)/2: the frame spans |x| <= 0.3 at the floor, which at d=10 holds that bias to 1.6e-4 at the worst row (c=0.9), a tenth of its tolerance, where at d=1 it would be 100x larger and dominate. And the c>1 row needs c above 1 at every measured pixel, not just at the centre, which at d=1 it is not. Rays reach at most D = d/c <= 200 here, well inside the wall's kQuadExtent reach, so no ray escapes past its edges.
+constexpr float kAoWallDistance = 10.0F;
+// AO is one Bernoulli draw per sample, so its standard error falls only as 1/sqrt(N). This count puts the 6-sigma tolerance 5.8x below the gap to the uniform-hemisphere curve (1+c)/2 at c=0.25, the narrowest of the rows that discriminate, and further below it at c=0.50 and c=0.75. c=0.05 separates the two curves by only 0.0068 and so discriminates at no practical N, which is why the sweep carries four rows and not one.
+constexpr int kAoSamplesPerPixel = 1024;
+// Every pixel, not centreMean's 4x4 block: AO is a visibility query about the plane's constant +Z normal and does not depend on the view direction, so the spread centreMean exists to limit costs nothing here, and reading the whole frame gives the same N for a sixteenth of the traced paths.
+constexpr float kAoMeasuredPixels = static_cast<float>(kImageSize) * static_cast<float>(kImageSize);
+
+// Closed-form cosine-weighted AO for the corner scene: a receiver on the infinite floor at perpendicular distance d from the wall plane, occlusion range D, c = d/D. Malley's method makes the sampled direction's tangential projection uniform on the unit disk (PBR 4th ed. 13.6.3), and a ray reaches the wall plane at t = d/wx, so it is occluded exactly when wx >= c -- a half-plane cut of the unit disk, i.e. a circular segment of area acos(c) - c*sqrt(1-c^2). Rotating the tangent frame maps a uniform disk onto itself, so this does not depend on how buildShadingFrame orients it. c -> 0 approaches the half-space limit 0.5; c >= 1 puts the whole wall beyond D.
+float analyticAmbientOcclusion(float c) {
+    if (c >= 1.0F) {
+        return 1.0F;
+    }
+    return 1.0F - ((std::acos(c) - (c * std::sqrt(1.0F - (c * c)))) / kPi);
+}
+
+// Binomial standard error on the visibility fraction at ~6 sigma, the same device as nee_validate.cpp's quad-solid-angle tolerance: taken from the estimator's own statistics rather than picked by hand. N counts only the block's own samples; the 1.5px reconstruction filter mixes a one-pixel halo in, which can only raise the contributing count. At p = 1 this is exactly zero, which is correct rather than degenerate -- every sample is then deterministically unoccluded, and the AO lane and the filter-weight lane accumulate the identical sequence of weights, so the quotient at write-out is bit-exactly 1.0.
+float aoTolerance(float expected) {
+    const float n = static_cast<float>(kAoSamplesPerPixel) * kAoMeasuredPixels;
+    return 6.0F * std::sqrt(expected * (1.0F - expected) / n);
+}
+
+// One AO render, averaged over the whole frame. maxBounces=0 because AO is written at bounce 0 before any BSDF work, so the beauty path these checks never read costs the minimum; the Lambertian material is for the same reason, since AO is a pure visibility query and reads no material at all.
+bool checkAoRow(const char* label, const TestScene& scene, const EnvironmentMap& env,
+                 float aoMaxDistance, float expected, EmbreeAccel& accel,
+                 engine::scene::ThreadPool& pool) {
+    PathTraceSettings settings = makeLambertianSettings(/*maxBounces=*/0);
+    settings.samplesPerPixel = kAoSamplesPerPixel;
+    settings.aoMaxDistance = aoMaxDistance;
+    const engine::gfx::HdrImage& ao = renderPass(scene, env, settings, accel, pool, true).ao;
+    const float measured = regionMean(ao, 0, 0, kImageSize, kImageSize).x;
+    const float tolerance = aoTolerance(expected);
+    std::cout << "  " << label;
+    for (std::size_t pad = std::string(label).size(); pad < 38; ++pad) {
+        std::cout << ' ';
+    }
+    std::cout << "measured " << measured << "   analytic " << expected << "   tolerance " << tolerance
+              << '\n';
+    if (std::fabs(measured - expected) > tolerance) {
+        std::cerr << "integrator_validate: FAILED ambient occlusion at " << label << " -- measured "
+                  << measured << " vs analytic " << expected << " (tolerance " << tolerance << ")\n";
+        return false;
+    }
+    return true;
+}
+
+struct AoCase {
+    const char* name;
+    float c;  // d / aoMaxDistance
+};
+
+// Ray-traced AO against its closed form, over two configurations. An unoccluded plane, where every AO ray escapes and the lane must read exactly 1.0 -- the row an inverted polarity fails outright. Then the corner scene swept over c, which pins the SHAPE of the curve: a sweep and not a point because uniform-hemisphere sampling under the same mean-of-visibility estimator gives (1+c)/2, a different curve that any single row could coincide with.
+bool checkAmbientOcclusionAnalytic() {
+    std::cout << "integrator_validate: ambient occlusion vs analytic cosine-weighted visibility\n";
+    const EnvironmentMap env = makeUniformEnvironment();
+    engine::scene::ThreadPool pool;
+    bool ok = true;
+
+    const TestScene openScene = makeQuadScene(1.0F, glm::vec3(0.04F));
+    std::optional<EmbreeAccel> openAccel = EmbreeAccel::build(openScene.worldTriangles);
+    if (!openAccel.has_value()) {
+        std::cerr << "integrator_validate: FAILED to build Embree scene for the unoccluded AO plane\n";
+        return false;
+    }
+    ok = checkAoRow("unoccluded plane", openScene, env, kAoWallDistance, 1.0F, *openAccel, pool) && ok;
+
+    const TestScene corner = makeCornerScene(1.0F, glm::vec3(0.04F), kAoWallDistance);
+    std::optional<EmbreeAccel> cornerAccel = EmbreeAccel::build(corner.worldTriangles);
+    if (!cornerAccel.has_value()) {
+        std::cerr << "integrator_validate: FAILED to build Embree scene for the AO corner\n";
+        return false;
+    }
+    const std::array<AoCase, 4> sweep{{{"corner c=0.05 (half-space limit)", 0.05F},
+                                        {"corner c=0.25", 0.25F},
+                                        {"corner c=0.50", 0.5F},
+                                        {"corner c=0.75", 0.75F}}};
+    for (const AoCase& testCase : sweep) {
+        ok = checkAoRow(testCase.name, corner, env, kAoWallDistance / testCase.c,
+                         analyticAmbientOcclusion(testCase.c), *cornerAccel, pool) &&
+             ok;
+    }
+    return ok;
+}
+
+// aoMaxDistance bracketed from both sides on one fixed geometry, so the only thing changing between the two rows is the bound itself. At c=0.9 the wall is just inside range and darkens the plate slightly; at c=1.1 it is just outside and every ray escapes, so the lane must read exactly 1.0 -- and it is exact rather than approximate because even the frame-edge sample nearest the wall, at the x=0.3 where the film clips, still sits at c=1.067. A build that ignores aoMaxDistance reads the unbounded half-space value 0.5 in both rows.
+bool checkAmbientOcclusionDistanceBound() {
+    std::cout << "integrator_validate: ambient occlusion respects aoMaxDistance\n";
+    const EnvironmentMap env = makeUniformEnvironment();
+    engine::scene::ThreadPool pool;
+
+    const TestScene corner = makeCornerScene(1.0F, glm::vec3(0.04F), kAoWallDistance);
+    std::optional<EmbreeAccel> accel = EmbreeAccel::build(corner.worldTriangles);
+    if (!accel.has_value()) {
+        std::cerr << "integrator_validate: FAILED to build Embree scene for the AO distance bound\n";
+        return false;
+    }
+    const std::array<AoCase, 2> cases{{{"occluder just inside range (c=0.90)", 0.9F},
+                                        {"occluder just outside range (c=1.10)", 1.1F}}};
+    bool ok = true;
+    for (const AoCase& testCase : cases) {
+        ok = checkAoRow(testCase.name, corner, env, kAoWallDistance / testCase.c,
+                         analyticAmbientOcclusion(testCase.c), *accel, pool) &&
+             ok;
+    }
+    return ok;
+}
+
 }  // namespace
 
 int main() {
@@ -1343,8 +1452,11 @@ int main() {
     const bool partitionOk = checkTransportPartition();
     const bool quadLightOk = checkQuadLightIrradianceOneSidedOcclusion();
     const bool inverseSquareOk = checkQuadLightInverseSquare();
+    const bool aoAnalyticOk = checkAmbientOcclusionAnalytic();
+    const bool aoDistanceOk = checkAmbientOcclusionDistanceBound();
     if (!casesOk || !slabOk || !sphereOk || !absorptionOk || !onSurfaceTintOk || !bindingOk ||
-        !resolveOk || !partitionOk || !quadLightOk || !inverseSquareOk) {
+        !resolveOk || !partitionOk || !quadLightOk || !inverseSquareOk || !aoAnalyticOk ||
+        !aoDistanceOk) {
         std::cerr << "integrator_validate: FAILED\n";
         return EXIT_FAILURE;
     }
