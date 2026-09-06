@@ -18,6 +18,10 @@ public:
     [[nodiscard]] float minMs() const;
     [[nodiscard]] float maxMs() const;
 
+    // Percentile of the recorded frame times, fraction in [0,1] (0.5 = median). Copies the filled span onto the stack and nth_elements it: no allocation, at most kHistoryLength floats. A mean hides hitches by construction -- one 50ms frame in 120 moves a 60fps average by 0.4fps and is exactly the frame a user feels -- so the dashboard leads with p50/p95 and keeps the mean as a courtesy number.
+    // kHistoryLength samples cannot express a p99: the 99th percentile of 120 is the second-largest value, not a tail estimate. Callers should ask for p95 and read maxMs() for the tail.
+    [[nodiscard]] float percentileMs(float fraction) const;
+
     // Raw buffer + write cursor, for ImGui::PlotLines's values_offset.
     [[nodiscard]] const std::array<float, kHistoryLength>& history() const { return history_; }
     [[nodiscard]] int cursor() const { return cursor_; }

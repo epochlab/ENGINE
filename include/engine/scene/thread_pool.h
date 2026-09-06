@@ -14,7 +14,12 @@ namespace engine::scene {
 // Persistent worker-thread pool for parallel rendering. Spawning and joining hardware_concurrency() std::threads on every renderPathTraced call would repeat the OS thread-creation/join cost on every progressive pass under PathTraceDriver; this pool spawns its threads once at construction and parks them (condition_variable wait, no busy-spin) between dispatches instead.
 class ThreadPool {
 public:
-    explicit ThreadPool(unsigned int threadCount = std::max(1U, std::thread::hardware_concurrency()));
+    // One worker per hardware thread, floored at 1 (hardware_concurrency is documented to be allowed to return 0). Named rather than written inline as the default argument so callers that need to REPORT the pool size before a pool exists -- the startup spec block -- read it from here instead of restating the expression.
+    [[nodiscard]] static unsigned int defaultThreadCount() {
+        return std::max(1U, std::thread::hardware_concurrency());
+    }
+
+    explicit ThreadPool(unsigned int threadCount = defaultThreadCount());
     ~ThreadPool();
 
     ThreadPool(const ThreadPool&) = delete;

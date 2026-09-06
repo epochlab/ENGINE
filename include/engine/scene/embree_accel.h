@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <optional>
 #include <vector>
 
@@ -47,5 +48,8 @@ private:
     std::vector<Triangle> triangles_;  // kept alive: the vertex buffer shares this memory with Embree
     int triangleCount_ = 0;
 };
+
+// Bytes Embree has allocated for BVH/geometry data, via its own device memory monitor (rtcSetDeviceMemoryMonitorFunction) rather than an estimate from triangle count. Device-global, so it counts everything built on any device this process created -- exact today, since build() creates one device holding one scene, and it stops being exact the moment a second scene is attached.
+[[nodiscard]] std::size_t embreeAllocatedBytes();
 
 }  // namespace engine::scene

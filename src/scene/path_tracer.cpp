@@ -70,8 +70,6 @@ float transmissionOffsetEpsilon(const ShadingTriangle& tri) {
 constexpr float kFilterRadius = 1.5F;
 constexpr int kFilterExtent = 1;  // how many pixels either side of a sample its splat can reach: a sample sits at most 1.0 past its own pixel's far centre, so a destination two pixels away is at least kFilterRadius off and weighs exactly zero
 constexpr int kFilterTableSize = 64;
-// Square destination tiles, each owned outright by one worker: splatting crosses pixel boundaries, so the row-disjoint invariant the rasterizer still relies on cannot hold here. Size trades halo waste against load-balancing granularity -- the halo re-traces (size+2*kFilterExtent)^2/size^2 of a tile, 4.2% here against 6.3% at 64, while doubling to 128 quarters the number of work items a small render has to spread across its workers. 96 and 128 measured indistinguishable at 1080p; 64 measurably worse.
-constexpr int kTileSize = 96;
 // Per-tile accumulator lanes: beauty.rgb, termination bounce, shadow, the five transport buckets' rgb, then ambient occlusion -- the scalars take one lane each and are broadcast to RGB at write-out, matching writeTexel's convention. AO is appended rather than placed beside shadow so no existing lane index moves.
 constexpr int kSampleLanes = 21;
 constexpr int kTileLanes = kSampleLanes + 1;  // plus the per-pixel filter weight the lanes above are normalised by
@@ -127,7 +125,8 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
                        const std::vector<int>& instanceLightIndex, const LightSet& lights,
                        bool showSky, const PathTraceSettings& settings,
                        const std::vector<PathTraceSettings>& perInstanceSettings,
-                       Sampler& sampler, glm::vec2 aoSample) {
+                       Sampler& sampler, glm::vec2 aoSample,
+                       engine::debug::RayCounts& __restrict rays) {
     glm::vec3 radiance(0.0F);
     glm::vec3 throughput(1.0F);
     Ray ray = primaryRay;
@@ -176,6 +175,7 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
 
     // bounce 0 (the primary/camera ray, direct lighting via NEE) always traces regardless of maxBounces -- maxBounces counts secondary/indirect bounces beyond it, so maxBounces==0 means direct lighting only, no continuation rays. The loop runs one iteration PAST maxBounces so the final BSDF-sampled ray can still collect its MIS-weighted environment contribution via the miss branch below; that extra iteration breaks at the depth guard before any surface interaction -- see the guard for why the terminal ray must be traced rather than dropped.
     for (; bounce <= settings.maxBounces + 1; ++bounce) {
+        (bounce == 0 ? rays.primary : rays.bounce) += 1;
         const std::optional<Hit> hit = accel.intersect(ray);
 
         // Beer-Lambert attenuation for the segment just traveled (ray.origin to this hit/miss), gated on
@@ -292,6 +292,7 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
             // NEE's near-side origin verbatim: the shading-terminator offset plus a geometric-normal back-off, on whichever side wo is.
             const glm::vec3 aoOrigin = shadowTerminatorOffset(triangle, hit->u, hit->v, frontSide) +
                                         (geoNormal * kRayEpsilon * (frontSide ? 1.0F : -1.0F));
+            ++rays.ao;
             gAo = accel.occluded(Ray{aoOrigin, aoDir, kRayEpsilon, settings.aoMaxDistance})
                        ? 0.0F
                        : 1.0F;
@@ -360,6 +361,7 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
                         (geoNormal * shadowEpsilon * (geoCos > 0.0F ? 1.0F : -1.0F));
                     const Ray shadowRay{shadowOrigin, lightSample->direction, shadowEpsilon,
                                          lightSample->distance * (1.0F - kShadowDistanceEpsilon)};
+                    ++rays.shadow;
                     if (!accel.occluded(shadowRay)) {
                         if (bounce == 0) {
                             gShadow = 0.0F;
@@ -451,23 +453,26 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                        const std::vector<PathTraceSettings>& perInstanceSettings,
                        std::uint32_t runSeed, const std::atomic<std::uint64_t>& generation,
                        std::uint64_t requestedGeneration, ThreadPool& threadPool,
-                       PathTraceResult& out) {
+                       engine::debug::PassStats& stats, PathTraceResult& out) {
     const float aspect = static_cast<float>(width) / static_cast<float>(height);
     // Constant for the whole pass, so it is built once here rather than per primary ray: the aspect-taking primaryRay rebuilds it every call, which at samplesPerPixel rays per pixel is millions of identical reconstructions per pass. rasterizer.cpp already hoists it the same way.
     const Camera::ViewBasis basis = camera.viewBasis(aspect);
-    const int tilesX = (width + kTileSize - 1) / kTileSize;
-    const int tilesY = (height + kTileSize - 1) / kTileSize;
+    const int tilesX = (width + kPathTraceTileSize - 1) / kPathTraceTileSize;
+    const int tilesY = (height + kPathTraceTileSize - 1) / kPathTraceTileSize;
 
     // One worker owns every output pixel of one tile, and traces every pixel within the filter radius of it -- the kFilterExtent-wide halo, whose samples are therefore traced twice, once by each of the two tiles they splat into. Sampler is seeded per (x, y, s, runSeed), so both tiles compute the identical sample; the cost is ~13% more rays at this tile size, and what it buys is that no splat ever crosses into another worker's pixels, so the whole pass needs no locks, no atomics and no merge phase.
     const auto renderTile = [&](int tileIndex) {
-        const int tileX0 = (tileIndex % tilesX) * kTileSize;
-        const int tileY0 = (tileIndex / tilesX) * kTileSize;
-        const int tileX1 = std::min(tileX0 + kTileSize, width);
-        const int tileY1 = std::min(tileY0 + kTileSize, height);
+        const int tileX0 = (tileIndex % tilesX) * kPathTraceTileSize;
+        const int tileY0 = (tileIndex / tilesX) * kPathTraceTileSize;
+        const int tileX1 = std::min(tileX0 + kPathTraceTileSize, width);
+        const int tileY1 = std::min(tileY0 + kPathTraceTileSize, height);
 
-        // Reused for the life of the worker thread, so a pass allocates nothing: sized for a full tile even at the image edge, which keeps the row stride a constant kTileSize.
+        // Stack-local, not thread_local like the accumulator below: zeroed by construction, so the reset boundary is the tile boundary with no bookkeeping. A thread_local would outlive the tile AND the pass, and a missed reset would silently double-count. tracePath increments this in place through a __restrict reference -- see render_stats.h for the measurement that settled that over returning the counts by value.
+        engine::debug::RayCounts tileRays;
+
+        // Reused for the life of the worker thread, so a pass allocates nothing: sized for a full tile even at the image edge, which keeps the row stride a constant kPathTraceTileSize.
         thread_local std::vector<float> accumulator;
-        accumulator.assign(static_cast<std::size_t>(kTileSize) * kTileSize * kTileLanes, 0.0F);
+        accumulator.assign(static_cast<std::size_t>(kPathTraceTileSize) * kPathTraceTileSize * kTileLanes, 0.0F);
 
         for (int y = std::max(tileY0 - kFilterExtent, 0);
              y < std::min(tileY1 + kFilterExtent, height); ++y) {
@@ -487,7 +492,8 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                     const glm::vec2 aoSample = aoSampler.next2D();
                     const TraceResult trace =
                         tracePath(primary, accel, shadingTriangles, instances, instanceLightIndex,
-                                  lights, showSky, settings, perInstanceSettings, sampler, aoSample);
+                                  lights, showSky, settings, perInstanceSettings, sampler,
+                                  aoSample, tileRays);
                     const std::array<float, kSampleLanes> values{
                         trace.radiance.x,          trace.radiance.y,
                         trace.radiance.z,          static_cast<float>(trace.terminationBounce),
@@ -520,7 +526,7 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                             }
                             float* lanes =
                                 accumulator.data() +
-                                ((static_cast<std::size_t>(splatY - tileY0) * kTileSize) +
+                                ((static_cast<std::size_t>(splatY - tileY0) * kPathTraceTileSize) +
                                  static_cast<std::size_t>(splatX - tileX0)) * kTileLanes;
                             for (std::size_t lane = 0; lane < kSampleLanes; ++lane) {
                                 lanes[lane] += weight * values[lane];
@@ -535,7 +541,7 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
         for (int y = tileY0; y < tileY1; ++y) {
             for (int x = tileX0; x < tileX1; ++x) {
                 const float* lanes = accumulator.data() +
-                                      ((static_cast<std::size_t>(y - tileY0) * kTileSize) +
+                                      ((static_cast<std::size_t>(y - tileY0) * kPathTraceTileSize) +
                                        static_cast<std::size_t>(x - tileX0)) * kTileLanes;
                 // Always positive: a pixel's own samples land within half a pixel of its centre, well inside the 1.5px support, and samplesPerPixel is at least 1.
                 const float invWeight = 1.0F / lanes[kSampleLanes];
@@ -550,10 +556,14 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                 writeTexel(out.ao, x, y, glm::vec3(lanes[20] * invWeight));
             }
         }
+
+        stats.addTile(tileRays);
     };
 
-    threadPool.parallelFor(tilesX * tilesY, [&renderTile, &generation, requestedGeneration](int tileIndex) {
+    threadPool.parallelFor(tilesX * tilesY, [&renderTile, &generation, requestedGeneration,
+                                              &stats](int tileIndex) {
         if (generation.load(std::memory_order_relaxed) != requestedGeneration) {
+            stats.addCancelledTile();  // counted, not ignored: a cancelled pass must not read as a short one
             return;  // stale -- caller discards this pass's result entirely
         }
         renderTile(tileIndex);

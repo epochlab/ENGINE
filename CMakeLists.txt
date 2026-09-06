@@ -35,6 +35,23 @@ endif()
 include(CheckIPOSupported)
 check_ipo_supported(RESULT IPO_SUPPORTED)
 
+# Build provenance for the startup spec block: a timing number without the machine and build it was measured on is not a measurement.
+# Configure-time, not build-time: a commit made without re-running cmake reports the previous SHA, accepted, because the alternative (a custom command re-running git every build) adds two process spawns to every incremental build for a debug string.
+# EXISTS also matches a .git *file*, which is what this repo has -- it is a submodule, so .git is a gitlink, not a directory. Absent git, or a tarball checkout, reports "unknown" rather than failing the configure.
+find_package(Git QUIET)
+set(ENGINE_GIT_SHA "unknown")
+if(GIT_FOUND AND EXISTS ${CMAKE_SOURCE_DIR}/.git)
+    execute_process(COMMAND ${GIT_EXECUTABLE} rev-parse --short HEAD
+                    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+                    OUTPUT_VARIABLE ENGINE_GIT_SHA OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+    execute_process(COMMAND ${GIT_EXECUTABLE} status --porcelain --untracked-files=no
+                    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+                    OUTPUT_VARIABLE ENGINE_GIT_DIRTY OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+    if(NOT ENGINE_GIT_DIRTY STREQUAL "")
+        set(ENGINE_GIT_SHA "${ENGINE_GIT_SHA}+dirty")
+    endif()
+endif()
+
 find_program(CPPCHECK_EXE NAMES cppcheck)
 if(CPPCHECK_EXE)
     add_custom_target(cppcheck
@@ -109,11 +126,19 @@ add_executable(engine
     src/debug/memory_tracker.cpp
     src/debug/histogram.cpp
     src/debug/hud_overlay.cpp
+    src/debug/spec_report.cpp
+    src/debug/perf_dashboard.cpp
     $<TARGET_OBJECTS:vendored_no_tidy>)
 target_include_directories(engine PRIVATE include ${IMGUI_DIR} ${IMGUI_DIR}/backends ${CGLTF_DIR} ${JSON_DIR})
 target_compile_definitions(engine PRIVATE
     GL_SILENCE_DEPRECATION
-    ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets")
+    ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets"
+    ENGINE_GIT_SHA="${ENGINE_GIT_SHA}"
+    # $<CONFIG>, not CMAKE_BUILD_TYPE: correct under both the single-config generators the guard at the top of this file defaults and the multi-config Xcode generator that ignores it.
+    ENGINE_BUILD_TYPE="$<CONFIG>"
+    # Kept adjacent to target_compile_options below, which is the flag it reports, so the two cannot drift unnoticed.
+    ENGINE_MARCH="native"
+    ENGINE_IPO=$<BOOL:${IPO_SUPPORTED}>)
 target_compile_options(engine PRIVATE -Wall -Wextra -Werror -march=native)
 target_link_libraries(engine PRIVATE
     glfw GLEW::GLEW OpenGL::GL glm::glm
