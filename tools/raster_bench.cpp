@@ -53,14 +53,14 @@ engine::gfx::HdrImage constantTexture(glm::vec4 color) {
     return image;
 }
 
-Material makeMaterial(glm::vec3 baseColor, float roughness, float ao) {
+Material makeMaterial(glm::vec3 baseColor, float roughness) {
     Material material;
     material.baseColorTexture = constantTexture(glm::vec4(baseColor, 1.0F));
     material.normalTexture = constantTexture(glm::vec4(0.5F, 0.5F, 1.0F, 1.0F));  // tangent-space (0,0,1)
     material.bumpTexture = constantTexture(glm::vec4(0.5F));
     material.roughnessTexture = constantTexture(glm::vec4(roughness));
     material.specularTexture = constantTexture(glm::vec4(0.04F));
-    material.aoTexture = constantTexture(glm::vec4(ao));
+    material.aoTexture = constantTexture(glm::vec4(1.0F));  // unread since AO became path-traced; kept a valid 1x1 so every slot matches makeDefaultMaterial
     return material;
 }
 
@@ -198,10 +198,10 @@ int main(int argc, char** argv) {
     }
 
     std::vector<MeshInstance> instances;
-    instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.8F, 0.2F, 0.2F), 0.2F, 1.0F), glm::mat4(1.0F), ""});
-    instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.2F, 0.8F, 0.2F), 0.5F, 0.6F), glm::mat4(1.0F), ""});
-    instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.2F, 0.2F, 0.8F), 0.8F, 0.3F), glm::mat4(1.0F), ""});
-    instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.8F, 0.8F, 0.2F), 1.0F, 0.9F), glm::mat4(1.0F), ""});
+    instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.8F, 0.2F, 0.2F), 0.2F), glm::mat4(1.0F), ""});
+    instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.2F, 0.8F, 0.2F), 0.5F), glm::mat4(1.0F), ""});
+    instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.2F, 0.2F, 0.8F), 0.8F), glm::mat4(1.0F), ""});
+    instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.8F, 0.8F, 0.2F), 1.0F), glm::mat4(1.0F), ""});
 
     PathTraceSettings settings{};
     settings.samplesPerPixel = 1;
