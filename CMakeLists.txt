@@ -170,6 +170,17 @@ target_include_directories(gltf_tangent PRIVATE ${JSON_DIR})
 target_compile_options(gltf_tangent PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(gltf_tangent PRIVATE glm::glm)
 
+# Offline generator for src/scene/blue_noise_mask.inc, the void-and-cluster dither array sampler.cpp bakes in. Grouped
+# with gltf_tangent rather than with the validate tools below: it produces a committed artifact, it does not check one,
+# so it stays out of the ctest loop. -march=native/IPO because it is convolution-bound and only ever run by hand.
+add_executable(bluenoise_mask tools/bluenoise_mask.cpp src/gfx/hdr_image.cpp)
+target_include_directories(bluenoise_mask PRIVATE include)
+target_compile_options(bluenoise_mask PRIVATE -Wall -Wextra -Werror -march=native)
+target_link_libraries(bluenoise_mask PRIVATE glm::glm OpenEXR::OpenEXR Imath::Imath)
+if(IPO_SUPPORTED)
+    set_target_properties(bluenoise_mask PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
+endif()
+
 # Headless correctness checks (Phase 4): no test framework exists yet, so these follow test_pattern/downsample's standalone-CLI convention (non-zero exit on failure).
 # -march=native/IPO mirror the engine target's flags so these tools validate the exact codegen that ships, not a differently-optimized build of the same math.
 add_executable(embree_validate tools/embree_validate.cpp src/scene/embree_accel.cpp src/scene/ray_types.cpp)
@@ -188,7 +199,7 @@ if(IPO_SUPPORTED)
     set_target_properties(bsdf_validate PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
 endif()
 
-add_executable(sampler_validate tools/sampler_validate.cpp src/scene/sampler.cpp)
+add_executable(sampler_validate tools/sampler_validate.cpp src/scene/sampler.cpp src/debug/power_spectrum.cpp)
 target_include_directories(sampler_validate PRIVATE include)
 target_compile_options(sampler_validate PRIVATE -Wall -Wextra -Werror -march=native)
 target_link_libraries(sampler_validate PRIVATE glm::glm)
@@ -232,7 +243,7 @@ if(IPO_SUPPORTED)
 endif()
 
 # Headless before/after comparison renders (tools/render_beauty.cpp). Not a correctness gate and deliberately absent from the add_test loop below: its output is a picture for a human to look at, and a full-scene render is far slower than any validator. Needs OCIO (the display transform, evaluated on the CPU) and zlib (PNG encode) on top of the usual render dependencies.
-add_executable(render_beauty tools/render_beauty.cpp src/scene/path_tracer.cpp
+add_executable(render_beauty tools/render_beauty.cpp src/debug/power_spectrum.cpp src/scene/path_tracer.cpp
                src/scene/gbuffer_shading.cpp src/scene/embree_accel.cpp src/scene/ray_types.cpp
                src/scene/shading_scene.cpp src/scene/bsdf.cpp src/scene/sampler.cpp
                src/scene/environment_map.cpp src/scene/light.cpp src/scene/camera.cpp src/scene/thread_pool.cpp
