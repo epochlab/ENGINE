@@ -38,8 +38,6 @@ struct DashboardFrame {
     int renderHeight;
     float renderScale;
     bool interactiveScale;
-    // '?' toggles the hotkey section on, beneath the block's closing rule. It has to be a section of this block rather than a print of its own: the redraw rewrites every line it owns, so anything printed into that region is erased before the eye can catch it.
-    bool showHotkeys;
     int refreshRateHz;
 };
 
