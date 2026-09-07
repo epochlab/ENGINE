@@ -1123,7 +1123,10 @@ void updateHud(AppResources& app, const engine::platform::Window& window,
     app.filmBackPresetIndex = filmBackPresetIndex;
     app.debugCamera.setFilmBack(
         app.filmBackPresets[static_cast<std::size_t>(filmBackPresetIndex)].filmBack);
-    app.hud.render();
+    {
+        const engine::debug::ScopedCpuTimer hudRenderTimer(app.stages.hudRenderMs);
+        app.hud.render();
+    }
 }
 
 // The three read-back/sampling steps that must run after the composited image lands in the default framebuffer and before the HUD draws over it: histogram capture, the over-range scan, and the rate-limited RAM resample. Grouped because they share that placement constraint, not because they are otherwise related.
