@@ -1,7 +1,6 @@
 #pragma once
 
 #include <cstddef>
-#include <span>
 
 namespace engine::debug {
 
@@ -37,11 +36,5 @@ struct EngineSpec {
 // One-shot provenance block on stdout, printed once at startup after the GL context exists (queryGpuInfo) and after the scene has loaded, so every number in it is real rather than a default.
 // Deliberately NOT the live dashboard: plain text, no ANSI, no redraw, so it survives being piped to a log file. Arnold prints the equivalent header at the top of every render log for the same reason -- a timing number without the machine and build it was measured on is not a measurement.
 void printSpec(const EngineSpec& spec, const GpuInfo& gpu);
-
-// The key bindings as rows of text. Data rather than a print call, because '?' under -stats cannot simply print them: the dashboard rewrites every line of its own block on each redraw, so the map has to be drawn as a section of that block, in its erase-line framing. One list, two framings, no restatement.
-[[nodiscard]] std::span<const char* const> hotkeyRows();
-
-// The same rows straight to stdout, for the startup block and for '?' when no dashboard is running to host them.
-void printHotkeys();
 
 }  // namespace engine::debug
