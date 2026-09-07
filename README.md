@@ -257,7 +257,7 @@ Grouped by area of design, each group ordered by importance (most important firs
 
 ### 7. Testing & validation infrastructure
 
-- **Test suite hardening**: `ctest` wires 5 correctness validators (`bsdf_validate`, `embree_validate`, `integrator_validate`, `nee_validate`, `rasterizer_validate`; `enable_testing()`/`add_test` loop, `CMakeLists.txt:229-232`), but no unit-test framework exists for logic that doesn't need a full scene (sampler, BSDF math in isolation), and no automated regression-image gate -- `render_beauty`'s `--compare` exists but is deliberately excluded from `add_test` (`CMakeLists.txt:199`, human-judged visual comparison). Add a lightweight unit-test framework for the former, and/or a threshold-based promotion of the image diff into `ctest` for the latter.
+- **Test suite hardening**: `ctest` wires 6 correctness validators (`bsdf_validate`, `embree_validate`, `integrator_validate`, `nee_validate`, `rasterizer_validate`, `sampler_validate`; `enable_testing()`/`add_test` loop, `CMakeLists.txt:275-277`), but each is a standalone binary rolling its own assertions, with no shared unit-test framework behind them, and there is no automated regression-image gate -- `render_beauty`'s `--compare` exists but is deliberately excluded from `add_test` (`CMakeLists.txt:245`, human-judged visual comparison). Add a lightweight unit-test framework for the former, and/or a threshold-based promotion of the image diff into `ctest` for the latter.
 
 ### 8. Engineering & maintenance
 
