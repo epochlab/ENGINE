@@ -130,6 +130,7 @@ void PerfDashboard::accumulate(const DashboardFrame& frame) {
     sums_.histogramMs += stages.histogramMs;
     sums_.probeMs += stages.probeMs;
     sums_.hudMs += stages.hudMs;
+    sums_.hudRenderMs += stages.hudRenderMs;
     sums_.swapMs += stages.swapMs;
     sums_.uploadMs += stages.uploadMs;
     sums_.rasterMs += stages.rasterMs;
@@ -253,8 +254,9 @@ void PerfDashboard::drawStageRows(const DashboardFrame& frame) {
     const auto phasePct = [&](double ms) { return passMs > 0.0 ? (ms / passMs) * 100.0 : 0.0; };
     const auto mean = [&](float sum) { return static_cast<double>(windowMean(sum)); };
     const auto pct = [&](float sum) { return static_cast<double>(percentOf(windowMean(sum), cpu)); };
-    // presentMs is measured inclusive of the upload nested inside it, so the blit's own cost is the difference -- arithmetic, not a second instrument.
+    // presentMs and hudMs are each measured inclusive of a stage nested inside them, so the outer half's own cost is the difference -- arithmetic, not a second instrument.
     const double blitMs = std::max(mean(sums_.presentMs) - mean(sums_.uploadMs), 0.0);
+    const double hudBuildMs = std::max(mean(sums_.hudMs) - mean(sums_.hudRenderMs), 0.0);
     // One buffer, rewritten per row: formatBar always overwrites and terminates, and no row's bar is read after its own append.
     Bar bar{};
     // Bursty stages print their last REAL cost and, in place of a percentage, how often they fire: averaging a 150ms stall that happens 1 frame in 88 reports 1.7ms for something that drops a frame every time it runs, and a share-of-this-frame is either ~100% or zero. They get no bar for the same reason.
@@ -296,9 +298,12 @@ void PerfDashboard::drawStageRows(const DashboardFrame& frame) {
     barFor(sums_.probeMs);
     append("\x1b[2K  %-15s%8.3f %5.1f %s |  suspended %s\n", "pixel probe", mean(sums_.probeMs),
             pct(sums_.probeMs), bar.data(), frame.driverSuspended ? "yes" : "no");
-    barFor(sums_.hudMs);
-    append("\x1b[2K  %-15s%8.3f %5.1f %s |\n", "hud", mean(sums_.hudMs), pct(sums_.hudMs),
-            bar.data());
+    formatBar(bar, static_cast<double>(percentOf(static_cast<float>(hudBuildMs), cpu)) / 100.0);
+    append("\x1b[2K  %-15s%8.3f %5.1f %s |\n", "hud build", hudBuildMs,
+            static_cast<double>(percentOf(static_cast<float>(hudBuildMs), cpu)), bar.data());
+    barFor(sums_.hudRenderMs);
+    append("\x1b[2K  %-15s%8.3f %5.1f %s |\n", "hud render", mean(sums_.hudRenderMs),
+            pct(sums_.hudRenderMs), bar.data());
 }
 
 void PerfDashboard::drawRayRows(const DashboardFrame& frame) {

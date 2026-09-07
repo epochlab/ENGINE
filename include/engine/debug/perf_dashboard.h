@@ -53,7 +53,7 @@ public:
     static constexpr double kNonTtySeconds = 5.0;
     static constexpr std::size_t kBufferBytes = 8192;
     // Lines the body occupies, used only to reserve the block on the very first draw. Every later redraw moves up by the count the previous draw actually emitted, so a wrong value here costs one misaligned frame rather than a block that walks up the screen forever.
-    static constexpr int kBodyLines = 29;
+    static constexpr int kBodyLines = 30;
 
     PerfDashboard();
 
