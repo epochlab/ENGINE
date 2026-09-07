@@ -78,6 +78,7 @@ struct PassRecord {
     int height = 0;
     double traceMs = 0.0;       // renderPathTraced
     double accumulateMs = 0.0;  // accumulateMean
+    double overRangeMs = 0.0;   // reduceOverRange, the HUD's over-range statistics
     double publishMs = 0.0;     // resultMutex_ hold
     double passMs = 0.0;        // the whole iteration, including buffer acquisition
     RayCounts rays;
@@ -95,7 +96,7 @@ struct FrameStageTimes {
     float uploadMs = 0.0F;      // the display texture upload, only when a newly published pass invalidates it
     float presentMs = 0.0F;     // presentFrame, INCLUSIVE of uploadMs -- the blit's own cost is the difference
     float histogramMs = 0.0F;
-    float overRangeMs = 0.0F;   // every 4th frame, Histogram::kCaptureIntervalFrames
+    float overRangeMs = 0.0F;   // the O(kOverRangeBinCount) read of the driver's reduction, every frame
     float probeMs = 0.0F;       // samplePixelProbe, including its synchronous glReadPixels on the post-filter AOVs
     float hudMs = 0.0F;         // HUD draw + camera write-back + render, INCLUSIVE of hudRenderMs -- the build half is the difference
     float hudRenderMs = 0.0F;   // HudOverlay::render (ImGui::Render + RenderDrawData), unconditional so it is paid with the HUD hidden
