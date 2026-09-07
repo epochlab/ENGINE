@@ -309,9 +309,11 @@ glm::vec3 referenceEonAlbedo(const glm::vec3& rho, float r) {
 }
 
 // A bare EON diffuse surface. ior=1 is what makes the measurement below exact rather than approximate: exact dielectric Fresnel is identically zero there while Schlick's (1-c)^5 tail is not, so coatFresnelRatio and dielectricFresnelAvg both collapse, diffuseKdAt becomes exactly 1, and evaluateBsdfSplit's diffuse channel is the raw EON lobe with no coupling factor multiplying it. Same device checkBeerLambert uses to remove the interface from a transmission measurement.
+// checkIndexMatchedCoat asserts that collapse rather than assuming it, which is what the specular roughness parameter is for: it is inert here by the same argument, so sweeping it is the instrument.
 // f0 is 0 to match ior=1 rather than for effect: it feeds the specular lobe only, which this check never reads.
-BsdfParams makeDiffuseParams(const glm::vec3& baseColor, float diffuseRoughness) {
-    return BsdfParams{baseColor,          /*metallic=*/0.0F,          /*roughness=*/0.5F,
+BsdfParams makeDiffuseParams(const glm::vec3& baseColor, float diffuseRoughness,
+                              float roughness = 0.5F) {
+    return BsdfParams{baseColor,          /*metallic=*/0.0F,          roughness,
                        glm::vec3(0.0F),    /*edgeTint=*/glm::vec3(1.0F), /*ior=*/1.0F,
                        /*transmissionFactor=*/0.0F, diffuseRoughness,
                        engine::scene::eonAlbedoInversion(baseColor, diffuseRoughness),
@@ -394,6 +396,139 @@ bool checkEonAlbedoInversion() {
                 ok = false;
             }
         }
+    }
+    return ok;
+}
+
+// EON BRDF value (paper eq. 16-19) in double, transcribed independently of bsdf.cpp's evaluateEon: c1/c2 re-derived from their literals and every term written out rather than shared, the discipline referenceEonAlbedo applies one level up to the albedo.
+// The quartic albedo fit's coefficients (paper eq. 14) are the paper's data, not arithmetic, so quoting them is transcription and not the same expression tested against itself. What this reference cannot catch is a typo inside that quartic; checkEonAlbedoInversion's Monte Carlo integral of the shipped lobe covers it, and the two checks are complementary for that reason.
+// The 1e-7 floors are reproduced rather than dropped. They are the model's guarded evaluation at r=0, where 1-E_F and 1-<E_F> are all identically zero, not a tolerance -- omitting them would leave the reference disagreeing at exactly the row that matters least and force a looser bound on every row that matters more.
+glm::vec3 referenceEon(const glm::vec3& rho, float r, const glm::vec3& wi, const glm::vec3& wo) {
+    const double c1 = 0.5 - (2.0 / (3.0 * kPi));
+    const double c2 = (2.0 / 3.0) - (28.0 / (15.0 * kPi));
+    const double muI = wi.z;
+    const double muO = wo.z;
+    const double s = static_cast<double>(glm::dot(wi, wo)) - (muI * muO);
+    const double sOverT = s > 0.0 ? s / std::max(muI, muO) : s;
+    const double af = 1.0 / (1.0 + (c1 * r));
+    const double avgEFon = af * (1.0 + (c2 * r));
+    // Paper eq. 14's quartic in (1 - mu), evaluated as an explicit polynomial rather than bsdf.cpp's Horner nesting.
+    const auto eFon = [&](double mu) {
+        const double m = 1.0 - mu;
+        const double gOverPi = (0.0571085289 * m) + (0.491881867 * m * m) +
+                                (-0.332181442 * m * m * m) + (0.0714429953 * m * m * m * m);
+        return (1.0 + (r * gOverPi)) * af;
+    };
+    constexpr double kEps = 1e-7;
+    const double shadow = (std::max(kEps, 1.0 - eFon(muO)) * std::max(kEps, 1.0 - eFon(muI))) /
+                           std::max(kEps, 1.0 - avgEFon);
+    glm::vec3 result(0.0F);
+    for (int c = 0; c < 3; ++c) {
+        const double rhoC = rho[c];
+        const double rhoMs = (rhoC * rhoC * avgEFon) / (1.0 - (rhoC * (1.0 - avgEFon)));
+        result[c] = static_cast<float>(((rhoC * af * (1.0 + (r * sOverT))) + (rhoMs * shadow)) / kPi);
+    }
+    return result;
+}
+
+// The instrument for coatAlbedo's fresnelAvg ARGUMENT, which nothing else in this suite can see. checkAverageFresnel pins dielectricFresnelAvg the function; reverting the three call sites (bsdf.cpp:538, :805, :808) to Karis' schlickFresnelAvg(coatF0) leaves all six validators green while moving 1882 of the 1886 channels cornell changed, because clay.json's ior 1.55 is every wall, the floor and the ceiling.
+// ior=1 is the ONLY point where the question is resolvable at all. At every ior>1 each term carrying F_avg is multiScatterTint(F_avg, Eavg)*(1-E(mu, alpha)), and E/Eavg come only from the private 32x32 table whose own quadrature error is ~1.5e-3 (bsdf.cpp:169) against a 2.0e-4 spread between the two candidates: the reference is already 7.5x coarser than the signal, and resolving it at 10:1 needs an E 75x more accurate than the table being checked. At ior=1 the table's coefficients are multiplied by exact zeros and drop out of the expression entirely.
+// The collapse is exact in float32, term by term: dielectricF0(1)=+0, dielectricFresnelAvg(1)=(1-1)/5.08638=+0 so multiScatterTint(0,E)=+0, fresnelDielectric(mu,1,1)=+0 so coatFresnelRatio=+0, hence coatAlbedo=+0, diffuseCoupling=(1-0)/(1-0)=1, diffuseKdAt=1, and .diffuse is evaluateEon multiplied by exactly 1.0F. evaluateEon reads only diffuseRho/diffuseRoughness/wi/wo, and alpha reaches .specular alone, so params.roughness has no other route into the diffuse channel: an index-matched interface is optically absent, and its roughness cannot be observable.
+// Hence tolerance exactly zero, from x*1.0F == x -- an algebraic guarantee, not a measured run. The Karis revert breaks it by a measured 7.8e-4 relative, worst at roughness 0.92 / mu_o = mu_i = 1, about 8000 ULP at the diffuse value's magnitude.
+// Two facts that set the sweep, both against instinct. The deviation peaks at NORMAL incidence, not grazing: coat = msTint*(1-E(mu)) and E rises toward grazing at high roughness (0.31 at mu=1, 0.89 at mu=1/31), so a grazing-first sweep is ~6x weaker. And it changes sign below mu~0.3 at roughness 1, so only |delta|==0 is a safe predicate; any signed bound breaks.
+// Do NOT widen mu below 1e-3: fresnelDielectric(mu, 1, 1) returns 1.0F, not 0, for mu <= 1.7263349e-4, because etaI==etaT makes the ratio exactly 1 and 1.0F-mu*mu rounds to 1.0F, tripping the total-internal-reflection early-out (bsdf.cpp:45). The collapse is genuinely false in that sliver; it is recorded in README section 5.1 rather than worked around silently. Do NOT extend the sweep to ior>1 either -- the identity is exact only at index match.
+// Residual, deliberate: any g(ior) with g(1)=0 passes here, notably 2*dielectricFresnelAvg(ior). This check pins the argument's collapse; checkAverageFresnel pins the function's value. Neither alone is sufficient and both are cheap.
+bool checkIndexMatchedCoat() {
+    // Exact, from the collapse above. The second bound is a float32-vs-double residual on the same closed form, ~15 operations deep, measured worst 1.74e-7 -- 5.7x under, thin on purpose. It is not the instrument; it is the backstop that stops a roughness-INDEPENDENT corruption (a pinned diffuseKd, a lost 1/(1-coatAvg) normalisation, a channel swap) from passing as bit-identical, which the invariance assertion alone cannot see.
+    constexpr float kInvarianceTolerance = 0.0F;
+    constexpr float kValueTolerance = 1e-6F;
+    // 0.0 is the reference row every other is compared against. 0.37 and 0.92 sit deliberately off the table's 32-row k/31 grid, the device checkWhiteFurnaceTwoSided's off-grid cases use; 0.92 is where the revert's deviation is largest.
+    const std::array<float, 8> roughnesses = {0.0F, 0.05F, 0.25F, 0.37F, 0.5F, 0.75F, 0.92F, 1.0F};
+    const std::array<float, 6> cosines = {1.0F, 0.8F, 0.6F, 0.4F, 0.2F, 0.05F};
+    const std::array<float, 3> diffuseRoughnesses = {0.0F, 0.5F, 1.0F};
+    // The chromatic row carries the weight for the value assertion, the reason checkEonAlbedoInversion gives: at baseColor 1 the inversion is the identity and a grey row cannot tell a correct result from one that merely preserves brightness.
+    const std::array<glm::vec3, 2> albedos = {glm::vec3(1.0F), glm::vec3(0.8F, 0.3F, 0.1F)};
+
+    bool ok = true;
+    int rowsChecked = 0;
+    float worstOverall = 0.0F;
+    float worstValueErr = 0.0F;
+    std::cout << "bsdf_validate: index-matched coat, diffuse channel vs specular roughness (ior 1)\n";
+    std::cout << "  baseColor              diffuseRoughness  worst |delta|  at roughness/mu_o/mu_i\n";
+    for (const glm::vec3& albedo : albedos) {
+        for (float diffuseRoughness : diffuseRoughnesses) {
+            float worst = 0.0F;
+            float worstRoughness = 0.0F;
+            float worstMuO = 0.0F;
+            float worstMuI = 0.0F;
+            for (float muO : cosines) {
+                for (float muI : cosines) {
+                    // Non-coplanar pair, checkReciprocity's construction: a shared azimuth would leave a swapped-phi bug invisible.
+                    const float sinO = std::sqrt(std::max(0.0F, 1.0F - (muO * muO)));
+                    const float sinI = std::sqrt(std::max(0.0F, 1.0F - (muI * muI)));
+                    const glm::vec3 wo(sinO, 0.0F, muO);
+                    const glm::vec3 wi(sinI * std::cos(1.1F), sinI * std::sin(1.1F), muI);
+                    const glm::vec3 reference =
+                        engine::scene::evaluateBsdfSplit(
+                            makeDiffuseParams(albedo, diffuseRoughness, roughnesses[0]), wo, wi)
+                            .diffuse;
+                    const glm::vec3 analytic = referenceEon(
+                        engine::scene::eonAlbedoInversion(albedo, diffuseRoughness),
+                        diffuseRoughness, wi, wo);
+                    const float scale = std::max(maxChannel(analytic), 1e-6F);
+                    const float valueErr = maxChannel(glm::abs(reference - analytic)) / scale;
+                    worstValueErr = std::max(worstValueErr, valueErr);
+                    if (!(valueErr <= kValueTolerance)) {
+                        std::cerr << "bsdf_validate: FAILED index-matched coat (value) at baseColor=["
+                                   << albedo.x << ", " << albedo.y << ", " << albedo.z
+                                   << "] diffuseRoughness=" << diffuseRoughness << " mu_o=" << muO
+                                   << " mu_i=" << muI << " diffuse=[" << reference.x << ", "
+                                   << reference.y << ", " << reference.z << "] reference EON=["
+                                   << analytic.x << ", " << analytic.y << ", " << analytic.z
+                                   << "] relative err=" << valueErr << " (expected <= "
+                                   << kValueTolerance << ")\n";
+                        ok = false;
+                    }
+                    for (std::size_t i = 1; i < roughnesses.size(); ++i) {
+                        const glm::vec3 value =
+                            engine::scene::evaluateBsdfSplit(
+                                makeDiffuseParams(albedo, diffuseRoughness, roughnesses[i]), wo, wi)
+                                .diffuse;
+                        const float delta = maxChannel(glm::abs(value - reference)) / scale;
+                        ++rowsChecked;
+                        if (delta > worst) {
+                            worst = delta;
+                            worstRoughness = roughnesses[i];
+                            worstMuO = muO;
+                            worstMuI = muI;
+                        }
+                        if (!(delta <= kInvarianceTolerance)) {
+                            std::cerr << "bsdf_validate: FAILED index-matched coat at baseColor=["
+                                       << albedo.x << ", " << albedo.y << ", " << albedo.z
+                                       << "] diffuseRoughness=" << diffuseRoughness
+                                       << " roughness=" << roughnesses[i] << " mu_o=" << muO
+                                       << " mu_i=" << muI << " diffuse=[" << value.x << ", "
+                                       << value.y << ", " << value.z << "] vs roughness 0 ["
+                                       << reference.x << ", " << reference.y << ", " << reference.z
+                                       << "] relative delta=" << delta
+                                       << " (expected exactly 0: at ior 1 the coat is optically absent, so its roughness cannot reach the diffuse channel)\n";
+                            ok = false;
+                        }
+                    }
+                }
+            }
+            worstOverall = std::max(worstOverall, worst);
+            std::cout << "  [" << albedo.x << ", " << albedo.y << ", " << albedo.z << "]         "
+                       << diffuseRoughness << "               " << worst << "            "
+                       << worstRoughness << " / " << worstMuO << " / " << worstMuI << '\n';
+        }
+    }
+    std::cout << "  " << rowsChecked << " roughness comparisons, worst |delta| " << worstOverall
+               << ", worst value error " << worstValueErr << '\n';
+    // Anti-vacuity: a sweep that asserted nothing would print zeros too.
+    if (rowsChecked == 0) {
+        std::cerr << "bsdf_validate: FAILED index-matched coat -- no rows asserted\n";
+        ok = false;
     }
     return ok;
 }
@@ -1244,6 +1379,7 @@ int main() {
     const bool whiteFurnaceOk = checkWhiteFurnaceTwoSided();
     const bool eonDiffuseOk = checkEonDiffuseFurnace();
     const bool eonInversionOk = checkEonAlbedoInversion();
+    const bool indexMatchedCoatOk = checkIndexMatchedCoat();
     const bool transmissiveEnergyOk = checkTransmissiveEnergyBalance();
     const bool transmissionTintOk = checkTransmissionTint();
     const bool conductorFresnelOk = checkConductorFresnel();
@@ -1254,7 +1390,7 @@ int main() {
     const bool transmissionReciprocityOk = checkTransmissionReciprocity();
     const bool roundTripOk = checkTransmissionRoundTrip();
 
-    if (!pdfOk || !furnaceOk || !whiteFurnaceOk || !eonDiffuseOk || !eonInversionOk ||
+    if (!pdfOk || !furnaceOk || !whiteFurnaceOk || !eonDiffuseOk || !eonInversionOk || !indexMatchedCoatOk ||
         !transmissiveEnergyOk || !transmissionTintOk || !conductorFresnelOk || !dielectricFresnelOk || !averageFresnelOk || !dispersionOk ||
         !reciprocityOk || !transmissionReciprocityOk || !roundTripOk) {
         std::cerr << "bsdf_validate: FAILED\n";
