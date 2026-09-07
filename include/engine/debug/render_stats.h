@@ -97,7 +97,8 @@ struct FrameStageTimes {
     float histogramMs = 0.0F;
     float overRangeMs = 0.0F;   // every 4th frame, Histogram::kCaptureIntervalFrames
     float probeMs = 0.0F;       // samplePixelProbe, including its synchronous glReadPixels on the post-filter AOVs
-    float hudMs = 0.0F;
+    float hudMs = 0.0F;         // HUD draw + camera write-back + render, INCLUSIVE of hudRenderMs -- the build half is the difference
+    float hudRenderMs = 0.0F;   // HudOverlay::render (ImGui::Render + RenderDrawData), unconditional so it is paid with the HUD hidden
     float swapMs = 0.0F;        // swapBuffers: the vsync wait, i.e. slack, not engine cost
 };
 
