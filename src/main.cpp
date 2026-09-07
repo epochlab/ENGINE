@@ -186,8 +186,7 @@ struct AppResources {
     // Zeroed at the top of every frame -- see FrameStageTimes.
     engine::debug::FrameStageTimes stages;
     engine::debug::PerfDashboard dashboard;
-    // Companion to histogram, computed separately (see updateOverRangeStats) since Histogram bins the post-display-transform, post-8-bit-clamp framebuffer and cannot tell 1.01 from 100.0 -- both saturate bin 255 identically. Gated at the same capture interval, not scanned every frame.
-    int overRangeFrameCounter = 0;
+    // Companion to histogram, computed separately (see updateOverRangeStats) since Histogram bins the post-display-transform, post-8-bit-clamp framebuffer and cannot tell 1.01 from 100.0 -- both saturate bin 255 identically.
     float overRangeFraction = 0.0F;
     float overRangePeakMultiple = 0.0F;
     engine::scene::DebugCameraController debugCamera;
@@ -1031,34 +1030,25 @@ void requestPathTraceIfTriggerChanged(AppResources& app, const engine::scene::Ca
     app.lastPathTraceTrigger = current;
 }
 
-// Fraction of texels that would clip at the display encode, plus the peak such value as a multiple of display range -- e.g. "3.2%, peak 47.8x". Computed from the pre-display-transform HdrImage (full float, in hand already) rather than the composited framebuffer Histogram reads, since B1's colorimetric-only display transform means anything above 1.0 clips with no tone-mapped rolloff to cushion it, and the on-screen histogram alone cannot distinguish "just barely over" from "wildly over" -- both pin bin 255 identically. Gated at Histogram's own capture interval rather than scanned every frame, matching this codebase's no-work-per-frame-without-a-reason convention (a multi-megapixel float scan is not free).
+// Fraction of texels that would clip at the display encode, plus the peak such value as a multiple of display range -- e.g. "3.2%, peak 47.8x". Read from the pre-display-transform beauty rather than the composited framebuffer Histogram reads, since B1's colorimetric-only display transform means anything above 1.0 clips with no tone-mapped rolloff to cushion it, and the on-screen histogram alone cannot distinguish "just barely over" from "wildly over" -- both pin bin 255 identically.
+// The per-texel walk that produced these lives on the driver thread now (PathTraceResult::overRange), leaving exposure -- the readout's only non-pixel input -- to be applied here: exactly for the peak, and by reading the published histogram's complementary CDF at 1/exposure for the fraction. Both therefore track the exposure slider live on a converged image that will never retrace, which a driver-side count at a fixed threshold could not do, and cheaply enough that the frame gate the old scan needed is gone.
 void updateOverRangeStats(AppResources& app,
                            const std::shared_ptr<const engine::scene::PathTraceResult>& pathTraceSnapshot) {
-    ++app.overRangeFrameCounter;
-    if (app.overRangeFrameCounter % engine::debug::Histogram::kCaptureIntervalFrames != 0) {
-        return;
-    }
-    // Started past the interval gate, like the display-texture upload's timer: a skipped frame must read 0, or the dashboard counts every frame as a firing and reports the skip path's cost as the scan's.
     const engine::debug::ScopedCpuTimer overRangeTimer(app.stages.overRangeMs);
     if (!pathTraceSnapshot) {
         app.overRangeFraction = 0.0F;
         app.overRangePeakMultiple = 0.0F;
         return;
     }
-    const engine::gfx::HdrImage& beauty = pathTraceSnapshot->beauty;
+    const engine::scene::OverRangeStats& stats = pathTraceSnapshot->overRange;
     const float exposure = std::pow(2.0F, app.debugCamera.relativeExposureEv());
-    const int texelCount = beauty.width * beauty.height;
-    int overCount = 0;
-    float peak = 0.0F;
-    for (int i = 0; i < texelCount; ++i) {
-        const std::size_t idx = static_cast<std::size_t>(i) * 4;
-        const float maxChannel = std::max({beauty.rgba[idx + 0], beauty.rgba[idx + 1], beauty.rgba[idx + 2]}) *
-                                  exposure;
-        overCount += maxChannel > 1.0F ? 1 : 0;
-        peak = std::max(peak, maxChannel);
-    }
-    app.overRangeFraction = texelCount > 0 ? static_cast<float>(overCount) / static_cast<float>(texelCount) : 0.0F;
-    app.overRangePeakMultiple = peak;
+    app.overRangePeakMultiple = exposure * stats.rawPeak;
+    // Texels binned strictly above the one holding 1/exposure: an exact count above that bin's upper edge, so the only approximation is the threshold, quantised to at most 1/1024 of a stop (see kOverRangeSubBinBits).
+    const auto bin = static_cast<std::size_t>(engine::scene::overRangeBin(1.0F / exposure));
+    const std::uint32_t texelCount = stats.aboveBin.front();
+    app.overRangeFraction =
+        texelCount > 0 ? static_cast<float>(stats.aboveBin[bin + 1]) / static_cast<float>(texelCount)
+                        : 0.0F;
 }
 
 void updateHud(AppResources& app, const engine::platform::Window& window,
@@ -1129,7 +1119,7 @@ void updateHud(AppResources& app, const engine::platform::Window& window,
     }
 }
 
-// The three read-back/sampling steps that must run after the composited image lands in the default framebuffer and before the HUD draws over it: histogram capture, the over-range scan, and the rate-limited RAM resample. Grouped because they share that placement constraint, not because they are otherwise related.
+// The per-frame read-back/sampling steps, run after the composited image lands in the default framebuffer and before the HUD draws over it: histogram capture, the over-range readout, and the rate-limited RAM resample. Only the histogram actually reads the framebuffer and so requires that placement; the other two are grouped with it because they feed the same HUD panel from the same frame, not because they share the constraint.
 void sampleDisplayedFrame(AppResources& app,
                            const std::shared_ptr<const engine::scene::PathTraceResult>& pathTraceSnapshot,
                            int winWidth, int winHeight) {
