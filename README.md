@@ -39,16 +39,20 @@ cmake -B build
 cmake --build build
 ```
 
-This produces nine targets:
+This produces thirteen targets:
 
 - `build/engine`: the path tracer
 - `build/test_pattern`: EXR calibration-pattern generator (`tools/test_pattern.cpp`)
 - `build/downsample`: EXR downsampling tool (`tools/downsample.cpp`)
+- `build/bluenoise_mask`: void-and-cluster blue-noise mask generator (`tools/bluenoise_mask.cpp`)
+- `build/gltf_tangent`: glTF tangent-generation tool (`tools/gltf_tangent.cpp`)
 - `build/embree_validate`: headless Embree ray-scene intersection correctness check (`tools/embree_validate.cpp`)
 - `build/bsdf_validate`: headless BSDF pdf-normalization and furnace-test check (`tools/bsdf_validate.cpp`)
 - `build/nee_validate`: headless NEE/MIS unbiasedness check against a brute-force reference (`tools/nee_validate.cpp`)
 - `build/rasterizer_validate`: headless CPU-rasterizer-vs-Embree G-buffer correctness check (`tools/rasterizer_validate.cpp`)
 - `build/integrator_validate`: headless full-integrator depth-invariance and transport-partition correctness check (`tools/integrator_validate.cpp`)
+- `build/sampler_validate`: headless Sobol/Owen-scramble sampler stratification check (`tools/sampler_validate.cpp`)
+- `build/render_beauty`: headless beauty render with PNG/EXR diffing, not run under `ctest` (`tools/render_beauty.cpp`)
 - `build/raster_bench`: rasterizer timing harness, not run under `ctest` (`tools/raster_bench.cpp`)
 
 `-Wall -Wextra -Werror` gates every target. `clang-tidy` (see `.clang-tidy`) and `cppcheck` (`cmake --build build --target cppcheck`, over `src/`) both run if installed, skipped otherwise.
@@ -177,9 +181,6 @@ Grouped by area of design, each group ordered by importance (most important firs
 
 ### 1. Rendering correctness (materials & transport physics)
 
-- **An instrument that can see the coat half of `F_avg`**: `coatAlbedo` taking `dielectricFresnelAvg(ior)` rather than Karis' mean of Schlick is worth at most 1.9e-4 on any furnace reading, below every `bsdf_validate` tolerance -- reverting that half alone leaves all five validators **green**, yet it's the half that actually moves the cornell picture (1882 of 1886 changed channels).
-  - `checkAverageFresnel` asserts `dielectricFresnelAvg` directly, pinning the function, but nothing pins the *call site*: a revert there is invisible.
-  - Needs either a coat-specific energy identity tight enough to resolve 2e-4, or a direct assertion on `coatAlbedo`'s output against an independently integrated reference, as `checkAverageFresnel` does for the average itself.
 - **Gate the EON sampling shape on `diffuseKd`**: `diffuseRoughness` conflates the EON diffuse *value* with the *sampling strategy* for the borrowed cosine multi-scatter lobe.
   - They decouple whenever `diffuseKd` is zero -- `metallic=1`/`transmissionFactor=1` zeroes it (`bsdf.cpp:643`) while `diffuseProb` stays non-zero (`bsdf.cpp:641`) -- so a conductor still draws CLTC (`sampleEon`, `bsdf.cpp:531`) to shape a lobe EON doesn't describe.
   - Measured on `chrome.json`: 1976/691200 channels affected, max 11/255, a 1.2% variance penalty; worked around there via `diffuseRoughness: 0`, which fixes one asset, not the mechanism.
@@ -194,6 +195,12 @@ Grouped by area of design, each group ordered by importance (most important firs
 - **Silhouette clamp on the specular lobe's projected-area divisor**: `singleScatter` divides by `std::max(4*wo.z*wi.z, 1e-6F)` (`bsdf.cpp`) while the VNDF pdf beside it divides by `std::max(wo.z, 1e-6F)` -- two different thresholds on the same geometry, so at the exact silhouette the value is floored while the density it is divided by is not.
   - Measured, not inferred, at ior 1.5168 / roughness 0.02 on the mirrored pair: the clamp engages exactly at `cos = 5e-4` (`4c^2 = 1e-6`) and darkens one-sidedly as `4c^2/1e-6` below it -- 0.64x at `cos 4e-4`, 0.16x at `2e-4`, 0.04x at `1e-4`.
   - Reachable, unlike the `D` denominator floor that used to sit above it, but only within 0.029 degrees of tangency: on a 40px-radius sphere at 640x360 the affected band is ~2e-4 px, so it does not reach the picture at this resolution. Left in place deliberately rather than silently retuned -- the fix is to give both sites the same threshold, which needs the reachable case measured at a resolution where it shows.
+- **Index-matched interfaces reflect at grazing in float32**: `fresnelDielectric(mu, 1, 1)` returns exactly `1.0F`, not 0, for `mu <= 1.7263349e-4` (`bsdf.cpp:45`). At `etaI == etaT` the ratio is exactly 1, so `sinThetaT == sinThetaI`, and for small `mu` the `1.0F - mu*mu` under the square root rounds to `1.0F`, tripping the total-internal-reflection early-out at an interface that cannot have one.
+  - Same class as the silhouette clamp above, and narrower: reachable only inside 0.0099 degrees of tangency and only at `ior` exactly 1, which no shipped material authors. Found while building `checkIndexMatchedCoat`, which holds `mu >= 1e-3` for this reason and says so.
+  - Fix is to gate the early-out on `etaI != etaT`. Deliberately not applied blind: it is the same "measure the reachable case first" bar as the clamp above.
+- **Pin the coat's `F_avg` at working ior**: `checkIndexMatchedCoat` pins that `coatAlbedo`'s `fresnelAvg` argument *collapses at index match*, which is what separates `dielectricFresnelAvg` from Karis' mean of Schlick. It cannot pin the argument's *value* at `ior` 1.3-1.6, and neither can anything else today.
+  - Structural, not an oversight: at every `ior > 1` each term carrying `F_avg` is `multiScatterTint(F_avg, Eavg) * (1 - E(mu, alpha))`, and `E`/`Eavg` come only from the 32x32 table (`buildAlbedoTable`), whose own quadrature error is ~1.5e-3 (`bsdf.cpp:169`) against a 2.0e-4 spread between the two candidates: the reference is already 7.5x coarser than the signal it must resolve, and resolving it at 10:1 needs an `E` 75x more accurate than the table being checked.
+  - So the prerequisite is a more accurate `E`: a higher-resolution bake, or one moved offline into an `.inc` like `blue_noise_mask.inc` so cost stops bounding it. Until then any `g(ior)` with `g(1) = 0` passes -- notably `2*dielectricFresnelAvg(ior)`.
 - **CIE-integrated fit for the chromium reflectivity/edge-tint triples**: the measured chromium at `conductorIorFromReflectivity` (`bsdf.cpp`) -- reflectivity `[0.552, 0.555, 0.558]`, `edgeTint` `[0.555, 0.558, 0.672]`, from Johnson & Christy 1974 via Gulbrandsen eq 14/15 -- is sampled at three representative wavelengths rather than integrated against the CIE colour-matching functions, which is what an RGB channel actually is. Its 0.0048 round-trip error against the source `(n, k)`, and its sensitivity to the chosen wavelength triple, are both documented there. Proper integration needs the CIE curves and a chosen RGB primary set, giving every future measured metal one principled path from tabulated `(n, k)` to an authored `(r, g)` pair instead of a hand-picked triple.
 
 ### 2. Lighting
