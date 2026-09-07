@@ -8,11 +8,11 @@ namespace engine::scene {
 
 namespace {
 
-// SplitMix64 finalizer (Vigna) -- decorrelates nearby (pixel, dimension set) inputs into unrelated seeds.
-std::uint64_t hashSeed(int pixelX, int pixelY, int extra, std::uint32_t runSeed) {
-    std::uint64_t h = static_cast<std::uint64_t>(static_cast<std::uint32_t>(pixelX)) * 0x9E3779B97F4A7C15ULL;
-    h ^= static_cast<std::uint64_t>(static_cast<std::uint32_t>(pixelY)) * 0xC2B2AE3D27D4EB4FULL;
-    h ^= static_cast<std::uint64_t>(static_cast<std::uint32_t>(extra)) * 0x165667B19E3779F9ULL;
+// SplitMix64 finalizer (Vigna) -- decorrelates nearby (dimension set, run seed) inputs into unrelated seeds.
+// Deliberately NOT a function of the pixel: see the dither mask below. Every pixel draws the same randomized sequence,
+// and what separates them is the toroidal shift, not the scramble.
+std::uint64_t hashSeed(int extra, std::uint32_t runSeed) {
+    std::uint64_t h = static_cast<std::uint64_t>(static_cast<std::uint32_t>(extra)) * 0x165667B19E3779F9ULL;
     h ^= static_cast<std::uint64_t>(runSeed);
     h ^= h >> 30;
     h *= 0xBF58476D1CE4E5B9ULL;
@@ -131,11 +131,66 @@ std::uint32_t sobolPoint(std::uint32_t index, int dimension) {
     return x;
 }
 
-float toUnitFloat(std::uint32_t x) {
-    return static_cast<float>(x >> 8) * 0x1.0p-24F;  // 24 significant bits -> [0,1)
+// Blue-noise dithered sampling (Georgiev & Fajardo 2016, "Blue-noise Dithered Sampling", SIGGRAPH Talks): every pixel
+// uses the SAME point set, toroidally shifted by an offset looked up in a blue-noise matrix tiled over the image rather
+// than chosen randomly per pixel. Random per-pixel offsets -- equivalently, the per-pixel Owen scramble this replaced --
+// are the white-noise special case of the same construction, and leave each pixel's error independent of its
+// neighbours'. Correlating the offsets instead pushes the error field's power out of the low frequencies the eye and any
+// subsequent filter integrate over, without changing how much error there is: the paper's own claim is that "numerical
+// error is roughly the same", so this buys apparent cleanliness, not convergence.
+// For d = 1 the paper's matrix "is identical to a dither mask", and the mask here is Ulichney's void-and-cluster array
+// (1993) -- see tools/bluenoise_mask.cpp, which generates the table below.
+constexpr int kMaskSize = 128;  // the size Georgiev & Fajardo used for their rendered images
+constexpr int kMaskPixels = kMaskSize * kMaskSize;
+constexpr std::array<std::uint16_t, kMaskPixels> kBlueNoiseRanks = {{
+#include "blue_noise_mask.inc"
+}};
+
+// R2, the 2D low-discrepancy sequence of Roberts (2018), "The Unreasonable Effectiveness of Quasirandom Sequences":
+// point c is frac(c * (1/phi2, 1/phi2^2)) where phi2 = 1.324717957244746 is the plastic number, the real root of
+// x^3 = x + 1. Constants are 2^32 / phi2 and 2^32 / phi2^2, so the fixed-point multiply below wraps to the same frac().
+// A hash was tried here first and is not sufficient: hashed offsets are free to land close together, and two channels
+// within the mask's correlation radius are correlated -- measured at |r| = 0.14 between channels 8 and 23, which
+// sampler_validate's checkChannelsAreDecorrelated now fails on. R2 spreads them by construction: the minimum toroidal
+// separation over the 146 channels a 12-bounce path reaches is 8.1 px, where the sigma = 1.5 filter is ~1e-6.
+constexpr std::uint32_t kR2AlphaX = 0xC13FA9A9U;
+constexpr std::uint32_t kR2AlphaY = 0x91E10DA6U;
+// Keeps the top log2(kMaskSize) bits of the fixed-point fraction, so the offset follows kMaskSize rather than a literal.
+constexpr int kR2Shift = 32 - std::countr_zero(static_cast<unsigned>(kMaskSize));
+
+// The shift in the sampler's own 24-bit output space, so applying it is one add and one mask and the wraparound IS the
+// toroidal wrap. MN = 2^14 divides 2^24 exactly, so the mask's (rank + 0.5)/MN lands on rank * 1024 + 512 with no
+// rounding at all -- the shift is exactly representable, which is what lets sampler_validate invert it and keep
+// asserting the net properties with zero tolerance.
+// Each dimension set reads the SAME mask under its own toroidal translation of the lookup, and that translation is
+// load-bearing rather than decorative. Giving every set one shared shift was measured and is wrong: it puts a pixel's
+// whole d-dimensional sample on the diagonal of the d-torus, so averaging over a neighbourhood of pixels integrates the
+// path integrand along a line instead of over the torus and does not converge to it. The leftover, varying slowly across
+// the image, IS low-frequency error -- measured at 199x white noise in the lowest octave, the opposite of the intent.
+// Translating instead makes the components mutually decorrelated (a blue-noise mask's autocorrelation is near-delta, so
+// two different lags are effectively independent) while each component stays exactly the same blue-noise field in screen
+// space. That is a cheap stand-in for the paper's Sec. 3 annealed d-vector matrix, which remains the principled upgrade.
+// Channels are numbered as hashSeed's `extra` already is -- each dimension set owns 2*set and 2*set+1 -- so a 1D draw
+// and either half of a 2D draw can never land on the same translation.
+// The tile wraps by masking rather than by modulo: kMaskSize is a power of two, so this is also correct for the negative
+// pixel coordinates a filter footprint can reach past the image edge.
+std::uint32_t ditherFixed(int pixelX, int pixelY, int ditherChannel) {
+    const auto channel = static_cast<std::uint32_t>(ditherChannel);
+    const auto x = (static_cast<std::uint32_t>(pixelX) + ((channel * kR2AlphaX) >> kR2Shift)) & (kMaskSize - 1U);
+    const auto y = (static_cast<std::uint32_t>(pixelY) + ((channel * kR2AlphaY) >> kR2Shift)) & (kMaskSize - 1U);
+    return (static_cast<std::uint32_t>(kBlueNoiseRanks[(y * kMaskSize) + x]) << 10U) | 512U;
+}
+
+// One dimension set's output: 24 significant bits of the scrambled point, shifted by this pixel's dither for that set.
+float toShiftedUnitFloat(std::uint32_t x, std::uint32_t dither) {
+    return static_cast<float>(((x >> 8) + dither) & 0xFFFFFFU) * 0x1.0p-24F;
 }
 
 }  // namespace
+
+float blueNoiseDither(int pixelX, int pixelY, int ditherChannel) {
+    return static_cast<float>(ditherFixed(pixelX, pixelY, ditherChannel)) * 0x1.0p-24F;
+}
 
 // The index mask bounds the sequence to the length actually drawn from. Without it the per-set shuffle spreads a small
 // sample index across all 32 bits, and sobolPoint's loop then runs once per set bit -- about 16 iterations rather than
@@ -156,7 +211,8 @@ float Sampler::next1D() {
     // Two independent seeds per set, taken as the halves of one avalanched hash rather than from separate magic salts:
     // hashSeed's SplitMix64 finalizer already decorrelates its halves, which is the same argument kAoSeedOffset rests on
     // in path_tracer.cpp. Distinct `extra` values are what separate one dimension set from the next.
-    const std::uint64_t setHash = hashSeed(pixelX_, pixelY_, 2 * dimensionSet_, scrambleSeed_);
+    const int set = dimensionSet_;
+    const std::uint64_t setHash = hashSeed(2 * set, scrambleSeed_);
     ++dimensionSet_;
     // Shuffling the index per set (Burley 2020 Sec. 5.2) is what decorrelates sets from one another: without it every
     // set would visit the sequence in the same order and the sets would share one point ordering. Owen-scrambling the
@@ -165,22 +221,26 @@ float Sampler::next1D() {
     const auto indexSeed = static_cast<std::uint32_t>(setHash);
     const auto scramble = static_cast<std::uint32_t>(setHash >> 32U);
     const std::uint32_t shuffled = nestedUniformScramble(sampleIndex_, indexSeed) & indexMask_;
-    return toUnitFloat(nestedUniformScramble(sobolPoint(shuffled, 0), scramble));
+    return toShiftedUnitFloat(nestedUniformScramble(sobolPoint(shuffled, 0), scramble),
+                               ditherFixed(pixelX_, pixelY_, 2 * set));
 }
 
 glm::vec2 Sampler::next2D() {
     // Both coordinates share one shuffled index -- they are the two components of a single point of the 2D sequence, so
     // shuffling them apart would destroy the joint stratification that makes next2D worth using over two next1D calls.
     // Their Owen scrambles differ, which is Owen's own per-dimension independence requirement (1995).
-    const std::uint64_t setHash = hashSeed(pixelX_, pixelY_, 2 * dimensionSet_, scrambleSeed_);
-    const std::uint64_t scrambleHash = hashSeed(pixelX_, pixelY_, (2 * dimensionSet_) + 1, scrambleSeed_);
+    const int set = dimensionSet_;
+    const std::uint64_t setHash = hashSeed(2 * set, scrambleSeed_);
+    const std::uint64_t scrambleHash = hashSeed((2 * set) + 1, scrambleSeed_);
     ++dimensionSet_;
     const auto indexSeed = static_cast<std::uint32_t>(setHash);
     const auto scrambleX = static_cast<std::uint32_t>(setHash >> 32U);
     const auto scrambleY = static_cast<std::uint32_t>(scrambleHash);
     const std::uint32_t shuffled = nestedUniformScramble(sampleIndex_, indexSeed) & indexMask_;
-    return {toUnitFloat(nestedUniformScramble(sobolPoint(shuffled, 0), scrambleX)),
-            toUnitFloat(nestedUniformScramble(sobolPoint(shuffled, 1), scrambleY))};
+    return {toShiftedUnitFloat(nestedUniformScramble(sobolPoint(shuffled, 0), scrambleX),
+                               ditherFixed(pixelX_, pixelY_, 2 * set)),
+            toShiftedUnitFloat(nestedUniformScramble(sobolPoint(shuffled, 1), scrambleY),
+                               ditherFixed(pixelX_, pixelY_, (2 * set) + 1))};
 }
 
 }  // namespace engine::scene

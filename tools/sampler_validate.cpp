@@ -16,11 +16,13 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <numeric>
 #include <string>
 #include <vector>
 
 #include <glm/glm.hpp>
 
+#include "engine/debug/power_spectrum.h"
 #include "engine/scene/sampler.h"
 
 using engine::scene::Sampler;
@@ -32,6 +34,10 @@ constexpr std::uint32_t kSeed = 0x9E3779B9U;
 constexpr int kSampleCount = 128;
 constexpr int kPixelX = 37;
 constexpr int kPixelY = 41;
+// Must match sampler.cpp's kMaskSize: the mask is baked into that translation unit and reached only through
+// blueNoiseDither, so this is the one place the size is restated and the permutation check is what would catch a drift.
+constexpr int kMaskSize = 128;
+constexpr int kMaskPixels = kMaskSize * kMaskSize;
 
 int failures = 0;
 
@@ -42,16 +48,27 @@ void report(bool passed, const char* name, const char* detail) {
     }
 }
 
-// Draws the 1D value of dimension set `set`, exactly as the renderer would: a fresh Sampler per sample, index
-// advancing, scramble seed fixed.
-float draw1D(int sampleIndex, int set) {
-    Sampler sampler(kPixelX, kPixelY, sampleIndex, kSampleCount, kSeed);
+// Every draw comes out toroidally shifted by its pixel's blue-noise dither (sampler.h), so recovering the underlying
+// sequence means subtracting that shift back off, modulo 1. Exact, not approximate: the shift and the drawn value are
+// both multiples of 2^-24 in [0,1), so the difference is representable and IEEE returns it exactly -- which is what lets
+// the net checks below stay tolerance-free assertions on integer counts rather than becoming statistical ones.
+float unshift(float value, int pixelX, int pixelY, int ditherChannel) {
+    const float dither = engine::scene::blueNoiseDither(pixelX, pixelY, ditherChannel);
+    return value >= dither ? value - dither : (value - dither) + 1.0F;
+}
+
+// Draws the 1D value of dimension set `set` at an arbitrary pixel, exactly as the renderer would: a fresh Sampler per
+// sample, index advancing, scramble seed fixed. Shift removed, so this is the shared sequence every pixel draws from.
+float draw1DAt(int pixelX, int pixelY, int sampleIndex, int set) {
+    Sampler sampler(pixelX, pixelY, sampleIndex, kSampleCount, kSeed);
     float value = 0.0F;
     for (int i = 0; i <= set; ++i) {
         value = sampler.next1D();
     }
-    return value;
+    return unshift(value, pixelX, pixelY, 2 * set);
 }
+
+float draw1D(int sampleIndex, int set) { return draw1DAt(kPixelX, kPixelY, sampleIndex, set); }
 
 // Draws the 2D value of dimension set `set`, with the preceding sets consumed as 1D draws.
 glm::vec2 draw2D(int sampleIndex, int set) {
@@ -59,7 +76,8 @@ glm::vec2 draw2D(int sampleIndex, int set) {
     for (int i = 0; i < set; ++i) {
         static_cast<void>(sampler.next1D());
     }
-    return sampler.next2D();
+    const glm::vec2 value = sampler.next2D();
+    return {unshift(value.x, kPixelX, kPixelY, 2 * set), unshift(value.y, kPixelX, kPixelY, (2 * set) + 1)};
 }
 
 std::size_t binOf(float value, int binCount) {
@@ -184,8 +202,11 @@ void checkPassDirectionOccupancy(int m, int setCount) {
 }
 
 // Sobol's index-0 point is all zeros before scrambling, and the renderer's very first displayed pass is index 0 for
-// every pixel -- unscrambled, that would put every pixel's jitter exactly on its pixel corner. Owen scrambling maps it
-// to a uniformly distributed point instead, so index 0 must vary across pixels rather than being a constant.
+// every pixel -- unscrambled, that would put every pixel's jitter exactly on its pixel corner. Every pixel now draws the
+// same scrambled sequence, so what has to spread index 0 across pixels is the dither shift; this reads the shifted value
+// deliberately, since the shift is the mechanism under test. A chi-square well BELOW its 15 dof is the expected result
+// rather than a suspicious one: a blue-noise mask distributes its values more evenly over any local region than the
+// independent draws the statistic is defined against.
 void checkIndexZeroIsScrambled() {
     constexpr int kPixels = 4096;
     constexpr int kBins = 16;
@@ -220,8 +241,9 @@ void checkSetsAreDecorrelated() {
     report(identical == 0, "adjacent dimension sets decorrelate", detail);
 }
 
-// The scramble seed must decorrelate neighbouring pixels: two pixels drawing the same set at the same sample index must
-// not return the same value, or every pixel would share one noise realization.
+// Neighbouring pixels must not draw the same values, or every pixel would share one noise realization. What separates
+// them is now the dither shift rather than a per-pixel scramble, and the mask being a permutation is what guarantees it:
+// adjacent cells hold distinct ranks, so adjacent pixels are shifted by distinct amounts.
 void checkPixelsAreDecorrelated() {
     constexpr int kSamples = 128;
     int identical = 0;
@@ -235,6 +257,133 @@ void checkPixelsAreDecorrelated() {
     report(identical == 0, "adjacent pixels decorrelate", detail);
 }
 
+// The shift must be a property of the pixel ALONE -- one value, reused at every sample index and in every dimension set.
+// A shift that drifted per sample index would be a fresh random rotation per sample, which is plain Monte Carlo with the
+// stratification thrown away -- a failure that still produces plausible-looking noise and so is invisible in an image.
+// It must vary per channel, and separately does: see checkChannelsAreDecorrelated.
+// Asserted directly and exactly: with each pixel's own shift removed, two different pixels must recover bit-identical
+// values everywhere, which is true only if they share one sequence and each shift is rigid.
+void checkShiftIsRigid(int setCount) {
+    constexpr int kSamples = 64;
+    int mismatches = 0;
+    for (int sample = 0; sample < kSamples; ++sample) {
+        for (int set = 0; set < setCount; ++set) {
+            mismatches += draw1DAt(kPixelX, kPixelY, sample, set) != draw1DAt(kPixelX + 1, kPixelY + 3, sample, set)
+                              ? 1
+                              : 0;
+        }
+    }
+    char detail[128];
+    std::snprintf(detail, sizeof(detail), "%d/%d draws disagree after unshifting", mismatches, kSamples * setCount);
+    report(mismatches == 0, "dither shift is rigid across index and set", detail);
+}
+
+// Distinct dither channels must carry distinct, uncorrelated shift fields. This is the direct regression test for the
+// defect measured during this work: when every channel shared one shift, a pixel's whole sample vector lay on the
+// diagonal of the d-torus, a neighbourhood of pixels integrated the path integrand along a line rather than over the
+// torus, and the residual showed up as low-frequency error at 199x white noise -- the exact opposite of the intent.
+// Two channels landing on the same translation would reintroduce it silently, since the image would still look like
+// noise. Gate at |r| < 0.1: two independent fields of kMaskPixels samples have a sample correlation of SD 1/128, so 0.1
+// is ~13 SD and cannot fire by chance, while a repeated translation reads exactly 1.
+void checkChannelsAreDecorrelated(int channelCount) {
+    std::vector<std::vector<double>> fields(static_cast<std::size_t>(channelCount));
+    for (int c = 0; c < channelCount; ++c) {
+        std::vector<double>& field = fields[static_cast<std::size_t>(c)];
+        field.resize(kMaskPixels);
+        for (int y = 0; y < kMaskSize; ++y) {
+            for (int x = 0; x < kMaskSize; ++x) {
+                field[(static_cast<std::size_t>(y) * kMaskSize) + static_cast<std::size_t>(x)] =
+                    engine::scene::blueNoiseDither(x, y, c) - 0.5;  // mean-centred: the mask is uniform on [0,1)
+            }
+        }
+    }
+    double worst = 0.0;
+    int worstA = -1;
+    int worstB = -1;
+    for (int a = 0; a < channelCount; ++a) {
+        for (int b = a + 1; b < channelCount; ++b) {
+            double dot = 0.0;
+            double normA = 0.0;
+            double normB = 0.0;
+            for (std::size_t i = 0; i < static_cast<std::size_t>(kMaskPixels); ++i) {
+                const double va = fields[static_cast<std::size_t>(a)][i];
+                const double vb = fields[static_cast<std::size_t>(b)][i];
+                dot += va * vb;
+                normA += va * va;
+                normB += vb * vb;
+            }
+            const double r = std::abs(dot / std::sqrt(normA * normB));
+            if (r > worst) {
+                worst = r;
+                worstA = a;
+                worstB = b;
+            }
+        }
+    }
+    char detail[160];
+    std::snprintf(detail, sizeof(detail), "worst |r| = %.4f between channels %d and %d, over %d channels", worst,
+                  worstA, worstB, channelCount);
+    report(worst < 0.1, "dither channels decorrelate", detail);
+}
+
+// The mask must be a permutation of [0, kMaskPixels): every shift used exactly once, so the set of shifts is precisely
+// the uniform grid a toroidal shift needs -- no value doubled, none missing. The rank is recovered exactly rather than
+// rounded, since (rank + 0.5) / kMaskPixels is a multiple of 2^-24 and scaling it back is a power-of-two multiply.
+void checkMaskIsPermutation() {
+    std::vector<int> seen(kMaskPixels, 0);
+    int bad = 0;
+    for (int y = 0; y < kMaskSize; ++y) {
+        for (int x = 0; x < kMaskSize; ++x) {
+            const float value = engine::scene::blueNoiseDither(x, y, 0);
+            const int rank = static_cast<int>((value * static_cast<float>(kMaskPixels)) - 0.5F);
+            if (rank < 0 || rank >= kMaskPixels || seen[static_cast<std::size_t>(rank)] != 0) {
+                ++bad;
+                continue;
+            }
+            seen[static_cast<std::size_t>(rank)] = 1;
+        }
+    }
+    char detail[128];
+    std::snprintf(detail, sizeof(detail), "%d/%d ranks out of range or repeated", bad, kMaskPixels);
+    report(bad == 0, "dither mask is a permutation", detail);
+}
+
+// The mask must actually be blue noise, which is a statement about its spectrum and nothing else: a permutation with the
+// right value distribution but a white spectrum would pass every check above and buy nothing at all, because the entire
+// point of the construction is where the error lands in frequency, not how the shifts are distributed.
+// Measured against the analytic white-noise null (whiteNoiseBandShare), not against a shuffled control. A sampled null
+// was tried first and was wrong in a way worth recording: shuffling 16384 elements with mt19937(1) reproduces the exact
+// permutation bluenoise_mask.cpp uses to place its initial binary pattern, so the "control" was a rearrangement of the
+// mask by the mask's own generator sequence and read eightfold high. A control has to be independent of the thing it
+// controls for, and the flat spectrum white noise is DEFINED by needs no sampling at all.
+// The gate is a factor of two below the null: a wide margin, since void-and-cluster suppresses this band by four orders
+// of magnitude and the failure guarded against -- a mask that degenerated toward white noise -- sits at 1.0x.
+void checkMaskIsBlueNoise() {
+    std::vector<double> mask(kMaskPixels);
+    for (int y = 0; y < kMaskSize; ++y) {
+        for (int x = 0; x < kMaskSize; ++x) {
+            mask[(static_cast<std::size_t>(y) * kMaskSize) + static_cast<std::size_t>(x)] =
+                engine::scene::blueNoiseDither(x, y, 0);
+        }
+    }
+
+    // Bands 3 and up are everything below an eighth of Nyquist -- the low-frequency error a blue-noise mask exists to
+    // suppress, and the band a subsequent filter or the eye integrates over.
+    constexpr int kLowBand = 3;
+    const std::array<double, engine::debug::kSpectrumBands> bands =
+        engine::debug::octaveBandPower(mask, kMaskSize, kMaskSize);
+    const std::array<double, engine::debug::kSpectrumBands> null =
+        engine::debug::whiteNoiseBandShare(kMaskSize, kMaskSize);
+    const double measured = std::accumulate(bands.begin() + kLowBand, bands.end(), 0.0) /
+                             std::accumulate(bands.begin(), bands.end(), 0.0);
+    const double expected = std::accumulate(null.begin() + kLowBand, null.end(), 0.0);
+
+    char detail[160];
+    std::snprintf(detail, sizeof(detail), "low band %.5f%% of power vs %.3f%% white-noise null (%.0fx suppressed)",
+                  100.0 * measured, 100.0 * expected, expected / measured);
+    report(measured < 0.5 * expected, "dither mask has a blue-noise spectrum", detail);
+}
+
 }  // namespace
 
 int main() {
@@ -242,7 +391,7 @@ int main() {
     // A 12-bounce path (integrator_validate's slab case) consumes ~5 sets per bounce plus 2 at the camera, so set 64+
     // is genuinely reached in practice and is where an unpadded sampler would have degraded.
     constexpr int kSetCount = 72;
-    std::printf("sampler_validate: padded Owen-scrambled Sobol, 2^%d-sample prefixes\n\n", kM);
+    std::printf("sampler_validate: padded Owen-scrambled Sobol, blue-noise dithered, 2^%d-sample prefixes\n\n", kM);
 
     checkOneDimensionalNet(kM, kSetCount);
     checkEverySetIsPerfectNet(kM, {0, 1, 2, 7, 31, 64, 71});
@@ -250,6 +399,10 @@ int main() {
     checkIndexZeroIsScrambled();
     checkSetsAreDecorrelated();
     checkPixelsAreDecorrelated();
+    checkShiftIsRigid(kSetCount);
+    checkChannelsAreDecorrelated((2 * kSetCount) + 2);
+    checkMaskIsPermutation();
+    checkMaskIsBlueNoise();
 
     std::printf("\nsampler_validate: %s\n", failures == 0 ? "all checks passed" : "FAILURES PRESENT");
     return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
