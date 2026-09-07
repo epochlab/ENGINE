@@ -9,6 +9,7 @@
 #include <OpenEXR/ImfChromaticities.h>
 #include <OpenEXR/ImfFrameBuffer.h>
 #include <OpenEXR/ImfInputFile.h>
+#include <OpenEXR/ImfOutputFile.h>
 #include <OpenEXR/ImfStandardAttributes.h>
 
 namespace engine::gfx {
@@ -92,6 +93,35 @@ std::optional<HdrImage> loadExr(const std::string& path) {
     } catch (const std::exception& e) {
         std::cerr << "loadExr: failed to load " << path << ": " << e.what() << '\n';
         return std::nullopt;
+    }
+}
+
+bool writeExr(const std::string& path, const HdrImage& image) {
+    try {
+        Imf::Header header(image.width, image.height);
+        for (const char* channel : {"R", "G", "B", "A"}) {
+            header.channels().insert(channel, Imf::Channel(Imf::FLOAT));
+        }
+
+        Imf::FrameBuffer frameBuffer;
+        // const_cast because OpenEXR's OutputFile API takes a mutable base pointer even though it only reads through it
+        // on write; the buffer itself is never modified here.
+        auto* base = const_cast<float*>(image.rgba.data());
+        const std::size_t xStride = sizeof(float) * 4;
+        const std::size_t yStride = xStride * static_cast<std::size_t>(image.width);
+        const std::array<const char*, 4> names = {"R", "G", "B", "A"};
+        for (std::size_t c = 0; c < names.size(); ++c) {
+            frameBuffer.insert(names[c],
+                                Imf::Slice(Imf::FLOAT, reinterpret_cast<char*>(base + c), xStride, yStride));
+        }
+
+        Imf::OutputFile file(path.c_str(), header);
+        file.setFrameBuffer(frameBuffer);
+        file.writePixels(image.height);
+        return true;
+    } catch (const std::exception& e) {
+        std::cerr << "writeExr: failed to write " << path << ": " << e.what() << '\n';
+        return false;
     }
 }
 

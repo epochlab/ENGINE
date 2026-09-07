@@ -303,7 +303,8 @@ engine::scene::PathTraceResult renderPassPerInstance(
     engine::debug::PassStats stats;  // required by renderPathTraced; this tool checks radiance, not throughput
     engine::scene::renderPathTraced(makeCamera(), accel, scene.shadingTriangles, scene.instances,
                                      instanceLightIndex, lights, kImageSize, kImageSize, showSky,
-                                     settings, perInstanceSettings, /*runSeed=*/7U, generation,
+                                     settings, perInstanceSettings, /*scrambleSeed=*/7U, /*sampleBase=*/0,
+                                     /*sampleCount=*/settings.samplesPerPixel, generation,
                                      /*requestedGeneration=*/1U, pool, stats, result);
     return result;
 }
@@ -991,7 +992,8 @@ engine::scene::PathTraceResult renderPassWithLights(const TestScene& scene,
     engine::debug::PassStats stats;  // required by renderPathTraced; this tool checks radiance, not throughput
     engine::scene::renderPathTraced(makeCamera(), accel, scene.shadingTriangles, scene.instances,
                                      instanceLightIndex, lights, kImageSize, kImageSize, showSky,
-                                     settings, perInstanceSettings, /*runSeed=*/7U, generation,
+                                     settings, perInstanceSettings, /*scrambleSeed=*/7U, /*sampleBase=*/0,
+                                     /*sampleCount=*/settings.samplesPerPixel, generation,
                                      /*requestedGeneration=*/1U, pool, stats, result);
     return result;
 }

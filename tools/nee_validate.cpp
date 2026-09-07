@@ -138,7 +138,7 @@ float misCombinedLo(const BsdfParams& params, const glm::vec3& wo, const Environ
                      int sampleCount, std::uint32_t seed) {
     glm::vec3 accum(0.0F);
     for (int i = 0; i < sampleCount; ++i) {
-        Sampler sampler(0, 0, i, seed);
+        Sampler sampler(0, 0, i, sampleCount, seed);
 
         // NEE.
         const EnvironmentMap::EnvSample lightSample =
@@ -317,7 +317,7 @@ float misCombinedLoQuad(const BsdfParams& params, const glm::vec3& wo, const Qua
     const LightSet lights(nullptr, 0.0F, 1.0F, quads);
     glm::vec3 accum(0.0F);
     for (int i = 0; i < sampleCount; ++i) {
-        Sampler sampler(0, 0, i, seed);
+        Sampler sampler(0, 0, i, sampleCount, seed);
 
         // NEE.
         const std::optional<LightSample> lightSample = lights.sample(p, sampler);
