@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -562,12 +563,18 @@ int main(int argc, char** argv) {
     // actually did, as opposed to only which values it sampled. Deterministic here where the viewer's are not, since
     // this tool renders a fixed pass count with no cancellation.
     engine::debug::PassStats stats;
+    // Per-pass wall clock, so a change's traversal cost is measured rather than argued. Only the trace is timed: the accumulate below is O(pixels) and identical across revisions. Mean is the figure to compare -- unlike raster_bench's single-threaded frames, a pass's minimum is set by how the tile queue happened to drain and varies ~12% run to run, where the mean holds to ~1%. Reported alongside best/worst so a run disturbed by other load is visible rather than silently folded in. Pass 0 carries the pool spin-up and first-touch faults and is counted like any other: discarding it would change the image, and it biases both sides of an A/B equally.
+    std::vector<double> milliseconds;
+    milliseconds.reserve(static_cast<std::size_t>(options.passes));
     for (int pass = 0; pass < options.passes; ++pass) {
+        const auto start = std::chrono::steady_clock::now();
         engine::scene::renderPathTraced(camera, *accel, model->shadingTriangles, model->instances,
                                          instanceLightIndex, lights, width, height,
                                          /*showSky=*/true, baseSettings, *perInstanceSettings,
                                          options.scrambleSeed, /*sampleBase=*/pass, /*sampleCount=*/options.passes, generation,
                                          /*requestedGeneration=*/1U, threadPool, stats, result);
+        const auto end = std::chrono::steady_clock::now();
+        milliseconds.push_back(std::chrono::duration<double, std::milli>(end - start).count());
         for (std::size_t i = 0; i < accumulated.rgba.size(); ++i) {
             accumulated.rgba[i] += (result.*options.lane).rgba[i];
         }
@@ -579,6 +586,12 @@ int main(int argc, char** argv) {
     const engine::debug::RayCounts rays = stats.rays();
     std::cout << "render_beauty: rays over " << options.passes << " passes -- primary " << rays.primary << ", bounce "
               << rays.bounce << ", ao " << rays.ao << ", shadow " << rays.shadow << ", total " << rays.total() << "\n";
+
+    const auto [best, worst] = std::minmax_element(milliseconds.begin(), milliseconds.end());
+    const double totalMs = std::accumulate(milliseconds.begin(), milliseconds.end(), 0.0);
+    std::cout << "render_beauty: best-of-" << options.passes << ": " << *best << " ms/pass  (mean "
+              << totalMs / static_cast<double>(options.passes) << ", worst " << *worst << ", total "
+              << totalMs << ")\n";
 
     if (!options.outExrPath.empty()) {
         if (!engine::gfx::writeExr(options.outExrPath, accumulated)) {

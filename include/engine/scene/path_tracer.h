@@ -29,7 +29,8 @@ struct PathTraceSettings {
     int samplesPerPixel;
     int maxBounces;  // secondary/indirect bounces beyond the always-traced primary hit; 0 = direct lighting only
     int russianRouletteStartBounce;
-    // Ambient-occlusion ray length bound (Miller 1994; Landis 2002): a hard cutoff, no falloff curve, so the AO AOV measures local contact rather than whole-room enclosure. Scene-scale dependent, sourced from profile.json. Defaulted because the validation tools build settings by value-init plus assignment, where an undefaulted field would silently be 0 and disable every AO ray.
+    // Ambient-occlusion ray length bound, and the scale of the obscurance falloff over it (Zhukov et al. 1998; Iones et al. 2003): a hit at distance t contributes 1 - (1 - t/aoMaxDistance)^2 visibility, so the AO AOV measures local contact rather than whole-room enclosure and reaches full visibility smoothly at the bound instead of stepping there.
+    // Weaker than the hard cutoff it replaces at the same value: this is now the distance occlusion has faded to nothing by, not the one it fully occludes out to, so a scene tuned against the old behaviour wants a larger number here. Scene-scale dependent, sourced from profile.json. Defaulted because the validation tools build settings by value-init plus assignment, where an undefaulted field would silently be 0 and disable every AO ray.
     float aoMaxDistance = 0.25F;
     float rrMinProb = 0.05F;  // floor: stops a near-zero-throughput path being killed with near-certainty
     // Ceiling of exactly 1.0: a path carrying full throughput must never be terminated. Any lower caps survival for no gain -- it saves a fraction of deep-path tracing and pays for it with variance costing more than that fraction in extra samples.
@@ -86,7 +87,7 @@ struct OverRangeStats {
 struct PathTraceResult {
     engine::gfx::HdrImage beauty;
     engine::gfx::HdrImage bounceHeatmap;   // mean bounce depth at termination, across samples
-    // Cosine-weighted ambient occlusion (Miller 1994; Landis 2002), one bounded ray per sample: the fraction of the hemisphere above the primary hit that reaches past aoMaxDistance unobstructed. 1.0 = unoccluded, the OPPOSITE polarity to `shadow` below -- AO keeps the baked-texture convention it replaces, where white is open sky. Background (no primary hit) is 1.0; averaged and re-averaged exactly as shadow is, converging from a binary per-sample visibility test into continuous contact shading.
+    // Cosine-weighted obscurance (Zhukov et al. 1998; Iones et al. 2003), the distance-weighted generalisation of ambient occlusion (Miller 1994; Landis 2002), one bounded ray per sample: the hemisphere above the primary hit weighted by how far each direction reaches before obstruction, saturating at aoMaxDistance. 1.0 = unoccluded, the OPPOSITE polarity to `shadow` below -- AO keeps the baked-texture convention it replaces, where white is open sky. Background (no primary hit) is 1.0; averaged and re-averaged exactly as shadow is. Each sample already carries a graded value rather than a 0/1 draw, so the contact gradient is present at one sample per pixel and does not have to converge into existence.
     engine::gfx::HdrImage ao;
     engine::gfx::HdrImage shadow;          // fraction of the primary hit's NEE samples toward the env light that were occluded -- 1.0 = fully shadowed, 0.0 = fully lit or no primary hit (background); averaged across samples and re-averaged across passes, so it converges from a binary per-sample test into continuous soft-shadow/penumbra density
 
