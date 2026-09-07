@@ -11,7 +11,6 @@
 #include <cstring>
 
 #include "engine/debug/frame_stats.h"
-#include "engine/debug/spec_report.h"
 
 namespace engine::debug {
 
@@ -222,7 +221,7 @@ void PerfDashboard::draw(const DashboardFrame& frame) {
     drawStageRows(frame);
     drawRayRows(frame);
     drawFooter(frame);
-    // The block grows and shrinks as the hotkey section is toggled. Growth needs nothing -- the next cursor-up uses the count this draw emitted -- but shrinking would leave the rows it shed sitting below, so they are erased here and stay part of the block's height as blank lines.
+    // First draw reserves kBodyLines as an estimate; if the real block is shorter, the shed lines are erased and kept as blank lines so the next cursor-up still accounts for them.
     while (lines_ < lastLineCount_) {
         append("\x1b[2K\n");
     }
@@ -362,13 +361,8 @@ void PerfDashboard::drawFooter(const DashboardFrame& frame) {
             frame.windowHeight, static_cast<double>(frame.renderScale),
             frame.interactiveScale ? " interactive" : "", frame.renderWidth, frame.renderHeight);
     append("\x1b[2K==============================================================================\n");
-    // Blank line inside the block, not after it: it separates the table from whatever follows (the '?' map, or the shell cursor) and is still a line the next redraw's cursor-up accounts for and erases.
+    // Blank line inside the block, not after it: it separates the table from the shell cursor and is still a line the next redraw's cursor-up accounts for and erases.
     append("\x1b[2K\n");
-    if (frame.showHotkeys) {
-        for (const char* row : hotkeyRows()) {
-            append("\x1b[2K %s\n", row);
-        }
-    }
 }
 
 }  // namespace engine::debug
