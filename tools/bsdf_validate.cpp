@@ -120,6 +120,61 @@ bool checkPdfNormalization() {
     return ok;
 }
 
+// sampleBsdf's reported density must equal pdfBsdf re-evaluated at the direction it returned -- the contract BsdfSample::pdf states in bsdf.h ("exactly what pdfBsdf would return for it") and that nothing asserted. checkPdfNormalization above reads sample->pdf, the density the sampler reports about itself, and never re-evaluates it, so that contract had no instrument at all.
+// What it covers was measured, not assumed. NOT a mixture term missing from the density: sampleBsdf reports evaluateContinuousLobes' own pdf, so both sides are then wrong together and this stays green -- deleting the msReflect density term leaves 0 failures here and fails checkFurnace at Lo=1.28 instead. What it does cover is the sign-mirroring round trip, since sampleBsdf returns wi in woLocal's convention and pdfBsdf re-mirrors it and nothing else in the suite closes that loop, and any future strategy reporting a hand-computed density beside the mixture rather than through it -- the usual optimisation once a lobe's own pdf is already in hand.
+// Exact equality, not a tolerance: both sides are the same arithmetic over the same deterministic LobeProbabilities, so any difference is a broken round trip rather than drift. Delta transmission reports 0 on both sides and is asserted like every other row.
+// Swept over checkPdfNormalization's grid plus transmissionFactor, including the ndotV<0 exiting rows the mirroring claim rests on, so every strategy in the ladder is drawn: VNDF reflection, EON, both multiple-scattering cosine lobes, rough and smooth refraction.
+bool checkSampleDensityConsistency() {
+    constexpr int kSampleCount = 8000;
+    constexpr std::uint32_t kSeed = 11;
+    const std::array<float, 4> roughnesses = {0.05F, 0.25F, 0.5F, 1.0F};
+    const std::array<float, 3> metallics = {0.0F, 0.5F, 1.0F};
+    const std::array<float, 3> transmissions = {0.0F, 0.5F, 1.0F};
+    const std::array<float, 3> diffuseRoughnesses = {0.0F, 0.5F, 1.0F};
+    const std::array<float, 4> ndotVs = {0.2F, 0.6F, 1.0F, -0.6F};
+
+    bool ok = true;
+    long long compared = 0;
+    for (float roughness : roughnesses) {
+        for (float metallic : metallics) {
+            for (float transmission : transmissions) {
+                for (float diffuseRoughness : diffuseRoughnesses) {
+                    for (float ndotV : ndotVs) {
+                        const BsdfParams params =
+                            makeParams(roughness, metallic, transmission, diffuseRoughness);
+                        const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (ndotV * ndotV))), 0.0F,
+                                            ndotV);
+                        for (int i = 0; i < kSampleCount && ok; ++i) {
+                            engine::scene::Sampler sampler(0, 0, i, kSampleCount, kSeed);
+                            const std::optional<engine::scene::BsdfSample> sample =
+                                engine::scene::sampleBsdf(params, wo, sampler);
+                            if (!sample.has_value()) {
+                                continue;
+                            }
+                            ++compared;
+                            const float reevaluated =
+                                engine::scene::pdfBsdf(params, wo, sample->wiLocal);
+                            if (reevaluated == sample->pdf) {
+                                continue;
+                            }
+                            std::cerr << "bsdf_validate: FAILED sample/pdf consistency at roughness="
+                                      << roughness << " metallic=" << metallic
+                                      << " transmission=" << transmission
+                                      << " diffuseRoughness=" << diffuseRoughness
+                                      << " ndotV=" << ndotV << " sample->pdf=" << sample->pdf
+                                      << " pdfBsdf=" << reevaluated << '\n';
+                            ok = false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    std::cout << "bsdf_validate: sample/pdf consistency, " << compared
+              << " sampled directions re-evaluated (exact equality)\n";
+    return ok;
+}
+
 glm::vec3 furnaceLo(const BsdfParams& params, const glm::vec3& wo, int sampleCount, std::uint32_t seed) {
     glm::vec3 accum(0.0F);
     for (int i = 0; i < sampleCount; ++i) {
@@ -264,33 +319,56 @@ bool checkWhiteFurnaceTwoSided() {
 // Classical Oren-Nayar variants (and this codebase's own diffuse lobe before EON) lose energy as
 // diffuseRoughness increases -- exactly the problem EON's analytic multiple-scattering compensation
 // term exists to fix (Portsmouth, Kutz, Hill 2025) -- so this must read 1.0 at every value, same
-// correctness target as the specular sweep. Conductors have no diffuse substrate (diffuseKd is zeroed
-// at metallic=1 in computeLobeProbabilities), so this is dielectric-only; roughness is fixed at a
-// mid-range value since it is the specular lobe's own parameter, orthogonal to diffuseRoughness.
+// correctness target as the specular sweep. Roughness is fixed at a mid-range value since it is the
+// specular lobe's own parameter, orthogonal to diffuseRoughness.
+// Conductors are swept too, and asserted EXACTLY invariant in diffuseRoughness rather than merely
+// energy-conserving. diffuseKd is zeroed at metallic=1, so a conductor has no diffuse lobe and
+// diffuseRoughness must reach nothing: computeLobeProbabilities hands that slot's whole selection mass
+// to msReflect, leaving lobes.diffuse identically 0 and sampleEon uncalled. This is the row that went
+// unguarded while the reflected multiple-scattering lobe borrowed the diffuse strategy -- a conductor
+// then drew a CLTC shape set by diffuseRoughness for a lobe of zero value, measurable only as variance,
+// which an energy band cannot see.
 bool checkEonDiffuseFurnace() {
     constexpr int kSampleCount = 400000;
     constexpr float kTolerance = 0.02F;
     constexpr float kRoughness = 0.5F;
     const std::array<float, 5> diffuseRoughnesses = {0.0F, 0.25F, 0.5F, 0.75F, 1.0F};
     const std::array<float, 3> ndotVs = {1.0F, 0.6F, 0.2F};
+    const std::array<float, 2> metallics = {0.0F, 1.0F};
 
     bool ok = true;
-    std::uint32_t seed = 20000;
     std::cout << "bsdf_validate: EON diffuse-roughness furnace energy (1.0 = perfectly energy-conserving)\n";
-    std::cout << "  diffuseRoughness  ndotV  Lo\n";
-    for (float diffuseRoughness : diffuseRoughnesses) {
-        for (float ndotV : ndotVs) {
-            ++seed;
-            const BsdfParams params = makeParams(kRoughness, 0.0F, 0.0F, diffuseRoughness);
-            const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (ndotV * ndotV))), 0.0F, ndotV);
-            const glm::vec3 lo = furnaceLo(params, wo, kSampleCount, seed);
-            std::cout << "  " << diffuseRoughness << "              " << ndotV << "    "
-                      << minChannel(lo) << '\n';
-            if (!withinBand(lo, 1.0F, kTolerance)) {
-                std::cerr << "bsdf_validate: FAILED EON diffuse furnace energy at diffuseRoughness="
-                          << diffuseRoughness << " ndotV=" << ndotV << " Lo=[" << minChannel(lo) << ", "
-                          << maxChannel(lo) << "] (expected 1.0 +/- " << kTolerance << ")\n";
-                ok = false;
+    std::cout << "  metallic  diffuseRoughness  ndotV  Lo\n";
+    for (std::size_t m = 0; m < metallics.size(); ++m) {
+        const float metallic = metallics[m];
+        // Per-ndotV reading at diffuseRoughness 0, the reference the conductor rows must reproduce bit for bit.
+        std::array<glm::vec3, 3> baseline{};
+        for (float diffuseRoughness : diffuseRoughnesses) {
+            for (std::size_t v = 0; v < ndotVs.size(); ++v) {
+                const float ndotV = ndotVs[v];
+                // Seeded by (metallic, ndotV) only, deliberately NOT by diffuseRoughness: the invariance assertion below is exact equality, so the two readings it compares must be built from the same sample sequence or the comparison measures the realization rather than the shape.
+                const std::uint32_t seed = 20000 + static_cast<std::uint32_t>((m * ndotVs.size()) + v);
+                const BsdfParams params = makeParams(kRoughness, metallic, 0.0F, diffuseRoughness);
+                const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (ndotV * ndotV))), 0.0F, ndotV);
+                const glm::vec3 lo = furnaceLo(params, wo, kSampleCount, seed);
+                std::cout << "  " << metallic << "         " << diffuseRoughness << "              "
+                          << ndotV << "    " << minChannel(lo) << '\n';
+                if (!withinBand(lo, 1.0F, kTolerance)) {
+                    std::cerr << "bsdf_validate: FAILED EON diffuse furnace energy at metallic="
+                              << metallic << " diffuseRoughness=" << diffuseRoughness
+                              << " ndotV=" << ndotV << " Lo=[" << minChannel(lo) << ", "
+                              << maxChannel(lo) << "] (expected 1.0 +/- " << kTolerance << ")\n";
+                    ok = false;
+                }
+                if (diffuseRoughness == 0.0F) {
+                    baseline[v] = lo;
+                } else if (metallic == 1.0F && lo != baseline[v]) {
+                    std::cerr << "bsdf_validate: FAILED conductor diffuseRoughness invariance at ndotV="
+                              << ndotV << " diffuseRoughness=" << diffuseRoughness << " Lo="
+                              << minChannel(lo) << " vs " << minChannel(baseline[v])
+                              << " (a conductor has no diffuse lobe; diffuseRoughness must reach nothing)\n";
+                    ok = false;
+                }
             }
         }
     }
@@ -1375,6 +1453,7 @@ bool checkTransmissionRoundTrip() {
 
 int main() {
     const bool pdfOk = checkPdfNormalization();
+    const bool densityOk = checkSampleDensityConsistency();
     const bool furnaceOk = checkFurnace();
     const bool whiteFurnaceOk = checkWhiteFurnaceTwoSided();
     const bool eonDiffuseOk = checkEonDiffuseFurnace();
@@ -1390,7 +1469,7 @@ int main() {
     const bool transmissionReciprocityOk = checkTransmissionReciprocity();
     const bool roundTripOk = checkTransmissionRoundTrip();
 
-    if (!pdfOk || !furnaceOk || !whiteFurnaceOk || !eonDiffuseOk || !eonInversionOk || !indexMatchedCoatOk ||
+    if (!pdfOk || !densityOk || !furnaceOk || !whiteFurnaceOk || !eonDiffuseOk || !eonInversionOk || !indexMatchedCoatOk ||
         !transmissiveEnergyOk || !transmissionTintOk || !conductorFresnelOk || !dielectricFresnelOk || !averageFresnelOk || !dispersionOk ||
         !reciprocityOk || !transmissionReciprocityOk || !roundTripOk) {
         std::cerr << "bsdf_validate: FAILED\n";

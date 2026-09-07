@@ -143,6 +143,8 @@ Named presets (`assets/materials/*.json`), parsed into `MaterialConfig` (`scene_
 
 ## 4. AOV reference
 
+The four Direct/Indirect Diffuse/Specular buckets key on the **sampling strategy** a bounce drew from (`LobeType`, `path_tracer.cpp`), not on the surface's material class. A rough surface's Kulla-Conty multiple-scattering energy is therefore Specular in both senses that matter -- it is repeated scattering on the GGX microsurface, and since it has its own cosine strategy (`msReflect`, `bsdf.cpp`) it is drawn as such. A conductor contributes to the Diffuse buckets not at all, having no diffuse lobe.
+
 Every AOV below is computed by the path tracer each pass, except: the 14 primary-hit-only AOVs (Alpha, Depth, WorldPos, UV, Normal, GeomNormal, Albedo, Metallic, Roughness, Tangent, ObjectID, Fresnel, IOR, Wireframe), which come from the synchronous CPU rasterizer (§1, §2) instead, refreshed every frame; and HSV/Luminance/Sobel/Gabor, GPU post-filters of the Beauty image (shared `PostProcessPass`, re-run every displayed frame over the completed texture -- not cached across frames, see §6 roadmap).
 
 | AOV | Category | Mechanism | Role / why it matters |
@@ -181,10 +183,10 @@ Grouped by area of design, each group ordered by importance (most important firs
 
 ### 1. Rendering correctness (materials & transport physics)
 
-- **Gate the EON sampling shape on `diffuseKd`**: `diffuseRoughness` conflates the EON diffuse *value* with the *sampling strategy* for the borrowed cosine multi-scatter lobe.
-  - They decouple whenever `diffuseKd` is zero -- `metallic=1`/`transmissionFactor=1` zeroes it (`bsdf.cpp:643`) while `diffuseProb` stays non-zero (`bsdf.cpp:641`) -- so a conductor still draws CLTC (`sampleEon`, `bsdf.cpp:531`) to shape a lobe EON doesn't describe.
-  - Measured on `chrome.json`: 1976/691200 channels affected, max 11/255, a 1.2% variance penalty; worked around there via `diffuseRoughness: 0`, which fixes one asset, not the mechanism.
-  - Fix: gate the *shape* on `diffuseKd` at both `sampleEon` and `pdfEon` (`bsdf.cpp:543`) -- `diffuseKd` is deterministic from params, so this stays consistent. Not the *density*: `bsdf.cpp:362` forbids gating the pdf on kd, since selection probability is independent of it and starving the mixture denominator inflates throughput for metals.
+- **Exact `(1-E)cos` sampler for the two multiple-scattering lobes**: `msReflect` and `msTransmit` (`bsdf.cpp`) are both cosine-sampled, the standard practical choice (Kulla & Conty 2017) but not the lobes' own shape. The zero-variance density is `(1-E(mu_i))cos / (pi*(1-Eavg))`, normalised by the quantity `averageAlbedo` already holds, which would make `value/pdf` exactly `fms`.
+  - Bounded rather than open-ended, which is why it is a refinement and not a defect: cosine's weight ratio is at most `(1-E(0))/(1-Eavg)`, a few x at high roughness.
+  - Blocked on a per-roughness inverse CDF over `mu` that no table here has -- the albedo table is 32x32 and directional only. That is a bake, so it shares the offline-table prerequisite the `F_avg` item below is waiting on.
+- **The exiting side's reflected multiple-scattering share is VNDF-sampled**: `diffuseProb` is 0 inside a transmissive medium, so `msReflect` is 0 there too and the internally-reflected compensation lobe is drawn by the specular strategy alone (`bsdf.cpp`). Coverage is complete for `alpha > 0`, so this is variance and not bias, and the far-hemisphere twin `msTransmit` is unaffected. Needs a measurement inside rough glass before a third reflection strategy is worth its selection mass.
 - **Rough-transmission coverage at `transmissionDepth 0`**: `checkOnSurfaceTransmissionTint` (`tools/integrator_validate.cpp`) authors both its slab and sphere at roughness 0.02 (`alpha` 4e-4, below the smooth threshold), so every reading comes from `sampleBsdf`'s delta branch.
   - Measured, not assumed: tinting *only* that branch and reverting both continuous sites fails `bsdf_validate` 54 times yet leaves `integrator_validate` **green** -- the rough transmission path's tint has no integrator-level coverage at all, resting entirely on `bsdf_validate`'s analytic rows.
   - A rough row may be a one-line change -- at `ior 1.0` Walter refraction is straight through for any microfacet normal, so the expected reading should still be exactly `transmissionColor^2` -- but that needs measuring first: whether the transmissive multiple-scattering lobe activates at `eta = 1` and moves the expectation off the square. Not Quick until that reads back.
