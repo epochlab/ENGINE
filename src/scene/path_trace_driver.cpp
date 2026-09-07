@@ -1,10 +1,12 @@
 #include "engine/scene/path_trace_driver.h"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstddef>
 #include <thread>
 #include <utility>
+#include <vector>
 
 namespace engine::scene {
 
@@ -38,6 +40,49 @@ void accumulateMean(PathTraceResult& sample, const PathTraceResult& previousMean
             }
         }
     });
+}
+
+// Reduces the published mean's beauty to OverRangeStats on the driver's own pool -- the same walk the render thread used to do serially, on the thread that just wrote these texels and still holds them in cache. Row-chunked with per-chunk private accumulators folded serially afterwards, following buildSubTriangles (rasterizer.cpp): a histogram bin is far too contended for one atomic increment per texel.
+// One chunk per worker rather than buildSubTriangles' four: every texel costs the same, so there is no imbalance for finer granularity to absorb, and each extra chunk is another kOverRangeBinCount-entry array to zero and fold.
+// A separate pass over beauty rather than a fold into accumulateMean's inner loop, which would save the re-read: accumulateMean is skipped on the first pass of every generation (`if (n > 1)` below), which is exactly the interactive case, so fusing would need a conditional duplicate of this code on that path.
+void reduceOverRange(PathTraceResult& pass, std::vector<OverRangeHistogram>& histograms,
+                      std::vector<float>& peaks, ThreadPool& threadPool) {
+    const engine::gfx::HdrImage& beauty = pass.beauty;
+    const int chunkCount =
+        std::max(1, std::min(beauty.height, static_cast<int>(threadPool.threadCount())));
+    const int chunkRows = (beauty.height + chunkCount - 1) / chunkCount;
+    const auto rowFloats = static_cast<std::size_t>(beauty.width) * 4;
+    histograms.assign(static_cast<std::size_t>(chunkCount), OverRangeHistogram{});
+    peaks.assign(static_cast<std::size_t>(chunkCount), 0.0F);
+
+    threadPool.parallelFor(chunkCount, [&](int chunk) {
+        OverRangeHistogram& bins = histograms[static_cast<std::size_t>(chunk)];
+        const std::size_t begin = static_cast<std::size_t>(chunk * chunkRows) * rowFloats;
+        const std::size_t end =
+            static_cast<std::size_t>(std::min((chunk + 1) * chunkRows, beauty.height)) * rowFloats;
+        const float* rgba = beauty.rgba.data();
+        // Peak kept in a register and stored once at the end: `peaks` is the only array adjacent chunks could false-share, since each chunk's bin writes stay inside its own histogram.
+        float peak = 0.0F;
+        for (std::size_t i = begin; i < end; i += 4) {
+            const float maxChannel = std::max({rgba[i], rgba[i + 1], rgba[i + 2]});
+            ++bins[static_cast<std::size_t>(overRangeBin(maxChannel))];
+            peak = std::max(peak, maxChannel);
+        }
+        peaks[static_cast<std::size_t>(chunk)] = peak;
+    });
+
+    OverRangeStats& out = pass.overRange;
+    out.rawPeak = *std::max_element(peaks.begin(), peaks.end());
+    // Summed chunk-major, then turned into a suffix sum in place: both walks are sequential over one array, where folding straight into the complementary CDF would stride across every chunk's histogram per bin.
+    std::fill(out.aboveBin.begin(), out.aboveBin.end(), 0U);
+    for (const OverRangeHistogram& bins : histograms) {
+        for (std::size_t bin = 0; bin < bins.size(); ++bin) {
+            out.aboveBin[bin] += bins[bin];
+        }
+    }
+    for (std::size_t bin = kOverRangeBinCount; bin-- > 0;) {
+        out.aboveBin[bin] += out.aboveBin[bin + 1];
+    }
 }
 
 double millisecondsSince(std::chrono::steady_clock::time_point start) {
@@ -106,13 +151,15 @@ engine::debug::PassRecord PathTraceDriver::lastPassRecord() const {
 // Driver-thread-only. passStats_ is read here rather than inside driverLoop so both the completed and the cancelled call site share one definition of what a PassRecord contains.
 void PathTraceDriver::publishPassRecord(std::uint64_t generation, int passIndex, int width,
                                          int height, double traceMs, double accumulateMs,
-                                         double publishMs, double passMs, bool cancelled) {
+                                         double overRangeMs, double publishMs, double passMs,
+                                         bool cancelled) {
     const engine::debug::PassRecord record{generation,
                                             passIndex,
                                             width,
                                             height,
                                             traceMs,
                                             accumulateMs,
+                                            overRangeMs,
                                             publishMs,
                                             passMs,
                                             passStats_.rays(),
@@ -191,7 +238,8 @@ void PathTraceDriver::driverLoop(std::stop_token stopToken) {
         if (generation_.load(std::memory_order_relaxed) != activeGeneration) {
             // Published before the discard, not skipped: a camera drag cancels passes continuously, and rays traced for a discarded pass were still paid for. Reporting only completed passes would show an idle tracer during exactly the interaction that loads it hardest.
             publishPassRecord(activeGeneration, passIndex, pass->beauty.width, pass->beauty.height,
-                               traceMs, 0.0, 0.0, millisecondsSince(passStart), /*cancelled=*/true);
+                               traceMs, 0.0, 0.0, 0.0, millisecondsSince(passStart),
+                               /*cancelled=*/true);
             continue;  // superseded mid-pass -- discard, next iteration picks up the new request
         }
 
@@ -202,6 +250,11 @@ void PathTraceDriver::driverLoop(std::stop_token stopToken) {
             accumulateMean(*pass, *currentMean, n, threadPool_);
         }
         const double accumulateMs = millisecondsSince(accumulateStart);
+
+        // After the mean, before the publish: the statistics must describe the image that is about to go on screen, and the render thread must never see a result whose two are stale.
+        const auto overRangeStart = std::chrono::steady_clock::now();
+        reduceOverRange(*pass, overRangeHistograms_, overRangePeaks_, threadPool_);
+        const double overRangeMs = millisecondsSince(overRangeStart);
         currentMean = pass;
 
         const auto publishStart = std::chrono::steady_clock::now();
@@ -212,7 +265,8 @@ void PathTraceDriver::driverLoop(std::stop_token stopToken) {
         const double publishMs = millisecondsSince(publishStart);
 
         publishPassRecord(activeGeneration, n, pass->beauty.width, pass->beauty.height, traceMs,
-                           accumulateMs, publishMs, millisecondsSince(passStart), /*cancelled=*/false);
+                           accumulateMs, overRangeMs, publishMs, millisecondsSince(passStart),
+                           /*cancelled=*/false);
     }
 }
 

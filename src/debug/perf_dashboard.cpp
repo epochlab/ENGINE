@@ -21,8 +21,8 @@ constexpr double kMiB = 1024.0 * 1024.0;
 constexpr double kGiB = 1024.0 * 1024.0 * 1024.0;
 constexpr double kMillion = 1.0e6;
 
-// Index into PerfDashboard's burst arrays. Bursty means "runs on a small fraction of frames": the rasterizer only on a trigger change into one of its AOVs, the upload only when a newly published pass invalidates the display texture, the over-range scan every 4th frame.
-enum BurstStage { kBurstRaster = 0, kBurstUpload = 1, kBurstOverRange = 2 };
+// Index into PerfDashboard's burst arrays. Bursty means "runs on a small fraction of frames": the rasterizer only on a trigger change into one of its AOVs, the upload only when a newly published pass invalidates the display texture.
+enum BurstStage { kBurstRaster = 0, kBurstUpload = 1 };
 
 // Frames per firing, "1/88", in the column a per-frame stage puts its percentage. "never" for a stage that has not fired since launch -- a real state (the rasterizer, whenever no rasterizer AOV has been selected) and not the same as firing every frame, which is what dividing by a floor of one would have shown.
 void formatDuty(std::array<char, 8>& out, double framesPerFiring) {
@@ -145,7 +145,7 @@ void PerfDashboard::accumulate(const DashboardFrame& frame) {
     ++totalFrames_;
 
     // A stage that did not run this frame reads exactly 0 (renderFrame zeroes them all), so a non-zero value is a firing, and the value kept is the real cost rather than a mean diluted by the frames it skipped.
-    const std::array<float, 3> burst{stages.rasterMs, stages.uploadMs, stages.overRangeMs};
+    const std::array<float, 2> burst{stages.rasterMs, stages.uploadMs};
     for (std::size_t i = 0; i < burst.size(); ++i) {
         if (burst[i] > 0.0F) {
             burstLastMs_[i] = burst[i];
@@ -250,7 +250,7 @@ void PerfDashboard::drawFrameHeader(const DashboardFrame& frame) {
 void PerfDashboard::drawStageRows(const DashboardFrame& frame) {
     const float cpu = cpuTotalMs();
     const auto& pass = frame.pass;
-    const double passMs = pass.traceMs + pass.accumulateMs + pass.publishMs;
+    const double passMs = pass.traceMs + pass.accumulateMs + pass.overRangeMs + pass.publishMs;
     const auto phasePct = [&](double ms) { return passMs > 0.0 ? (ms / passMs) * 100.0 : 0.0; };
     const auto mean = [&](float sum) { return static_cast<double>(windowMean(sum)); };
     const auto pct = [&](float sum) { return static_cast<double>(percentOf(windowMean(sum), cpu)); };
@@ -279,28 +279,30 @@ void PerfDashboard::drawStageRows(const DashboardFrame& frame) {
             static_cast<double>(burstLastMs_[kBurstRaster]), duty.data(), kBarBlank,
             pass.accumulateMs, phasePct(pass.accumulateMs));
     formatDuty(duty, burstDutyFrames(kBurstUpload));
-    append("\x1b[2K  %-15s%8.3f %5s %s |  publish         %9.2f %6.1f\n", "tex upload",
-            static_cast<double>(burstLastMs_[kBurstUpload]), duty.data(), kBarBlank, pass.publishMs,
-            phasePct(pass.publishMs));
+    append("\x1b[2K  %-15s%8.3f %5s %s |  over-range      %9.2f %6.1f\n", "tex upload",
+            static_cast<double>(burstLastMs_[kBurstUpload]), duty.data(), kBarBlank,
+            pass.overRangeMs, phasePct(pass.overRangeMs));
     formatBar(bar, static_cast<double>(percentOf(static_cast<float>(blitMs), cpu)) / 100.0);
-    append("\x1b[2K  %-15s%8.3f %5.1f %s |  --------------------------------\n", "present blit",
-            blitMs, static_cast<double>(percentOf(static_cast<float>(blitMs), cpu)), bar.data());
+    append("\x1b[2K  %-15s%8.3f %5.1f %s |  publish         %9.2f %6.1f\n", "present blit", blitMs,
+            static_cast<double>(percentOf(static_cast<float>(blitMs), cpu)), bar.data(),
+            pass.publishMs, phasePct(pass.publishMs));
     barFor(sums_.histogramMs);
-    append("\x1b[2K  %-15s%8.3f %5.1f %s |  tiles     %5llu / %-5llu %-6s\n", "histogram",
-            mean(sums_.histogramMs), pct(sums_.histogramMs), bar.data(),
+    append("\x1b[2K  %-15s%8.3f %5.1f %s |  --------------------------------\n", "histogram",
+            mean(sums_.histogramMs), pct(sums_.histogramMs), bar.data());
+    barFor(sums_.overRangeMs);
+    append("\x1b[2K  %-15s%8.3f %5.1f %s |  tiles     %5llu / %-5llu %-6s\n", "over-range",
+            mean(sums_.overRangeMs), pct(sums_.overRangeMs), bar.data(),
             static_cast<unsigned long long>(pass.tilesCompleted),
             static_cast<unsigned long long>(pass.tilesCompleted + pass.tilesCancelled),
             pass.cancelled ? "CANCEL" : "");
-    formatDuty(duty, burstDutyFrames(kBurstOverRange));
-    append("\x1b[2K  %-15s%8.3f %5s %s |  samples   %5d / %s\n", "over-range",
-            static_cast<double>(burstLastMs_[kBurstOverRange]), duty.data(), kBarBlank,
-            frame.accumulatedSamples, frame.maxSamples > 0 ? "capped" : "unbounded");
     barFor(sums_.probeMs);
-    append("\x1b[2K  %-15s%8.3f %5.1f %s |  suspended %s\n", "pixel probe", mean(sums_.probeMs),
-            pct(sums_.probeMs), bar.data(), frame.driverSuspended ? "yes" : "no");
+    append("\x1b[2K  %-15s%8.3f %5.1f %s |  samples   %5d / %s\n", "pixel probe",
+            mean(sums_.probeMs), pct(sums_.probeMs), bar.data(), frame.accumulatedSamples,
+            frame.maxSamples > 0 ? "capped" : "unbounded");
     formatBar(bar, static_cast<double>(percentOf(static_cast<float>(hudBuildMs), cpu)) / 100.0);
-    append("\x1b[2K  %-15s%8.3f %5.1f %s |\n", "hud build", hudBuildMs,
-            static_cast<double>(percentOf(static_cast<float>(hudBuildMs), cpu)), bar.data());
+    append("\x1b[2K  %-15s%8.3f %5.1f %s |  suspended %s\n", "hud build", hudBuildMs,
+            static_cast<double>(percentOf(static_cast<float>(hudBuildMs), cpu)), bar.data(),
+            frame.driverSuspended ? "yes" : "no");
     barFor(sums_.hudRenderMs);
     append("\x1b[2K  %-15s%8.3f %5.1f %s |\n", "hud render", mean(sums_.hudRenderMs),
             pct(sums_.hudRenderMs), bar.data());

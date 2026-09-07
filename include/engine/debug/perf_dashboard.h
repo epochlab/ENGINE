@@ -89,9 +89,9 @@ private:
     // The same cost, held until exactly one frame has charged for it. A redraw happens on roughly 1 frame in 20, so adding lastDrawMs_ to every frame's total would inflate cpu total by ~20x the dashboard's real share and push the unaccounted residual negative.
     float unbilledDrawMs_ = 0.0F;
 
-    // Bursty stages (rasterizer, texture upload, over-range scan) run on a small fraction of frames. Their per-frame mean would report ~1.7ms for a stage that actually stalls the render thread for 150ms and drops a frame, so the last ACTUAL cost is kept alongside a duty cycle counted since launch -- cumulative, not windowed, because at 3Hz a window of ~20 frames usually contains zero firings of a 1-in-88 stage.
-    std::array<float, 3> burstLastMs_{};
-    std::array<std::uint64_t, 3> burstFireCount_{};
+    // Bursty stages (rasterizer, texture upload) run on a small fraction of frames. Their per-frame mean would report ~1.7ms for a stage that actually stalls the render thread for 150ms and drops a frame, so the last ACTUAL cost is kept alongside a duty cycle counted since launch -- cumulative, not windowed, because at 3Hz a window of ~20 frames usually contains zero firings of a 1-in-88 stage.
+    std::array<float, 2> burstLastMs_{};
+    std::array<std::uint64_t, 2> burstFireCount_{};
     std::uint64_t totalFrames_ = 0;
 
     bool tty_ = false;
