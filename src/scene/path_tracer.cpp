@@ -439,10 +439,11 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
 }  // namespace
 
 PathTraceResult makePathTraceResult(int width, int height) {
-    // 9 fields (beauty/bounceHeatmap/ao/shadow + 5 transport-component AOVs) -- see PathTraceResult's declaration order in path_tracer.h, which this positional init must match.
+    // 9 images (beauty/bounceHeatmap/ao/shadow + 5 transport-component AOVs) -- see PathTraceResult's declaration order in path_tracer.h, which this positional init must match. The trailing overRange field is deliberately left to its own initialiser: it is a reduction of beauty, not an allocation.
     return {makeImage(width, height), makeImage(width, height), makeImage(width, height),
             makeImage(width, height), makeImage(width, height), makeImage(width, height),
-            makeImage(width, height), makeImage(width, height), makeImage(width, height)};
+            makeImage(width, height), makeImage(width, height), makeImage(width, height),
+            OverRangeStats{}};
 }
 
 void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,

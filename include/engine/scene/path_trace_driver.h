@@ -69,8 +69,8 @@ private:
     void driverLoop(std::stop_token stopToken);
     // width/height come from the rendered buffer, not the Request that asked for it: the same numbers, and it describes the image that actually exists.
     void publishPassRecord(std::uint64_t generation, int passIndex, int width, int height,
-                            double traceMs, double accumulateMs, double publishMs, double passMs,
-                            bool cancelled);
+                            double traceMs, double accumulateMs, double overRangeMs,
+                            double publishMs, double passMs, bool cancelled);
     std::shared_ptr<PathTraceResult> acquireFreeBuffer(int width, int height);
 
     const EmbreeAccel& accel_;
@@ -104,6 +104,10 @@ private:
 
     // Driver-thread-only rotation of buffer sets, allocated on first use and reused for the process's life -- renderPathTraced writes into one of these instead of allocating 8 fresh images per pass. Four, because up to three can be pinned at once: the mean the driver just published, the frame-local snapshot the render thread holds for the duration of a frame, and the older result app.pathTraceDisplayedOwner still holds because the display texture was built from it. The fourth is the one being written.
     std::array<std::shared_ptr<PathTraceResult>, 4> bufferPool_;
+
+    // Per-chunk private accumulators for reduceOverRange, driver-thread-owned and reused across passes -- the same convention as passStats_ and the buffer pool, and the reason a steady-state pass allocates nothing. 128 KiB per worker, which stays a per-core working set because no chunk ever touches another's.
+    std::vector<OverRangeHistogram> overRangeHistograms_;
+    std::vector<float> overRangePeaks_;
 
     // Persistent parallel dispatch for renderPathTraced and its accumulate step, reused across every pass -- see ThreadPool's own doc comment. Declared before thread_ so it's fully constructed (and its workers parked and ready) before driverLoop starts, and outlives every renderPathTraced call driverLoop makes (destroyed only after thread_ has stopped and joined).
     ThreadPool threadPool_;
