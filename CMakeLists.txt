@@ -271,7 +271,7 @@ if(IPO_SUPPORTED)
     set_target_properties(raster_bench PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
 endif()
 
-# All five correctness tools run under `ctest --test-dir build`; previously buildable but unrun, so a regression only surfaced if someone remembered to invoke them by hand.
+# All six correctness tools run under `ctest --test-dir build`; previously buildable but unrun, so a regression only surfaced if someone remembered to invoke them by hand.
 enable_testing()
 foreach(validator embree_validate bsdf_validate nee_validate rasterizer_validate integrator_validate sampler_validate)
     add_test(NAME ${validator} COMMAND ${validator})
