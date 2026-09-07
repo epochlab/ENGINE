@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <limits>
+#include <numbers>
 #include <optional>
 #include <random>
 #include <string>
@@ -1337,22 +1338,27 @@ bool checkQuadLightInverseSquare() {
 
 // --- Ray-traced ambient occlusion (path_tracer.cpp's AO lane) ---------------------------------------
 
-// Wall distance for the AO checks, ten times makeCornerScene's default. Both reasons are quantitative. AO(c) is nonlinear, so the measured block's spatial spread in d biases its mean by about AO''(c)*Var(d/D)/2: the frame spans |x| <= 0.3 at the floor, which at d=10 holds that bias to 1.6e-4 at the worst row (c=0.9), a tenth of its tolerance, where at d=1 it would be 100x larger and dominate. And the c>1 row needs c above 1 at every measured pixel, not just at the centre, which at d=1 it is not. Rays reach at most D = d/c <= 200 here, well inside the wall's kQuadExtent reach, so no ray escapes past its edges.
+// Wall distance for the AO checks, ten times makeCornerScene's default. Both reasons are quantitative. AO(c) is nonlinear, so the measured block's spatial spread in d biases its mean by about AO''(c)*Var(d/D)/2: the frame spans |x| <= 0.3 at the floor, which at d=10 holds that bias to 3.3e-5 at the worst row (c=0.50), 2% of its tolerance, where at d=1 it would be 100x larger and twice the tolerance there. And the c>1 row needs c above 1 at every measured pixel, not just at the centre: at d=10 the nearest is c=1.067, at d=1 it is below 1. Rays reach at most D = d/c <= 200 here, well inside the wall's kQuadExtent reach, so no ray escapes past its edges.
 constexpr float kAoWallDistance = 10.0F;
-// AO is one Bernoulli draw per sample, so its standard error falls only as 1/sqrt(N). This count puts the 6-sigma tolerance 5.8x below the gap to the uniform-hemisphere curve (1+c)/2 at c=0.25, the narrowest of the rows that discriminate, and further below it at c=0.50 and c=0.75. c=0.05 separates the two curves by only 0.0068 and so discriminates at no practical N, which is why the sweep carries four rows and not one.
+// One rho draw per sample, so the standard error falls only as 1/sqrt(N). This count puts the 6-sigma tolerance at least 8x below the gap to every curve the sweep must exclude: 10-23x for a linear rho, 26-116x for the old hard cutoff, and 8x at the narrowest for uniform-hemisphere sampling of the same rho, whose margin is what sets the count.
 constexpr int kAoSamplesPerPixel = 1024;
 // Every pixel, not centreMean's 4x4 block: AO is a visibility query about the plane's constant +Z normal and does not depend on the view direction, so the spread centreMean exists to limit costs nothing here, and reading the whole frame gives the same N for a sixteenth of the traced paths.
 constexpr float kAoMeasuredPixels = static_cast<float>(kImageSize) * static_cast<float>(kImageSize);
 
-// Closed-form cosine-weighted AO for the corner scene: a receiver on the infinite floor at perpendicular distance d from the wall plane, occlusion range D, c = d/D. Malley's method makes the sampled direction's tangential projection uniform on the unit disk (PBR 4th ed. 13.6.3), and a ray reaches the wall plane at t = d/wx, so it is occluded exactly when wx >= c -- a half-plane cut of the unit disk, i.e. a circular segment of area acos(c) - c*sqrt(1-c^2). Rotating the tangent frame maps a uniform disk onto itself, so this does not depend on how buildShadingFrame orients it. c -> 0 approaches the half-space limit 0.5; c >= 1 puts the whole wall beyond D.
+// Closed-form cosine-weighted obscurance for the corner scene: a receiver on the infinite floor at perpendicular distance d from the wall plane, occlusion range D, c = d/D. Malley's method makes the sampled direction's tangential projection uniform on the unit disk (PBR 4th ed. 13.6.3), and a ray reaches the wall plane at t = d/a for disk coordinate a, so it is in range exactly when a >= c and carries x = t/D = c/a there. Integrating the deficit 1 - rho = (1 - c/a)^2 over the disk's chord length 2*sqrt(1-a^2) gives I(c) = int_c^1 (1-c/a)^2 * 2*sqrt(1-a^2) da, elementary from int 2*sqrt(1-a^2), int sqrt(1-a^2)/a and int sqrt(1-a^2)/a^2, and AO = 1 - I/pi. Rotating the tangent frame maps a uniform disk onto itself, so this does not depend on how buildShadingFrame orients it. c -> 0 approaches the half-space limit 0.5, unchanged from the binary form; c >= 1 puts the whole wall beyond D.
+// In double because the three terms are O(1) while their sum vanishes as (32*sqrt(2)/105)*(1-c)^(7/2) -- that high-order tangency IS the rho'(1) = 0 condition, and it is severe cancellation to evaluate.
 float analyticAmbientOcclusion(float c) {
     if (c >= 1.0F) {
         return 1.0F;
     }
-    return 1.0F - ((std::acos(c) - (c * std::sqrt(1.0F - (c * c)))) / kPi);
+    const double x = static_cast<double>(c);
+    const double s = std::sqrt(1.0 - (x * x));
+    const double deficit =
+        ((1.0 - (2.0 * x * x)) * std::acos(x)) + (5.0 * x * s) - (4.0 * x * std::log((1.0 + s) / x));
+    return static_cast<float>(1.0 - (deficit / std::numbers::pi));
 }
 
-// Binomial standard error on the visibility fraction at ~6 sigma, the same device as nee_validate.cpp's quad-solid-angle tolerance: taken from the estimator's own statistics rather than picked by hand. N counts only the block's own samples; the 1.5px reconstruction filter mixes a one-pixel halo in, which can only raise the contributing count. At p = 1 this is exactly zero, which is correct rather than degenerate -- every sample is then deterministically unoccluded, and the AO lane and the filter-weight lane accumulate the identical sequence of weights, so the quotient at write-out is bit-exactly 1.0.
+// Standard error on the mean at ~6 sigma, the same device as nee_validate.cpp's quad-solid-angle tolerance: taken from the estimator's own statistics rather than picked by hand. The per-sample rho is no longer a Bernoulli draw but any value in [0,1], where Bhatia-Davis bounds Var <= (M-mu)(mu-m) = p(1-p), so this expression is now a conservative bound on the standard error rather than the exact one. N counts only the block's own samples; the 1.5px reconstruction filter mixes a one-pixel halo in, which can only raise the contributing count. At p = 1 this is exactly zero, which is correct rather than degenerate -- every sample is then deterministically unoccluded, and the AO lane and the filter-weight lane accumulate the identical sequence of weights, so the quotient at write-out is bit-exactly 1.0.
 float aoTolerance(float expected) {
     const float n = static_cast<float>(kAoSamplesPerPixel) * kAoMeasuredPixels;
     return 6.0F * std::sqrt(expected * (1.0F - expected) / n);
@@ -1387,7 +1393,7 @@ struct AoCase {
     float c;  // d / aoMaxDistance
 };
 
-// Ray-traced AO against its closed form, over two configurations. An unoccluded plane, where every AO ray escapes and the lane must read exactly 1.0 -- the row an inverted polarity fails outright. Then the corner scene swept over c, which pins the SHAPE of the curve: a sweep and not a point because uniform-hemisphere sampling under the same mean-of-visibility estimator gives (1+c)/2, a different curve that any single row could coincide with.
+// Ray-traced AO against its closed form, over two configurations. An unoccluded plane, where every AO ray escapes and the lane must read exactly 1.0 -- the row an inverted polarity fails outright. Then the corner scene swept over c, which pins the SHAPE of the curve: a sweep and not a point because three wrong integrators pass any single row -- uniform-hemisphere sampling of the same rho, a linear rho, and the hard cutoff this replaced. Rows chosen so the analytic value clears all three by the margins kAoSamplesPerPixel is sized for.
 bool checkAmbientOcclusionAnalytic() {
     std::cout << "integrator_validate: ambient occlusion vs analytic cosine-weighted visibility\n";
     const EnvironmentMap env = makeUniformEnvironment();
@@ -1409,9 +1415,9 @@ bool checkAmbientOcclusionAnalytic() {
         return false;
     }
     const std::array<AoCase, 4> sweep{{{"corner c=0.05 (half-space limit)", 0.05F},
+                                        {"corner c=0.15", 0.15F},
                                         {"corner c=0.25", 0.25F},
-                                        {"corner c=0.50", 0.5F},
-                                        {"corner c=0.75", 0.75F}}};
+                                        {"corner c=0.50", 0.5F}}};
     for (const AoCase& testCase : sweep) {
         ok = checkAoRow(testCase.name, corner, env, kAoWallDistance / testCase.c,
                          analyticAmbientOcclusion(testCase.c), *cornerAccel, pool) &&
@@ -1420,7 +1426,8 @@ bool checkAmbientOcclusionAnalytic() {
     return ok;
 }
 
-// aoMaxDistance bracketed from both sides on one fixed geometry, so the only thing changing between the two rows is the bound itself. At c=0.9 the wall is just inside range and darkens the plate slightly; at c=1.1 it is just outside and every ray escapes, so the lane must read exactly 1.0 -- and it is exact rather than approximate because even the frame-edge sample nearest the wall, at the x=0.3 where the film clips, still sits at c=1.067. A build that ignores aoMaxDistance reads the unbounded half-space value 0.5 in both rows.
+// aoMaxDistance bracketed from both sides on one fixed geometry, so the only thing changing between the two rows is the bound itself. At c=0.50 the wall is inside range and darkens the plate by 11 tolerances; at c=1.1 it is outside and every ray escapes, so the lane must read exactly 1.0 -- exact rather than approximate because even the frame-edge sample nearest the wall, at the x=0.3 where the film clips, still sits at c=1.067. A build that ignores aoMaxDistance reads the unbounded half-space value 0.5 in both rows.
+// The inside row sits at c=0.50 and not just under the bound as it did for the hard cutoff: rho'(1) = 0 makes the deficit vanish as (1-c)^(7/2), so c=0.90 now reads 0.99995, within 0.6 tolerances of unoccluded and unresolvable at any practical N. That is the discontinuity being gone, not a lost test.
 bool checkAmbientOcclusionDistanceBound() {
     std::cout << "integrator_validate: ambient occlusion respects aoMaxDistance\n";
     const EnvironmentMap env = makeUniformEnvironment();
@@ -1432,7 +1439,7 @@ bool checkAmbientOcclusionDistanceBound() {
         std::cerr << "integrator_validate: FAILED to build Embree scene for the AO distance bound\n";
         return false;
     }
-    const std::array<AoCase, 2> cases{{{"occluder just inside range (c=0.90)", 0.9F},
+    const std::array<AoCase, 2> cases{{{"occluder inside range (c=0.50)", 0.5F},
                                         {"occluder just outside range (c=1.10)", 1.1F}}};
     bool ok = true;
     for (const AoCase& testCase : cases) {
