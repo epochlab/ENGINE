@@ -451,7 +451,8 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                        const std::vector<int>& instanceLightIndex, const LightSet& lights,
                        int width, int height, bool showSky, const PathTraceSettings& settings,
                        const std::vector<PathTraceSettings>& perInstanceSettings,
-                       std::uint32_t runSeed, const std::atomic<std::uint64_t>& generation,
+                       std::uint32_t scrambleSeed, int sampleBase, int sampleCount,
+                       const std::atomic<std::uint64_t>& generation,
                        std::uint64_t requestedGeneration, ThreadPool& threadPool,
                        engine::debug::PassStats& stats, PathTraceResult& out) {
     const float aspect = static_cast<float>(width) / static_cast<float>(height);
@@ -460,7 +461,7 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
     const int tilesX = (width + kPathTraceTileSize - 1) / kPathTraceTileSize;
     const int tilesY = (height + kPathTraceTileSize - 1) / kPathTraceTileSize;
 
-    // One worker owns every output pixel of one tile, and traces every pixel within the filter radius of it -- the kFilterExtent-wide halo, whose samples are therefore traced twice, once by each of the two tiles they splat into. Sampler is seeded per (x, y, s, runSeed), so both tiles compute the identical sample; the cost is ~13% more rays at this tile size, and what it buys is that no splat ever crosses into another worker's pixels, so the whole pass needs no locks, no atomics and no merge phase.
+    // One worker owns every output pixel of one tile, and traces every pixel within the filter radius of it -- the kFilterExtent-wide halo, whose samples are therefore traced twice, once by each of the two tiles they splat into. Sampler is seeded per (x, y, sampleBase + s, scrambleSeed), all four pass-wide constants or loop indices, so both tiles compute the identical sample; the cost is ~13% more rays at this tile size, and what it buys is that no splat ever crosses into another worker's pixels, so the whole pass needs no locks, no atomics and no merge phase.
     const auto renderTile = [&](int tileIndex) {
         const int tileX0 = (tileIndex % tilesX) * kPathTraceTileSize;
         const int tileY0 = (tileIndex / tilesX) * kPathTraceTileSize;
@@ -479,7 +480,11 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
             for (int x = std::max(tileX0 - kFilterExtent, 0);
                  x < std::min(tileX1 + kFilterExtent, width); ++x) {
                 for (int s = 0; s < settings.samplesPerPixel; ++s) {
-                    Sampler sampler(x, y, s, runSeed);
+                    // sampleBase + s is this sample's position in the pixel's accumulated sequence, not a per-pass
+                    // seed: it must advance across passes for the Sobol points to stratify against the samples already
+                    // accumulated. scrambleSeed stays fixed for the whole accumulation -- see sampler.h.
+                    const int sampleIndex = sampleBase + s;
+                    Sampler sampler(x, y, sampleIndex, sampleCount, scrambleSeed);
                     const glm::vec2 jitter = sampler.next2D();
                     const float filmX = static_cast<float>(x) + jitter.x;
                     const float filmY = static_cast<float>(y) + jitter.y;
@@ -487,8 +492,9 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                     // HdrImage row 0 is the top (EXR/glTF convention); NDC +Y is up -- flip.
                     const float ndcY = 1.0F - ((filmY / static_cast<float>(height)) * 2.0F);
                     const Ray primary = camera.primaryRay(basis, ndcX, ndcY);
-                    // AO draws from its own stream, not `sampler`: taking two dimensions from the path's sampler would shift every later dimension and move all eight pre-existing images. Passing the drawn pair rather than the sampler makes it provable that AO consumes exactly two dimensions and cannot drift. Seeding stays a pure function of (x, y, s, seed), which is what the halo determinism above rests on.
-                    Sampler aoSampler(x, y, s, runSeed ^ kAoSeedOffset);
+                    // AO draws from its own stream, not `sampler`: taking two dimensions from the path's sampler would shift every later dimension and move all eight pre-existing images. Passing the drawn pair rather than the sampler makes it provable that AO consumes exactly two dimensions and cannot drift. Seeding stays a pure function of (x, y, sampleIndex, seed), which is what the halo determinism above rests on.
+                    // The offset goes on the SCRAMBLE SEED, never the sample index: a shifted index would have AO walk the same Sobol points as the path a few steps along, correlating the two streams, whereas an offset seed gives AO an independently scrambled copy of the same well-stratified sequence.
+                    Sampler aoSampler(x, y, sampleIndex, sampleCount, scrambleSeed ^ kAoSeedOffset);
                     const glm::vec2 aoSample = aoSampler.next2D();
                     const TraceResult trace =
                         tracePath(primary, accel, shadingTriangles, instances, instanceLightIndex,

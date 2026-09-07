@@ -172,7 +172,7 @@ std::optional<LightSample> LightSet::sample(const glm::vec3& p, Sampler& sampler
 
     const int quadIndex = index - (envPresent ? 1 : 0);
     const QuadLight& quad = quads_[static_cast<std::size_t>(quadIndex)];
-    // Drawn before the degeneracy check, not after: returning early without consuming this 2D would shift every later dimension on that path relative to its neighbours, and randomized Halton's low-discrepancy property (sampler.h) rests on paths agreeing about which dimension is which. Both branches now consume the same 2D regardless of degeneracy; the selection 1D above is drawn only when count() > 1, so a single-light scene consumes 2D alone.
+    // Drawn before the degeneracy check, not after: returning early without consuming this 2D would shift every later dimension on that path relative to its neighbours, and the sampler's low-discrepancy property (sampler.h) rests on paths agreeing about which dimension is which. Both branches now consume the same 2D regardless of degeneracy; the selection 1D above is drawn only when count() > 1, so a single-light scene consumes 2D alone.
     const glm::vec2 u = sampler.next2D();
     const std::optional<SphericalRectangle> rect = buildSphericalRectangle(quad, p);
     if (!rect.has_value()) {

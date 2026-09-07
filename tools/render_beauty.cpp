@@ -1,9 +1,10 @@
 // Headless beauty render, for before/after comparison across a code change. Loads a scene exactly as main.cpp does, accumulates N path-traced passes, and writes one path-traced AOV (--aov, Beauty by default) as an 8-bit PNG through the same display encoding the viewer shows it under.
-// Exists because the renderer is a GLFW application: comparing two revisions otherwise means two manual screenshots, which cannot be pixel-differenced and cannot be trusted to share a camera. Everything here is deterministic -- fixed camera from profile.json, fixed runSeed per pass, no interaction -- so two runs over unchanged code produce a byte-identical file, which is what makes a non-zero diff meaningful.
+// Exists because the renderer is a GLFW application: comparing two revisions otherwise means two manual screenshots, which cannot be pixel-differenced and cannot be trusted to share a camera. Everything here is deterministic -- fixed camera from profile.json, a fixed scramble seed for the whole render with the sample index advancing per pass, no interaction -- so two runs over unchanged code produce a byte-identical file, which is what makes a non-zero diff meaningful.
 // --compare takes a previously written PNG and reports max/RMS channel deviation against the render just produced, so "did this change the picture, and where" is answered numerically rather than by eye.
 // Same standalone-CLI convention as the validate tools: no test framework, non-zero exit on failure.
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
@@ -11,7 +12,9 @@
 #include <cctype>
 #include <cstring>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
+#include <numeric>
 #include <string>
 #include <vector>
 
@@ -23,6 +26,8 @@
 #include "engine/config/profile_config.h"
 #include "engine/config/scene_config.h"
 #include "engine/debug/aov.h"
+#include "engine/debug/power_spectrum.h"
+#include "engine/debug/render_stats.h"
 #include "engine/gfx/hdr_image.h"
 #include "engine/gfx/ocio_display_transform.h"
 #include "engine/scene/camera.h"
@@ -62,9 +67,23 @@ struct Options {
     std::string scenePath = "scenes/cornell.json";
     std::string outPath;
     std::string comparePath;
+    // Linear-light companions to --out/--compare, for measuring convergence rather than inspecting an image. The PNG
+    // path cannot do that job: it is display-transformed and 8-bit, so it compresses highlights and clamps everything
+    // above display range, and a sampling change's effect on exactly those bright high-variance regions reads as zero.
+    std::string outExrPath;
+    std::string compareExrPath;
+    // Reports how --compare-exr's error distributes over spatial frequency rather than only how large it is. A sampling
+    // change that rearranges error without reducing it is invisible to RMSE by construction, so RMSE alone cannot
+    // confirm or refute one.
+    bool errorSpectrum = false;
     int width = 0;   // 0 = profile.json's window size
     int height = 0;
     int passes = 64;
+    // The scramble seed is one realization of the randomization, not a property of the sampler: two seeds give two
+    // independent error images with the same expected RMSE. Exposed because a claim that two samplers converge equally
+    // well needs the spread across seeds to say what "equally" means, and because a reference sharing a seed with the
+    // render measured against it also shares that render's exact samples, cancelling part of the error being measured.
+    std::uint32_t scrambleSeed = 1;
     float exposureEv = 0.0F;
     // -1 = use the scene's own authored environment.lightEnabled default; 0/1 override it -- lets a
     // headless capture of the classic (env-off) Cornell variant not need a second scene.json.
@@ -311,6 +330,49 @@ std::vector<unsigned char> encodeForDisplay(const engine::gfx::HdrImage& image, 
     return out;
 }
 
+// How the error against the reference distributes over spatial frequency, as each octave band's share of total power.
+// RMSE already reports the total; what a blue-noise sampler claims to change is the ARRANGEMENT, which is invisible to
+// any single number and is exactly this distribution. Normalised by the total so two renders with different error
+// magnitudes are still comparable as distributions -- the claim under test is that the total is unchanged and only its
+// placement moved, and those are two separate readings.
+// Luminance rather than per-channel: a scalar field is what has a spectrum, and error visibility is a luminance effect.
+void reportErrorSpectrum(const engine::gfx::HdrImage& image, const engine::gfx::HdrImage& reference) {
+    const auto pixels = static_cast<std::size_t>(image.width) * static_cast<std::size_t>(image.height);
+    std::vector<double> luminanceError(pixels);
+    double squaredSum = 0.0;
+    for (std::size_t p = 0; p < pixels; ++p) {
+        const std::size_t i = p * 4;
+        const double e = (0.2126 * (image.rgba[i] - reference.rgba[i])) +
+                          (0.7152 * (image.rgba[i + 1] - reference.rgba[i + 1])) +
+                          (0.0722 * (image.rgba[i + 2] - reference.rgba[i + 2]));
+        luminanceError[p] = e;
+        squaredSum += e * e;
+    }
+
+    const std::array<double, engine::debug::kSpectrumBands> bands =
+        engine::debug::octaveBandPower(luminanceError, image.width, image.height);
+    // Bands are far from equal in width, so a raw share says nothing on its own -- what matters is the share relative to
+    // what white noise would put there. Printed alongside, so a band reads directly as blue (below 1.0) or red (above).
+    const std::array<double, engine::debug::kSpectrumBands> white =
+        engine::debug::whiteNoiseBandShare(image.width, image.height);
+    const double total = std::accumulate(bands.begin(), bands.end(), 0.0);
+    std::cout << "render_beauty: error spectrum -- luminance RMS "
+              << std::sqrt(squaredSum / static_cast<double>(pixels))
+              << ", octave bands (low to high), share of total power and ratio to white noise\n";
+    for (int band = engine::debug::kSpectrumBands - 1; band >= 0; --band) {
+        const double high = 0.5 / std::exp2(band);
+        const double share = bands[static_cast<std::size_t>(band)] / total;
+        // A band can hold no lattice points at all below 256 px on an axis, and dividing by its share would print nan.
+        const double whiteShare = white[static_cast<std::size_t>(band)];
+        std::cout << "  " << std::setw(8) << (high * 0.5) << " - " << std::setw(8) << high << " c/px   "
+                  << std::setw(8) << (100.0 * share) << " %";
+        if (whiteShare > 0.0) {
+            std::cout << "   " << std::setw(7) << (share / whiteShare) << "x white";
+        }
+        std::cout << "\n";
+    }
+}
+
 bool parseArgs(int argc, char** argv, Options& options) {
     for (int i = 1; i < argc; ++i) {
         const auto needsValue = [&](const char* flag) {
@@ -329,6 +391,17 @@ bool parseArgs(int argc, char** argv, Options& options) {
         } else if (std::strcmp(argv[i], "--compare") == 0) {
             if (!needsValue("--compare")) { return false; }
             options.comparePath = argv[++i];
+        } else if (std::strcmp(argv[i], "--out-exr") == 0) {
+            if (!needsValue("--out-exr")) { return false; }
+            options.outExrPath = argv[++i];
+        } else if (std::strcmp(argv[i], "--compare-exr") == 0) {
+            if (!needsValue("--compare-exr")) { return false; }
+            options.compareExrPath = argv[++i];
+        } else if (std::strcmp(argv[i], "--error-spectrum") == 0) {
+            options.errorSpectrum = true;
+        } else if (std::strcmp(argv[i], "--seed") == 0) {
+            if (!needsValue("--seed")) { return false; }
+            options.scrambleSeed = static_cast<std::uint32_t>(std::strtoul(argv[++i], nullptr, 10));
         } else if (std::strcmp(argv[i], "--passes") == 0) {
             if (!needsValue("--passes")) { return false; }
             options.passes = std::atoi(argv[++i]);
@@ -349,9 +422,9 @@ bool parseArgs(int argc, char** argv, Options& options) {
             options.envLight = std::atoi(argv[++i]) != 0 ? 1 : 0;
         } else {
             std::cerr << "render_beauty: unknown argument '" << argv[i]
-                      << "'\nusage: render_beauty [--scene scenes/x.json] --out out.png "
-                         "[--compare ref.png] [--passes N] [--width W] [--height H] [--exposure EV] "
-                         "[--aov name]\n";
+                      << "'\nusage: render_beauty [--scene scenes/x.json] --out out.png [--out-exr out.exr] [--compare-exr ref.exr] "
+                         "[--compare ref.png] [--error-spectrum] [--seed N] [--passes N] [--width W] [--height H] "
+                         "[--exposure EV] [--aov name]\n";
             return false;
         }
     }
@@ -361,6 +434,10 @@ bool parseArgs(int argc, char** argv, Options& options) {
     }
     if (options.passes < 1) {
         std::cerr << "render_beauty: --passes must be at least 1\n";
+        return false;
+    }
+    if (options.errorSpectrum && options.compareExrPath.empty()) {
+        std::cerr << "render_beauty: --error-spectrum needs --compare-exr to have an error to analyse\n";
         return false;
     }
     return true;
@@ -475,18 +552,21 @@ int main(int argc, char** argv) {
     const engine::scene::LightSet lights(envLightEnabled ? &environmentMap : nullptr,
                                          /*envRotationRadians=*/0.0F, /*envExposure=*/1.0F, quadLights);
 
-    // Mean of `passes` independent single-sample passes, each with its own runSeed -- the same accumulation PathTraceDriver performs, done synchronously. Seeds are the pass index, so the whole render is reproducible. Every lane is traced regardless of which one --aov selects: they share the sample set and the reconstruction filter, so producing one alone would not be cheaper.
+    // Mean of `passes` single-sample passes -- the same accumulation PathTraceDriver performs, done synchronously. Each pass advances the sampler's sequence index rather than re-randomizing it, so the accumulated samples stratify against each other exactly as they do in the viewer; the scramble seed is held fixed for the whole render (--seed, default 1), which is what makes two runs over unchanged code byte-identical. Every lane is traced regardless of which one --aov selects: they share the sample set and the reconstruction filter, so producing one alone would not be cheaper.
     engine::scene::PathTraceResult result = engine::scene::makePathTraceResult(width, height);
     engine::gfx::HdrImage accumulated = engine::gfx::HdrImage{
         width, height, std::vector<float>(static_cast<std::size_t>(width) *
                                            static_cast<std::size_t>(height) * 4, 0.0F)};
     const std::atomic<std::uint64_t> generation{1};
-    engine::debug::PassStats stats;  // required by renderPathTraced; this tool writes an image, not a timing report
+    // Reported, not discarded: ray counts are the one figure that says whether a change altered what the integrator
+    // actually did, as opposed to only which values it sampled. Deterministic here where the viewer's are not, since
+    // this tool renders a fixed pass count with no cancellation.
+    engine::debug::PassStats stats;
     for (int pass = 0; pass < options.passes; ++pass) {
         engine::scene::renderPathTraced(camera, *accel, model->shadingTriangles, model->instances,
                                          instanceLightIndex, lights, width, height,
                                          /*showSky=*/true, baseSettings, *perInstanceSettings,
-                                         static_cast<std::uint32_t>(pass), generation,
+                                         options.scrambleSeed, /*sampleBase=*/pass, /*sampleCount=*/options.passes, generation,
                                          /*requestedGeneration=*/1U, threadPool, stats, result);
         for (std::size_t i = 0; i < accumulated.rgba.size(); ++i) {
             accumulated.rgba[i] += (result.*options.lane).rgba[i];
@@ -494,6 +574,56 @@ int main(int argc, char** argv) {
     }
     for (float& v : accumulated.rgba) {
         v /= static_cast<float>(options.passes);
+    }
+
+    const engine::debug::RayCounts rays = stats.rays();
+    std::cout << "render_beauty: rays over " << options.passes << " passes -- primary " << rays.primary << ", bounce "
+              << rays.bounce << ", ao " << rays.ao << ", shadow " << rays.shadow << ", total " << rays.total() << "\n";
+
+    if (!options.outExrPath.empty()) {
+        if (!engine::gfx::writeExr(options.outExrPath, accumulated)) {
+            return EXIT_FAILURE;
+        }
+        std::cout << "render_beauty: wrote " << options.outExrPath << " (linear " << options.aovName << ", "
+                  << width << "x" << height << ", " << options.passes << " passes)\n";
+    }
+
+    if (!options.compareExrPath.empty()) {
+        const std::optional<engine::gfx::HdrImage> reference = engine::gfx::loadExr(options.compareExrPath);
+        if (!reference.has_value()) {
+            return EXIT_FAILURE;
+        }
+        if (reference->width != width || reference->height != height) {
+            std::cerr << "render_beauty: --compare-exr image is " << reference->width << "x"
+                      << reference->height << ", this render is " << width << "x" << height << "\n";
+            return EXIT_FAILURE;
+        }
+        // Two metrics, because neither alone characterises a render's error. Absolute RMSE is dominated by the brightest
+        // pixels, so it tracks the highlights a sampling change moves most; relative MSE (Rousselle et al. 2011, the
+        // standard metric in the denoising/sampling literature) divides by the reference's own intensity, so a dim
+        // corner's noise counts as much as a bright one's. The epsilon is the conventional guard against dividing by a
+        // black pixel, not a tuned parameter.
+        constexpr double kRelativeEpsilon = 1e-2;
+        double squaredSum = 0.0;
+        double relativeSum = 0.0;
+        std::size_t counted = 0;
+        for (std::size_t i = 0; i < accumulated.rgba.size(); ++i) {
+            if (i % 4 == 3) {
+                continue;  // alpha carries no radiance
+            }
+            const double delta = static_cast<double>(accumulated.rgba[i]) - static_cast<double>(reference->rgba[i]);
+            const double ref = reference->rgba[i];
+            squaredSum += delta * delta;
+            relativeSum += (delta * delta) / ((ref * ref) + kRelativeEpsilon);
+            ++counted;
+        }
+        const double rmse = std::sqrt(squaredSum / static_cast<double>(counted));
+        const double relativeMse = relativeSum / static_cast<double>(counted);
+        std::cout << "render_beauty: vs " << options.compareExrPath << " -- linear RMSE " << rmse
+                  << ", relMSE " << relativeMse << "\n";
+        if (options.errorSpectrum) {
+            reportErrorSpectrum(accumulated, *reference);
+        }
     }
 
     const bool isBeauty = options.lane == &engine::scene::PathTraceResult::beauty;

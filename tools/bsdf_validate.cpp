@@ -96,7 +96,7 @@ bool checkPdfNormalization() {
                     }
                     // sampleBsdf returns wi in woLocal's own convention and reports the density it drew from, so no second pdfBsdf evaluation is needed and none of the mirroring above applies.
                     for (int i = 0; i < kBsdfSamples; ++i) {
-                        engine::scene::Sampler sampler(0, 0, i, kBsdfSeed);
+                        engine::scene::Sampler sampler(0, 0, i, kBsdfSamples, kBsdfSeed);
                         const std::optional<engine::scene::BsdfSample> sample =
                             engine::scene::sampleBsdf(params, wo, sampler);
                         if (sample.has_value()) {
@@ -123,7 +123,7 @@ bool checkPdfNormalization() {
 glm::vec3 furnaceLo(const BsdfParams& params, const glm::vec3& wo, int sampleCount, std::uint32_t seed) {
     glm::vec3 accum(0.0F);
     for (int i = 0; i < sampleCount; ++i) {
-        engine::scene::Sampler sampler(0, 0, i, seed);
+        engine::scene::Sampler sampler(0, 0, i, sampleCount, seed);
         const std::optional<engine::scene::BsdfSample> sample =
             engine::scene::sampleBsdf(params, wo, sampler);
         if (sample.has_value()) {
@@ -406,7 +406,7 @@ glm::vec3 transmissiveEnergyLo(const BsdfParams& params, const glm::vec3& wo, in
     const float etaSq = eta * eta;
     glm::vec3 accum(0.0F);
     for (int i = 0; i < sampleCount; ++i) {
-        engine::scene::Sampler sampler(0, 0, i, seed);
+        engine::scene::Sampler sampler(0, 0, i, sampleCount, seed);
         const std::optional<engine::scene::BsdfSample> sample =
             engine::scene::sampleBsdf(params, wo, sampler);
         if (!sample.has_value()) {
@@ -482,8 +482,9 @@ glm::vec3 refractAboutZ(const glm::vec3& wo, float eta) {
 // pdf == 0 identifies the delta branch: a rough transmission sample returns a real density. The seed is fixed and the lobe-selection probabilities are colourless, so every params variation below draws the identical lobe and the identical direction.
 std::optional<glm::vec3> deltaTransmitThroughput(const BsdfParams& params, const glm::vec3& wo,
                                                   std::uint32_t seed) {
-    for (int i = 0; i < 64; ++i) {
-        engine::scene::Sampler sampler(0, 0, i, seed);
+    constexpr int kAttempts = 64;
+    for (int i = 0; i < kAttempts; ++i) {
+        engine::scene::Sampler sampler(0, 0, i, kAttempts, seed);
         const std::optional<engine::scene::BsdfSample> sample =
             engine::scene::sampleBsdf(params, wo, sampler);
         if (sample.has_value() && sample->type == engine::scene::LobeType::Transmission &&

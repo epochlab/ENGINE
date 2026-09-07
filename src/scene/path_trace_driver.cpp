@@ -162,7 +162,11 @@ void PathTraceDriver::driverLoop(std::stop_token stopToken) {
             continue;  // every buffer still referenced by the render thread -- retry rather than allocate
         }
 
-        const int passIndex = accumulatedSamples_.load(std::memory_order_relaxed) + 1;
+        // Two distinct roles, deliberately not one value (see sampler.h). sampleBase is how many samples this image has
+        // already accumulated, so the sampler continues its Sobol sequence where the previous pass stopped instead of
+        // re-drawing the same point under a new randomization; passIndex is the same count 1-based, for display only.
+        const int sampleBase = accumulatedSamples_.load(std::memory_order_relaxed);
+        const int passIndex = sampleBase + 1;
         const auto passStart = std::chrono::steady_clock::now();
         passStats_.reset();
         // Built fresh each pass from this request's env state -- cheap (holds references/scalars, no
@@ -175,7 +179,12 @@ void PathTraceDriver::driverLoop(std::stop_token stopToken) {
         renderPathTraced(activeRequest->camera, accel_, shadingTriangles_, instances_,
                           instanceLightIndex_, lights, activeRequest->width, activeRequest->height,
                           activeRequest->showSky, activeRequest->settings, perInstanceSettings_,
-                          static_cast<std::uint32_t>(passIndex), generation_, activeGeneration,
+                          // The generation IS the scramble seed: it is fixed for every pass of one accumulation and
+                          // changes exactly when the image restarts (camera move, setting change), which is precisely
+                          // the lifetime a randomized-QMC scramble must have. Passed raw rather than pre-hashed --
+                          // Sampler's own SplitMix64 avalanches it, so a small monotonic counter is sufficient input.
+                          static_cast<std::uint32_t>(activeGeneration), sampleBase, activeRequest->maxSamples,
+                          generation_, activeGeneration,
                           threadPool_, passStats_, *pass);
         const double traceMs = millisecondsSince(traceStart);
 
