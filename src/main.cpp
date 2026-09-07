@@ -220,7 +220,6 @@ struct AppResources {
     bool invert;   // 1.0 - colour, applied to the final display-referred image -- the 'I' debug toggle
     bool statsEnabled;  // -stats: the live terminal dashboard. The instrumentation behind it always runs; this only gates the drawing.
     bool showHud;  // 'H' toggle; gates HudOverlay::draw only -- beginFrame/render stay unconditional so ImGui's frame pairing is never broken
-    bool showHotkeys = false;  // '?' toggle, default off; under -stats the dashboard hosts the map as a section of its block, otherwise each press prints it
     // Chromatic aberration strength (0 = off), radial UV offset passed to OcioDisplayTransform::setAberration -- HUD slider only.
     float aberrationStrength;
     // The rasterizer runs only on a trigger change into one of its AOVs, so its cost is not a per-frame stage: kept across frames and reported as a last-actual-cost plus duty cycle rather than averaged away.
@@ -488,10 +487,6 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         engine::debug::gpuTimerQueryAvailable(),
     };
     engine::debug::printSpec(spec, gpuInfo);
-    // The map trails the spec block only when nothing else will host it. Under -stats the dashboard owns the rest of the terminal, so a copy here would sit stranded between the two blocks; there it is a '?' section beneath the perf block instead.
-    if (!statsEnabled) {
-        engine::debug::printHotkeys();
-    }
 
     return AppResources{
         .edgeFilterShader = std::move(shaders->edgeFilterShader),
@@ -573,7 +568,7 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
     };
 }
 
-// Debug-only: 'L' cycles the viewer LUT (sRGB -> Rec709 -> Raw -> sRGB -> ...), Raw being a genuine no-display-encode passthrough for direct encoded-vs-unencoded comparison. 'R'/'G'/'B' toggle isolating a channel of the active AOV (pressing the active one again turns it back off) -- reset moved to '0' to free these back up. 'I' inverts the final display-referred colour. 'H' toggles the HUD. '?' shows the hotkey map, which the startup spec block also prints once. 'ESC' quits. No general input-mapping system for these few keys is needed: WASD/QE need continuous per-frame state (Window::isKeyDown) rather than this edge-triggered callback, so this single slot still covers everything that's actually event-shaped. Wired up here, not inside initializeApp: every callback captures a reference into app, which must already be at its final, stable address (main()'s local, unwrapped from the optional initializeApp returned) -- capturing a reference during initializeApp would dangle the moment that AppResources is moved into its optional's storage.
+// Debug-only: 'L' cycles the viewer LUT (sRGB -> Rec709 -> Raw -> sRGB -> ...), Raw being a genuine no-display-encode passthrough for direct encoded-vs-unencoded comparison. 'R'/'G'/'B' toggle isolating a channel of the active AOV (pressing the active one again turns it back off) -- reset moved to '0' to free these back up. 'I' inverts the final display-referred colour. 'H' toggles the HUD. 'ESC' quits. No general input-mapping system for these few keys is needed: WASD/QE need continuous per-frame state (Window::isKeyDown) rather than this edge-triggered callback, so this single slot still covers everything that's actually event-shaped. Wired up here, not inside initializeApp: every callback captures a reference into app, which must already be at its final, stable address (main()'s local, unwrapped from the optional initializeApp returned) -- capturing a reference during initializeApp would dangle the moment that AppResources is moved into its optional's storage.
 void wireCallbacks(engine::platform::Window& window, AppResources& app) {
     window.setKeyCallback([&app, &window](int key, int action) {
         if (action != GLFW_PRESS) {
@@ -596,12 +591,6 @@ void wireCallbacks(engine::platform::Window& window, AppResources& app) {
             app.invert = !app.invert;
         } else if (key == GLFW_KEY_H) {
             app.showHud = !app.showHud;
-        } else if (key == GLFW_KEY_SLASH) {
-            // With -stats the map is a section of the dashboard, toggled here and drawn there beneath its closing rule: printing it directly would land inside the block the next redraw rewrites, so it would never be seen. Without the dashboard there is no block to attach to, and it goes straight to the terminal.
-            app.showHotkeys = !app.showHotkeys;
-            if (!app.statsEnabled) {
-                engine::debug::printHotkeys();
-            }
         } else if (key == GLFW_KEY_ESCAPE) {
             window.setShouldClose(true);
         }
@@ -1169,7 +1158,6 @@ void updateDashboard(AppResources& app, float frameMs, int winWidth, int winHeig
         pass.height,
         app.lastPathTraceTrigger.renderScale,
         interactive,
-        app.showHotkeys,
         app.gpuInfo.refreshRateHz,
     };
     app.dashboard.update(frame);

@@ -1,6 +1,5 @@
 #include "engine/debug/spec_report.h"
 
-#include <array>
 #include <cstdio>
 
 #include "engine/debug/memory_tracker.h"
@@ -14,7 +13,7 @@ constexpr double kMiB = 1024.0 * 1024.0;
 constexpr double kGiB = 1024.0 * 1024.0 * 1024.0;
 
 // std::printf, not std::cout: this block is a fixed-format table, and iostream's width/precision manipulators make that far harder to read than the format string does. The rest of the file's startup logging is being replaced by this, so there is no mixed-style seam left behind.
-// Grouped by blank lines rather than by a label column and rule lines. Every line here is self-describing -- "16.00 GiB RAM", "git 3ef6b85+dirty" -- so a HOST/BUILD gutter spent 9 columns per line restating what the values already say, and the group separator is the one piece of structure that isn't redundant. 78 columns, matching perf_dashboard.h's width, so the two blocks line up in the same terminal.
+// No label column or rule lines between groups. Every line here is self-describing -- "16.00 GiB RAM", "git 3ef6b85+dirty" -- so a HOST/BUILD gutter spent 9 columns per line restating what the values already say. 78 columns, matching perf_dashboard.h's width, so the two blocks line up in the same terminal.
 // No CPU brand line: GL_RENDERER reads "Apple M1" on the line above, and on a unified-memory part that IS the CPU brand -- printing machdep.cpu.brand_string as well duplicated the string verbatim. What sysctl uniquely knows is the topology, which is what stays.
 void printHost(const HostInfo& host) {
     // Two performance levels are reported separately because they are not interchangeable: the E-cores are several times slower per thread, so a ThreadPool sized to hw.logicalcpu is not 8 equal workers. Printed only when the machine actually has a second level.
@@ -51,47 +50,26 @@ void printSpec(const EngineSpec& spec, const GpuInfo& gpu) {
                  gpu.renderer.c_str(), gpu.version.c_str(), gpu.refreshRateHz,
                  spec.khrDebugAvailable ? "yes" : "no", spec.gpuTimerAvailable ? "yes" : "no");
     printHost(queryHostInfo());
-    std::printf("\n");
     printBuild(buildInfo(), queryLibraryVersions());
     // Paths stay on their own lines: both are unbounded in length, so packing either alongside a fixed field is what makes the block wrap unpredictably on someone else's machine.
-    std::printf("\n%s\n", spec.scenePath);
+    std::printf("%s\n", spec.scenePath);
     std::printf("%d instances (%d light)   %d triangles\n", spec.instanceCount, spec.lightCount,
                  spec.triangleCount);
     std::printf("hdri  %s\n", spec.hdriPath);
     std::printf("load %.1f ms   bvh build %.1f ms   bvh %.1f MiB\n", spec.modelLoadMs,
                  spec.bvhBuildMs, static_cast<double>(spec.bvhBytes) / kMiB);
-    std::printf("\nwindow %dx%d   renderScale %.2f (interactive %.2f)   aov %s\n", spec.windowWidth,
+    std::printf("window %dx%d   renderScale %.2f (interactive %.2f)   aov %s\n", spec.windowWidth,
                  spec.windowHeight, spec.renderScale, spec.interactiveRenderScale, spec.aovName);
     std::printf("path trace  %u threads  %d px tiles  %d spp/pass  %d bounces  RR@%d\n",
                  spec.pathTraceThreads, spec.tileSize, spec.samplesPerPass, spec.maxBounces,
                  spec.russianRouletteStartBounce);
     if (spec.maxSamples > 0) {
-        std::printf("max samples %d   ao range %.2f   raster %u threads\n\n", spec.maxSamples,
+        std::printf("max samples %d   ao range %.2f   raster %u threads\n", spec.maxSamples,
                      static_cast<double>(spec.aoMaxDistance), spec.rasterThreads);
     } else {
-        std::printf("max samples unbounded   ao range %.2f   raster %u threads\n\n",
+        std::printf("max samples unbounded   ao range %.2f   raster %u threads\n",
                      static_cast<double>(spec.aoMaxDistance), spec.rasterThreads);
     }
-    std::fflush(stdout);
-}
-
-std::span<const char* const> hotkeyRows() {
-    // Two columns, split the way the input handling itself is: continuous camera keys (Window::isKeyDown) on the left, edge-triggered viewer toggles (wireCallbacks' key callback, main.cpp) on the right.
-    static constexpr std::array<const char*, 5> kRows{
-        "W/A/S/D   move camera           0      reset camera to default",
-        "Q/E       move camera down/up   L      cycle viewer LUT (sRGB/Rec709/Raw)",
-        "LMB drag  orbit camera          R/G/B  isolate channel of active AOV",
-        "H         toggle HUD            I      invert display colour",
-        "?         show this map         ESC    quit"};
-    return kRows;
-}
-
-void printHotkeys() {
-    for (const char* row : hotkeyRows()) {
-        std::printf("%s\n", row);
-    }
-    std::printf("\n");
-    // Flushed here rather than by the caller: on a '?' press this is the only thing printed, and a piped run would otherwise hold it until exit.
     std::fflush(stdout);
 }
 
