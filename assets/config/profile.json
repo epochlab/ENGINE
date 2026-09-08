@@ -9,7 +9,7 @@
         "pitchDegrees": 0.0,
         "filmBackPreset": "ARRI Alexa XT (16:9)",
         "focalLengthMm": 70.0,
-        "nearClip": 0.1,
+        "nearClip": 0.01,
         "farClip": 100.0,
         "aperture": 2.8,
         "shutterSeconds": 0.008,
@@ -30,6 +30,6 @@
         "maxBounces": 8,
         "russianRouletteStartBounce": 3,
         "maxSamples": 128,
-        "aoMaxDistance": 0.25
+        "aoMaxDistance": 1.0
     }
 }
