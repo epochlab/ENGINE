@@ -320,6 +320,8 @@ struct AlbedoTable {
     std::vector<float> tavg;
     std::vector<float> msDensity;  // [roughnessIndex][muIndex], the reflected multiple-scattering lobe's own shape
     std::vector<float> msCdf;
+    std::vector<float> msTransmitDensity;  // [roughnessIndex][muIndex][etaIndex], the transmitted twin, unnormalised
+    std::vector<float> msTransmitCdf;
 };
 
 // mu = 0 is a degenerate view direction (wo lies in the surface plane); nudge off it, as the runtime lookup's own
@@ -451,6 +453,35 @@ void buildMultipleScatteringShape(AlbedoTable& table) {
     }
 }
 
+// Sampling shape for the transmitted multiple-scattering lobe, the far-hemisphere twin of the shape above, one axis wider because the escape it is built from is eta-dependent and the Schlick split cannot factor that out.
+// transmitMultiScatter's value is constant in wi times (1-Escape(mu_i))/(pi*deficitAvg), so the zero-variance density is (1-Escape(mu_i))*cos, and cosine sampling pays (1-Escape(mu_i))/(1-EscapeAvg) as weight variance -- relative variance 25 at roughness 0.13, under 0.15 by roughness 1.
+// Unlike the reflect shape this is stored UNNORMALISED: bsdf.cpp blends four rows over (roughness, eta) and divides by the blended total, which reproduces the raw-deficit interpolation escapeAlbedo itself performs, where a blend of per-row-normalised shapes would not commute with it.
+// Unnormalised storage is also what removes the degenerate row: a row whose deficit is numerically zero carries near-zero weight into the blend rather than a unit-mass shape of amplified noise, so this needs neither the reflect side's bake-time abort nor a substituted fallback.
+void buildTransmitMultipleScatteringShape(AlbedoTable& table) {
+    const double step = 1.0 / (kTransmitRes - 1);
+    const auto size = static_cast<std::size_t>(kTransmitRes) * kTransmitRes * kEtaRes;
+    table.msTransmitDensity.assign(size, 0.0F);
+    table.msTransmitCdf.assign(size, 0.0F);
+    for (int ri = 0; ri < kTransmitRes; ++ri) {
+        for (int ei = 0; ei < kEtaRes; ++ei) {
+            double cdf = 0.0;
+            for (int mi = 0; mi < kTransmitRes; ++mi) {
+                const auto index = static_cast<std::size_t>((((ri * kTransmitRes) + mi) * kEtaRes) + ei);
+                // Clamped at the grid point, where multiScatterShape clamps after interpolating: the escape table is stratified-sampled, so a cell can land a few 1e-8 past unity, and a negative segment would break the CDF monotonicity the exact inversion depends on.
+                // The clamp only ever raises the density, so the pdf stays non-zero everywhere the value is.
+                const double deficit = std::max(1.0 - (table.r[index] + table.t[index]), 0.0);
+                const auto density = static_cast<float>(deficit * mi * step);
+                if (mi > 0) {
+                    // Trapezoid over the float density as emitted, not the double behind it, so the stored pair is exactly consistent at the precision bsdf.cpp reads them back at.
+                    cdf += 0.5 * (table.msTransmitDensity[index - kEtaRes] + density) * step;
+                }
+                table.msTransmitDensity[index] = density;
+                table.msTransmitCdf[index] = static_cast<float>(cdf);
+            }
+        }
+    }
+}
+
 // Largest disagreement between the shipped reflect rule and one at doubled order, over the stored grid and the means.
 // The rule's own error, measured rather than asserted: the integrand is analytic on the domain built for it, so the
 // doubled rule is exact to well past float32 and the printed number is the committed table's accuracy.
@@ -526,7 +557,11 @@ bool writeInc(const std::string& path, const AlbedoTable& table, double residual
         << gTransmitSamples << "^2 samples per cell.\n"
            "// kMsReflectDensity/kMsReflectCdf are the reflected multiple-scattering lobe's sampling shape: a\n"
            "// piecewise-linear density over mu, proportional to (1-E(mu))*mu and normalised to 1, with its exact\n"
-           "// prefix integrals. bsdf.cpp inverts the first and evaluates it for the matching pdf.\n";
+           "// prefix integrals. bsdf.cpp inverts the first and evaluates it for the matching pdf.\n"
+           "// kMsTransmitDensity/kMsTransmitCdf are the same shape for the transmitted twin, carrying the escape\n"
+           "// table's eta axis and stored UNNORMALISED: bsdf.cpp blends four rows over (roughness, eta) and\n"
+           "// divides by the blended total, so the sampled shape is the raw-deficit interpolation escapeAlbedo\n"
+           "// performs and a numerically zero row cannot contribute a unit-mass shape of amplified noise.\n";
     out << "\nconstexpr int kAlbedoRes = " << kAlbedoRes << ";\n"
         << "constexpr int kTransmitRes = " << kTransmitRes << ";\n"
         << "constexpr int kEtaRes = " << kEtaRes << ";\n"
@@ -542,6 +577,8 @@ bool writeInc(const std::string& path, const AlbedoTable& table, double residual
     writeArray(out, "kEscapeAvgTransmit", table.tavg);
     writeArray(out, "kMsReflectDensity", table.msDensity);
     writeArray(out, "kMsReflectCdf", table.msCdf);
+    writeArray(out, "kMsTransmitDensity", table.msTransmitDensity);
+    writeArray(out, "kMsTransmitCdf", table.msTransmitCdf);
     return out.good();
 }
 
@@ -578,6 +615,7 @@ int main(int argc, char** argv) {
     const Residual residual = verifyReflect(table, phiNodes, psiNodes, muNodes);
     buildTransmit(table);
     buildMultipleScatteringShape(table);
+    buildTransmitMultipleScatteringShape(table);
     if (!writeInc(outPath, table, residual.value)) {
         return EXIT_FAILURE;
     }

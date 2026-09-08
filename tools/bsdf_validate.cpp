@@ -9,8 +9,10 @@
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <optional>
 #include <random>
+#include <vector>
 
 #include <glm/glm.hpp>
 
@@ -121,7 +123,7 @@ bool checkPdfNormalization() {
 }
 
 // sampleBsdf's reported density must equal pdfBsdf re-evaluated at the direction it returned -- the contract BsdfSample::pdf states in bsdf.h ("exactly what pdfBsdf would return for it") and that nothing asserted. checkPdfNormalization above reads sample->pdf, the density the sampler reports about itself, and never re-evaluates it, so that contract had no instrument at all.
-// What it covers was measured, not assumed. NOT a mixture term missing from the density: sampleBsdf reports evaluateContinuousLobes' own pdf, so both sides are then wrong together and this stays green -- deleting the msReflect density term leaves 0 failures here and fails checkFurnace at Lo=1.28 instead. What it does cover is the sign-mirroring round trip, since sampleBsdf returns wi in woLocal's convention and pdfBsdf re-mirrors it and nothing else in the suite closes that loop, and any future strategy reporting a hand-computed density beside the mixture rather than through it -- the usual optimisation once a lobe's own pdf is already in hand.
+// What it covers was measured, not assumed. NOT a mixture term missing from the density: sampleBsdf reports evaluateContinuousLobes' own pdf, so both sides are then wrong together and this stays green -- deleting the msReflect density term leaves 0 failures here and fails checkFurnace at Lo=1.28 instead -- checkSamplingChiSquare below is the instrument that does catch it directly. What it does cover is the sign-mirroring round trip, since sampleBsdf returns wi in woLocal's convention and pdfBsdf re-mirrors it and nothing else in the suite closes that loop, and any future strategy reporting a hand-computed density beside the mixture rather than through it -- the usual optimisation once a lobe's own pdf is already in hand.
 // Exact equality, not a tolerance: both sides are the same arithmetic over the same deterministic LobeProbabilities, so any difference is a broken round trip rather than drift. Delta transmission reports 0 on both sides and is asserted like every other row.
 // Swept over checkPdfNormalization's grid plus transmissionFactor, including the ndotV<0 exiting rows the mirroring claim rests on, so every strategy in the ladder is drawn: VNDF reflection, EON, both multiple-scattering cosine lobes, rough and smooth refraction.
 bool checkSampleDensityConsistency() {
@@ -1655,6 +1657,158 @@ bool checkTransmissionRoundTrip() {
 
 }  // namespace
 
+// --- Goodness of fit between where sampleBsdf's draws actually land and the density pdfBsdf reports for them.
+// The gap this closes: checkSampleDensityConsistency proves only that the two code paths agree with each other, not that either describes the realised distribution -- its own comment records that deleting the msReflect density term leaves it green. A sampler and a pdf that are wrong together are invisible to every other check here except as an energy shift the furnace bands may be too loose to resolve.
+// Pearson's chi-square over equal-solid-angle bins of the whole sphere, with expected counts from integrating pdfBsdf over each bin (Mitsuba's chi2test; PBRT-v4's BSDF sampling tests). Bins are uniform in (cos theta, phi) because that is the measure of dw, so every bin subtends the same solid angle and the quadrature below integrates the density directly.
+// Rejected draws are a cell in their own right, which is what makes this a test of the total sampling mass as well as its shape: sampleBsdf returning nullopt is exactly the event "wi left the sampled support", of probability 1 - integral(pdf), and a pdf that integrates to the wrong total shows up here as a rejection-cell mismatch rather than passing unnoticed.
+// scrambleSeed is drawn fresh per sample -- the one configuration sampler.h warns forfeits stratification -- deliberately: a chi-square needs iid draws, and a low-discrepancy point set would make the null distribution wrong in the dangerous direction, understating the statistic and hiding a real mismatch.
+// Regularized upper incomplete gamma Q(a, x): series below the crossover, continued fraction above (Numerical Recipes 3rd ed. 6.2). Supplies the chi-square survival function so the test can state a significance level rather than carry a critical-value table indexed by degrees of freedom.
+double regularizedGammaQ(double a, double x) {
+    constexpr int kMaxIterations = 300;
+    constexpr double kEpsilon = 1e-14;
+    const double logGammaA = std::lgamma(a);
+    const double tiny = std::numeric_limits<double>::min();
+    if (x < a + 1.0) {
+        double term = 1.0 / a;
+        double sum = term;
+        for (int n = 1; n < kMaxIterations && std::fabs(term) > std::fabs(sum) * kEpsilon; ++n) {
+            term *= x / (a + n);
+            sum += term;
+        }
+        return 1.0 - (sum * std::exp(-x + (a * std::log(x)) - logGammaA));
+    }
+    double b = x + 1.0 - a;
+    double c = 1.0 / tiny;
+    double d = 1.0 / b;
+    double h = d;
+    for (int i = 1; i < kMaxIterations; ++i) {
+        const double an = -i * (i - a);
+        b += 2.0;
+        d = (an * d) + b;
+        if (std::fabs(d) < tiny) { d = tiny; }
+        c = b + (an / c);
+        if (std::fabs(c) < tiny) { c = tiny; }
+        d = 1.0 / d;
+        const double delta = d * c;
+        h *= delta;
+        if (std::fabs(delta - 1.0) <= kEpsilon) { break; }
+    }
+    return h * std::exp(-x + (a * std::log(x)) - logGammaA);
+}
+
+struct ChiSquareCase {
+    float roughness;
+    float metallic;
+    float transmission;
+    float ndotV;
+};
+
+bool checkSamplingChiSquare() {
+    constexpr double kPiDouble = 3.14159265358979324;
+    constexpr int kCosBins = 16;
+    constexpr int kPhiBins = 8;
+    constexpr int kPanels = 256;            // even, for Simpson, per axis per bin; measured, not guessed: the peaked refraction lobe at roughness 0.2 is mis-integrated badly enough to report p=1e-78 on correct code at 48 panels and to still fail at 64, passes from 96, and the p-value stops moving past this
+    constexpr int kSampleCount = 200000;
+    constexpr double kMinExpected = 5.0;    // Cochran's rule, the count below which a cell's chi-square term is not trustworthy and must be pooled
+    constexpr double kSignificance = 0.01;
+    constexpr std::uint32_t kSeed = 0x9E3779B9U;
+
+    // Transmissive rows sit either side of the interface so the transmitted multiple-scattering lobe is drawn at both eta orientations; the metallic rows are where the reflected one carries the whole diffuse selection mass.
+    const std::array<ChiSquareCase, 12> cases = {{
+        {0.2F, 0.0F, 1.0F, 0.8F},  {0.2F, 0.0F, 1.0F, -0.6F},
+        {0.4F, 0.0F, 1.0F, 0.8F},  {0.4F, 0.0F, 1.0F, -0.6F},
+        {0.7F, 0.0F, 1.0F, 0.8F},  {0.7F, 0.0F, 1.0F, -0.6F},
+        {1.0F, 0.0F, 1.0F, 0.8F},  {1.0F, 0.0F, 1.0F, -0.6F},
+        {0.3F, 1.0F, 0.0F, 0.7F},  {0.8F, 1.0F, 0.0F, 0.7F},
+        {0.5F, 0.0F, 0.0F, 0.5F},  {1.0F, 0.0F, 0.0F, 0.5F},
+    }};
+    // Sidak correction across the grid: without it, twelve independent tests at 1% would fail one time in eight on correct code.
+    const double perCase = 1.0 - std::pow(1.0 - kSignificance, 1.0 / static_cast<double>(cases.size()));
+
+    bool ok = true;
+    double worstP = 1.0;
+    for (const ChiSquareCase& testCase : cases) {
+        const BsdfParams params = makeParams(testCase.roughness, testCase.metallic, testCase.transmission);
+        const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (testCase.ndotV * testCase.ndotV))), 0.0F, testCase.ndotV);
+
+        std::vector<double> expected(static_cast<std::size_t>(kCosBins) * kPhiBins + 1, 0.0);
+        double mass = 0.0;
+        for (int ci = 0; ci < kCosBins; ++ci) {
+            const double c0 = -1.0 + (2.0 * ci / kCosBins);
+            const double c1 = -1.0 + (2.0 * (ci + 1.0) / kCosBins);
+            for (int pi = 0; pi < kPhiBins; ++pi) {
+                const double p0 = 2.0 * kPiDouble * pi / kPhiBins;
+                const double p1 = 2.0 * kPiDouble * (pi + 1.0) / kPhiBins;
+                const double integral = simpson(c0, c1, kPanels, [&](double cosTheta) {
+                    const double sinTheta = std::sqrt(std::max(0.0, 1.0 - (cosTheta * cosTheta)));
+                    return simpson(p0, p1, kPanels, [&](double phi) {
+                        const glm::vec3 wi(static_cast<float>(sinTheta * std::cos(phi)),
+                                            static_cast<float>(sinTheta * std::sin(phi)),
+                                            static_cast<float>(cosTheta));
+                        return static_cast<double>(engine::scene::pdfBsdf(params, wo, wi));
+                    });
+                });
+                expected[static_cast<std::size_t>((ci * kPhiBins) + pi)] = integral * kSampleCount;
+                mass += integral;
+            }
+        }
+        expected.back() = std::max(1.0 - mass, 0.0) * kSampleCount;
+
+        std::vector<double> observed(expected.size(), 0.0);
+        std::mt19937 rng(kSeed);
+        for (int i = 0; i < kSampleCount; ++i) {
+            engine::scene::Sampler sampler(0, 0, 0, 1, rng());
+            const std::optional<engine::scene::BsdfSample> sample = engine::scene::sampleBsdf(params, wo, sampler);
+            if (!sample.has_value() || sample->pdf <= 0.0F) {
+                observed.back() += 1.0;
+                continue;
+            }
+            const glm::vec3 wi = sample->wiLocal;
+            const int ci = std::min(static_cast<int>((wi.z + 1.0F) * 0.5F * kCosBins), kCosBins - 1);
+            float phi = std::atan2(wi.y, wi.x);
+            if (phi < 0.0F) { phi += static_cast<float>(2.0 * kPiDouble); }
+            const int pi = std::min(static_cast<int>(phi / static_cast<float>(2.0 * kPiDouble) * kPhiBins), kPhiBins - 1);
+            observed[static_cast<std::size_t>((ci * kPhiBins) + pi)] += 1.0;
+        }
+
+        // Cells too sparse to trust individually are merged into one, which is what keeps the statistic chi-square distributed rather than merely chi-square shaped.
+        double chiSquare = 0.0;
+        int cells = 0;
+        double pooledExpected = 0.0;
+        double pooledObserved = 0.0;
+        for (std::size_t i = 0; i < expected.size(); ++i) {
+            if (expected[i] < kMinExpected) {
+                pooledExpected += expected[i];
+                pooledObserved += observed[i];
+                continue;
+            }
+            const double delta = observed[i] - expected[i];
+            chiSquare += (delta * delta) / expected[i];
+            ++cells;
+        }
+        if (pooledExpected >= kMinExpected) {
+            const double delta = pooledObserved - pooledExpected;
+            chiSquare += (delta * delta) / pooledExpected;
+            ++cells;
+        }
+        const int dof = cells - 1;
+        const double p = regularizedGammaQ(0.5 * dof, 0.5 * chiSquare);
+        worstP = std::min(worstP, p);
+        if (p >= perCase) {
+            continue;
+        }
+        std::cerr << "bsdf_validate: FAILED sampling chi-square at roughness=" << testCase.roughness
+                  << " metallic=" << testCase.metallic << " transmission=" << testCase.transmission
+                  << " ndotV=" << testCase.ndotV << " chi2=" << chiSquare << " dof=" << dof << " p=" << p
+                  << " (threshold " << perCase << ", sampled mass " << mass << ")\n";
+        ok = false;
+    }
+    std::cout << "bsdf_validate: sampling chi-square over " << cases.size() << " configurations, "
+              << kSampleCount << " draws each, worst p-value " << worstP << " against a Sidak threshold of "
+              << perCase << "\n";
+    return ok;
+}
+
 int main() {
     const bool pdfOk = checkPdfNormalization();
     const bool densityOk = checkSampleDensityConsistency();
@@ -1673,10 +1827,11 @@ int main() {
     const bool reciprocityOk = checkReciprocity();
     const bool transmissionReciprocityOk = checkTransmissionReciprocity();
     const bool roundTripOk = checkTransmissionRoundTrip();
+    const bool chiSquareOk = checkSamplingChiSquare();
 
     if (!pdfOk || !densityOk || !furnaceOk || !whiteFurnaceOk || !eonDiffuseOk || !eonInversionOk || !indexMatchedCoatOk ||
         !transmissiveEnergyOk || !transmissionTintOk || !conductorFresnelOk || !dielectricFresnelOk || !averageFresnelOk || !coatFresnelAvgOk || !dispersionOk ||
-        !reciprocityOk || !transmissionReciprocityOk || !roundTripOk) {
+        !reciprocityOk || !transmissionReciprocityOk || !roundTripOk || !chiSquareOk) {
         std::cerr << "bsdf_validate: FAILED\n";
         return EXIT_FAILURE;
     }
