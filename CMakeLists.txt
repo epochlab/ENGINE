@@ -181,6 +181,14 @@ if(IPO_SUPPORTED)
     set_target_properties(bluenoise_mask PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
 endif()
 
+# Offline generator for src/scene/albedo_table.inc, the Kulla-Conty energy tables bsdf.cpp bakes in. Grouped with
+# bluenoise_mask for the same reason: it produces a committed artifact, it does not check one, so it stays out of the
+# ctest loop. Neither -march=native nor IPO, unlike every other tool here -- the output is committed source and must
+# reproduce bit-for-bit on any machine, and FMA contraction is free to differ; the bake runs in seconds regardless.
+add_executable(albedo_table tools/albedo_table.cpp)
+target_compile_options(albedo_table PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(albedo_table PRIVATE glm::glm)
+
 # Headless correctness checks (Phase 4): no test framework exists yet, so these follow test_pattern/downsample's standalone-CLI convention (non-zero exit on failure).
 # -march=native/IPO mirror the engine target's flags so these tools validate the exact codegen that ships, not a differently-optimized build of the same math.
 add_executable(embree_validate tools/embree_validate.cpp src/scene/embree_accel.cpp src/scene/ray_types.cpp)
