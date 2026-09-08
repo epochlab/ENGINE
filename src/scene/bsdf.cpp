@@ -249,22 +249,30 @@ float msReflectPdf(float mu, float roughness) {
     return lerp1(msReflectDensity(row, m0), msReflectDensity(row, m0 + 1), mt) / (2.0F * kPi);
 }
 
-// Exact inversion of that same piecewise-linear density: binary search for the segment, then the positive root of its quadratic CDF. Written as 2c/(q + sqrt(q^2 + 2*dq*c)) rather than the textbook (-q + sqrt(...))/dq, which is the algebraically identical form that stays finite as a segment flattens (dq -> 0, where it reduces to c/q) and at mu = 0, where q is exactly 0 and it reduces to sqrt(2c/dq).
-glm::vec3 sampleMsReflect(float roughness, glm::vec2 u) {
-    const MsReflectRow row = msReflectRow(roughness);
+// Exact inversion of a tabulated piecewise-linear density over mu on an edge-aligned grid: binary search the prefix integrals for the segment, then take the positive root of its quadratic. Shared by both multiple-scattering lobes so the stable form below has exactly one implementation.
+// Written as 2c/(q + sqrt(q^2 + 2*dq*c)) rather than the textbook (-q + sqrt(...))/dq, which is the algebraically identical form that stays finite as a segment flattens (dq -> 0, where it reduces to c/q) and at mu = 0, where q is exactly 0 and it reduces to sqrt(2c/dq).
+// Both fetches must see the same normalised density, so a caller holding an unnormalised table scales both by its total rather than passing the raw entries: the 1e-9 floor below is a density-scale quantity, not a free epsilon.
+template <typename Density, typename Cdf>
+float invertPiecewiseLinearDensity(Density density, Cdf cdf, int resolution, float u) {
     int low = 0;
-    int high = kAlbedoRes - 1;
+    int high = resolution - 1;
     while (high - low > 1) {
         const int mid = (low + high) / 2;
-        (msReflectCdf(row, mid) <= u.x ? low : high) = mid;
+        (cdf(mid) <= u ? low : high) = mid;
     }
-    constexpr float kStep = 1.0F / (kAlbedoRes - 1);
-    const float q0 = msReflectDensity(row, low);
-    const float dq = msReflectDensity(row, low + 1) - q0;
-    const float c = (u.x - msReflectCdf(row, low)) / kStep;
+    const float step = 1.0F / static_cast<float>(resolution - 1);
+    const float q0 = density(low);
+    const float dq = density(low + 1) - q0;
+    const float c = (u - cdf(low)) / step;
     const float root = std::sqrt(std::max((q0 * q0) + (2.0F * dq * c), 0.0F));
     const float t = std::clamp((2.0F * c) / std::max(q0 + root, 1e-9F), 0.0F, 1.0F);
-    const float mu = (static_cast<float>(low) + t) * kStep;
+    return (static_cast<float>(low) + t) * step;
+}
+
+glm::vec3 sampleMsReflect(float roughness, glm::vec2 u) {
+    const MsReflectRow row = msReflectRow(roughness);
+    const float mu = invertPiecewiseLinearDensity([&](int i) { return msReflectDensity(row, i); },
+                                                   [&](int i) { return msReflectCdf(row, i); }, kAlbedoRes, u.x);
     const float r = std::sqrt(std::max(0.0F, 1.0F - (mu * mu)));
     const float phi = 2.0F * kPi * u.y;
     return {r * std::cos(phi), r * std::sin(phi), mu};
@@ -319,6 +327,71 @@ EscapeSplit averageEscapeAlbedo(float roughness, float eta) {
     };
     return {lerp1(fetch(kEscapeAvgReflect, r0), fetch(kEscapeAvgReflect, r0 + 1), rt),
              lerp1(fetch(kEscapeAvgTransmit, r0), fetch(kEscapeAvgTransmit, r0 + 1), rt)};
+}
+
+// --- Sampling shape for the transmitted multiple-scattering lobe, from kMsTransmitDensity/kMsTransmitCdf.
+// The far-hemisphere twin of sampleMsReflect above, one axis wider because the escape it is built from is eta-dependent and the Schlick split that makes the reflect side Fresnel-free cannot factor that out.
+// transmitMultiScatter's value is constant in wi times (1-Escape(mu_i))/(pi*deficitAvg), so the density that makes f*cos/pdf independent of wi is (1-Escape(mu_i))*cos; cosine sampling, which this replaces, pays (1-Escape(mu_i))/(1-EscapeAvg) as weight variance, measured relative variance 25 at roughness 0.13 against under 0.15 at roughness 1.
+// eta is the reciprocal orientation etaT/etaI, the one transmitMultiScatter looks the value up at: a wi on the far side has crossed the interface, and pairing the density with the other orientation would sample a different shape than the one being evaluated.
+struct MsTransmitRow {
+    std::array<int, 4> base;
+    std::array<float, 4> weight;
+    float scale;
+};
+
+// Bilinear over (roughness, eta) of four rows, each entry a stride of kEtaRes apart along mu.
+template <typename Table>
+float msTransmitBlend(const Table& table, const MsTransmitRow& row, int index) {
+    const int offset = index * kEtaRes;
+    return (row.weight[0] * table[row.base[0] + offset]) + (row.weight[1] * table[row.base[1] + offset]) +
+           (row.weight[2] * table[row.base[2] + offset]) + (row.weight[3] * table[row.base[3] + offset]);
+}
+
+// The table is stored unnormalised, so the blend is divided by its own blended total here rather than each row being normalised at bake time: integration is linear, so a blend of exact prefix integrals is the exact prefix integral of the blended density, and this is the interpolation of raw deficits escapeAlbedo itself performs -- blending four already-normalised rows would not commute with it, and their totals span seven orders across the roughness axis.
+// It is also what makes a numerically dead row harmless: it contributes its own near-zero weight to the blend instead of a unit-mass shape of amplified noise, so no row needs a bake-time abort or a substituted fallback.
+MsTransmitRow msTransmitRow(float roughness, float eta) {
+    const float rf = std::clamp(roughness, 0.0F, 1.0F) * (kTransmitRes - 1);
+    const float ef = etaAxisCoord(eta);
+    const int r0 = std::min(static_cast<int>(rf), kTransmitRes - 2);
+    const int e0 = std::min(static_cast<int>(ef), kEtaRes - 2);
+    const float rt = rf - static_cast<float>(r0);
+    const float et = ef - static_cast<float>(e0);
+    const int base0 = (r0 * kTransmitRes * kEtaRes) + e0;
+    const int base1 = base0 + (kTransmitRes * kEtaRes);
+    MsTransmitRow row{{base0, base0 + 1, base1, base1 + 1},
+                       {(1.0F - rt) * (1.0F - et), (1.0F - rt) * et, rt * (1.0F - et), rt * et},
+                       0.0F};
+    // Last prefix integral is the row's total energy deficit. Zero only if every clamped deficit in all four rows is zero, which leaves the lobe no energy to carry, so a zero scale correctly reports a zero density rather than dividing by it.
+    const float total = msTransmitBlend(kMsTransmitCdf, row, kTransmitRes - 1);
+    row.scale = total > 0.0F ? 1.0F / total : 0.0F;
+    return row;
+}
+
+float msTransmitDensity(const MsTransmitRow& row, int index) {
+    return msTransmitBlend(kMsTransmitDensity, row, index) * row.scale;
+}
+
+float msTransmitCdf(const MsTransmitRow& row, int index) {
+    return msTransmitBlend(kMsTransmitCdf, row, index) * row.scale;
+}
+
+// Solid-angle density: the mu density spread over 2*pi of azimuth, mu measured from the far-side normal.
+float msTransmitPdf(float mu, float roughness, float eta) {
+    const MsTransmitRow row = msTransmitRow(roughness, eta);
+    const float mf = std::clamp(mu, 0.0F, 1.0F) * (kTransmitRes - 1);
+    const int m0 = std::min(static_cast<int>(mf), kTransmitRes - 2);
+    const float mt = mf - static_cast<float>(m0);
+    return lerp1(msTransmitDensity(row, m0), msTransmitDensity(row, m0 + 1), mt) / (2.0F * kPi);
+}
+
+// Returns the near-hemisphere direction; the caller mirrors z, as the cosine draw it replaces did.
+glm::vec3 sampleMsTransmit(float roughness, float eta, glm::vec2 u) {
+    const MsTransmitRow row = msTransmitRow(roughness, eta);
+    const float mu = invertPiecewiseLinearDensity([&](int i) { return msTransmitDensity(row, i); },
+                                                   [&](int i) { return msTransmitCdf(row, i); }, kTransmitRes, u.x);
+    const float r = std::sqrt(std::max(0.0F, 1.0F - (mu * mu)));
+    const float phi = 2.0F * kPi * u.y;
+    return {r * std::cos(phi), r * std::sin(phi), mu};
 }
 
 }  // namespace
@@ -421,9 +494,9 @@ struct LobeEval {
 struct LobeProbabilities {
     float specular;
     float diffuse;
-    float msReflect;    // multiple-scattering reflection, cosine-sampled over the near hemisphere
+    float msReflect;    // multiple-scattering reflection, drawn from kMsReflectDensity over the near hemisphere
     float transmit;     // single-scatter refraction, VNDF-sampled about a microfacet normal
-    float msTransmit;   // multiple-scattering transmission, cosine-sampled over the far hemisphere
+    float msTransmit;   // multiple-scattering transmission, drawn from kMsTransmitDensity over the far hemisphere
     float etaI;
     float etaT;
     float diffuseKd;              // evaluateDiffuseLobe's wo-side energy factor, 0 on the exiting side
@@ -453,7 +526,7 @@ struct LobeProbabilities {
 
 // kd carries the wo-side (1-F)/(1-Favg) coupling; the matching wi-side (1-F) factor is applied here, so the lobe is reciprocal (A4) while its directional albedo still integrates to (1-F(mu_o)), same total energy as the old one-sided form, correctly distributed.
 // pdf must not be gated on kd: sampleBsdf selects this lobe with probability lobes.diffuse, which computeLobeProbabilities derives deterministically from params and wo, so the pdf side of the MIS mixture must match that selection density whatever value the lobe carries. Selection mass may depend on kd, but only by moving to another strategy of the same mixture (lobes.msReflect); deleting it starves the mixture denominator and inflates throughput.
-// Shared shape of the multiple-scattering lobe, on whichever hemisphere wi lies. Cosine-distributed and symmetric in wo/wi. eta/deficitAvg are passed in rather than read off lobes because the two callers below need different orientations: a reflected wi stays in wo's medium (eta = etaI/etaT, lobes.escapeAvg), but a transmitted wi has crossed into the far medium and its escape must be looked up in the reciprocal orientation (eta = etaT/etaI, lobes.escapeAvgRecip) -- averageEscapeAlbedo is only a self-normalising cosine mean of escapeAlbedo when both are evaluated at the same eta, so pairing the wrong eta with the wrong average would perturb the total-energy identity below rather than merely mis-shape it.
+// Shared shape of the multiple-scattering lobe, on whichever hemisphere wi lies. Symmetric in wo/wi, and cosine-distributed only where the escape deficit is flat in mu -- both strategies below draw the exact (1-Escape)cos shape instead. eta/deficitAvg are passed in rather than read off lobes because the two callers below need different orientations: a reflected wi stays in wo's medium (eta = etaI/etaT, lobes.escapeAvg), but a transmitted wi has crossed into the far medium and its escape must be looked up in the reciprocal orientation (eta = etaT/etaI, lobes.escapeAvgRecip) -- averageEscapeAlbedo is only a self-normalising cosine mean of escapeAlbedo when both are evaluated at the same eta, so pairing the wrong eta with the wrong average would perturb the total-energy identity below rather than merely mis-shape it.
 // Integrates over one full hemisphere to exactly (1 - escapeWo), since deficitAvg is the cosine-weighted mean of the same escape(mu) looked up here at the same eta, so the reflected share (1 - transmitShare) and the transmitted share transmitShare sum to the deficit across the two.
 // Both shares are delivered over their whole hemisphere, which requires the transmitted one to sit outside evaluateTransmissionLobe's half-vector rejections. It can only live there because lobes.msTransmit gives it a sampling density over that whole hemisphere; without one, energy outside the refraction cone would be unsamplable and bias the estimator rather than merely darken it.
 float multiScatterShape(const BsdfParams& params, float wiZ, float escapeWo, float eta,
@@ -666,8 +739,8 @@ LobeEval evaluateDiffuseLobe(const BsdfParams& params, const glm::vec3& wo, cons
 }
 
 // Single scatter D*G2*F/(4*ndotV*ndotL) plus the Kulla-Conty multiple-scattering lobe, and the VNDF pdf (Heitz 2018 eq.3, Jacobian 1/(4*dot(wo,nh))).
-// The pdf covers the single-scattering term only. The reflected multiple-scattering share is cosine-shaped and has a strategy of its own, lobes.msReflect, mirroring the transmitted share's lobes.msTransmit; evaluateContinuousLobes sums both densities into the mixture.
-// Cosine is the standard practical choice (Kulla & Conty 2017), not the ideal one: the zero-variance density here is (1-E(mu_i))cos/(pi*(1-Eavg)), which needs a per-roughness inverse CDF over mu that no table here provides. Cosine's weight ratio is bounded by (1-E(0))/(1-Eavg), a few x at high roughness.
+// The pdf covers the single-scattering term only. The reflected multiple-scattering share is (1-E)cos-shaped and has a strategy of its own, lobes.msReflect, mirroring the transmitted share's lobes.msTransmit; evaluateContinuousLobes sums both densities into the mixture.
+// Cosine was the standard practical choice (Kulla & Conty 2017); the zero-variance density here is (1-E(mu_i))cos/(pi*(1-Eavg)), and kMsReflectDensity holds exactly that shape, so lobes.msReflect draws it rather than paying the (1-E(mu_i))/(1-Eavg) weight ratio.
 // The exiting side leaves this share on VNDF alone, since diffuseProb and so msReflect are 0 there: coverage is complete for alpha>0, the shape is not.
 LobeEval evaluateSpecularLobe(const BsdfParams& params, const glm::vec3& wo, const glm::vec3& wi,
                                float alpha, const LobeProbabilities& lobes) {
@@ -743,7 +816,7 @@ LobeProbabilities computeLobeProbabilities(const BsdfParams& params, const glm::
     }
     const AlbedoSplit splitWo = directionalAlbedo(wo.z, params.roughness);
     const AlbedoSplit splitAvg = averageAlbedo(params.roughness);
-    // Scaled by E: the specular lobe has two parts, and only the single-scattering part is drawn by VNDF sampling. The multiple-scattering part is cosine-shaped and drawn by msReflect below, so its selection mass must move there; otherwise a rough white metal, whose Fresnel pins specularProb to the 0.95 clamp, would sample 69% of its own reflectance only 5% of the time.
+    // Scaled by E: the specular lobe has two parts, and only the single-scattering part is drawn by VNDF sampling. The multiple-scattering part is (1-E)cos-shaped and drawn by msReflect below, so its selection mass must move there; otherwise a rough white metal, whose Fresnel pins specularProb to the 0.95 clamp, would sample 69% of its own reflectance only 5% of the time.
     const float specularProb = std::clamp(
         glm::mix(fresnelAtNormal, conductorLuma, params.metallic) * splitWo.total(), 0.05F, 0.95F);
     const float transmittance = (1.0F - fresnelAtNormal) * (1.0F - params.metallic);
@@ -900,7 +973,8 @@ BsdfEval evaluateContinuousLobes(const BsdfParams& params, const glm::vec3& wo, 
         const LobeEval transmission = evaluateTransmissionLobe(params, wo, wi, alpha, lobes);
         return {glm::vec3(0.0F), glm::vec3(0.0F),
                 transmission.f + transmitMultiScatter(params, wi.z, lobes),
-                (lobes.transmit * transmission.pdf) + (lobes.msTransmit * -wi.z / kPi)};
+                (lobes.transmit * transmission.pdf) +
+                     (lobes.msTransmit * msTransmitPdf(-wi.z, params.roughness, lobes.etaT / lobes.etaI))};
     }
     const LobeEval specular = evaluateSpecularLobe(params, wo, wi, alpha, lobes);
     const LobeEval diffuse = evaluateDiffuseLobe(params, wo, wi, lobes);
@@ -970,18 +1044,19 @@ std::optional<BsdfSample> sampleBsdf(const BsdfParams& params, const glm::vec3& 
             return std::nullopt;
         }
         const glm::vec3 throughput = (eval.total() * wi.z) / eval.pdf;
-        // The multiple-scattering branch reports SpecularReflection: path_tracer.cpp buckets transport by strategy, and repeated bounces on a GGX microsurface are specular however cosine-shaped their exitant distribution is.
+        // The multiple-scattering branch reports SpecularReflection: path_tracer.cpp buckets transport by strategy, and repeated bounces on a GGX microsurface are specular however broad their exitant distribution is.
         const bool sampledDiffuse = !sampledSpecular && lobeU < lobes.specular + lobes.diffuse;
         return BsdfSample{glm::vec3(wi.x, wi.y, wi.z * sign), throughput,
                            sampledDiffuse ? LobeType::Diffuse : LobeType::SpecularReflection,
                            eval.pdf};
     }
 
-    // Top slice of the ladder: the multiple-scattering transmission lobe, cosine over the far hemisphere. It needs a strategy of its own because the refraction VNDF below reaches only directions some microfacet can refract into, while this lobe spans the whole hemisphere.
+    // Top slice of the ladder: the multiple-scattering transmission lobe, drawn from its own tabulated shape over the far hemisphere. It needs a strategy of its own because the refraction VNDF below reaches only directions some microfacet can refract into, while this lobe spans the whole hemisphere.
     // msTransmit tested first, not inside: the four probabilities below it sum to 1.0 only to float precision, so with no mass here a top-of-range lobeU must fall through to the transmit lobe it always belonged to rather than be rejected.
+    // eta matches transmitMultiScatter's own lookup orientation, so the shape drawn here is the shape evaluateContinuousLobes evaluates and divides by.
     if (lobes.msTransmit > 0.0F &&
         lobeU >= lobes.specular + lobes.diffuse + lobes.msReflect + lobes.transmit) {
-        glm::vec3 wi = sampleCosineHemisphere(sampler.next2D());
+        glm::vec3 wi = sampleMsTransmit(params.roughness, lobes.etaT / lobes.etaI, sampler.next2D());
         wi.z = -wi.z;
         const BsdfEval eval = evaluateContinuousLobes(params, wo, wi, alpha, lobes);
         if (eval.pdf <= 1e-8F) {
