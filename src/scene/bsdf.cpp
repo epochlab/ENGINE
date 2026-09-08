@@ -162,36 +162,11 @@ glm::vec3 sampleGGXVNDF(const glm::vec3& wo, float alpha, glm::vec2 u) {
     return glm::normalize(glm::vec3(alpha * nh.x, alpha * nh.y, std::max(0.0F, nh.z)));
 }
 
-// Directional albedo of the single-scattering GGX lobe with Fresnel forced to 1, the fraction of energy smithG2 lets through, so 1-E is exactly what multiple scattering must return (Kulla & Conty 2017, "Revisiting Physically Based Shading at Imageworks").
-// Depends on nothing but (mu, alpha): Fresnel, metallic, baseColor, and lobe-selection probabilities are all applied by the caller, never baked in here.
-// Indexed by perceptual roughness rather than alpha: E is far better distributed in sqrt(alpha), and it is what callers already hold. Grid is edge-aligned so roughness 0 / mu 1 are exact table entries.
-constexpr int kAlbedoRes = 32;
-constexpr int kAlbedoSamples = 16;  // per axis; 256 stratified samples/cell, ~1.5e-3 vs a 128x128 reference
-
-// Split by Schlick's form F(c) = f0*(1 - (1-c)^5) + (1-c)^5 so one table serves any f0 (the standard environment-BRDF split): Ess(mu, f0) = f0*a + b, and with f0=1 that collapses to a + b = E, the Fresnel-free albedo the multiple-scattering lobe needs. Two channels, no third axis for ior.
-// The transmit side needs a third axis. Its energy curve is not the reflect side's: the below-horizon reflections that drive E down are the valid side for refraction, so far fewer samples are discarded (measured 0.559 combined vs 0.307 reflect-only at roughness 1.0).
-// Unlike the reflect side it genuinely depends on eta (G2 uses the refracted |wi.z|, and TIR gates validity), so the Schlick split cannot factor it out. One axis in log(eta) covers entering and exiting, since the two are reciprocals of each other.
-constexpr int kEtaRes = 16;
-constexpr float kEtaMin = 1.0F / 2.5F;  // exiting a 2.5-ior medium; the reciprocal end is entering one
-constexpr float kEtaMax = 2.5F;
-
-struct AlbedoTable {
-    std::array<float, static_cast<std::size_t>(kAlbedoRes) * kAlbedoRes> a;  // [roughnessIndex][muIndex]
-    std::array<float, static_cast<std::size_t>(kAlbedoRes) * kAlbedoRes> b;
-    std::array<float, kAlbedoRes> aavg;  // cosine-weighted means, 2*integral(.(mu)*mu dmu)
-    std::array<float, kAlbedoRes> bavg;
-    // Escaping fraction of a dielectric interface, split into the reflected and transmitted shares and indexed [roughnessIndex][muIndex][etaIndex]. Both use exact dielectric Fresnel at build time rather than the Schlick split above: inside the total-internal-reflection cone exact Fresnel is 1.0 while Schlick reads ~0.1, so no rescale of a Schlick-basis number can stand in for it, and the escape budget would under-count the reflected share by the whole TIR cone.
-    std::array<float, static_cast<std::size_t>(kAlbedoRes) * kAlbedoRes * kEtaRes> r;
-    std::array<float, static_cast<std::size_t>(kAlbedoRes) * kAlbedoRes * kEtaRes> t;
-    std::array<float, static_cast<std::size_t>(kAlbedoRes) * kEtaRes> ravg;
-    std::array<float, static_cast<std::size_t>(kAlbedoRes) * kEtaRes> tavg;
-};
-
-// log-spaced so eta and 1/eta are symmetric about index kEtaRes/2.
-float etaAtIndex(int index) {
-    const float u = static_cast<float>(index) / static_cast<float>(kEtaRes - 1);
-    return std::exp(std::log(kEtaMin) + (u * (std::log(kEtaMax) - std::log(kEtaMin))));
-}
+// Kulla-Conty energy tables, baked offline by tools/albedo_table.cpp (Kulla & Conty 2017, "Revisiting Physically Based Shading at Imageworks"). The .inc defines kAlbedoRes/kTransmitRes/kEtaRes/kEtaMin/kEtaMax alongside the arrays, so the grid the lookups below index is the grid the generator wrote and the two cannot drift apart.
+// kAlbedoA/kAlbedoB are the directional albedo of the single-scattering GGX lobe with Fresnel forced to 1, the fraction of energy smithG2 lets through, so 1-E is exactly what multiple scattering must return. Split by Schlick's form F(c) = f0*(1 - (1-c)^5) + (1-c)^5 so one table serves any f0 (the standard environment-BRDF split): Ess(mu, f0) = f0*a + b, and with f0=1 that collapses to a + b = E, the Fresnel-free albedo the multiple-scattering lobe needs.
+// kEscapeReflect/kEscapeTransmit are the escaping fraction of a dielectric interface, split into the reflected and transmitted shares and indexed [roughnessIndex][muIndex][etaIndex]. They use exact dielectric Fresnel rather than the Schlick split: inside the total-internal-reflection cone exact Fresnel is 1.0 while Schlick reads ~0.1, so no rescale of a Schlick-basis number can stand in for it, and the escape budget would under-count the reflected share by the whole TIR cone. Their third axis is why they stay at kTransmitRes.
+// Building this at startup is what used to bound its accuracy: the grid and the quadrature were sized by load latency, not by what the energy tests need. See the generator for the rule and its measured residual.
+#include "albedo_table.inc"
 
 // Refract wo about microfacet normal ht. Returns false on total internal reflection at that facet.
 bool refractAbout(const glm::vec3& wo, const glm::vec3& ht, float eta, glm::vec3& wi) {
@@ -207,84 +182,6 @@ bool refractAbout(const glm::vec3& wo, const glm::vec3& ht, float eta, glm::vec3
     return true;
 }
 
-// Deterministic stratified midpoint quadrature, not RNG Monte Carlo: the integrand is smooth, and a fixed grid keeps the table bit-identical across runs and machines (see the determinism note on -march=native). Below-horizon reflections contribute zero; that discard is part of the energy loss being measured.
-AlbedoTable buildAlbedoTable() {
-    AlbedoTable table{};
-    for (int ri = 0; ri < kAlbedoRes; ++ri) {
-        const float roughness = static_cast<float>(ri) / static_cast<float>(kAlbedoRes - 1);
-        const float alpha = std::max(roughness * roughness, kMinAlpha);
-        double aWeighted = 0.0;
-        double bWeighted = 0.0;
-        std::array<double, kEtaRes> rWeighted{};
-        std::array<double, kEtaRes> tWeighted{};
-        for (int mi = 0; mi < kAlbedoRes; ++mi) {
-            // mu=0 is a degenerate view direction (wo lies in the surface plane); nudge off it.
-            const float mu = std::max(static_cast<float>(mi) / static_cast<float>(kAlbedoRes - 1), 1e-3F);
-            const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (mu * mu))), 0.0F, mu);
-            const float g1 = smithG1(mu, alpha);
-            double aSum = 0.0;
-            double bSum = 0.0;
-            std::array<double, kEtaRes> rSum{};
-            std::array<double, kEtaRes> tSum{};
-            for (int i = 0; i < kAlbedoSamples; ++i) {
-                for (int j = 0; j < kAlbedoSamples; ++j) {
-                    const glm::vec2 u((static_cast<float>(i) + 0.5F) / kAlbedoSamples,
-                                       (static_cast<float>(j) + 0.5F) / kAlbedoSamples);
-                    const glm::vec3 nh = sampleGGXVNDF(wo, alpha, u);
-                    const glm::vec3 wi = glm::reflect(-wo, nh);
-                    const float fc = std::pow(std::clamp(1.0F - glm::dot(wo, nh), 0.0F, 1.0F), 5.0F);
-                    if (wi.z > 0.0F) {
-                        const float weight = smithG2(mu, wi.z, alpha) / std::max(g1, 1e-8F);
-                        aSum += weight * (1.0F - fc);
-                        bSum += weight * fc;
-                    }
-                    // Same visible normal, reflected and refracted: the VNDF sample is the expensive part and is shared across every eta, so the third axis costs only the refraction.
-                    // A facet reflects with probability F and refracts with 1-F, so the two shares are Fresnel-weighted complements of one throughput, never independent quantities.
-                    const float woDotNh = glm::dot(wo, nh);
-                    for (int ei = 0; ei < kEtaRes; ++ei) {
-                        const float eta = etaAtIndex(ei);
-                        const float fresnel = fresnelDielectric(woDotNh, eta, 1.0F);
-                        if (wi.z > 0.0F) {
-                            rSum[ei] += (smithG2(mu, wi.z, alpha) / std::max(g1, 1e-8F)) * fresnel;
-                        }
-                        glm::vec3 wt;
-                        if (refractAbout(wo, nh, eta, wt) && wt.z < 0.0F) {
-                            tSum[ei] +=
-                                (smithG2(mu, -wt.z, alpha) / std::max(g1, 1e-8F)) * (1.0F - fresnel);
-                        }
-                    }
-                }
-            }
-            const auto cells = static_cast<double>(kAlbedoSamples) * kAlbedoSamples;
-            const float a = static_cast<float>(aSum / cells);
-            const float b = static_cast<float>(bSum / cells);
-            table.a[(ri * kAlbedoRes) + mi] = a;
-            table.b[(ri * kAlbedoRes) + mi] = b;
-            // Trapezoid over the mu axis: the grid is edge-aligned, so the two endpoints span half a cell each and the step is 1/(kAlbedoRes-1), not 1/kAlbedoRes.
-            const double endpoint = (mi == 0 || mi == kAlbedoRes - 1) ? 0.5 : 1.0;
-            aWeighted += endpoint * 2.0 * a * mu;
-            bWeighted += endpoint * 2.0 * b * mu;
-            for (int ei = 0; ei < kEtaRes; ++ei) {
-                const float r = static_cast<float>(rSum[ei] / cells);
-                const float t = static_cast<float>(tSum[ei] / cells);
-                table.r[(((ri * kAlbedoRes) + mi) * kEtaRes) + ei] = r;
-                table.t[(((ri * kAlbedoRes) + mi) * kEtaRes) + ei] = t;
-                rWeighted[ei] += endpoint * 2.0 * r * mu;
-                tWeighted[ei] += endpoint * 2.0 * t * mu;
-            }
-        }
-        table.aavg[ri] = static_cast<float>(aWeighted / (kAlbedoRes - 1));
-        table.bavg[ri] = static_cast<float>(bWeighted / (kAlbedoRes - 1));
-        for (int ei = 0; ei < kEtaRes; ++ei) {
-            table.ravg[(ri * kEtaRes) + ei] = static_cast<float>(rWeighted[ei] / (kAlbedoRes - 1));
-            table.tavg[(ri * kEtaRes) + ei] = static_cast<float>(tWeighted[ei] / (kAlbedoRes - 1));
-        }
-    }
-    return table;
-}
-
-const AlbedoTable kAlbedo = buildAlbedoTable();
-
 float lerp1(float a, float b, float t) { return a + ((b - a) * t); }
 
 // Schlick-split albedo pair: Ess(f0) = f0*a + b, and a+b = E (the f0=1 case).
@@ -295,7 +192,7 @@ struct AlbedoSplit {
     [[nodiscard]] float at(float f0) const { return (f0 * a) + b; }
 };
 
-// Bilinear lookup. E climbs steeply as mu->0 (0.31 at mu=1, ~1.0 at grazing, alpha=1), so the first mu bin carries the largest interpolation error, harmless since every integral consuming E weights grazing by cos(theta).
+// Bilinear lookup. E climbs steeply as mu->0 (0.31 at mu=1, 0.99 at the first grid column, alpha=1), so the first mu bin carries the largest interpolation error -- measured 7.1e-3 there against 3.2e-5 for mu >= 0.3 -- harmless since every integral consuming E weights grazing by cos(theta).
 AlbedoSplit directionalAlbedo(float mu, float roughness) {
     const float rf = std::clamp(roughness, 0.0F, 1.0F) * (kAlbedoRes - 1);
     const float mf = std::clamp(mu, 0.0F, 1.0F) * (kAlbedoRes - 1);
@@ -305,18 +202,72 @@ AlbedoSplit directionalAlbedo(float mu, float roughness) {
     const float mt = mf - static_cast<float>(m0);
     const int i0 = (r0 * kAlbedoRes) + m0;
     const int i1 = ((r0 + 1) * kAlbedoRes) + m0;
-    return {lerp1(lerp1(kAlbedo.a[i0], kAlbedo.a[i0 + 1], mt),
-                   lerp1(kAlbedo.a[i1], kAlbedo.a[i1 + 1], mt), rt),
-             lerp1(lerp1(kAlbedo.b[i0], kAlbedo.b[i0 + 1], mt),
-                   lerp1(kAlbedo.b[i1], kAlbedo.b[i1 + 1], mt), rt)};
+    return {lerp1(lerp1(kAlbedoA[i0], kAlbedoA[i0 + 1], mt),
+                   lerp1(kAlbedoA[i1], kAlbedoA[i1 + 1], mt), rt),
+             lerp1(lerp1(kAlbedoB[i0], kAlbedoB[i0 + 1], mt),
+                   lerp1(kAlbedoB[i1], kAlbedoB[i1 + 1], mt), rt)};
 }
 
 AlbedoSplit averageAlbedo(float roughness) {
     const float rf = std::clamp(roughness, 0.0F, 1.0F) * (kAlbedoRes - 1);
     const int r0 = std::min(static_cast<int>(rf), kAlbedoRes - 2);
     const float rt = rf - static_cast<float>(r0);
-    return {lerp1(kAlbedo.aavg[r0], kAlbedo.aavg[r0 + 1], rt),
-             lerp1(kAlbedo.bavg[r0], kAlbedo.bavg[r0 + 1], rt)};
+    return {lerp1(kAlbedoAvgA[r0], kAlbedoAvgA[r0 + 1], rt),
+             lerp1(kAlbedoAvgB[r0], kAlbedoAvgB[r0 + 1], rt)};
+}
+
+// --- Sampling shape for the reflected multiple-scattering lobe, from kMsReflectDensity/kMsReflectCdf.
+// The lobe's value is fms*(1-E(mu_o))*(1-E(mu_i))/(pi*(1-Eavg)), so the density that makes f*cos/pdf independent of wi is (1-E(mu_i))*cos/(pi*(1-Eavg)) -- the table holds exactly that shape as a piecewise-linear density over mu, normalised, with its exact prefix integrals.
+// Cosine sampling, which this replaces, pays the ratio (1-E(mu_i))/(1-Eavg) as weight variance: measured relative variance 0.029 at roughness 1 but +1.66 at 0.25 and +17.3 at 0.126, where 1-Eavg and 1-E(mu) are both small and their quotient is not, with weights reaching 92x. The win is at LOW roughness, not high.
+// Row blend is the albedo lookups' own, so the density the sampler inverts and the density the pdf evaluates are the same function of roughness, which is what keeps the estimator unbiased rather than merely close.
+struct MsReflectRow {
+    int base;
+    float blend;
+};
+
+MsReflectRow msReflectRow(float roughness) {
+    const float rf = std::clamp(roughness, 0.0F, 1.0F) * (kAlbedoRes - 1);
+    const int r0 = std::min(static_cast<int>(rf), kAlbedoRes - 2);
+    return {r0 * kAlbedoRes, rf - static_cast<float>(r0)};
+}
+
+float msReflectDensity(const MsReflectRow& row, int index) {
+    return lerp1(kMsReflectDensity[row.base + index], kMsReflectDensity[row.base + kAlbedoRes + index],
+                  row.blend);
+}
+
+float msReflectCdf(const MsReflectRow& row, int index) {
+    return lerp1(kMsReflectCdf[row.base + index], kMsReflectCdf[row.base + kAlbedoRes + index], row.blend);
+}
+
+// Solid-angle density: the mu density spread over 2*pi of azimuth. Reduces to the cosine form mu/pi wherever the stored shape is 2*mu, which is what it becomes as the energy deficit goes flat.
+float msReflectPdf(float mu, float roughness) {
+    const MsReflectRow row = msReflectRow(roughness);
+    const float mf = std::clamp(mu, 0.0F, 1.0F) * (kAlbedoRes - 1);
+    const int m0 = std::min(static_cast<int>(mf), kAlbedoRes - 2);
+    const float mt = mf - static_cast<float>(m0);
+    return lerp1(msReflectDensity(row, m0), msReflectDensity(row, m0 + 1), mt) / (2.0F * kPi);
+}
+
+// Exact inversion of that same piecewise-linear density: binary search for the segment, then the positive root of its quadratic CDF. Written as 2c/(q + sqrt(q^2 + 2*dq*c)) rather than the textbook (-q + sqrt(...))/dq, which is the algebraically identical form that stays finite as a segment flattens (dq -> 0, where it reduces to c/q) and at mu = 0, where q is exactly 0 and it reduces to sqrt(2c/dq).
+glm::vec3 sampleMsReflect(float roughness, glm::vec2 u) {
+    const MsReflectRow row = msReflectRow(roughness);
+    int low = 0;
+    int high = kAlbedoRes - 1;
+    while (high - low > 1) {
+        const int mid = (low + high) / 2;
+        (msReflectCdf(row, mid) <= u.x ? low : high) = mid;
+    }
+    constexpr float kStep = 1.0F / (kAlbedoRes - 1);
+    const float q0 = msReflectDensity(row, low);
+    const float dq = msReflectDensity(row, low + 1) - q0;
+    const float c = (u.x - msReflectCdf(row, low)) / kStep;
+    const float root = std::sqrt(std::max((q0 * q0) + (2.0F * dq * c), 0.0F));
+    const float t = std::clamp((2.0F * c) / std::max(q0 + root, 1e-9F), 0.0F, 1.0F);
+    const float mu = (static_cast<float>(low) + t) * kStep;
+    const float r = std::sqrt(std::max(0.0F, 1.0F - (mu * mu)));
+    const float phi = 2.0F * kPi * u.y;
+    return {r * std::cos(phi), r * std::sin(phi), mu};
 }
 
 // Fractional index into the log-spaced eta axis, clamped to the tabulated range.
@@ -335,30 +286,30 @@ struct EscapeSplit {
 
 // Trilinear over (roughness, mu, eta).
 EscapeSplit escapeAlbedo(float mu, float roughness, float eta) {
-    const float rf = std::clamp(roughness, 0.0F, 1.0F) * (kAlbedoRes - 1);
-    const float mf = std::clamp(mu, 0.0F, 1.0F) * (kAlbedoRes - 1);
+    const float rf = std::clamp(roughness, 0.0F, 1.0F) * (kTransmitRes - 1);
+    const float mf = std::clamp(mu, 0.0F, 1.0F) * (kTransmitRes - 1);
     const float ef = etaAxisCoord(eta);
-    const int r0 = std::min(static_cast<int>(rf), kAlbedoRes - 2);
-    const int m0 = std::min(static_cast<int>(mf), kAlbedoRes - 2);
+    const int r0 = std::min(static_cast<int>(rf), kTransmitRes - 2);
+    const int m0 = std::min(static_cast<int>(mf), kTransmitRes - 2);
     const int e0 = std::min(static_cast<int>(ef), kEtaRes - 2);
     const float rt = rf - static_cast<float>(r0);
     const float mt = mf - static_cast<float>(m0);
     const float et = ef - static_cast<float>(e0);
     const auto fetch = [&](const auto& channel, int r, int m) {
-        const int base = (((r * kAlbedoRes) + m) * kEtaRes) + e0;
+        const int base = (((r * kTransmitRes) + m) * kEtaRes) + e0;
         return lerp1(channel[base], channel[base + 1], et);
     };
     const auto bilinear = [&](const auto& channel) {
         return lerp1(lerp1(fetch(channel, r0, m0), fetch(channel, r0, m0 + 1), mt),
                       lerp1(fetch(channel, r0 + 1, m0), fetch(channel, r0 + 1, m0 + 1), mt), rt);
     };
-    return {bilinear(kAlbedo.r), bilinear(kAlbedo.t)};
+    return {bilinear(kEscapeReflect), bilinear(kEscapeTransmit)};
 }
 
 EscapeSplit averageEscapeAlbedo(float roughness, float eta) {
-    const float rf = std::clamp(roughness, 0.0F, 1.0F) * (kAlbedoRes - 1);
+    const float rf = std::clamp(roughness, 0.0F, 1.0F) * (kTransmitRes - 1);
     const float ef = etaAxisCoord(eta);
-    const int r0 = std::min(static_cast<int>(rf), kAlbedoRes - 2);
+    const int r0 = std::min(static_cast<int>(rf), kTransmitRes - 2);
     const int e0 = std::min(static_cast<int>(ef), kEtaRes - 2);
     const float rt = rf - static_cast<float>(r0);
     const float et = ef - static_cast<float>(e0);
@@ -366,8 +317,8 @@ EscapeSplit averageEscapeAlbedo(float roughness, float eta) {
         const int base = (r * kEtaRes) + e0;
         return lerp1(channel[base], channel[base + 1], et);
     };
-    return {lerp1(fetch(kAlbedo.ravg, r0), fetch(kAlbedo.ravg, r0 + 1), rt),
-             lerp1(fetch(kAlbedo.tavg, r0), fetch(kAlbedo.tavg, r0 + 1), rt)};
+    return {lerp1(fetch(kEscapeAvgReflect, r0), fetch(kEscapeAvgReflect, r0 + 1), rt),
+             lerp1(fetch(kEscapeAvgTransmit, r0), fetch(kEscapeAvgTransmit, r0 + 1), rt)};
 }
 
 }  // namespace
@@ -955,7 +906,7 @@ BsdfEval evaluateContinuousLobes(const BsdfParams& params, const glm::vec3& wo, 
     const LobeEval diffuse = evaluateDiffuseLobe(params, wo, wi, lobes);
     return {diffuse.f, specular.f, glm::vec3(0.0F),
             (lobes.specular * specular.pdf) + (lobes.diffuse * diffuse.pdf) +
-                 (lobes.msReflect * wi.z / kPi)};
+                 (lobes.msReflect * msReflectPdf(wi.z, params.roughness))};
 }
 
 }  // namespace
@@ -1009,7 +960,7 @@ std::optional<BsdfSample> sampleBsdf(const BsdfParams& params, const glm::vec3& 
         } else if (lobeU < lobes.specular + lobes.diffuse) {
             wi = sampleEon(wo, params.diffuseRoughness, sampler.next2D());
         } else {
-            wi = sampleCosineHemisphere(sampler.next2D());
+            wi = sampleMsReflect(params.roughness, sampler.next2D());
         }
         if (wi.z <= 0.0F) {
             return std::nullopt;
