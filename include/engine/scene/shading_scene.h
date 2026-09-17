@@ -1,8 +1,15 @@
 #pragma once
 
+#include <vector>
+
 #include <glm/glm.hpp>
 
 namespace engine::scene {
+
+struct AabbBounds {
+    glm::vec3 min;
+    glm::vec3 max;
+};
 
 // World-space, baked from the glTF loader's per-vertex data -- the path tracer's only source of per-vertex shading data.
 struct ShadingVertex {
@@ -28,5 +35,12 @@ struct ShadingTriangle {
 // normalSide: which side the secondary ray leaves on. The projection moves the hit along the vertex normals, so a ray going the other way (refraction entering a dielectric, TIR inside one) needs it mirrored or the origin lands past the interface it just crossed.
 [[nodiscard]] glm::vec3 shadowTerminatorOffset(const ShadingTriangle& tri, float u, float v,
                                                bool normalSide);
+
+// True for the inverted box computeInstanceBounds leaves on an instance that contributed no triangles -- the identity of a min/max reduction over nothing, not a sentinel value.
+[[nodiscard]] bool isEmpty(const AabbBounds& box);
+
+// World-space AABB per instance, indexed by ShadingTriangle::instanceIndex (instanceCount entries). Positions are already world-space, so this is one linear pass with no transform work -- computed once at load, never per frame. Feeds the Wireframe AOV's per-object box edges (rasterizer.h).
+[[nodiscard]] std::vector<AabbBounds> computeInstanceBounds(const std::vector<ShadingTriangle>& triangles,
+                                                             int instanceCount);
 
 }  // namespace engine::scene
