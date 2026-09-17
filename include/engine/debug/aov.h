@@ -7,7 +7,7 @@ namespace engine::debug {
 enum class AovId : int {
     // Utility.
     Beauty = 0,
-    Wireframe,  // combined AOV: white mesh-edge lines + yellow scene-bounding-box lines (rasterizer.h)
+    Wireframe,  // combined AOV: white mesh-edge lines + one false-coloured bounding box per instance (rasterizer.h)
     Alpha,
     Depth,
     HSV,

@@ -1,6 +1,30 @@
 #include "engine/scene/shading_scene.h"
 
+#include <limits>
+
 namespace engine::scene {
+
+bool isEmpty(const AabbBounds& box) {
+    return box.min.x > box.max.x || box.min.y > box.max.y || box.min.z > box.max.z;
+}
+
+std::vector<AabbBounds> computeInstanceBounds(const std::vector<ShadingTriangle>& triangles,
+                                               int instanceCount) {
+    constexpr float kInf = std::numeric_limits<float>::infinity();
+    std::vector<AabbBounds> bounds(static_cast<std::size_t>(instanceCount),
+                                    AabbBounds{glm::vec3(kInf), glm::vec3(-kInf)});
+    for (const ShadingTriangle& tri : triangles) {
+        AabbBounds& box = bounds[static_cast<std::size_t>(tri.instanceIndex)];
+        const auto expand = [&box](const glm::vec3& position) {
+            box.min = glm::min(box.min, position);
+            box.max = glm::max(box.max, position);
+        };
+        expand(tri.v0.position);
+        expand(tri.v1.position);
+        expand(tri.v2.position);
+    }
+    return bounds;
+}
 
 ShadingVertex interpolateShading(const ShadingTriangle& tri, float u, float v) {
     const float w = 1.0F - u - v;

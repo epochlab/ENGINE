@@ -11,11 +11,6 @@ using RTCSceneTy = struct RTCSceneTy;
 
 namespace engine::scene {
 
-struct AabbBounds {
-    glm::vec3 min;
-    glm::vec3 max;
-};
-
 // Ray-scene intersection backed by Intel Embree's SIMD BVH build/traversal. One RTC_GEOMETRY_TYPE_TRIANGLE geometry over a static triangle soup, built once at scene load -- no refit/update API, the scene is static. Backs the path tracer's primary/shadow/bounce rays via single-ray rtcIntersect1/rtcOccluded1, called from tracePath (path_tracer.cpp). Correctness is exercised by tools/embree_validate.cpp against bruteForceIntersect (ray_types.h).
 class EmbreeAccel {
 public:
@@ -35,9 +30,6 @@ public:
     [[nodiscard]] bool occluded(const Ray& ray) const;
 
     [[nodiscard]] int triangleCount() const { return triangleCount_; }
-
-    // World-space AABB of the whole committed scene -- Embree already computes and caches this during rtcCommitScene, so this is a cheap query, not a re-scan of the triangle data. Feeds the Wireframe AOV's bounding-box edges (rasterizer.cpp).
-    [[nodiscard]] AabbBounds sceneBounds() const;
 
 private:
     EmbreeAccel(RTCDeviceTy* device, RTCSceneTy* scene, std::vector<Triangle> triangles);
