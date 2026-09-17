@@ -43,7 +43,7 @@ struct RasterSubTriangle {
     int triangleIndex;  // indexes shadingTriangles -- resolves material/instance and the original triangle for interpolateShading
 };
 
-// One clipped, screen-projected bounding-box edge ready for line rasterization -- see buildBoxEdges.
+// One clipped, screen-projected bounding-box edge ready for line rasterization -- see appendBoxEdges. color is its instance's falseColorForId hue, resolved once per box rather than per covered pixel.
 struct RasterLineSegment {
     glm::vec2 p0;
     glm::vec2 p1;
@@ -53,13 +53,18 @@ struct RasterLineSegment {
     int maxX;
     int minY;
     int maxY;
+    glm::vec3 color;
 };
+
+// The cube's 12 edges as corner-index pairs, matching appendBoxEdges' 8-corner ordering: the 4 of the min-z face, the 4 of the max-z face, then the 4 pillars joining them.
+constexpr std::array<std::array<int, 2>, 12> kBoxEdges{
+    {{0, 1}, {1, 2}, {2, 3}, {3, 0}, {4, 5}, {5, 6}, {6, 7}, {7, 4}, {0, 4}, {1, 5}, {2, 6}, {3, 7}}};
+constexpr std::size_t kBoxEdgeCount = kBoxEdges.size();
 
 // Fixed on-screen line thickness in pixels, constant regardless of triangle/box size or distance.
 constexpr float kLineThicknessPx = 1.0F;
 
 const glm::vec3 kWireframeColor(1.0F, 1.0F, 1.0F);
-const glm::vec3 kBoundingBoxColor(1.0F, 1.0F, 0.0F);
 
 // 2D cross product (b-a) x (p-a), the Pineda 1988 edge function -- positive when p is left of directed edge a->b.
 float edgeFunction(const ScreenVertex& a, const ScreenVertex& b, float px, float py) {
@@ -226,13 +231,15 @@ std::vector<RasterSubTriangle> buildSubTriangles(const Camera& camera,
 // Memory is O(sum of row spans), so a scene of few very large triangles can need more of it than the sub-triangle array itself. That is the opposite regime from the one this exists for, where triangles are small and each spans a handful of rows.
 struct RowBuckets {
     std::vector<std::size_t> offsets;  // height+1 entries, offsets[y]..offsets[y+1] is row y's range in `indices`
-    std::vector<int> indices;          // indexes subTriangles; int since a clip splits at most one triangle into two, bounding this by 2x the scene's triangle count
+    std::vector<int> indices;          // indexes the bucketed span array; int since a clip splits at most one triangle into two, bounding this by 2x the scene's triangle count
 };
 
-RowBuckets buildRowBuckets(const std::vector<RasterSubTriangle>& subTriangles, int height) {
+// Templated over the element rather than duplicated: sub-triangles and box edges both carry minY/maxY and both need the same per-row lists, so one body serves both and the two cannot drift apart.
+template <typename Span>
+RowBuckets buildRowBuckets(const std::vector<Span>& spans, int height) {
     RowBuckets buckets;
     buckets.offsets.assign(static_cast<std::size_t>(height) + 1, 0);
-    for (const RasterSubTriangle& st : subTriangles) {
+    for (const Span& st : spans) {
         for (int y = st.minY; y <= st.maxY; ++y) {
             ++buckets.offsets[static_cast<std::size_t>(y) + 1];
         }
@@ -245,8 +252,8 @@ RowBuckets buildRowBuckets(const std::vector<RasterSubTriangle>& subTriangles, i
 
     // Per-row write cursor. Filing in increasing sub-triangle index leaves each row's list in the same relative order the old full-array scan visited them in, so the z-test's tie-break at exactly equal depth is unchanged.
     std::vector<std::size_t> cursor(buckets.offsets.begin(), buckets.offsets.end() - 1);
-    for (std::size_t i = 0; i < subTriangles.size(); ++i) {
-        const RasterSubTriangle& st = subTriangles[i];
+    for (std::size_t i = 0; i < spans.size(); ++i) {
+        const Span& st = spans[i];
         for (int y = st.minY; y <= st.maxY; ++y) {
             buckets.indices[cursor[static_cast<std::size_t>(y)]++] = static_cast<int>(i);
         }
@@ -254,9 +261,9 @@ RowBuckets buildRowBuckets(const std::vector<RasterSubTriangle>& subTriangles, i
     return buckets;
 }
 
-// Builds the AABB's 12 edges (8-corner topology), near-clipped and projected once per call -- mirrors buildSubTriangles' role for a fixed 12 segments instead of the scene's triangle list.
-std::vector<RasterLineSegment> buildBoxEdges(const Camera& camera, const AabbBounds& box, int width,
-                                              int height) {
+// Appends one AABB's 12 edges (8-corner topology), near-clipped and projected -- mirrors buildSubTriangles' role for 12 segments instead of the scene's triangle list. Appends rather than returns so the per-instance loop concatenates into one array without a vector per box.
+void appendBoxEdges(const Camera& camera, const AabbBounds& box, const glm::vec3& color, int width,
+                     int height, std::vector<RasterLineSegment>& out) {
     const glm::vec3 camPos = camera.position();
     const Camera::ViewBasis basis = camera.viewBasis(static_cast<float>(width) / static_cast<float>(height));
     const std::array<glm::vec3, 8> corners{
@@ -264,12 +271,7 @@ std::vector<RasterLineSegment> buildBoxEdges(const Camera& camera, const AabbBou
         glm::vec3(box.max.x, box.max.y, box.min.z), glm::vec3(box.min.x, box.max.y, box.min.z),
         glm::vec3(box.min.x, box.min.y, box.max.z), glm::vec3(box.max.x, box.min.y, box.max.z),
         glm::vec3(box.max.x, box.max.y, box.max.z), glm::vec3(box.min.x, box.max.y, box.max.z)};
-    constexpr std::array<std::array<int, 2>, 12> kEdges{
-        {{0, 1}, {1, 2}, {2, 3}, {3, 0}, {4, 5}, {5, 6}, {6, 7}, {7, 4}, {0, 4}, {1, 5}, {2, 6}, {3, 7}}};
-
-    std::vector<RasterLineSegment> segments;
-    segments.reserve(kEdges.size());
-    for (const std::array<int, 2>& edge : kEdges) {
+    for (const std::array<int, 2>& edge : kBoxEdges) {
         glm::vec3 a{};
         glm::vec3 b{};
         if (clipSegmentNearPlane(corners[static_cast<std::size_t>(edge[0])],
@@ -286,13 +288,12 @@ std::vector<RasterLineSegment> buildBoxEdges(const Camera& camera, const AabbBou
         if (minX > maxX || minY > maxY) {
             continue;
         }
-        segments.push_back(RasterLineSegment{{sa.sx, sa.sy}, {sb.sx, sb.sy}, sa.invZ, sb.invZ, minX, maxX,
-                                              minY, maxY});
+        out.push_back(RasterLineSegment{
+            {sa.sx, sa.sy}, {sb.sx, sb.sy}, sa.invZ, sb.invZ, minX, maxX, minY, maxY, color});
     }
-    return segments;
 }
 
-// Resolves and writes every G-buffer field for one covered, z-winning pixel -- same sampling calls tracePath's bounce-0 block makes (gbuffer_shading.h), never a lighting/BSDF evaluation. origU/origV are the perspective-correct barycentric coordinates on the ORIGINAL (unclipped) triangle. wireframe is a screen-space distance-to-edge test against the triangle's own 3 projected edges (v0/v1/v2), sharing nearLineSegmentPx with BoundingBox -- evaluated only at this already-z-tested pixel, so hidden-line removal is free.
+// Resolves and writes every G-buffer field for one covered, z-winning pixel -- same sampling calls tracePath's bounce-0 block makes (gbuffer_shading.h), never a lighting/BSDF evaluation. origU/origV are the perspective-correct barycentric coordinates on the ORIGINAL (unclipped) triangle. wireframe is a screen-space distance-to-edge test against the triangle's own 3 projected edges (v0/v1/v2), sharing nearLineSegmentPx with the box edges -- evaluated only at this already-z-tested pixel, so hidden-line removal is free.
 void shadePixel(RasterGBuffer& result, int x, int y, float viewZ, float origU, float origV,
                  const ShadingTriangle& triangle, const Material& material,
                  const PathTraceSettings& settings, const glm::vec3& camPos, const ScreenVertex& v0,
@@ -384,13 +385,13 @@ void shadeRow(RasterGBuffer& result, int y, int width, const std::vector<RasterS
     }
 }
 
-// Bounding-box edges: real line segments z-tested against the row's now-finalized depth (real geometry occludes them) but never written back to it, so box edges never occlude each other -- all 12 show unless real mesh blocks them. Drawn into the same wireframe AOV as the mesh edges, in yellow, taking precedence over white where both apply.
+// Bounding-box edges: real line segments z-tested against the row's now-finalized depth (real geometry occludes them) but never written back to it, so box edges never occlude each other -- every edge shows unless real mesh blocks it, including where two instances' boxes overlap. Drawn into the same wireframe AOV as the mesh edges, in the instance's own false colour, taking precedence over white where both apply.
+// Bucketed by row for the same reason the sub-triangles are: the segment count is 12 per instance, so a full-array scan per row would grow with the scene's object count.
 void drawBoxEdgesRow(RasterGBuffer& result, int y, const std::vector<RasterLineSegment>& boxEdges,
-                      const float* zRow) {
-    for (const RasterLineSegment& seg : boxEdges) {
-        if (y < seg.minY || y > seg.maxY) {
-            continue;
-        }
+                      const RowBuckets& rowBuckets, const float* zRow) {
+    const std::size_t rowEnd = rowBuckets.offsets[static_cast<std::size_t>(y) + 1];
+    for (std::size_t k = rowBuckets.offsets[static_cast<std::size_t>(y)]; k < rowEnd; ++k) {
+        const RasterLineSegment& seg = boxEdges[static_cast<std::size_t>(rowBuckets.indices[k])];
         for (int x = seg.minX; x <= seg.maxX; ++x) {
             const glm::vec2 p(static_cast<float>(x) + 0.5F, static_cast<float>(y) + 0.5F);
             const LineProximity prox = nearLineSegmentPx(p, seg.p0, seg.p1, kLineThicknessPx);
@@ -399,7 +400,7 @@ void drawBoxEdgesRow(RasterGBuffer& result, int y, const std::vector<RasterLineS
             }
             const float viewZ = 1.0F / glm::mix(seg.invZ0, seg.invZ1, prox.t);
             if (viewZ <= zRow[x]) {
-                writeTexel(result.wireframe, x, y, kBoundingBoxColor);
+                writeTexel(result.wireframe, x, y, seg.color);
             }
         }
     }
@@ -414,11 +415,11 @@ std::array<engine::gfx::HdrImage*, 14> aovImages(RasterGBuffer& g) {
 
 }  // namespace
 
-void renderRasterGBuffer(const Camera& camera, const EmbreeAccel& accel,
-                          const std::vector<ShadingTriangle>& shadingTriangles,
+void renderRasterGBuffer(const Camera& camera, const std::vector<ShadingTriangle>& shadingTriangles,
                           const std::vector<MeshInstance>& instances,
-                          const std::vector<PathTraceSettings>& perInstanceSettings, int width,
-                          int height, ThreadPool& threadPool, RasterGBuffer& result) {
+                          const std::vector<PathTraceSettings>& perInstanceSettings,
+                          const std::vector<AabbBounds>& instanceBounds, int width, int height,
+                          ThreadPool& threadPool, RasterGBuffer& result) {
     const std::array<engine::gfx::HdrImage*, 14> images = aovImages(result);
     // Reallocated only on a resolution change; every other call reuses the storage and relies on renderRow's clear. makeImage's own zeroing is redundant against that clear but runs once per resize, not once per frame.
     if (result.depth.width != width || result.depth.height != height) {
@@ -431,8 +432,17 @@ void renderRasterGBuffer(const Camera& camera, const EmbreeAccel& accel,
     const std::vector<RasterSubTriangle> subTriangles =
         buildSubTriangles(camera, shadingTriangles, width, height, threadPool);
     const RowBuckets rowBuckets = buildRowBuckets(subTriangles, height);
-    const AabbBounds sceneBounds = accel.sceneBounds();
-    const std::vector<RasterLineSegment> boxEdges = buildBoxEdges(camera, sceneBounds, width, height);
+    // One box per instance, in the instance's ObjectID false colour. An instance that contributed no triangles has an empty box and no edges to draw.
+    std::vector<RasterLineSegment> boxEdges;
+    boxEdges.reserve(instanceBounds.size() * kBoxEdgeCount);
+    for (std::size_t i = 0; i < instanceBounds.size(); ++i) {
+        if (isEmpty(instanceBounds[i])) {
+            continue;
+        }
+        appendBoxEdges(camera, instanceBounds[i], falseColorForId(static_cast<int>(i)), width, height,
+                        boxEdges);
+    }
+    const RowBuckets boxRowBuckets = buildRowBuckets(boxEdges, height);
     const std::size_t pixelCount = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
     std::vector<float> zbuffer(pixelCount);
     // The depth pass's other output: which sub-triangle owns each pixel, -1 for uncovered. 4 bytes per pixel, sized like the z-buffer because both are written by whichever worker owns the row.
@@ -458,7 +468,7 @@ void renderRasterGBuffer(const Camera& camera, const EmbreeAccel& accel,
         depthPassRow(y, subTriangles, rowBuckets, zRow, winnerRow);
         shadeRow(result, y, width, subTriangles, shadingTriangles, instances, perInstanceSettings, camPos,
                  zRow, winnerRow);
-        drawBoxEdgesRow(result, y, boxEdges, zRow);
+        drawBoxEdgesRow(result, y, boxEdges, boxRowBuckets, zRow);
     };
 
     threadPool.parallelFor(height, renderRow);

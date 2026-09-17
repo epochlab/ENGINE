@@ -126,10 +126,11 @@ int checkFields(const std::vector<FieldCheck>& fields, int x, int y, const char*
 bool checkPose(const char* poseName, const Camera& camera, const EmbreeAccel& accel,
                const std::vector<ShadingTriangle>& shadingTriangles,
                const std::vector<MeshInstance>& instances,
-               const std::vector<PathTraceSettings>& perInstanceSettings, ThreadPool& threadPool) {
+               const std::vector<PathTraceSettings>& perInstanceSettings,
+               const std::vector<AabbBounds>& instanceBounds, ThreadPool& threadPool) {
     RasterGBuffer raster;
-    renderRasterGBuffer(camera, accel, shadingTriangles, instances, perInstanceSettings, kWidth, kHeight,
-                         threadPool, raster);
+    renderRasterGBuffer(camera, shadingTriangles, instances, perInstanceSettings, instanceBounds, kWidth,
+                         kHeight, threadPool, raster);
     const float aspect = static_cast<float>(kWidth) / static_cast<float>(kHeight);
     const glm::vec3 camPos = camera.position();
     const glm::vec3 camForward = camera.forward();
@@ -201,7 +202,7 @@ bool checkPose(const char* poseName, const Camera& camera, const EmbreeAccel& ac
     return true;
 }
 
-// A single tiny (non-degenerate) triangle near `center` -- plants a known point into accel.sceneBounds() without a real visible surface.
+// A single tiny (non-degenerate) triangle near `center` -- plants a known point into its instance's bounds without a real visible surface.
 ShadingTriangle makeTinyTriangle(glm::vec3 center, float eps, int instanceIndex) {
     const glm::vec3 normal(0.0F, 0.0F, 1.0F);
     const glm::vec4 tangent(1.0F, 0.0F, 0.0F, 1.0F);
@@ -213,14 +214,14 @@ ShadingTriangle makeTinyTriangle(glm::vec3 center, float eps, int instanceIndex)
     return tri;
 }
 
-// A flat quad (2 triangles) in the XY plane at depth z, centered at the origin.
-std::array<ShadingTriangle, 2> makeQuad(float halfExtent, float z, int instanceIndex) {
+// A flat quad (2 triangles) in the XY plane, centered at `center`.
+std::array<ShadingTriangle, 2> makeQuad(float halfExtent, glm::vec3 center, int instanceIndex) {
     const glm::vec3 normal(0.0F, 0.0F, 1.0F);
     const glm::vec4 tangent(1.0F, 0.0F, 0.0F, 1.0F);
-    const glm::vec3 a(-halfExtent, -halfExtent, z);
-    const glm::vec3 b(halfExtent, -halfExtent, z);
-    const glm::vec3 c(halfExtent, halfExtent, z);
-    const glm::vec3 d(-halfExtent, halfExtent, z);
+    const glm::vec3 a = center + glm::vec3(-halfExtent, -halfExtent, 0.0F);
+    const glm::vec3 b = center + glm::vec3(halfExtent, -halfExtent, 0.0F);
+    const glm::vec3 c = center + glm::vec3(halfExtent, halfExtent, 0.0F);
+    const glm::vec3 d = center + glm::vec3(-halfExtent, halfExtent, 0.0F);
     ShadingTriangle t0;
     t0.v0 = ShadingVertex{a, normal, glm::vec2(0.0F, 0.0F), tangent};
     t0.v1 = ShadingVertex{b, normal, glm::vec2(1.0F, 0.0F), tangent};
@@ -234,32 +235,39 @@ std::array<ShadingTriangle, 2> makeQuad(float halfExtent, float z, int instanceI
     return {t0, t1};
 }
 
-// Wireframe is a combined AOV: white (1,1,1) mesh edges, yellow (1,1,0) box edges. Yellow is R>0.5 && B<0.5 -- unique among {black, white, yellow}.
-bool isBoundingBoxColor(glm::vec3 c) {
-    return c.x > 0.5F && c.z < 0.5F;
+// Wireframe is a combined AOV: white (1,1,1) mesh edges, each instance's falseColorForId hue on its own box edges. Matching that exact hue identifies both the box and which instance drew it, where a colour heuristic could only say "not white".
+bool isBoxColorOf(glm::vec3 c, int instanceIndex) {
+    return glm::all(glm::lessThan(glm::abs(c - falseColorForId(instanceIndex)), glm::vec3(kUnitEpsilon)));
 }
 
 bool isWireframeColor(glm::vec3 c) {
     return c.z > 0.5F;
 }
 
-int countBoundingBoxPixels(const RasterGBuffer& raster) {
-    int count = 0;
+// Screen-space extent of one instance's box pixels: count, plus the pixel bounding box they occupy (kWidth/kHeight-inverted when count is 0).
+struct BoxPixels {
+    int count;
+    int minX;
+    int maxX;
+};
+
+BoxPixels boxPixelsOf(const RasterGBuffer& raster, int instanceIndex) {
+    BoxPixels found{0, kWidth, -1};
     for (int y = 0; y < kHeight; ++y) {
         for (int x = 0; x < kWidth; ++x) {
-            if (isBoundingBoxColor(texelAt(raster.wireframe, x, y))) {
-                ++count;
+            if (!isBoxColorOf(texelAt(raster.wireframe, x, y), instanceIndex)) {
+                continue;
             }
+            ++found.count;
+            found.minX = std::min(found.minX, x);
+            found.maxX = std::max(found.maxX, x);
         }
     }
-    return count;
+    return found;
 }
 
-// Regression check: box edges are real line segments z-tested against scene geometry, so a solid occluder in front of the box should hide edges behind it. Case 1: two tiny (non-occluding) corner markers define the box -- all 12 edges eligible. Case 2: an occluder nearer than the box's near corner, same x/y extent as the marker (not larger -- it's part of the scene, so a larger extent would enlarge accel.sceneBounds() and test a different box). Tiny markers, not a filled quad, define the box corners: a filled quad would self-occlude in both cases.
-bool checkBoundingBoxOcclusion(ThreadPool& threadPool) {
-    const Camera::FilmBack filmBack{36.0F, 24.0F};
-    const Camera camera(glm::vec3(0.0F), 0.0F, 0.0F, filmBack, 35.0F, 0.1F, 100.0F, 2.8F, 1.0F / 125.0F,
-                        100.0F);
+// The material-independent settings every check here renders with -- the rasterizer AOVs under test are geometric, so these only need to be valid, not varied.
+PathTraceSettings makeTestSettings() {
     PathTraceSettings settings{};
     settings.samplesPerPixel = 1;
     settings.maxBounces = 0;
@@ -272,67 +280,97 @@ bool checkBoundingBoxOcclusion(ThreadPool& threadPool) {
     settings.transmissionFactor = 0.0F;
     settings.metallicFactor = 0.2F;
     settings.roughnessFactor = 1.0F;
+    return settings;
+}
 
-    std::vector<MeshInstance> instances;
-    instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.5F), 0.5F), glm::mat4(1.0F), ""});
-    const std::vector<PathTraceSettings> perInstanceSettings(instances.size(), settings);
+// Regression check: box edges are real line segments z-tested against scene geometry, so a solid occluder in front of the box should hide edges behind it. Case 1: two tiny (non-occluding) corner markers define instance 0's box -- all 12 edges eligible. Case 2: an occluder nearer than the box's near corner, same x/y extent as the marker (not larger -- it belongs to the same instance, so a larger extent would enlarge that instance's box and test a different one). Tiny markers, not a filled quad, define the box corners: a filled quad would self-occlude in both cases.
+bool checkBoundingBoxOcclusion(ThreadPool& threadPool) {
+    const Camera::FilmBack filmBack{36.0F, 24.0F};
+    const Camera camera(glm::vec3(0.0F), 0.0F, 0.0F, filmBack, 35.0F, 0.1F, 100.0F, 2.8F, 1.0F / 125.0F,
+                        100.0F);
+    const std::vector<MeshInstance> instances{
+        MeshInstance{makeMaterial(glm::vec3(0.5F), 0.5F), glm::mat4(1.0F), ""}};
+    const std::vector<PathTraceSettings> perInstanceSettings(instances.size(), makeTestSettings());
+    const int instanceCount = static_cast<int>(instances.size());
 
     const ShadingTriangle farMarker = makeTinyTriangle(glm::vec3(-0.5F, -0.5F, -15.0F), 0.05F, 0);
     const ShadingTriangle nearMarker = makeTinyTriangle(glm::vec3(0.5F, 0.5F, -5.0F), 0.05F, 0);
 
     // Case 1: box spans x/y in [-0.5,0.5], z in [-15,-5], nothing solid anywhere -- all edges eligible.
-    {
-        const std::vector<ShadingTriangle> scene{farMarker, nearMarker};
-        std::vector<Triangle> world = worldTrianglesOf(scene);
-        std::optional<EmbreeAccel> accel = EmbreeAccel::build(std::move(world));
-        if (!accel) {
-            std::cerr << "rasterizer_validate: checkBoundingBoxOcclusion FAILED -- accel build (case 1)\n";
-            return false;
-        }
-        RasterGBuffer raster;
-        renderRasterGBuffer(camera, *accel, scene, instances, perInstanceSettings, kWidth, kHeight,
-                             threadPool, raster);
-        const int unoccluded = countBoundingBoxPixels(raster);
-        std::cout << "rasterizer_validate: boundingBox unoccluded -- " << unoccluded << " pixels\n";
-        if (unoccluded == 0) {
-            std::cerr << "rasterizer_validate: checkBoundingBoxOcclusion FAILED -- no box edges "
-                         "visible with nothing in front of the box\n";
-            return false;
-        }
+    const std::vector<ShadingTriangle> scene{farMarker, nearMarker};
+    RasterGBuffer raster;
+    renderRasterGBuffer(camera, scene, instances, perInstanceSettings,
+                         computeInstanceBounds(scene, instanceCount), kWidth, kHeight, threadPool, raster);
+    const int unoccluded = boxPixelsOf(raster, 0).count;
+    std::cout << "rasterizer_validate: boundingBox unoccluded -- " << unoccluded << " pixels\n";
+    if (unoccluded == 0) {
+        std::cerr << "rasterizer_validate: checkBoundingBoxOcclusion FAILED -- no box edges "
+                     "visible with nothing in front of the box\n";
+        return false;
+    }
 
-        // Case 2: occluder at z=-4 (nearer than the near corner at z=-5), same 0.5 x/y extent -- shifts near-z by a small, predictable amount (-5 to -4) instead of enlarging x/y. Its own surface becomes the box's new near face, so that face's 4 edges stay visible (nearest thing there); far face + pillars are now behind it. Expect a large, not total, reduction.
-        const std::array<ShadingTriangle, 2> occluder = makeQuad(0.5F, -4.0F, 0);
-        const std::vector<ShadingTriangle> occludedScene{farMarker, occluder[0], occluder[1]};
-        std::vector<Triangle> occludedWorld = worldTrianglesOf(occludedScene);
-        std::optional<EmbreeAccel> occludedAccel = EmbreeAccel::build(std::move(occludedWorld));
-        if (!occludedAccel) {
-            std::cerr << "rasterizer_validate: checkBoundingBoxOcclusion FAILED -- accel build (case 2)\n";
-            return false;
-        }
-        RasterGBuffer occludedRaster;
-        renderRasterGBuffer(camera, *occludedAccel, occludedScene, instances, perInstanceSettings, kWidth,
-                             kHeight, threadPool, occludedRaster);
-        const int occluded = countBoundingBoxPixels(occludedRaster);
-        std::cout << "rasterizer_validate: boundingBox occluded -- " << occluded << " pixels\n";
-        if (occluded * 2 >= unoccluded) {
-            std::cerr << "rasterizer_validate: checkBoundingBoxOcclusion FAILED -- occluded pixel "
-                         "count ("
-                      << occluded << ") not substantially lower than unoccluded (" << unoccluded << ")\n";
-            return false;
-        }
+    // Case 2: occluder at z=-4 (nearer than the near corner at z=-5), same 0.5 x/y extent -- shifts near-z by a small, predictable amount (-5 to -4) instead of enlarging x/y. Its own surface becomes the box's new near face, so that face's 4 edges stay visible (nearest thing there); far face + pillars are now behind it. Expect a large, not total, reduction.
+    const std::array<ShadingTriangle, 2> occluder = makeQuad(0.5F, glm::vec3(0.0F, 0.0F, -4.0F), 0);
+    const std::vector<ShadingTriangle> occludedScene{farMarker, occluder[0], occluder[1]};
+    RasterGBuffer occludedRaster;
+    renderRasterGBuffer(camera, occludedScene, instances, perInstanceSettings,
+                         computeInstanceBounds(occludedScene, instanceCount), kWidth, kHeight, threadPool,
+                         occludedRaster);
+    const int occluded = boxPixelsOf(occludedRaster, 0).count;
+    std::cout << "rasterizer_validate: boundingBox occluded -- " << occluded << " pixels\n";
+    if (occluded * 2 >= unoccluded) {
+        std::cerr << "rasterizer_validate: checkBoundingBoxOcclusion FAILED -- occluded pixel count ("
+                  << occluded << ") not substantially lower than unoccluded (" << unoccluded << ")\n";
+        return false;
+    }
+    return true;
+}
+
+// Regression check for one box per instance rather than one for the whole scene: two separated quads on different instances. Each must draw its own false-coloured box, and the two must occupy disjoint screen columns -- a single fused box would span both quads, so its edges could not leave a gap between them, whatever colour they carried.
+bool checkPerInstanceBoxes(ThreadPool& threadPool) {
+    const Camera::FilmBack filmBack{36.0F, 24.0F};
+    const Camera camera(glm::vec3(0.0F), 0.0F, 0.0F, filmBack, 35.0F, 0.1F, 100.0F, 2.8F, 1.0F / 125.0F,
+                        100.0F);
+    const std::vector<MeshInstance> instances{
+        MeshInstance{makeMaterial(glm::vec3(0.5F), 0.5F), glm::mat4(1.0F), ""},
+        MeshInstance{makeMaterial(glm::vec3(0.5F), 0.5F), glm::mat4(1.0F), ""}};
+    const std::vector<PathTraceSettings> perInstanceSettings(instances.size(), makeTestSettings());
+
+    // Both at z=-10, where the 35mm lens on 36mm film sees x in about +-5.1 -- the +-2 centres and their 0.5 half-extent leave both fully on screen with a clear gap between them.
+    const std::array<ShadingTriangle, 2> left = makeQuad(0.5F, glm::vec3(-2.0F, 0.0F, -10.0F), 0);
+    const std::array<ShadingTriangle, 2> right = makeQuad(0.5F, glm::vec3(2.0F, 0.0F, -10.0F), 1);
+    const std::vector<ShadingTriangle> scene{left[0], left[1], right[0], right[1]};
+
+    RasterGBuffer raster;
+    renderRasterGBuffer(camera, scene, instances, perInstanceSettings,
+                         computeInstanceBounds(scene, static_cast<int>(instances.size())), kWidth, kHeight,
+                         threadPool, raster);
+    const BoxPixels leftBox = boxPixelsOf(raster, 0);
+    const BoxPixels rightBox = boxPixelsOf(raster, 1);
+    std::cout << "rasterizer_validate: perInstanceBoxes -- instance 0 " << leftBox.count << " px [x "
+              << leftBox.minX << "," << leftBox.maxX << "], instance 1 " << rightBox.count << " px [x "
+              << rightBox.minX << "," << rightBox.maxX << "]\n";
+    if (leftBox.count == 0 || rightBox.count == 0) {
+        std::cerr << "rasterizer_validate: checkPerInstanceBoxes FAILED -- an instance drew no box "
+                     "edges in its own false colour\n";
+        return false;
+    }
+    if (leftBox.maxX >= rightBox.minX) {
+        std::cerr << "rasterizer_validate: checkPerInstanceBoxes FAILED -- the two boxes overlap in x ("
+                  << leftBox.maxX << " >= " << rightBox.minX << "), expected one box per instance\n";
+        return false;
     }
     return true;
 }
 
 // Regression check: must draw something (not silently empty) but only a thin fraction of hit pixels, not most of the mesh.
-bool checkWireframeSanity(const Camera& camera, const EmbreeAccel& accel,
-                           const std::vector<ShadingTriangle>& shadingTriangles,
+bool checkWireframeSanity(const Camera& camera, const std::vector<ShadingTriangle>& shadingTriangles,
                            const std::vector<MeshInstance>& instances,
                            const std::vector<PathTraceSettings>& perInstanceSettings,
-                           ThreadPool& threadPool) {
+                           const std::vector<AabbBounds>& instanceBounds, ThreadPool& threadPool) {
     RasterGBuffer raster;
-    renderRasterGBuffer(camera, accel, shadingTriangles, instances, perInstanceSettings, kWidth, kHeight,
-                         threadPool, raster);
+    renderRasterGBuffer(camera, shadingTriangles, instances, perInstanceSettings, instanceBounds, kWidth,
+                         kHeight, threadPool, raster);
     int hitPixels = 0;
     int wirePixels = 0;
     for (int y = 0; y < kHeight; ++y) {
@@ -377,19 +415,9 @@ int main() {
     instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.2F, 0.2F, 0.8F), 0.8F), glm::mat4(1.0F), ""});
     instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.8F, 0.8F, 0.2F), 1.0F), glm::mat4(1.0F), ""});
 
-    PathTraceSettings settings{};
-    settings.samplesPerPixel = 1;
-    settings.maxBounces = 0;
-    settings.russianRouletteStartBounce = 1;
-    settings.bumpStrength = 1.0F;
-    settings.roughnessMin = 0.045F;
-    settings.roughnessMax = 1.0F;
-    settings.diffuseColour = glm::vec3(1.0F);
-    settings.ior = 1.5F;
-    settings.transmissionFactor = 0.0F;
-    settings.metallicFactor = 0.2F;
-    settings.roughnessFactor = 1.0F;
-    const std::vector<PathTraceSettings> perInstanceSettings(instances.size(), settings);
+    const std::vector<PathTraceSettings> perInstanceSettings(instances.size(), makeTestSettings());
+    const std::vector<AabbBounds> instanceBounds =
+        computeInstanceBounds(shadingTriangles, static_cast<int>(instances.size()));
 
     const Camera::FilmBack filmBack{36.0F, 24.0F};
     const Camera straightOn(glm::vec3(0.0F, 0.0F, 0.0F), 0.0F, 0.0F, filmBack, 35.0F, 0.1F, 100.0F, 2.8F,
@@ -403,18 +431,19 @@ int main() {
     ThreadPool threadPool;
     bool ok = true;
     ok = checkPose("straightOn", straightOn, *accel, shadingTriangles, instances, perInstanceSettings,
-                   threadPool) &&
+                   instanceBounds, threadPool) &&
          ok;
     ok = checkPose("angled", angled, *accel, shadingTriangles, instances, perInstanceSettings,
-                   threadPool) &&
+                   instanceBounds, threadPool) &&
          ok;
     ok = checkPose("clipTest", clipTest, *accel, shadingTriangles, instances, perInstanceSettings,
-                   threadPool) &&
+                   instanceBounds, threadPool) &&
          ok;
-    ok = checkWireframeSanity(straightOn, *accel, shadingTriangles, instances, perInstanceSettings,
+    ok = checkWireframeSanity(straightOn, shadingTriangles, instances, perInstanceSettings, instanceBounds,
                                threadPool) &&
          ok;
     ok = checkBoundingBoxOcclusion(threadPool) && ok;
+    ok = checkPerInstanceBoxes(threadPool) && ok;
 
     if (!ok) {
         std::cerr << "rasterizer_validate: FAILED\n";
