@@ -229,6 +229,8 @@ struct AppResources {
     engine::scene::PathTraceSettings pathTraceSettings;
     // Per-instance material fields, parallel-indexed with stumpModel.instances (ShadingTriangle::instanceIndex resolves into this) -- pathTraceSettings's 11 material fields copied per instance, overridden from sceneConfig.materialOverrides by MeshInstance::name where present. Renderer-only fields (samplesPerPixel/maxBounces/RR) are never read from these entries; see resolveBsdfParams/buildShadingFrame call sites in path_tracer.cpp/rasterizer.cpp.
     std::vector<engine::scene::PathTraceSettings> perInstanceSettings;
+    // World-space AABB per instance, parallel-indexed with stumpModel.instances. Static geometry, so computed once at startup and read every rasterizer call for the Wireframe AOV's per-object box edges (rasterizer.h).
+    std::vector<engine::scene::AabbBounds> instanceBounds;
     int maxSamples;  // accumulated-pass cap for PathTraceDriver; 0 = unbounded
     std::unique_ptr<engine::scene::PathTraceDriver> pathTraceDriver;
     std::optional<engine::gfx::Texture> pathTraceDisplayTexture;
@@ -459,6 +461,10 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         return std::nullopt;
     }
 
+    // After appendQuadLights, so the light panels' own instances are bounded too.
+    std::vector<engine::scene::AabbBounds> instanceBounds = engine::scene::computeInstanceBounds(
+        stumpModel->shadingTriangles, static_cast<int>(stumpModel->instances.size()));
+
     // Printed here, at the end of startup, rather than at the six points these values become known: every number in the block is real by now (the GL context exists, the scene has loaded, the BVH is built and has reported its memory), and one contiguous block survives being piped to a log where six scattered lines interleave with everything else.
     const engine::debug::EngineSpec spec{
         scenePath.c_str(),
@@ -538,6 +544,7 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         .lastRasterMs = 0.0F,
         .pathTraceSettings = basePathTraceSettings,
         .perInstanceSettings = std::move(*perInstanceSettings),
+        .instanceBounds = std::move(instanceBounds),
         .maxSamples = profileConfig.pathTracer.maxSamples,
         // Constructed in main() right after initializeApp() returns -- see path_trace_driver.h's constructor precondition (its reference members must bind to sceneAccel/environmentMap/stumpModel at their final, permanent address, which this designated-initializer expression, still local-variable-based and one AppResources move away from that address, cannot yet guarantee).
         .pathTraceDriver = nullptr,
@@ -1011,8 +1018,9 @@ void requestPathTraceIfTriggerChanged(AppResources& app, const engine::scene::Ca
     // The complement of needsLightTransport is exactly the rasterizer's 14 AOVs: aovNeedsLightTransport covers 13 of AovId::Count's 27 and selectPathTracedImage routes the other 14 here, so the two sets partition the enum and no AOV needs neither producer. On Beauty -- the default -- the rasterizer now does not run at all, where before it rasterized the full framebuffer on the render thread every frame of camera interaction to produce 14 images nobody was looking at.
     if (!needsLightTransport && renderWidth > 0 && renderHeight > 0) {
         const engine::debug::ScopedCpuTimer rasterTimer(app.stages.rasterMs);
-        engine::scene::renderRasterGBuffer(camera, app.sceneAccel, app.stumpModel.shadingTriangles,
+        engine::scene::renderRasterGBuffer(camera, app.stumpModel.shadingTriangles,
                                             app.stumpModel.instances, app.perInstanceSettings,
+                                            app.instanceBounds,
                                             renderWidth, renderHeight, *app.rasterThreadPool,
                                             *app.rasterGBuffer);
     }

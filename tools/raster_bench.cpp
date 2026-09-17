@@ -18,11 +18,9 @@
 
 #include "engine/gfx/hdr_image.h"
 #include "engine/scene/camera.h"
-#include "engine/scene/embree_accel.h"
 #include "engine/scene/gltf_loader.h"
 #include "engine/scene/path_tracer.h"
 #include "engine/scene/rasterizer.h"
-#include "engine/scene/ray_types.h"
 #include "engine/scene/shading_scene.h"
 #include "engine/scene/thread_pool.h"
 
@@ -117,15 +115,6 @@ std::vector<ShadingTriangle> makeLayeredTriangles(const Options& options, const 
     return triangles;
 }
 
-std::vector<Triangle> worldTrianglesOf(const std::vector<ShadingTriangle>& shadingTriangles) {
-    std::vector<Triangle> triangles;
-    triangles.reserve(shadingTriangles.size());
-    for (const ShadingTriangle& tri : shadingTriangles) {
-        triangles.push_back(Triangle{tri.v0.position, tri.v1.position, tri.v2.position});
-    }
-    return triangles;
-}
-
 // Returns nullopt on an unrecognized flag, a missing value, or a value outside its usable range -- argv is a system boundary, so a bad value is surfaced rather than clamped around.
 std::optional<Options> parseOptions(int argc, char** argv) {
     Options options;
@@ -191,12 +180,6 @@ int main(int argc, char** argv) {
                          100.0F);
 
     const std::vector<ShadingTriangle> shadingTriangles = makeLayeredTriangles(*options, camera);
-    std::optional<EmbreeAccel> accel = EmbreeAccel::build(worldTrianglesOf(shadingTriangles));
-    if (!accel) {
-        std::cerr << "raster_bench: EmbreeAccel::build failed\n";
-        return EXIT_FAILURE;
-    }
-
     std::vector<MeshInstance> instances;
     instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.8F, 0.2F, 0.2F), 0.2F), glm::mat4(1.0F), ""});
     instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.2F, 0.8F, 0.2F), 0.5F), glm::mat4(1.0F), ""});
@@ -216,13 +199,16 @@ int main(int argc, char** argv) {
     settings.metallicFactor = 0.2F;
     settings.roughnessFactor = 1.0F;
     const std::vector<PathTraceSettings> perInstanceSettings(instances.size(), settings);
+    // Once, outside the timed loop, as the app does at load -- the per-frame cost this measures is projecting and rasterizing the boxes, not deriving them.
+    const std::vector<AabbBounds> instanceBounds =
+        computeInstanceBounds(shadingTriangles, static_cast<int>(instances.size()));
 
     ThreadPool threadPool;
     // One buffer for the whole run, matching how the app owns it: renderRasterGBuffer reuses it in place, so the timed frames measure steady-state cost with no allocation in them.
     RasterGBuffer gbuffer;
     // Discarded warm-up pass, absorbing the costs that happen once rather than per frame: spinning up and parking the pool's workers, and the buffer's only allocation.
-    renderRasterGBuffer(camera, *accel, shadingTriangles, instances, perInstanceSettings, options->width,
-                         options->height, threadPool, gbuffer);
+    renderRasterGBuffer(camera, shadingTriangles, instances, perInstanceSettings, instanceBounds,
+                         options->width, options->height, threadPool, gbuffer);
     if (gbuffer.depth.width != options->width) {
         std::cerr << "raster_bench: warm-up produced a " << gbuffer.depth.width << "px-wide buffer\n";
         return EXIT_FAILURE;
@@ -232,7 +218,7 @@ int main(int argc, char** argv) {
     milliseconds.reserve(static_cast<std::size_t>(options->frames));
     for (int frame = 0; frame < options->frames; ++frame) {
         const auto start = std::chrono::steady_clock::now();
-        renderRasterGBuffer(camera, *accel, shadingTriangles, instances, perInstanceSettings,
+        renderRasterGBuffer(camera, shadingTriangles, instances, perInstanceSettings, instanceBounds,
                              options->width, options->height, threadPool, gbuffer);
         const auto end = std::chrono::steady_clock::now();
         milliseconds.push_back(std::chrono::duration<double, std::milli>(end - start).count());
