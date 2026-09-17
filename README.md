@@ -1,6 +1,6 @@
 # Physically based path tracer
 
-*A CPU, unidirectional brute-force Monte Carlo path tracer with real-time progressive display: Embree-accelerated, stochastic BSDF sampling combined with environment-map NEE via MIS, behind a thin OpenGL display/HUD layer.*
+*A CPU, unidirectional Monte Carlo path tracer with real-time progressive display: Embree-accelerated, stochastic BSDF sampling combined with environment-map NEE via MIS, behind a thin OpenGL display/HUD layer.*
 
 ![Sample render](sample.png)
 
@@ -24,10 +24,6 @@ C++20, built with CMake. Currently developed against macOS only.
 brew install cmake glfw glew glm imath openexr opencolorio embree
 ```
 
-Homebrew's `embree` formula pulls in `tbb` automatically (Embree's parallelism dependency) — no separate install step needed.
-
-Dear ImGui is vendored as a git submodule (`third_party/imgui`); initialise it before configuring:
-
 ```
 git submodule update --init --recursive
 ```
@@ -39,108 +35,107 @@ cmake -B build
 cmake --build build
 ```
 
-This produces fourteen targets:
-
-- `build/engine`: the path tracer
-- `build/test_pattern`: EXR calibration-pattern generator (`tools/test_pattern.cpp`)
-- `build/downsample`: EXR downsampling tool (`tools/downsample.cpp`)
-- `build/bluenoise_mask`: void-and-cluster blue-noise mask generator (`tools/bluenoise_mask.cpp`)
-- `build/gltf_tangent`: glTF tangent-generation tool (`tools/gltf_tangent.cpp`)
-- `build/albedo_table`: offline Kulla-Conty energy-table bake, emits `src/scene/albedo_table.inc` (`tools/albedo_table.cpp`)
-- `build/embree_validate`: headless Embree ray-scene intersection correctness check (`tools/embree_validate.cpp`)
-- `build/bsdf_validate`: headless BSDF pdf-normalization and furnace-test check (`tools/bsdf_validate.cpp`)
-- `build/nee_validate`: headless NEE/MIS unbiasedness check against a brute-force reference (`tools/nee_validate.cpp`)
-- `build/rasterizer_validate`: headless CPU-rasterizer-vs-Embree G-buffer correctness check (`tools/rasterizer_validate.cpp`)
-- `build/integrator_validate`: headless full-integrator depth-invariance and transport-partition correctness check (`tools/integrator_validate.cpp`)
-- `build/sampler_validate`: headless Sobol/Owen-scramble sampler stratification check (`tools/sampler_validate.cpp`)
-- `build/render_beauty`: headless beauty render with PNG/EXR diffing and per-pass timing, not run under `ctest` (`tools/render_beauty.cpp`)
-- `build/raster_bench`: rasterizer timing harness, not run under `ctest` (`tools/raster_bench.cpp`)
-
-`-Wall -Wextra -Werror` gates every target. `clang-tidy` (see `.clang-tidy`) and `cppcheck` (`cmake --build build --target cppcheck`, over `src/`) both run if installed, skipped otherwise.
-
-`cmake -B build -DENGINE_SANITIZE=ON` builds with AddressSanitizer + UndefinedBehaviorSanitizer instead (off by default); worth running after touching the glTF/JSON/EXR loading paths.
-
 ### Run
 
 ```
 ./build/engine [-scene path/to/scene.json] [-stats]
 ```
 
-Defaults to `assets/scenes/cornell.json` if `-scene` is omitted — currently the only scene shipped; the tree scene's geometry, textures and `tree.json` have been pulled from the repo for the time being.
-
-Flags are single-dash, after Arnold's `kick`. A **Computer & Engine Spec** block prints at startup either way: host CPU topology, GPU, compiler/build type/git SHA, library versions, and the scene's load/BVH costs and render settings — plain text, so it survives being piped to a log. `-stats` adds a live terminal dashboard that redraws in place at 3 Hz, breaking the frame down by render-thread stage and the path-trace pass by phase and ray type. The instrumentation behind it is compiled into the shipping Release build, so its numbers describe the same `-march=native` + IPO binary that ships rather than a separately-built one; the flag only gates the drawing. Piped to a non-TTY it emits one plain summary line every 5 s instead of ANSI redraws. `?` prints the key map: it trails the spec block at startup and toggles on each press when the dashboard is off, and under `-stats` it is a section of the dashboard beneath its closing rule instead -- the block rewrites every line it owns on each redraw, so a copy printed into that region would be erased before it could be read.
+Defaults to `assets/scenes/cornell.json` if `-scene` is omitted — currently the only scene shipped.
 
 ## 1. Pipeline
 
-glTF geometry/materials load once at startup into a CPU-resident scene: per-vertex shading data (`ShadingTriangle`) and world-space triangles feed an Embree scene (`EmbreeAccel`); materials keep only CPU `HdrImage` textures, sampled per-ray. An equirectangular HDR environment map loads alongside it, with its own luminance-importance-sampling CDF for NEE. Area lights (`scene.json`'s `lights`) inject emitting geometry into the same Embree scene at load (`appendQuadLights`), so they occlude and are camera/BSDF-hittable with no second intersection path.
+**Startup.** glTF geometry/materials load once into a CPU-resident scene: per-vertex shading data (`ShadingTriangle`) and world-space triangles feed an Embree scene (`EmbreeAccel`); materials keep only CPU `HdrImage` textures, sampled per-ray. An equirectangular HDR environment map loads alongside it, with its own luminance-importance-sampling CDF for NEE. Area lights (`scene.json`'s `lights`) are injected into the same Embree scene at load (`appendQuadLights`), so they occlude and are camera/BSDF-hittable with no second intersection path.
 
-Every frame, on any camera/scene-state change, `PathTraceDriver` hands a fresh request to a background thread pool (one worker/core, row-parallel, dynamic scheduling), restarting progressive accumulation:
+**Per frame**, on any camera/scene-state change, two paths run independently off the same trigger:
 
-- Camera ray generation (pinhole) → Embree intersection (`rtcIntersect1`/`rtcOccluded1`)
-- BSDF eval/sampling (Heitz 2018 GGX VNDF specular; EON rough-diffuse, Portsmouth/Kutz/Hill 2025; Walter 2007 rough dielectric transmission with exact Fresnel/TIR, falling back to a Snell delta lobe below the smooth-roughness threshold; Kulla-Conty multiple-scattering compensation on both interfaces; exact complex-IOR conductor Fresnel via Gulbrandsen 2014's reflectivity/edge-tint parameterisation) → NEE against a `LightSet` (environment map, optionally excluded via the HUD's "Environment Light" checkbox, plus any area lights — uniform selection, quads importance-sampled by solid angle via Ureña/Fajardo/King 2013's spherical-rectangle parametrisation), MIS-combined with BSDF sampling (power heuristic, Veach 1997)
-- Recursive bounce loop with Russian roulette, Chiang/Li/Burley 2019 shadow-terminator-corrected secondary-ray origins, Beer-Lambert extinction inside transmissive media
-- Radiance + full G-buffer/transport-component AOV set accumulated per pass, published lock-free for the render thread
+- **Path tracer** — `PathTraceDriver` hands a fresh request to a background thread pool (one worker/core, row-parallel, dynamic scheduling), restarting progressive accumulation:
+  1. Camera ray generation (pinhole) → Embree intersection (`rtcIntersect1`/`rtcOccluded1`)
+  2. BSDF eval/sampling (Heitz 2018 GGX VNDF specular; EON rough-diffuse, Portsmouth/Kutz/Hill 2025; Walter 2007 rough dielectric transmission with exact Fresnel/TIR, falling back to a Snell delta lobe below the smooth-roughness threshold; Kulla-Conty multiple-scattering compensation on both interfaces; exact complex-IOR conductor Fresnel via Gulbrandsen 2014's reflectivity/edge-tint parameterisation)
+  3. NEE against a `LightSet` (environment map, optionally excluded via the HUD's "Environment Light" checkbox, plus any area lights — uniform selection, quads importance-sampled by solid angle via Ureña/Fajardo/King 2013's spherical-rectangle parametrisation), MIS-combined with BSDF sampling (power heuristic, Veach 1997)
+  4. Recursive bounce loop with Russian roulette, Chiang/Li/Burley 2019 shadow-terminator-corrected secondary-ray origins, Beer-Lambert extinction inside transmissive media
+  5. Radiance + full G-buffer/transport-component AOV set accumulated per pass, published lock-free for the render thread
 
-Independently, on the same trigger, a synchronous CPU rasterizer (`rasterizer.cpp`) computes the 14 primary-hit-only AOVs (§4) every frame on the render thread: edge-function rasterization (Pineda 1988) with near-plane Sutherland-Hodgman clipping, sharing `gbuffer_shading.h`'s material sampling with the path tracer but no Embree/BSDF/recursion. This gives those AOVs instant, glitch-free feedback during camera movement, decoupled from Beauty's own progressive convergence; the path-traced request above only restarts when the selected AOV needs light-transport data.
+- **Rasterizer** — a synchronous CPU pass (`rasterizer.cpp`) computes the 14 primary-hit-only AOVs (§4) every frame on the render thread: edge-function rasterization (Pineda 1988) with near-plane Sutherland-Hodgman clipping, sharing `gbuffer_shading.h`'s material sampling with the path tracer but no Embree/BSDF/recursion. This gives those AOVs instant, glitch-free feedback during camera movement, decoupled from Beauty's own progressive convergence — the path-traced request above only restarts when the selected AOV needs light-transport data.
 
-The render thread blits whichever AOV is selected through OCIO's display transform (exposure/tone-mapping) and the debug HUD, converging over subsequent passes rather than blocking on one long render. No GPU rasterization anywhere: OpenGL exists only for the window, the post-process/OCIO blit, and ImGui; the primary-hit rasterizer is CPU-only.
+**Display.** The render thread blits whichever AOV is selected through OCIO's display transform (exposure/tone-mapping) and the debug HUD, converging over subsequent passes rather than blocking on one long render. No GPU rasterization anywhere: OpenGL exists only for the window, the post-process/OCIO blit, and ImGui; the primary-hit rasterizer is CPU-only.
 
 ## 2. Component reference
 
-| Feature | Mechanism | Role / why it matters |
-|---|---|---|
-| Camera / lens | Position/yaw/pitch, film-back + focal length → derived vertical FOV; pinhole primary rays derived directly from this basis | Geometric ground truth the ray-intersection/BSDF math is measured against |
-| Photographic exposure | EV100 from aperture/shutter/ISO, applied as a relative-stops delta against profile.json's default triple (Filament/Frostbite EV100 formula) | Familiar photographic brightness control -- not an absolute photometric quantity, since the scene isn't calibrated to real-world radiance |
-| OpenEXR linear pipeline | `HdrImage`/`loadExr`; all shading/compositing in linear light, OCIO display-encodes only at the final blit | Precondition for correct PBR colour math |
-| Display transform | OCIO Display/View API (sRGB, Rec.709, Raw), cycled at runtime ('L') -- a colourimetric encode (sRGB / Rec.1886 OETF) only, no tone mapping | Scene-referred radiance throughout; values above 1.0 clip at the display by design -- lookdev sees clipping honestly, not masked by a hidden filmic shoulder |
-| Startup spec block | One plain-text provenance block on stdout: GPU/driver/refresh rate, host CPU topology and cache line from `sysctl`, compiler/build type/`-march`/IPO/git SHA, runtime-queried library versions, and the scene's load and BVH-build costs with BVH bytes from Embree's own device memory monitor | Confirms the actual GPU/backend before a wrong-adapter bug masquerades as a render bug, and makes every timing number attributable -- a measurement without the machine and build it was taken on is not one |
-| Render telemetry (`-stats`) | 78-column terminal dashboard redrawn in place at 3 Hz through a single `write(2)` of a pre-built buffer: render-thread stages with share-of-frame bars, path-trace phases, ray counts by type with Mray/s, and a `cpu total` / `frame measured` / `unaccounted` reconciliation | Shows where every millisecond of the render cycle goes, and shows what it cannot account for -- an unmeasured stage surfaces as a growing residual rather than silently |
-| Frame-timing HUD | Ring buffer of recent frame times; rolling FPS/avg/min/max, GPU timer query around the post-process blit | Makes blit cost measurable frame to frame |
-| Memory HUD | Live RAM readout plus GPU allocation tracked at alloc/free (the path-traced display texture is the only GPU allocation left; OCIO uses zero LUT textures) | Surfaces a memory regression immediately, not after VRAM exhaustion |
-| Scene stats | Object/triangle/point counts, viewport resolution | Scene-complexity readout |
-| Debug camera controls | WASD/QE fly, R reset, LMB-drag orbit around a pivot read directly from the path tracer's own G-buffer (world-space hit position + hit mask at its centre pixel) | Interactive navigation without hand-editing camera parameters between runs |
-| Camera framing overlays | Centre crosshair, always on, drawn on the foreground overlay over the viewport | Composition aid that never contaminates the AOV buffers being debugged |
-| AOV selector | Dropdown across the full AOV set (§4), plus R/G/B channel-isolation hotkeys | Isolates one signal at a time for debugging |
-| Live histogram | Per-channel (R/G/B) histogram of the currently displayed image | Catches exposure/clipping and colour-space bugs a single still frame can hide |
-| glTF loading | cgltf; per-primitive vertices baked to world-space triangles/shading data at load time, materials' textures decoded once to `HdrImage` | Standard interchange format; nothing GPU-resident is needed once the CPU Embree scene/shading data exists |
-| Tangent-space normal mapping | Per-vertex tangent (glTF-supplied only), Gram-Schmidt re-orthogonalized per-ray | Surface micro-detail without extra geometry |
-| Ray acceleration | Intel Embree (SIMD BVH build/traversal), CPU, built once at load | Sub-linear ray-scene intersection, required before recursion is affordable |
-| Primary-hit rasterizer | CPU edge-function rasterization (Pineda 1988) + near-plane clip (Sutherland-Hodgman 1974), row-parallel, synchronous every frame | Instant primary-hit G-buffer AOVs (§4), decoupled from Beauty's progressive convergence |
-| Area lights | Rectangular emitters (`scene.json`'s `lights`), one-sided by default; own geometry in the BVH, solid-angle NEE sampling (Ureña, Fajardo & King 2013), MIS against BSDF sampling exactly like the environment | The classic emissive-panel Cornell box (§5 Large #2); ReSTIR's (§5) prerequisite light set |
-| Environment-light toggle | HUD "Environment Light" checkbox (`environment.lightEnabled` in `scene.json`, `--env-light` on `render_beauty`) | Removes the environment from NEE/MIS/every miss entirely, background included -- distinct from "Show/Hide Background", which only hides the camera-visible sky. Lets an HDRI+area-light scene isolate the panel-only look |
-| Stochastic BSDF | EON rough-diffuse (Portsmouth, Kutz, Hill 2025), GGX microfacet specular, Walter 2007 rough dielectric transmission (delta Snell + TIR below the smooth-roughness threshold), Kulla-Conty multiple-scattering compensation on the reflective and transmissive interface alike; four-lobe stochastic selection, one-sample mixture estimator | Materials respond to light with real physical behaviour, including rough and smooth glass, and conserve energy at every roughness |
-| Volumetric absorption | Beer-Lambert extinction (`transmissionColor` over `transmissionDepth`, Arnold `standard_surface`/OpenPBR convention) applied to a single-level medium stack while a path is inside a `transmissionFactor>0` material; at `transmissionDepth 0` there is no medium and the same colour is a constant on-surface tint instead | Tinted/coloured glass, thick or thin, without participating-media in-scattering (§5 Large #1) |
-| Per-object materials | `SceneConfig::materialOverrides` (glTF node name → `materials/*.json` path) builds a per-instance settings vector, indexed by `ShadingTriangle::instanceIndex` through both render paths | Different objects in one scene can carry different materials (e.g. a chrome sphere and a glass sphere in the same Cornell box) |
-| Environment lighting | Equirect HDR map, BSDF-sampled misses + luminance-importance-sampled NEE, MIS-combined | Image-based lighting; one member of `LightSet` alongside any area lights (still no punctual/directional lights -- those have no hittable geometry) |
-| Russian roulette | Survival probability clamped from running throughput from `russianRouletteStartBounce`, reweighted by `1/p` | Keeps recursion finite without biasing the estimator |
-| Progressive accumulation | Each background pass re-traces at the current camera/settings and averages into the displayed result; any camera/scene change restarts accumulation | Real-time-interactive without waiting for a single long render to finish |
+### Camera & display
+
+| Feature | Mechanism |
+|---|---|
+| Camera / lens | Position/yaw/pitch, film-back + focal length → derived vertical FOV, feeding pinhole primary rays directly — the geometric ground truth the ray/BSDF math is measured against |
+| Photographic exposure | EV100 from aperture/shutter/ISO, applied as a relative-stops delta against profile.json's default triple (Filament/Frostbite formula) — a familiar brightness control, not an absolute photometric quantity |
+| OpenEXR linear pipeline | `HdrImage`/`loadExr`; all shading/compositing in linear light, OCIO display-encodes only at the final blit — a precondition for correct PBR colour math |
+| Display transform | OCIO Display/View API (sRGB, Rec.709, Raw), cycled at runtime ('L') — a colourimetric encode only, no tone mapping, so values above 1.0 clip honestly rather than being masked by a hidden filmic shoulder |
+
+### Scene loading & geometry
+
+| Feature | Mechanism |
+|---|---|
+| glTF loading | cgltf; per-primitive vertices baked to world-space triangles/shading data at load time, materials' textures decoded once to `HdrImage` — nothing GPU-resident is needed once the CPU Embree scene exists |
+| Tangent-space normal mapping | Per-vertex tangent (glTF-supplied only), Gram-Schmidt re-orthogonalized per-ray, for surface micro-detail without extra geometry |
+| Ray acceleration | Intel Embree (SIMD BVH build/traversal), CPU, built once at load — sub-linear ray-scene intersection, required before recursion is affordable |
+| Primary-hit rasterizer | CPU edge-function rasterization (Pineda 1988) + near-plane clip (Sutherland-Hodgman 1974), row-parallel, synchronous every frame, giving instant primary-hit G-buffer AOVs (§4) decoupled from Beauty's progressive convergence |
+
+### Materials & lighting
+
+| Feature | Mechanism |
+|---|---|
+| Stochastic BSDF | EON rough-diffuse (Portsmouth, Kutz, Hill 2025), GGX microfacet specular, Walter 2007 rough dielectric transmission (delta Snell + TIR below the smooth-roughness threshold), Kulla-Conty multiple-scattering compensation on both interfaces; four-lobe stochastic selection, one-sample mixture estimator — real physical response, energy-conserving at every roughness |
+| Volumetric absorption | Beer-Lambert extinction (`transmissionColor` over `transmissionDepth`, Arnold/OpenPBR convention) on a single-level medium stack inside a `transmissionFactor>0` material (a constant on-surface tint at `transmissionDepth 0`) — tinted glass, thick or thin, without participating-media in-scattering (§5 Large #1) |
+| Per-object materials | `SceneConfig::materialOverrides` (glTF node name → `materials/*.json` path) builds a per-instance settings vector, indexed by `ShadingTriangle::instanceIndex` through both render paths — different objects in one scene can carry different materials |
+| Area lights | Rectangular emitters (`scene.json`'s `lights`), one-sided by default, with their own geometry in the BVH and solid-angle NEE sampling (Ureña, Fajardo & King 2013), MIS'd against BSDF sampling like the environment — the classic emissive-panel Cornell box (§5 Large #2), and ReSTIR's (§5) prerequisite light set |
+| Environment lighting | Equirect HDR map, BSDF-sampled misses + luminance-importance-sampled NEE, MIS-combined — image-based lighting, one member of `LightSet` alongside any area lights (still no punctual/directional lights, which have no hittable geometry) |
+| Environment-light toggle | HUD "Environment Light" checkbox (`environment.lightEnabled` in `scene.json`, `--env-light` on `render_beauty`) — removes the environment from NEE/MIS/every miss including the background, unlike "Show/Hide Background" which only hides the camera-visible sky; lets an HDRI+area-light scene isolate the panel-only look |
+| Russian roulette | Survival probability clamped from running throughput past `russianRouletteStartBounce`, reweighted by `1/p` — keeps recursion finite without biasing the estimator |
+| Progressive accumulation | Each background pass re-traces at the current camera/settings and averages into the displayed result, restarting on any camera/scene change — real-time-interactive without waiting for one long render to finish |
+
+### Debug tooling & telemetry
+
+| Feature | Mechanism |
+|---|---|
+| Startup spec block | One plain-text provenance block on stdout: GPU/driver/refresh rate, host CPU topology and cache line from `sysctl`, compiler/build type/`-march`/IPO/git SHA, runtime-queried library versions, and the scene's load/BVH-build cost — confirms the actual GPU/backend before a wrong-adapter bug masquerades as a render bug, and makes every timing number attributable |
+| Render telemetry (`-stats`) | 78-column terminal dashboard redrawn in place at 3 Hz via a single `write(2)`: render-thread stages with share-of-frame bars, path-trace phases, ray counts by type with Mray/s, and a `cpu total` / `frame measured` / `unaccounted` reconciliation — shows where every millisecond goes, and what it can't account for |
+| Frame-timing HUD | Ring buffer of recent frame times; rolling FPS/avg/min/max, GPU timer query around the post-process blit — makes blit cost measurable frame to frame |
+| Memory HUD | Live RAM readout plus GPU allocation tracked at alloc/free (the path-traced display texture is the only GPU allocation left) — surfaces a memory regression immediately, not after VRAM exhaustion |
+| Scene stats | Object/triangle/point counts, viewport resolution — a scene-complexity readout |
+| Debug camera controls | WASD/QE fly, R reset, LMB-drag orbit around a pivot read from the path tracer's own G-buffer (world-space hit position + hit mask at its centre pixel) — interactive navigation without hand-editing camera parameters |
+| Camera framing overlays | Centre crosshair, always on, drawn on the foreground overlay — a composition aid that never contaminates the AOV buffers being debugged |
+| AOV selector | Dropdown across the full AOV set (§4), plus R/G/B channel-isolation hotkeys, to isolate one signal at a time |
+| Live histogram | Per-channel (R/G/B) histogram of the currently displayed image — catches exposure/clipping and colour-space bugs a single still frame can hide |
 
 ## 3. Material library
 
-Named presets (`assets/materials/*.json`), parsed into `MaterialConfig` (`scene_config.h`) and assigned per-scene via `SceneConfig::materialPath` (the scene's default material) plus an optional per-object override, `SceneConfig::materialOverrides` (glTF node name → material JSON path) -- e.g. `assets/scenes/cornell.json`'s `{"sphere01": "materials/chrome.json", "sphere02": "materials/glass.json"}`, cornell box left on the scene default. Overrides build a per-instance settings vector indexed by `ShadingTriangle::instanceIndex` through both render paths (§2 Per-object materials).
+Named presets live in `assets/materials/*.json`, parsed into `MaterialConfig` (`scene_config.h`). Each scene picks one as its default via `SceneConfig::materialPath`, with optional per-object overrides via `SceneConfig::materialOverrides` (glTF node name → material JSON path) — e.g. `assets/scenes/cornell.json`'s `{"sphere01": "materials/chrome.json", "sphere02": "materials/glass.json"}`, everything else left on the scene default. Overrides build a per-instance settings vector, indexed by `ShadingTriangle::instanceIndex` through both render paths (§2 Per-object materials).
 
-| File | metallic | transmission | roughness (factor / min) | Role |
+Add a new material by dropping a JSON file in `assets/materials/` and pointing `materialPath`/`materialOverrides` at it — no code or schema change needed.
+
+### Shipped presets
+
+| File | metallic | transmission | roughness (factor / min) | Notes |
 |---|---|---|---|---|
-| `principled.json` | 0.0 | 0.0 | 1.0 / 0.045 | Was the tree scene's material (`tree.json`, its geometry/textures currently pulled from the repo); rough dielectric, heavy bump (`bumpStrength: 10.0`). The one file that declares every field, including the otherwise-optional `transmissionColor`/`transmissionDepth`/`edgeTint` |
+| `principled.json` | 0.0 | 0.0 | 1.0 / 0.045 | The tree scene's material (`tree.json`); rough dielectric, heavy bump (`bumpStrength: 10.0`). The only preset that declares every field, including the otherwise-optional `transmissionColor`/`transmissionDepth`/`edgeTint` |
 | `clay.json` | 0.0 | 0.0 | 0.5 / 0.045 | Neutral matte dielectric, no bump |
-| `chrome.json` | 1.0 | 0.0 | 0.05 / 0.045 | Idealised near-white mirror: `diffuseColour` (which at `metallic=1` *is* `f0`, Gulbrandsen's reflectivity `r`) is `[0.95, 0.95, 0.97]` and `edgeTint` is white, i.e. **no reflectance dip** — the one edge tint at which the conductor reproduces Schlick's grazing behaviour, so this preset exercises the transport rather than the parameterisation. A measured metal is what the `(r, edgeTint)` basis exists for: chromium's Johnson & Christy 1974 triples, their provenance and their error budget are recorded at `conductorIorFromReflectivity` (`bsdf.cpp`) and can be pasted straight back into this file |
-| `glass.json` | 0.0 | 1.0 | 0.02 / 0.01 | Schott N-BK7 crown glass, `ior: 1.5168` at the d line with `abbe: 64.17` giving it dispersion; tinted via Beer-Lambert `transmissionColor: [0.96, 0.98, 1.0]` over `transmissionDepth: 0.4` world units -- `diffuseColour` cannot tint transmission at all, see below |
+| `chrome.json` | 1.0 | 0.0 | 0.05 / 0.045 | Idealised near-white mirror: `diffuseColour` (which at `metallic=1` *is* `f0`, Gulbrandsen's reflectivity `r`) is `[0.95, 0.95, 0.97]` with a white `edgeTint` — **no reflectance dip**, the one edge tint at which the conductor reproduces Schlick's grazing behaviour, so this preset exercises the transport rather than the parameterisation. A measured metal is what the `(r, edgeTint)` basis exists for: chromium's Johnson & Christy 1974 triples are recorded at `conductorIorFromReflectivity` (`bsdf.cpp`) and can be pasted straight back into this file |
+| `glass.json` | 0.0 | 1.0 | 0.02 / 0.01 | Schott N-BK7 crown glass, `ior: 1.5168` at the d line with `abbe: 64.17` for dispersion; tinted via Beer-Lambert `transmissionColor: [0.96, 0.98, 1.0]` over `transmissionDepth: 0.4` world units — `diffuseColour` cannot tint transmission at all (see below) |
 
-`MaterialConfig` fields:
+### `MaterialConfig` fields
 
 | Field | Meaning |
 |---|---|
-| `diffuseColour` | Multiplies `baseColorTexture`; also the conductor lobe's `f0` tint. A **reflection** quantity throughout: it does not tint transmitted light, which `transmissionColor` alone does (below). On the diffuse lobe it is the **observed** albedo — the reflection colour seen at normal incidence under uniform illumination, OpenPBR's reading of `base_color` — not EON's ρ. The two differ once `diffuseRoughness > 0`; `eonAlbedoInversion` (`bsdf.cpp`) maps one to the other |
-| `metallicFactor` / `transmissionFactor` | Lobe selection -- a material is dielectric, conductor, or transmissive, not blended between (every shipped file uses 0.0/1.0) |
+| `diffuseColour` | Multiplies `baseColorTexture`; also the conductor lobe's `f0` tint. A **reflection** quantity throughout — it never tints transmitted light, which `transmissionColor` alone does. On the diffuse lobe it's the **observed** albedo (OpenPBR's reading of `base_color`), not EON's ρ; the two differ once `diffuseRoughness > 0`, and `eonAlbedoInversion` (`bsdf.cpp`) maps one to the other |
+| `metallicFactor` / `transmissionFactor` | Lobe selection — a material is dielectric, conductor, or transmissive, not blended between (every shipped file uses 0.0/1.0) |
 | `roughnessFactor` | Multiplies the roughness texture sample, before the `roughnessMin`/`roughnessMax` clamp |
 | `roughnessMin` / `roughnessMax` | Per-material clamp on the roughness sample; a material can floor below the shared 0.045 (e.g. glass's 0.01) for a genuinely smooth GGX lobe |
 | `ior` | Dielectric IOR, non-metal lobes only |
+| `abbe` | Abbe number, dispersion strength for the dielectric/transmissive lobes; 0 = no dispersion |
 | `diffuseRoughness` | EON rough-diffuse parameter r ∈ [0,1] (Portsmouth, Kutz, Hill 2025, revised 2026-02-04); 0 = Lambertian, and the roughness at which `diffuseColour` and EON's ρ coincide |
 | `bumpStrength` | Scales the bump texture's per-texel height difference |
-| `transmissionColor` / `transmissionDepth` | The **only** tint on transmitted light (Arnold `standard_surface`/OpenPBR convention), realised in one of two mutually exclusive regimes picked by the depth. `transmissionDepth > 0`: interior-medium Beer-Lambert absorption, `sigmaA = -log(transmissionColor)/transmissionDepth`, applied while a path is inside a `transmissionFactor>0` material. `transmissionDepth 0`: no interior medium -- a constant on-surface tint applied once per crossing, so a closed solid reads its square. Optional, default `[1,1,1]`/`0.0` -- Arnold/OpenPBR's own default, a true no-op in either regime (§2 Volumetric absorption) |
-| `edgeTint` | Gulbrandsen 2014 edge tint for the conductor lobe, `metallicFactor>0` only. Optional, default `[1,1,1]`: white is the no-dip edge Schlick always produced |
-
-`diffuseColour`/`roughnessFactor`/`roughnessMin`/`roughnessMax`/`bumpStrength` are required (`j.at`, missing/malformed fails the load and logs to stderr); `ior`/`abbe`/`metallicFactor`/`transmissionFactor`/`diffuseRoughness`/`transmissionColor`/`transmissionDepth`/`edgeTint` are parsed optional-with-default (`j.value`), each defaulting to the value that makes it a no-op in its owning lobe -- so a bespoke material only declares the fields its archetype actually uses (see `clay.json`/`glass.json`/`chrome.json` above vs. `principled.json`, which declares all thirteen). Add a new material by dropping a JSON file in `assets/materials/` and pointing `materialPath`/`materialOverrides` at it -- no code or schema change needed.
+| `transmissionColor` / `transmissionDepth` | The **only** tint on transmitted light (Arnold `standard_surface`/OpenPBR convention). `transmissionDepth > 0`: interior-medium Beer-Lambert absorption, `sigmaA = -log(transmissionColor)/transmissionDepth`, applied while a path is inside a `transmissionFactor>0` material. `transmissionDepth 0`: no interior medium — a constant on-surface tint applied once per crossing, so a closed solid reads its square. Default `[1,1,1]`/`0.0` is Arnold/OpenPBR's own no-op default in either regime (§2 Volumetric absorption) |
+| `edgeTint` | Gulbrandsen 2014 edge tint for the conductor lobe, `metallicFactor>0` only. Default `[1,1,1]`: white is the no-dip edge Schlick always produced |
 
 ## 4. AOV reference
 
@@ -148,35 +143,52 @@ The four Direct/Indirect Diffuse/Specular buckets key on the **sampling strategy
 
 Every AOV below is computed by the path tracer each pass, except: the 14 primary-hit-only AOVs (Alpha, Depth, WorldPos, UV, Normal, GeomNormal, Albedo, Metallic, Roughness, Tangent, ObjectID, Fresnel, IOR, Wireframe), which come from the synchronous CPU rasterizer (§1, §2) instead, refreshed every frame; and HSV/Luminance/Sobel/Gabor, GPU post-filters of the Beauty image (shared `PostProcessPass`, re-run every displayed frame over the completed texture -- not cached across frames, see §6 roadmap).
 
-| AOV | Category | Mechanism | Role / why it matters |
-|---|---|---|---|
-| Beauty | Utility | Final accumulated radiance, post tone-mapping | The primary output |
-| Wireframe | Utility | Screen-space line rasterization (Pineda 1988), z-tested against the scene's own depth: white mesh-triangle edges, yellow scene-bounding-box edges (drawn on top, so yellow wins) | Visualizes triangle density/topology and sanity-checks scene extent/framing in one combined view |
-| Alpha | Utility | 1.0 on a primary hit, 0.0 on a primary miss | Real coverage mask (this renderer isn't opaque-only-by-construction) |
-| Depth | Utility | Planar camera-space Z (Arnold/RenderMan/EXR "Z" convention) at the primary hit | Depth-based compositing/debugging |
-| HSV | Utility | Colour-space transform of Beauty | Isolates hue/saturation shifts a pure RGB view can hide |
-| Luminance | Utility | Rec.709 luminance of Beauty | Isolates perceived brightness from colour |
-| Sobel | Utility | 3×3 Sobel gradient magnitude of Luminance | Cheap edge/gradient signal |
-| Gabor | Utility | 4-orientation Gabor kernel bank, max response, of Luminance | Directional edge/texture response Sobel's isotropic magnitude can't distinguish |
-| WorldPos | Utility | Raw world-space primary-hit position | Debugging geometry/UV placement independent of shading |
-| UV | Utility | Primary-hit interpolated UV (fractional part) | Visualizes the texture-space mapping directly |
-| Normal | Material | Shading (normal-mapped) normal at the primary hit | The normal actually used in shading |
-| GeomNormal | Material | Smooth interpolated vertex normal, before normal-mapping | Separates a bad normal map from a bad base mesh |
-| Albedo | Material | Base-colour texture sample at the primary hit | Isolates texture data from lighting |
-| Metallic | Material | Per-instance metallic factor (`settings.metallicFactor`, `materials/*.json` or `SceneConfig::materialOverrides`), uniform within one object's triangles but no longer whole-image-constant now that per-object material assignment exists | Debug which instance carries which metallic value |
-| Roughness | Material | Roughness texture × a per-instance factor, floored at that material's own `roughnessMin` (materials can set their own floor, e.g. glass's below diffuse/chrome's shared 0.045); the texture varies per hit, the multiplying factor/floor vary per instance | Debug material authoring independent of shading |
-| Tangent | Material | Shading tangent basis at the primary hit | Debugs the tangent-space basis used for normal mapping |
-| ObjectID | Material | Per-instance index, false-coloured (`falseColorForId`) | Isolation mask for compositing/debugging |
-| AO | Material | Cosine-weighted obscurance (Zhukov et al. 1998; Iones et al. 2003), the distance-weighted generalisation of ambient occlusion (Miller 1994; Landis 2002): one hemisphere ray per sample bounded by `aoMaxDistance` (`profile.json`), each hit weighted `1 - (1 - t/aoMaxDistance)^2` so occlusion grades with proximity and reaches full visibility smoothly at the bound; 1.0 = unoccluded, the opposite polarity to Shadow | Reads contact and corner darkening off the actual geometry, which the baked texture it replaces could not express -- and, being pure visibility, independent of material and lighting |
-| Fresnel | Transport | `mix(exact dielectric Fresnel, exact complex-IOR conductor Fresnel, metallic)` at the primary hit's view angle — the same term shading evaluates (`fresnelAtViewAngle`, `bsdf.h`), against the macro normal rather than a microfacet half-vector | Debug grazing-angle reflectance behaviour in isolation, including the conductor dip an authored `edgeTint` produces, which the previous Schlick term could not represent at any `f0` |
-| IOR | Transport | Per-instance dielectric IOR (`settings.ior`), -1 on a miss | Isolates the raw refractive-index input driving Fresnel/transmission |
-| BounceCount | Transport | Mean path termination depth across samples, per pixel | Debug Russian roulette/termination behaviour |
-| DirectDiffuse | Lighting | Diffuse-bucketed radiance from a path's first (bounce-0) surface, physical (base colour included) | Isolates direct diffuse light arrival, in the same units as Beauty |
-| IndirectDiffuse | Lighting | Diffuse-bucketed radiance from later bounces | Isolates indirect (bounced) diffuse contribution |
-| DirectSpecular | Lighting | Specular-reflection-bucketed radiance, one bounce from camera | Isolates direct specular contribution |
-| IndirectSpecular | Lighting | Specular-reflection-bucketed radiance, later bounces | Isolates indirect specular (reflections) |
-| Refraction | Lighting | Radiance from any path that sampled a transmission lobe (sticky bucket) | Isolates glass/transmissive transport |
-| Shadow | Lighting | Binary NEE occlusion test toward the sampled light (environment or an area light, per `LightSet`'s uniform selection) at the primary hit, re-averaged across progressive passes into continuous shadow/penumbra density | Isolates direct-light visibility from material/lighting colour |
+### Utility
+
+| AOV | Mechanism |
+|---|---|
+| Beauty | Final accumulated radiance, post tone-mapping — the primary output |
+| Wireframe | Screen-space line rasterization (Pineda 1988), z-tested against the scene's own depth: white mesh-triangle edges, plus one bounding box per instance in that instance's `falseColorForId` hue, the same hue ObjectID gives it (drawn on top, so the box wins) — visualizes triangle density/topology and each object's extent/placement in one view |
+| Alpha | 1.0 on a primary hit, 0.0 on a primary miss — a real coverage mask (this renderer isn't opaque-only-by-construction) |
+| Depth | Planar camera-space Z (Arnold/RenderMan/EXR "Z" convention) at the primary hit, for depth-based compositing/debugging |
+| HSV | Colour-space transform of Beauty — isolates hue/saturation shifts a pure RGB view can hide |
+| Luminance | Rec.709 luminance of Beauty — isolates perceived brightness from colour |
+| Sobel | 3×3 Sobel gradient magnitude of Luminance — a cheap edge/gradient signal |
+| Gabor | 4-orientation Gabor kernel bank, max response, of Luminance — directional edge/texture response Sobel's isotropic magnitude can't distinguish |
+| WorldPos | Raw world-space primary-hit position, for debugging geometry/UV placement independent of shading |
+| UV | Primary-hit interpolated UV (fractional part) — visualizes the texture-space mapping directly |
+
+### Material
+
+| AOV | Mechanism |
+|---|---|
+| Normal | Shading (normal-mapped) normal at the primary hit — the normal actually used in shading |
+| GeomNormal | Smooth interpolated vertex normal, before normal-mapping — separates a bad normal map from a bad base mesh |
+| Albedo | Base-colour texture sample at the primary hit — isolates texture data from lighting |
+| Metallic | Per-instance metallic factor (`settings.metallicFactor`, `materials/*.json` or `SceneConfig::materialOverrides`), uniform within one object's triangles but no longer whole-image-constant now that per-object material assignment exists — debugs which instance carries which metallic value |
+| Roughness | Roughness texture × a per-instance factor, floored at that material's own `roughnessMin` (materials can set their own floor, e.g. glass's below diffuse/chrome's shared 0.045); texture varies per hit, factor/floor vary per instance — debugs material authoring independent of shading |
+| Tangent | Shading tangent basis at the primary hit — debugs the tangent-space basis used for normal mapping |
+| ObjectID | Per-instance index, false-coloured (`falseColorForId`) — an isolation mask for compositing/debugging |
+| AO | Cosine-weighted obscurance (Zhukov et al. 1998; Iones et al. 2003), the distance-weighted generalisation of ambient occlusion (Miller 1994; Landis 2002): one hemisphere ray per sample bounded by `aoMaxDistance` (`profile.json`), each hit weighted `1 - (1 - t/aoMaxDistance)^2` so occlusion grades with proximity and reaches full visibility smoothly at the bound; 1.0 = unoccluded, the opposite polarity to Shadow — reads contact/corner darkening off the actual geometry, independent of material and lighting |
+
+### Transport
+
+| AOV | Mechanism |
+|---|---|
+| Fresnel | `mix(exact dielectric Fresnel, exact complex-IOR conductor Fresnel, metallic)` at the primary hit's view angle — the same term shading evaluates (`fresnelAtViewAngle`, `bsdf.h`), against the macro normal rather than a microfacet half-vector; debugs grazing-angle reflectance in isolation, including the conductor dip an authored `edgeTint` produces |
+| IOR | Per-instance dielectric IOR (`settings.ior`), -1 on a miss — isolates the raw refractive-index input driving Fresnel/transmission |
+| BounceCount | Mean path termination depth across samples, per pixel — debugs Russian roulette/termination behaviour |
+
+### Lighting
+
+| AOV | Mechanism |
+|---|---|
+| DirectDiffuse | Diffuse-bucketed radiance from a path's first (bounce-0) surface, physical (base colour included) — isolates direct diffuse light arrival, in the same units as Beauty |
+| IndirectDiffuse | Diffuse-bucketed radiance from later bounces — isolates indirect (bounced) diffuse contribution |
+| DirectSpecular | Specular-reflection-bucketed radiance, one bounce from camera — isolates direct specular contribution |
+| IndirectSpecular | Specular-reflection-bucketed radiance, later bounces — isolates indirect specular (reflections) |
+| Refraction | Radiance from any path that sampled a transmission lobe (sticky bucket) — isolates glass/transmissive transport |
+| Shadow | Binary NEE occlusion test toward the sampled light (environment or an area light, per `LightSet`'s uniform selection) at the primary hit, re-averaged across progressive passes into continuous shadow/penumbra density — isolates direct-light visibility from material/lighting colour |
 
 ## 5. Roadmap
 
@@ -222,23 +234,19 @@ Grouped by area of design, each group ordered by importance (most important firs
 - **Texture minification filtering (MIP-mapping)**: point/bilinear only today (`sampleBilinear`, `hdr_image.h:22`); grazing/distant surfaces alias. No mip chain exists; needs ray differentials to pick a level per ray.
 - **Texture bit depth (16/32) via JSON**: hardcoded `GL_RGBA16F` today (`texture.cpp:45`); 32F ~doubles VRAM/buffer.
 - **High-frequency binary noise texture/material**: none exists yet. Add as a stress test for the Texture minification filtering item above -- high-frequency content exposes aliasing before/after mip-mapping lands, since sampling is point/bilinear only today (`sampleBilinear`, `hdr_image.h:22`).
-- **Display-texture upload rebuilds the whole image every published pass**: `ensurePathTraceDisplayTexture` (`main.cpp:847`) re-uploads the full RGBA32F buffer whenever the cache key changes -- 37.7 MB at 2048x1152, measured at **4.0-7.0 ms** on the render thread (`-stats`, `tex upload` row), firing once per completed pass. Three independent options, none of them tried: RGBA16F for the display copy (the texture is already `GL_RGBA16F`, `texture.cpp:45`, so the 32-bit staging copy is converted on the way in anyway), a PBO so the copy leaves the render thread, or uploading only the tiles the pass actually rewrote. Needs the Benchmark log (§6) to say which of the three is worth the bookkeeping.
+- **Display-texture upload rebuilds the whole image every published pass**: `ensurePathTraceDisplayTexture` (`main.cpp:847`) re-uploads the full RGBA32F buffer whenever the cache key changes -- 37.7 MB at 2048x1152, measured at **4.0-7.0 ms** on the render thread (`-stats`, `tex upload` row), firing once per completed pass. Three independent options, none of them tried: RGBA16F for the display copy (the texture is already `GL_RGBA16F`, `texture.cpp:45`, so the 32-bit staging copy is converted on the way in anyway), a PBO so the copy leaves the render thread, or uploading only the tiles the pass actually rewrote. Needs the Benchmark log (§5) to say which of the three is worth the bookkeeping.
 - **Frustum/backface culling**: skip `buildSubTriangles`'s per-frame full-scene walk (`rasterizer.cpp:153,274`) and the equivalent Embree traversal when out of view.
 - **Packet tracing**: `EmbreeAccel` calls `rtcIntersect1`/`rtcOccluded1` exclusively (`embree_accel.cpp:116,144`), single-ray only -- no `rtcIntersect4/8/16` packet API.
 - **Ray reordering before shading**: the tile loop traces in raster order (`path_tracer.cpp:307-320`), no Morton/direction-coherence sort ahead of `tracePath` (`path_tracer.cpp:77`).
 - **Deferred/sorted shading by material**: `tracePath` (`path_tracer.cpp:77`) evaluates the BSDF inline per ray; no material-bucketed shading pass.
-- **Reduce AOV-switch restarts**: `aovNeedsLightTransport` (`main.cpp:100-120`) plus the trigger-state comparison (`main.cpp:942-958`) force a full progressive-accumulation restart on every AOV switch that changes producer (rasterizer vs. path tracer), and even between two light-transport AOVs, since there's no mechanism to add a new accumulator bucket onto an already-converged mean today -- full restart or nothing. Blocked on: Benchmark log (§6), needed to measure whether a fix here (e.g. accumulating multiple light-transport AOVs simultaneously) is actually a net win before committing to the added bookkeeping.
+- **Reduce AOV-switch restarts**: `aovNeedsLightTransport` (`main.cpp:100-120`) plus the trigger-state comparison (`main.cpp:942-958`) force a full progressive-accumulation restart on every AOV switch that changes producer (rasterizer vs. path tracer), and even between two light-transport AOVs, since there's no mechanism to add a new accumulator bucket onto an already-converged mean today -- full restart or nothing. Blocked on: Benchmark log (§5), needed to measure whether a fix here (e.g. accumulating multiple light-transport AOVs simultaneously) is actually a net win before committing to the added bookkeeping.
 
-### 4. Scene & geometry
-
-- **Per-object bounds**: `EmbreeAccel::sceneBounds()` (`embree_accel.cpp:124-129`) computes one `rtcGetSceneBounds()` over a single flattened `RTC_GEOMETRY_TYPE_TRIANGLE` geometry holding every instance's triangles combined (`embree_accel.cpp:53-100`); the only consumer, the Wireframe AOV's box overlay, draws one scene-wide box (`rasterizer.cpp:435-436`). Every triangle already carries `instanceIndex` (`shading_scene.h:21`), so per-object AABBs can be computed by grouping `worldTriangles` by it.
-
-### 5. Camera
+### 4. Camera
 
 - **Depth of field**: thin-lens sampling in `primaryRay` + focus distance; technically unblocked today, cheaper once adaptive sampling lands.
 - **Motion blur**: blocked on the scene-graph/animation foundation the engine does not have yet + Embree multi-timestep geometry.
 
-### 6. Debug tooling, AOVs & UX
+### 5. Debug tooling, AOVs & UX
 
 - **Recover the delighted DirectDiffuse/DirectSpecular view**: `bdecb41` made the five transport AOVs physical (each contribution written once) so they exactly partition Beauty (`checkTransportPartition`, `integrator_validate.cpp:387`, ±1e-4) -- the prior delighted view (base colour divided out) was deliberately dropped, not a regression; its replacement is `DirectDiffuse / Albedo`.
   - Blocked, not Quick: Albedo is a `RasterGBuffer` field (`rasterizer.cpp:321`); `aovNeedsLightTransport` (`main.cpp:773-808`) makes the rasterizer/path-tracer mutually exclusive, so the two are never simultaneously fresh.
@@ -249,9 +257,6 @@ Grouped by area of design, each group ordered by importance (most important firs
   - No scene-graph animation yet, camera-only motion over static geometry -- this reprojects `WorldPos` (§4) through the previous frame's camera transform, not true motion capture.
   - `Camera` (`camera.h:10`) exposes only current `position()` (`camera.h:23`), no stored prior-frame matrix; needs one new persisted matrix, no new ray/sample work.
 - **Contact sheet export (grid of every AOV)**: tile thumbnails of all 27 `AovId` (`aov.h:7-40`) at once, vs. the HUD's single `ImGui::Combo` (`hud_overlay.cpp:336`) feeding one `pathTraceDisplayTexture` blit (`presentFrame`, `main.cpp:739`). Same mutual-exclusion blocker as the delighted-view item above: `aovNeedsLightTransport` (`main.cpp:93-108`) splits the 27 into 13 light-transport / 14 rasterizer AOVs, only one side fresh per frame -- needs that gating relaxed, not just N reads of one cached buffer.
-- **Expand reset (`0`) to full launch state**: `DebugCameraController::resetToDefault()` (`debug_camera_controller.cpp:122-127`, bound at `main.cpp:494-495`) resets only camera position/yaw/pitch/orbiting.
-  - Exposure-triangle defaults are already stored but never applied (`defaultAperture_`/`defaultShutterSeconds_`/`defaultIso_`, `debug_camera_controller.h:77-79`).
-  - Also not reset: `app.aov`, `userLut`, `channelView`, `invert` (`main.cpp:153-233`).
 - **PNG capture tool hardening**: `tools/render_beauty.cpp`'s `writePng` (lines 68-111) pipeline order is correct (exposure → OCIO display transform → dither → clamp → quantize, lines 198-234). Two gaps: RGB-only, no alpha (`colour type 2`, line 95); scanline filter hardcoded to type 0/None despite a comment claiming adaptive filtering (lines 70-74). Fix the comment or implement real adaptive filtering; add alpha output if a future consumer needs it.
 - **Depth's auto-range maximum is a serial per-texel render-thread scan**: `ensurePathTraceDisplayTexture` (`main.cpp:848-854`) walks the whole Depth image on the render thread to find its normalisation maximum -- the same shape as the over-range scan that has now moved to the driver, and the last one left. Narrower, though: it runs only on the display-texture cache-miss path and only while the Depth AOV is selected, so it is not on the Beauty path at all. Fixing it needs the range published from the producer the way `OverRangeStats` is, which for Depth is `RasterGBuffer`, not `PathTraceResult`.
 - **Reduce the HUD's build cost**: the `hud build` / `hud render` split (`-stats`) now attributes the stage, and the cost is **entirely widget construction in `HudOverlay::draw`**, not draw-list submission: 1.520 ms against 0.107 ms with the HUD shown, 0.000 ms against 0.021 ms with it hidden (cornell, 2048x1152, Apple M1). Any optimisation belongs in `draw`; `ImGui::Render`/`RenderDrawData` has nothing worth attacking.
@@ -263,17 +268,17 @@ Grouped by area of design, each group ordered by importance (most important firs
 - **Cache the post-filter AOVs (Gabor/Sobel/HSV/Luminance) across unchanged frames**: these already run as true post-process passes over the completed Beauty texture (`isPostFilterAov`, `main.cpp:865-867`; `edge_filter.frag`/`hsv_display.frag`), not touching accumulation -- but `presentFrame` (`main.cpp:860`, called every frame from `renderFrame` at `main.cpp:1100`) re-runs the filter shader on every displayed frame regardless of whether Beauty actually changed since the last one (e.g. idle HUD interaction). Skip the re-run when the underlying texture hasn't changed; §4's AOV reference wording was corrected alongside this finding, since it previously read as if a cache already existed.
 - **Diagonal coverage crack visible in the IOR AOV**: a short dashed/dotted diagonal line appears on the Cornell box's back wall in the IOR AOV, on an otherwise flat field. Ruled out: IOR is one constant `settings.ior` per instance (`rasterizer.cpp:329`), the box is a single instance, and the wall quad's two triangles share real index-buffer vertices at the diagonal (not duplicates) -- so the IOR value is bit-identical on both sides, and this can't be a material/instance seam. Also ruled out: a box-edge overlay path exists (`drawBoxEdgesRow`, `rasterizer.cpp:388-406,461`) but writes only the Wireframe AOV, never composited over IOR (`selectPathTracedImage`, `main.cpp:717-780`, returns exactly one AOV buffer per selection); and the IOR display is a plain unscaled Raw passthrough with no inversion by default (`ocio_display_transform.cpp:96-110`) -- so it's neither wireframe bleed-through nor a tonemap artifact. Leading hypothesis, not yet measured: a rasterizer coverage crack -- `coverPixel` (`rasterizer.cpp:77-85`) has no top-left tie-break/epsilon inset, and `buildSubTriangles` (`rasterizer.cpp:171-222`) projects/clips each triangle independently with no shared-vertex structure, so a "no gap" guarantee between two triangles sharing an edge is incidental, not enforced. A gap pixel keeps the per-row cleared/sentinel value (`rasterizer.cpp:447-456`) -- `0.0F` in most AOVs, `-1.0F` in IOR specifically -- so the same gap would show in any AOV whose field is non-zero at the wall; IOR's `-1` is just its own background value, not the reason the crack is visible only here. Needs confirmation by instrumenting `coverPixel`/`depthPassRow` at the exact dashed pixels before treating this as diagnosed.
 
-### 7. Testing & validation infrastructure
+### 6. Testing & validation infrastructure
 
 - **Test suite hardening**: `ctest` wires 6 correctness validators (`bsdf_validate`, `embree_validate`, `integrator_validate`, `nee_validate`, `rasterizer_validate`, `sampler_validate`; `enable_testing()`/`add_test` loop, `CMakeLists.txt:275-277`), but each is a standalone binary rolling its own assertions, with no shared unit-test framework behind them, and there is no automated regression-image gate -- `render_beauty`'s `--compare` exists but is deliberately excluded from `add_test` (`CMakeLists.txt:245`, human-judged visual comparison). Add a lightweight unit-test framework for the former, and/or a threshold-based promotion of the image diff into `ctest` for the latter.
 
-### 8. Engineering & maintenance
+### 7. Engineering & maintenance
 
 - **Memory efficiency pass**: only monitoring exists today (Memory HUD, §2), no active reduction initiative. Candidates once profiled: `gltf_loader.cpp`'s de-indexed mesh soup, which stores every position twice (once in `Triangle` for Embree, once in `ShadingVertex` for shading), and texture bit depth (Rendering performance & sampling, above).
 - **Documentation pass**: three parts -- a user/build guide beyond this README's Build section; an architecture/API reference for the `src/`/`include/engine/` module layout; write-ups of the physically-based techniques in use (BSDF model, sampling, GI), separate from inline code comments.
 - **Code-quality audit**: `rotateAboutY` (`environment_map.cpp:13`) → `glm::rotate`; `ShadingFrame::toLocal`/`toWorld` (`bsdf.h:26`) → `glm::mat3`. (BSDF math in `bsdf.cpp` -- GGX/Smith/Fresnel/VNDF -- is standard domain logic, not an offload candidate.)
 
-### 9. Large: strict dependency order
+### 8. Large: strict dependency order
 
 1. **Volumetric & subsurface transport**: participating media (in-scattering, phase functions) + BSSRDF/random-walk subsurface.
    - Beer-Lambert *extinction* (no in-scattering) already ships for tinted glass (`transmissionColor`/`transmissionDepth`, `path_tracer.cpp`'s `mediumSigmaA`) -- a simpler subset of this item, not the item itself.
