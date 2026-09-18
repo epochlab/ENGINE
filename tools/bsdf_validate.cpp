@@ -1711,8 +1711,9 @@ ENGINE_CHECK(transmission_round_trip, Slow, Statistical) {
 }
 
 // Transmission through an index-matched interface, the one configuration where the answer needs no reference at all: at ior 1 there is no interface, so a transmissive surface must pass every ray straight through, at every angle, and lose nothing.
-// This is the only check in the suite that reaches sampleBsdf's two refraction sites -- refractAbout for the rough branch and the Snell block in the smooth one. Both decided total internal reflection from 1 - cos^2(thetaI), which rounds to exactly 1.0F below cos 2^-12, so both reported TIR at an interface with no critical angle and returned no sample at all. A lost transmission sample is silent: it is energy deleted from the estimator, not a wrong value, so no furnace, reciprocity or chi-square row above can see it -- only the absence asserted here.
-// The existence assertion is binary and carries the check; it needs no tolerance and cannot be tuned. The direction and throughput assertions are the backstop that stops a sample that merely EXISTS from passing while pointing somewhere an index-matched interface cannot send it.
+// This is the only check in the suite that reaches the Snell block's cos^2 TIR predicate at ior 1. It decided total internal reflection from 1 - cos^2(thetaI), which rounds to exactly 1.0F below cos 2^-12, so it reported TIR at an interface with no critical angle and returned no sample at all. A lost transmission sample is silent: it is energy deleted from the estimator, not a wrong value, so no furnace, reciprocity or chi-square row above can see it -- only the absence asserted here.
+// It is also the only check that pins ior 1 to that same block at EVERY roughness. An index-matched interface is not a rough interface, it is no interface, and transmissionIsRough says so (PBRT-v4's DielectricBxDF branches its value, pdf and sampler on the same `eta == 1 || EffectivelySmooth()`). Before it did, the rough branch reached refractAbout, which returns -wo about every microfacet normal at ior 1, and evaluateTransmissionLobe then normalised the resulting zero half-vector: measured NaN throughput on 7783 of 7783 transmission draws at roughness 0.1 and 6666 of 7783 at roughness 1.0, the remainder being msTransmit draws, which do not form that half-vector. NaN is silent for the same reason a lost sample is -- it is not a wrong value any row above can average, it poisons the pixel for the rest of the render.
+// The existence assertion is binary and carries the check; it needs no tolerance and cannot be tuned. The direction and throughput assertions are the backstop that stops a sample that merely EXISTS from passing while pointing somewhere an index-matched interface cannot send it, and the reflection rows are the same statement on the near hemisphere: exact Fresnel is identically zero at ior 1, so nothing may come back.
 ENGINE_CHECK(index_matched_transmission, Fast, Exact) {
     // Straight-through is algebraic at r == 1 -- cos(thetaT) == cos(thetaI) and the tangential components scale by exactly 1 -- but it is reached through sqrt(fl(wo.z*wo.z)), which is not required to return |wo.z| to the last bit. Measured worst 0 over the whole sweep; the bound is one float32 epsilon of headroom, not a fitted number.
     constexpr float kDirectionTolerance = 1.2e-7F;
@@ -1773,7 +1774,7 @@ ENGINE_CHECK(index_matched_transmission, Fast, Exact) {
             ok = false;
         }
 
-        // The rough branch reaches refractAbout, which returned false in the same sliver. Every draw must produce a sample: with no critical angle, no microfacet orientation the VNDF can draw is steep enough to totally internally reflect.
+        // The rough draws below must select that same delta branch and carry that same throughput. Every draw is asserted, not merely counted: a NaN throughput is invisible to a count, and a count is all this used to make.
         const BsdfParams roughParams{smoothParams.baseColor,  smoothParams.metallic,
                                       kRoughRoughness,         smoothParams.f0,
                                       smoothParams.edgeTint,   /*ior=*/1.0F,
@@ -1781,6 +1782,10 @@ ENGINE_CHECK(index_matched_transmission, Fast, Exact) {
                                       smoothParams.diffuseRho, smoothParams.transmissionTint};
         int rejected = 0;
         int transmitted = 0;
+        int notDelta = 0;
+        int notFinite = 0;
+        float roughDirection = 0.0F;
+        float roughChromaticity = 0.0F;
         for (int i = 0; i < kRoughDraws; ++i) {
             engine::scene::Sampler roughSampler(0, 0, i, kRoughDraws, 9200U);
             const std::optional<engine::scene::BsdfSample> rough =
@@ -1789,16 +1794,77 @@ ENGINE_CHECK(index_matched_transmission, Fast, Exact) {
                 ++rejected;
                 continue;
             }
-            if (rough->type == engine::scene::LobeType::Transmission) {
-                ++transmitted;
+            if (rough->type != engine::scene::LobeType::Transmission) {
+                continue;
             }
+            ++transmitted;
+            const glm::vec3 weight = rough->throughputWeight;
+            if (!std::isfinite(weight.x) || !std::isfinite(weight.y) || !std::isfinite(weight.z)) {
+                ++notFinite;
+                continue;
+            }
+            if (rough->pdf != 0.0F) {
+                ++notDelta;
+            }
+            const glm::vec3 roughRatio = weight / tint;
+            roughDirection = std::max(roughDirection, maxChannel(glm::abs(rough->wiLocal + wo)));
+            roughChromaticity =
+                std::max(roughChromaticity, maxChannel(roughRatio) - minChannel(roughRatio));
         }
+        worstDirection = std::max(worstDirection, roughDirection);
+        worstChromaticity = std::max(worstChromaticity, roughChromaticity);
         roughRejections += rejected;
         if (transmittedAtNormal < 0) {
             transmittedAtNormal = transmitted;
         }
         std::cout << "  cos " << cosine << ": rough draws " << kRoughDraws << ", transmission "
-                  << transmitted << ", rejected " << rejected << '\n';
+                  << transmitted << ", rejected " << rejected << ", non-delta " << notDelta
+                  << ", non-finite " << notFinite << '\n';
+        if (notFinite != 0) {
+            std::cerr << "bsdf_validate: FAILED index-matched rough transmission at cos=" << cosine
+                      << " -- " << notFinite << " of " << transmitted
+                      << " transmission draws carried a non-finite throughput; at ior 1 the lobe is a "
+                         "delta and every draw must carry tint/P, so a NaN here is the zero half-vector "
+                         "an index-matched rough refraction forms\n";
+            ok = false;
+        }
+        if (notDelta != 0) {
+            std::cerr << "bsdf_validate: FAILED index-matched rough transmission at cos=" << cosine
+                      << " -- " << notDelta << " of " << transmitted
+                      << " transmission draws reported a continuous pdf; an index-matched interface has "
+                         "no rough lobe to sample at any roughness\n";
+            ok = false;
+        }
+        // Nothing may reflect. Exact dielectric Fresnel is identically zero at ior 1, so the reflection lobe has no value to carry -- but the Kulla-Conty compensation reads its escaping fraction from a table whose eta axis is log-spaced and never lands on 1, and the interpolated reflected share it returns is energy the interface did not reflect. Measured up to 0.0191 over these rows before computeLobeProbabilities took the exact index-matched boundary, the grazing rows worst; asserted at zero, not at a bound, because zero is what the Fresnel says.
+        for (float wiZ : {0.9F, 0.5F, 0.15F}) {
+            const glm::vec3 wi(std::sqrt(std::max(0.0F, 1.0F - (wiZ * wiZ))), 0.0F, wiZ);
+            const glm::vec3 reflected = engine::scene::evaluateBsdfSplit(roughParams, wo, wi).specular;
+            if (maxChannel(reflected) != 0.0F) {
+                std::cerr << "bsdf_validate: FAILED index-matched reflection at cos=" << cosine
+                          << " wi.z=" << wiZ << " -- reflected (" << reflected.x << ", " << reflected.y
+                          << ", " << reflected.z
+                          << "), expected exactly 0; an index-matched interface reflects nothing at any "
+                             "angle, so this is multiple-scattering compensation returning a deficit that "
+                             "does not exist\n";
+                ok = false;
+            }
+        }
+
+        // The same two backstops the smooth row above carries, at the same tolerances: existing and finite is not enough, the sample must also point where an index-matched interface can send it and carry nothing but the tint.
+        if (!(roughDirection <= kDirectionTolerance)) {
+            std::cerr << "bsdf_validate: FAILED index-matched rough transmission direction at cos="
+                      << cosine << " -- worst |wi + wo| " << roughDirection
+                      << " over the rough draws; an index-matched interface cannot bend a ray whatever "
+                         "microfacet normal it draws\n";
+            ok = false;
+        }
+        if (!(roughChromaticity <= kChromaticityTolerance)) {
+            std::cerr << "bsdf_validate: FAILED index-matched rough transmission chromaticity at cos="
+                      << cosine << " -- worst throughput/tint spread " << roughChromaticity
+                      << " over the rough draws; at ior 1 nothing but the tint can colour a transmitted "
+                         "ray\n";
+            ok = false;
+        }
         // The count of TRANSMISSION samples, not the count of rejections: at ior 1 the reflection lobe is identically zero, and sampleBsdf discards some of its draws on guards that have nothing to do with refraction, so a rejection bound would be asserting against those instead (measured: 6 of the 205 reflection draws at cos 0.1, carrying zero energy either way).
         // Every row draws the identical sampler sequence and, with F == 0 at every angle, the identical lobe selection, so the transmission count is a constant of the sweep rather than a statistic -- it must not vary with wo at all. A false TIR shows up here as a deficit against the normal-incidence row, which is the exact quantity the fix restores, with no tolerance and no noise.
         if (transmitted != transmittedAtNormal) {
@@ -1810,7 +1876,13 @@ ENGINE_CHECK(index_matched_transmission, Fast, Exact) {
             ok = false;
         }
     }
-    // No anti-vacuity guard: cosines is non-empty at compile time and the counter increments unconditionally, so a zero count is unreachable. The count is printed, which is what keeps a future skip visible.
+    // The rough assertions are all per-draw, so a change that stopped the interface transmitting at all would satisfy every one of them by vacuum -- and the count invariant with it, since transmittedAtNormal is seeded from the same collapsed first row.
+    if (transmittedAtNormal <= 0) {
+        std::cerr << "bsdf_validate: FAILED index-matched transmission -- no rough draw transmitted, so "
+                     "every rough assertion above was made about nothing\n";
+        ok = false;
+    }
+    // No anti-vacuity guard on the angle count: cosines is non-empty at compile time and the counter increments unconditionally, so a zero count is unreachable. The count is printed, which is what keeps a future skip visible.
     std::cout << "  " << rowsChecked << " angles asserted, worst direction error " << worstDirection
               << ", worst chromaticity spread " << worstChromaticity << ", rough rejections "
               << roughRejections << " of " << kRoughDraws * static_cast<int>(cosines.size()) << '\n';
