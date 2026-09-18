@@ -463,8 +463,9 @@ constexpr float kSmoothAlpha = 1e-3F;
 // Below this deficit there is no multiple scattering worth returning and the lobe switches off entirely: value (multiScatterShape) and selection probability (computeLobeProbabilities) must use the same test or the mixture allocates mass to a zero lobe.
 constexpr float kMinDeficit = 1e-3F;
 
+// ior == 1 is a delta at every roughness, not a rough interface: refractAbout returns -wo about every microfacet normal, so evaluateTransmissionLobe's half-vector normalize(wo + etaR*wi) normalises the zero vector and every guard below it is a NaN comparison -- measured NaN throughput on 7783 of 7783 transmission draws at roughness 0.1, 6666 of 7783 at roughness 1.0 (the remainder being the msTransmit draws, which do not form that half-vector). PBRT-v4's DielectricBxDF branches its value, pdf and sampler on the same `eta == 1 || EffectivelySmooth()`.
 bool transmissionIsRough(const BsdfParams& params, float alpha) {
-    return params.transmissionFactor > 0.0F && alpha >= kSmoothAlpha;
+    return params.transmissionFactor > 0.0F && alpha >= kSmoothAlpha && params.ior != 1.0F;
 }
 
 struct LobeEval {
@@ -863,7 +864,13 @@ LobeProbabilities computeLobeProbabilities(const BsdfParams& params, const glm::
     float escapeAvgRecip = 0.0F;
     float transmitShare = 0.0F;
     float msFraction = 0.0F;
-    if (params.transmissionFactor > 0.0F) {
+    // Index-matched interfaces take the exact boundary rather than the table: the delta branch transmits everything, so no microfacet energy is masked and there is nothing for the compensation to return. The tabulated escape cannot say so -- the eta axis is log-spaced and puts eta 1 exactly halfway between its 0.941 and 1.063 nodes, never on one, reading a deficit of 0.209 at roughness 1 where the truth is 0. Left to interpolate, that deficit reaches evaluateSpecularLobe's (1-transmitShare) term and deposits untinted reflected energy on an interface whose exact Fresnel is identically zero.
+    if (params.ior == 1.0F && params.transmissionFactor > 0.0F) {
+        escape = 1.0F;
+        escapeAvg = 1.0F;
+        escapeAvgRecip = 1.0F;
+        transmitShare = 1.0F;
+    } else if (params.transmissionFactor > 0.0F) {
         const EscapeSplit escapeWo = escapeAlbedo(wo.z, params.roughness, eta);
         const EscapeSplit escapeMean = averageEscapeAlbedo(params.roughness, eta);
         escape = escapeWo.total();
