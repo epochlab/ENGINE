@@ -516,15 +516,17 @@ glm::vec3 referenceEon(const glm::vec3& rho, float r, const glm::vec3& wi, const
 // The collapse is exact in float32, term by term: dielectricF0(1)=+0, dielectricFresnelAvg(1)=(1-1)/5.08638=+0 so multiScatterTint(0,E)=+0, fresnelDielectric(mu,1,1)=+0 so coatFresnelRatio=+0, hence coatAlbedo=+0, diffuseCoupling=(1-0)/(1-0)=1, diffuseKdAt=1, and .diffuse is evaluateEon multiplied by exactly 1.0F. evaluateEon reads only diffuseRho/diffuseRoughness/wi/wo, and alpha reaches .specular alone, so params.roughness has no other route into the diffuse channel: an index-matched interface is optically absent, and its roughness cannot be observable.
 // Hence tolerance exactly zero, from x*1.0F == x -- an algebraic guarantee, not a measured run. The Karis revert breaks it by a measured 7.8e-4 relative, worst at roughness 0.92 / mu_o = mu_i = 1, about 8000 ULP at the diffuse value's magnitude.
 // Two facts that set the sweep, both against instinct. The deviation peaks at NORMAL incidence, not grazing: coat = msTint*(1-E(mu)) and E rises toward grazing at high roughness (0.31 at mu=1, ~0.99 at the first grid column), so a grazing-first sweep is much weaker. And it changes sign below mu~0.3 at roughness 1, so only |delta|==0 is a safe predicate; any signed bound breaks.
-// Do NOT widen mu below 1e-3: fresnelDielectric(mu, 1, 1) returns 1.0F, not 0, for mu <= 1.7263349e-4, because etaI==etaT makes the ratio exactly 1 and 1.0F-mu*mu rounds to 1.0F, tripping the total-internal-reflection early-out (bsdf.cpp:45). The collapse is genuinely false in that sliver; it is recorded in README section 5.1 rather than worked around silently. Do NOT extend the sweep to ior>1 either -- the identity is exact only at index match.
+// The sweep reaches mu 1e-5 deliberately, and the four rows below 2.44e-4 are the regression test for the cos^2 Snell form: the old 1 - r^2*(1 - mu*mu) transcription rounded 1.0F-mu*mu to exactly 1.0F there, reported total internal reflection at an interface that has no critical angle, and returned fresnelDielectric(mu,1,1) = 1.0F instead of +0, which breaks every term of the collapse above. cos2Transmitted collapses to mu*mu at r == 1, so the sliver is now exact rather than excluded. Do NOT extend the sweep to ior>1 -- the identity is exact only at index match.
 // Residual, deliberate: any g(ior) with g(1)=0 passes here, notably 2*dielectricFresnelAvg(ior). This check pins the argument's collapse; checkAverageFresnel pins the function's value. Neither alone is sufficient and both are cheap.
 bool checkIndexMatchedCoat() {
-    // Exact, from the collapse above. The second bound is a float32-vs-double residual on the same closed form, ~15 operations deep, measured worst 1.74e-7 -- 5.7x under, thin on purpose. It is not the instrument; it is the backstop that stops a roughness-INDEPENDENT corruption (a pinned diffuseKd, a lost 1/(1-coatAvg) normalisation, a channel swap) from passing as bit-identical, which the invariance assertion alone cannot see.
+    // Exact, from the collapse above. The second bound is a float32-vs-double residual on the same closed form, ~15 operations deep, measured worst 2.03e-7 at the grazing tail -- 4.9x under, thin on purpose. It is not the instrument; it is the backstop that stops a roughness-INDEPENDENT corruption (a pinned diffuseKd, a lost 1/(1-coatAvg) normalisation, a channel swap) from passing as bit-identical, which the invariance assertion alone cannot see.
     constexpr float kInvarianceTolerance = 0.0F;
     constexpr float kValueTolerance = 1e-6F;
     // 0.0 is the reference row every other is compared against. 0.3661 and 0.92 sit deliberately off the table's k/127 grid, the device checkWhiteFurnaceTwoSided's off-grid cases use; 0.92 is where the revert's deviation is largest.
     const std::array<float, 8> roughnesses = {0.0F, 0.05F, 0.25F, 0.3661F, 0.5F, 0.75F, 0.92F, 1.0F};
-    const std::array<float, 6> cosines = {1.0F, 0.8F, 0.6F, 0.4F, 0.2F, 0.05F};
+    // The tail below 2.44e-4 (2^-12, where 1.0F-mu*mu rounds to 1.0F) is where the old Snell transcription falsely reported TIR; 1.7263349e-4 is the exact cosine README section 5.1 recorded the failure at.
+    const std::array<float, 11> cosines = {1.0F,   0.8F,         0.6F,    0.4F,    0.2F, 0.05F,
+                                           1e-2F, 1e-3F, 2.44e-4F, 1.7263349e-4F, 1e-5F};
     const std::array<float, 3> diffuseRoughnesses = {0.0F, 0.5F, 1.0F};
     // The chromatic row carries the weight for the value assertion, the reason checkEonAlbedoInversion gives: at baseColor 1 the inversion is the identity and a grey row cannot tell a correct result from one that merely preserves brightness.
     const std::array<glm::vec3, 2> albedos = {glm::vec3(1.0F), glm::vec3(0.8F, 0.3F, 0.1F)};
@@ -1495,8 +1497,46 @@ bool checkDielectricFresnel() {
                       << " / " << referenceDielectricFresnel(cosines.back(), ior) << '\n';
         }
     }
+    // Index match, kept out of the sweep above rather than folded into it: at ior 1 the true curve is identically zero, so the strict monotonicity assertion -- stated for n > 1, where reflectance rises toward grazing -- is the wrong predicate and would fail on correct code.
+    // Asserted at exactly zero, no tolerance and no division by specularGeometry: F is the only ior-dependent factor in the lobe, so F == +0 zeroes the product whatever D and G2 are, and the reference is algebraic rather than measured.
+    // The cosines run three orders below the main sweep's 0.02 floor because that is where the old Snell transcription failed, in two separate ways, and this is the direct regression test for both -- checkIndexMatchedCoat sees the same faults only after they have propagated through the coat coupling.
+    // Below 2.44e-4 (2^-12) it rounded 1.0F-mu*mu to exactly 1.0F, reported total internal reflection at an interface with no critical angle and returned 1.0F: measured 4.8e+11 in the lobe at roughness 0.02, cos 1e-5, since D/(4*mu*mu) multiplies it by ~5e11 there.
+    // Above the sliver it still leaked, from a SECOND cancellation the cos^2 form also removes: cosThetaT came from 1 - sinThetaT*sinThetaT, and at mu 0.02 that subtracts 0.99960004 from 1 in float32, so cosThetaT missed mu by ~1e-6 and the polarisation terms, which must cancel to exactly zero at r == 1, left F ~ 6e-10 -- measured 0.337797 in the lobe at roughness 0.02, cos 0.02. cos2Transmitted returns mu*mu exactly at r == 1, so cosThetaT == mu bit-for-bit and both terms are exactly zero.
+    // Measured on the pre-fix code: 6 of these 8 rows fail at every roughness, cos 1.0 and 0.5 being the only ones where the cancellation is harmless.
+    const std::array<float, 8> indexMatchedCosines = {1.0F,     0.5F,          0.02F,  1e-3F,
+                                                      2.44e-4F, 1.7263349e-4F, 1e-4F, 1e-5F};
+    int indexMatchedRows = 0;
+    for (float roughness : roughnesses) {
+        const glm::vec3 baseColor(1.0F);
+        const BsdfParams params{baseColor,
+                                 /*metallic=*/0.0F,
+                                 roughness,
+                                 /*f0=*/glm::vec3(0.04F),
+                                 /*edgeTint=*/glm::vec3(1.0F),
+                                 /*ior=*/1.0F,
+                                 /*transmissionFactor=*/0.0F,
+                                 /*diffuseRoughness=*/0.0F,
+                                 engine::scene::eonAlbedoInversion(baseColor, 0.0F),
+                                 /*transmissionTint=*/glm::vec3(1.0F)};
+        for (float cosine : indexMatchedCosines) {
+            const float sine = std::sqrt(std::max(0.0F, 1.0F - (cosine * cosine)));
+            const glm::vec3 wo(sine, 0.0F, cosine);
+            const glm::vec3 wi(-sine, 0.0F, cosine);
+            const float measured = maxChannel(engine::scene::evaluateBsdfSplit(params, wo, wi).specular);
+            ++indexMatchedRows;
+            if (!(measured == 0.0F)) {
+                std::cerr << "bsdf_validate: FAILED dielectric Fresnel at index match, roughness="
+                          << roughness << " cos=" << cosine << " gave " << measured
+                          << "; an ior-1 interface has no critical angle and reflects nothing, so the "
+                             "specular lobe must be exactly zero at every angle\n";
+                ok = false;
+            }
+        }
+    }
+    // No anti-vacuity guard here, unlike checkIndexMatchedCoat and checkCoatFresnelAvg: both arrays are non-empty at compile time and the counter increments unconditionally, so a zero count is unreachable rather than merely unlikely. The count is still printed, which is what makes a future conditioning skip visible.
     // No conditioning skip anywhere above, unlike checkConductorFresnel's normalised ratio: every row of the sweep is compared, and the count is printed so that stays visible.
-    std::cout << "  dielectric Fresnel: " << rowsChecked << " points vs reference\n";
+    std::cout << "  dielectric Fresnel: " << rowsChecked << " points vs reference, "
+              << indexMatchedRows << " index-matched rows at exactly zero\n";
     return ok;
 }
 
@@ -1652,6 +1692,113 @@ bool checkTransmissionRoundTrip() {
             ok = false;
         }
     }
+    return ok;
+}
+
+// Transmission through an index-matched interface, the one configuration where the answer needs no reference at all: at ior 1 there is no interface, so a transmissive surface must pass every ray straight through, at every angle, and lose nothing.
+// This is the only check in the suite that reaches sampleBsdf's two refraction sites -- refractAbout for the rough branch and the Snell block in the smooth one. Both decided total internal reflection from 1 - cos^2(thetaI), which rounds to exactly 1.0F below cos 2^-12, so both reported TIR at an interface with no critical angle and returned no sample at all. A lost transmission sample is silent: it is energy deleted from the estimator, not a wrong value, so no furnace, reciprocity or chi-square row above can see it -- only the absence asserted here.
+// The existence assertion is binary and carries the check; it needs no tolerance and cannot be tuned. The direction and throughput assertions are the backstop that stops a sample that merely EXISTS from passing while pointing somewhere an index-matched interface cannot send it.
+bool checkIndexMatchedTransmission() {
+    // Straight-through is algebraic at r == 1 -- cos(thetaT) == cos(thetaI) and the tangential components scale by exactly 1 -- but it is reached through sqrt(fl(wo.z*wo.z)), which is not required to return |wo.z| to the last bit. Measured worst 0 over the whole sweep; the bound is one float32 epsilon of headroom, not a fitted number.
+    constexpr float kDirectionTolerance = 1.2e-7F;
+    // NOT throughput == tint: sampleBsdf returns f/pdf, which divides by the lobe-selection probability, so a single draw carries tint/P and reads 0.842105 against a 0.8 tint at P = 0.95. That factor is what makes the estimator unbiased, and asserting it away would assert a bias in.
+    // The noise-free invariant is chromaticity instead: at ior 1 the only surviving factor is the tint itself, so throughput must be a positive SCALAR multiple of it, whatever P happens to be. A tint corruption, a channel swap or a per-channel Fresnel leak breaks the ratio; the selection probability cannot. Measured worst 0.
+    constexpr float kChromaticityTolerance = 1.2e-7F;
+    constexpr int kRoughDraws = 4096;
+    constexpr float kSmoothRoughness = 0.02F;   // alpha 4e-4, below bsdf.cpp's kSmoothAlpha: the delta branch
+    constexpr float kRoughRoughness = 0.3F;     // alpha 0.09, comfortably above it: the refractAbout branch
+    // Reaches 1e-5 for the same reason checkIndexMatchedCoat does: 2.44e-4 is 2^-12, and every row at or below it returns nullopt on the pre-fix code.
+    const std::array<float, 8> cosines = {1.0F,     0.7F,          0.1F,   1e-3F,
+                                          2.44e-4F, 1.7263349e-4F, 1e-4F, 1e-5F};
+    // Chromatic on purpose: a white tint cannot tell a preserved throughput from one that merely kept its brightness, the reason checkIndexMatchedCoat gives for its own chromatic row.
+    const glm::vec3 tint(0.8F, 0.5F, 0.2F);
+
+    bool ok = true;
+    int rowsChecked = 0;
+    float worstDirection = 0.0F;
+    float worstChromaticity = 0.0F;
+    int roughRejections = 0;
+    int transmittedAtNormal = -1;   // set by the first row, cos 1, where no formulation can report TIR
+    std::cout << "bsdf_validate: index-matched transmission, straight through at every angle (ior 1)\n";
+    for (float cosine : cosines) {
+        const float sine = std::sqrt(std::max(0.0F, 1.0F - (cosine * cosine)));
+        const glm::vec3 wo(sine, 0.0F, cosine);
+        const BsdfParams params = makeTransmissiveTintParams(kSmoothRoughness, glm::vec3(1.0F), tint);
+        const BsdfParams smoothParams{params.baseColor,  params.metallic,
+                                       params.roughness,  params.f0,
+                                       params.edgeTint,   /*ior=*/1.0F,
+                                       params.transmissionFactor, params.diffuseRoughness,
+                                       params.diffuseRho, params.transmissionTint};
+        engine::scene::Sampler sampler(0, 0, 0, 1, 9100U);
+        const std::optional<engine::scene::BsdfSample> smooth =
+            engine::scene::sampleBsdf(smoothParams, wo, sampler);
+        ++rowsChecked;
+        if (!smooth.has_value()) {
+            std::cerr << "bsdf_validate: FAILED index-matched transmission at cos=" << cosine
+                      << " -- the smooth branch returned no sample; an ior-1 interface has no critical "
+                         "angle, so refraction cannot fail at any angle and the energy is simply lost\n";
+            ok = false;
+            continue;
+        }
+        const float directionErr = maxChannel(glm::abs(smooth->wiLocal + wo));
+        const glm::vec3 ratio = smooth->throughputWeight / tint;
+        const float chromaticityErr = maxChannel(ratio) - minChannel(ratio);
+        worstDirection = std::max(worstDirection, directionErr);
+        worstChromaticity = std::max(worstChromaticity, chromaticityErr);
+        if (!(directionErr <= kDirectionTolerance)) {
+            std::cerr << "bsdf_validate: FAILED index-matched transmission direction at cos=" << cosine
+                      << " -- got (" << smooth->wiLocal.x << ", " << smooth->wiLocal.y << ", "
+                      << smooth->wiLocal.z << "), expected -wo; an index-matched interface cannot bend a ray\n";
+            ok = false;
+        }
+        if (!(chromaticityErr <= kChromaticityTolerance)) {
+            std::cerr << "bsdf_validate: FAILED index-matched transmission chromaticity at cos=" << cosine
+                      << " -- throughput/tint is (" << ratio.x << ", " << ratio.y << ", " << ratio.z
+                      << "), not one scalar; at ior 1 nothing but the tint can colour a transmitted ray\n";
+            ok = false;
+        }
+
+        // The rough branch reaches refractAbout, which returned false in the same sliver. Every draw must produce a sample: with no critical angle, no microfacet orientation the VNDF can draw is steep enough to totally internally reflect.
+        const BsdfParams roughParams{smoothParams.baseColor,  smoothParams.metallic,
+                                      kRoughRoughness,         smoothParams.f0,
+                                      smoothParams.edgeTint,   /*ior=*/1.0F,
+                                      smoothParams.transmissionFactor, smoothParams.diffuseRoughness,
+                                      smoothParams.diffuseRho, smoothParams.transmissionTint};
+        int rejected = 0;
+        int transmitted = 0;
+        for (int i = 0; i < kRoughDraws; ++i) {
+            engine::scene::Sampler roughSampler(0, 0, i, kRoughDraws, 9200U);
+            const std::optional<engine::scene::BsdfSample> rough =
+                engine::scene::sampleBsdf(roughParams, wo, roughSampler);
+            if (!rough.has_value()) {
+                ++rejected;
+                continue;
+            }
+            if (rough->type == engine::scene::LobeType::Transmission) {
+                ++transmitted;
+            }
+        }
+        roughRejections += rejected;
+        if (transmittedAtNormal < 0) {
+            transmittedAtNormal = transmitted;
+        }
+        std::cout << "  cos " << cosine << ": rough draws " << kRoughDraws << ", transmission "
+                  << transmitted << ", rejected " << rejected << '\n';
+        // The count of TRANSMISSION samples, not the count of rejections: at ior 1 the reflection lobe is identically zero, and sampleBsdf discards some of its draws on guards that have nothing to do with refraction, so a rejection bound would be asserting against those instead (measured: 6 of the 205 reflection draws at cos 0.1, carrying zero energy either way).
+        // Every row draws the identical sampler sequence and, with F == 0 at every angle, the identical lobe selection, so the transmission count is a constant of the sweep rather than a statistic -- it must not vary with wo at all. A false TIR shows up here as a deficit against the normal-incidence row, which is the exact quantity the fix restores, with no tolerance and no noise.
+        if (transmitted != transmittedAtNormal) {
+            std::cerr << "bsdf_validate: FAILED index-matched rough transmission at cos=" << cosine
+                      << " -- " << transmitted << " transmission samples against "
+                      << transmittedAtNormal
+                      << " at normal incidence; the lobe selection is angle-independent at ior 1, so a "
+                         "deficit is refraction failing at an interface whose critical angle does not exist\n";
+            ok = false;
+        }
+    }
+    // No anti-vacuity guard: cosines is non-empty at compile time and the counter increments unconditionally, so a zero count is unreachable. The count is printed, which is what keeps a future skip visible.
+    std::cout << "  " << rowsChecked << " angles asserted, worst direction error " << worstDirection
+              << ", worst chromaticity spread " << worstChromaticity << ", rough rejections "
+              << roughRejections << " of " << kRoughDraws * static_cast<int>(cosines.size()) << '\n';
     return ok;
 }
 
@@ -1827,11 +1974,12 @@ int main() {
     const bool reciprocityOk = checkReciprocity();
     const bool transmissionReciprocityOk = checkTransmissionReciprocity();
     const bool roundTripOk = checkTransmissionRoundTrip();
+    const bool indexMatchedTransmissionOk = checkIndexMatchedTransmission();
     const bool chiSquareOk = checkSamplingChiSquare();
 
     if (!pdfOk || !densityOk || !furnaceOk || !whiteFurnaceOk || !eonDiffuseOk || !eonInversionOk || !indexMatchedCoatOk ||
         !transmissiveEnergyOk || !transmissionTintOk || !conductorFresnelOk || !dielectricFresnelOk || !averageFresnelOk || !coatFresnelAvgOk || !dispersionOk ||
-        !reciprocityOk || !transmissionReciprocityOk || !roundTripOk || !chiSquareOk) {
+        !reciprocityOk || !transmissionReciprocityOk || !roundTripOk || !indexMatchedTransmissionOk || !chiSquareOk) {
         std::cerr << "bsdf_validate: FAILED\n";
         return EXIT_FAILURE;
     }
