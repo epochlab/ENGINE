@@ -33,19 +33,26 @@ float smithG2(float ndotV, float ndotL, float alpha) {
     return 1.0F / (1.0F + smithLambda(ndotV, alpha) + smithLambda(ndotL, alpha));
 }
 
-// Exact unpolarized dielectric Fresnel reflectance (PBRT's FrDielectric); 1.0 past total internal reflection.
+// Snell in cos^2 form: cos^2(thetaT) = (1 - r^2) + r^2 cos^2(thetaI), r = etaI/etaT. Negative means total internal reflection.
+// Algebraically 1 - r^2 sin^2(thetaI) (PBRT-v4 FrDielectric/Refract, Walter 2007 eq. 40), but never forms 1 - cos^2(thetaI), which rounds to exactly 1.0F below cos 2^-12 and falsely reports TIR.
+// At r == 1 it collapses to cos^2(thetaI), so an index-matched interface cannot total-internally-reflect by construction rather than by a branch; at r < 1 the constant term is positive, so entering a denser medium cannot either.
+float cos2Transmitted(float cosThetaI, float etaRatio) {
+    const float r2 = etaRatio * etaRatio;
+    return (1.0F - r2) + (r2 * cosThetaI * cosThetaI);
+}
+
+// Exact unpolarized dielectric Fresnel reflectance (PBRT's FrDielectric); 1.0 from the critical angle inward, where cosThetaT is 0 and both polarisations are already exactly 1.
 float fresnelDielectric(float cosThetaI, float etaI, float etaT) {
     cosThetaI = std::clamp(cosThetaI, -1.0F, 1.0F);
     if (cosThetaI < 0.0F) {
         std::swap(etaI, etaT);
         cosThetaI = -cosThetaI;
     }
-    const float sinThetaI = std::sqrt(std::max(0.0F, 1.0F - (cosThetaI * cosThetaI)));
-    const float sinThetaT = (etaI / etaT) * sinThetaI;
-    if (sinThetaT >= 1.0F) {
+    const float cos2ThetaT = cos2Transmitted(cosThetaI, etaI / etaT);
+    if (cos2ThetaT < 0.0F) {
         return 1.0F;
     }
-    const float cosThetaT = std::sqrt(std::max(0.0F, 1.0F - (sinThetaT * sinThetaT)));
+    const float cosThetaT = std::sqrt(cos2ThetaT);
     const float rParallel =
         ((etaT * cosThetaI) - (etaI * cosThetaT)) / ((etaT * cosThetaI) + (etaI * cosThetaT));
     const float rPerpendicular =
@@ -174,11 +181,11 @@ bool refractAbout(const glm::vec3& wo, const glm::vec3& ht, float eta, glm::vec3
     if (cosI <= 0.0F) {
         return false;
     }
-    const float sin2T = eta * eta * std::max(0.0F, 1.0F - (cosI * cosI));
-    if (sin2T >= 1.0F) {
+    const float cos2T = cos2Transmitted(cosI, eta);
+    if (cos2T < 0.0F) {
         return false;
     }
-    wi = ((eta * cosI) - std::sqrt(1.0F - sin2T)) * ht - (eta * wo);
+    wi = ((eta * cosI) - std::sqrt(cos2T)) * ht - (eta * wo);
     return true;
 }
 
@@ -1087,13 +1094,13 @@ std::optional<BsdfSample> sampleBsdf(const BsdfParams& params, const glm::vec3& 
                            eval.pdf};
     }
 
-    // Smooth specular transmission (delta lobe): Snell's law, TIR already folded into lobes.specular via fresnelDielectric returning 1.0 past the critical angle.
+    // Smooth specular transmission (delta lobe): Snell's law, TIR already folded into lobes.specular via fresnelDielectric returning 1.0 past the critical angle -- exactly, since both sites now decide it with the same cos2Transmitted predicate rather than two separately-rounded transcriptions.
     const float eta = lobes.etaI / lobes.etaT;
-    const float sin2ThetaT = eta * eta * std::max(0.0F, 1.0F - (wo.z * wo.z));
-    if (sin2ThetaT >= 1.0F) {
+    const float cos2ThetaT = cos2Transmitted(wo.z, eta);
+    if (cos2ThetaT < 0.0F) {
         return std::nullopt;
     }
-    const float cosThetaT = std::sqrt(1.0F - sin2ThetaT);
+    const float cosThetaT = std::sqrt(cos2ThetaT);
     const glm::vec3 wt(-eta * wo.x, -eta * wo.y, -cosThetaT);
     // Non-symmetric radiance-compression factor for camera-originated (Veach 1997 sec. 5.2, PBRT's SpecularTransmission::Sample_f under TransportMode::Radiance) transport: eta^2 = (etaI/etaT)^2, the squared ratio of the medium the ray is leaving to the medium it's entering. Self-consistent under round trips -- entering (eta=1/ior) times exiting (eta=ior/1) squared multiplies to 1, so a ray that enters and exits the same surface loses no net energy (tools/bsdf_validate.cpp's furnace test).
     const glm::vec3 throughput =
