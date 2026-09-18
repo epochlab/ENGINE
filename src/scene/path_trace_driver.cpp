@@ -109,10 +109,10 @@ PathTraceDriver::PathTraceDriver(const EmbreeAccel& accel,
 
 PathTraceDriver::~PathTraceDriver() = default;  // jthread requests stop + joins automatically
 
-void PathTraceDriver::requestTrace(const Request& request) {
+std::uint64_t PathTraceDriver::requestTrace(const Request& request) {
     const std::lock_guard<std::mutex> lock(requestMutex_);
     pendingRequest_.emplace(request);
-    generation_.fetch_add(1, std::memory_order_relaxed);
+    return generation_.fetch_add(1, std::memory_order_relaxed) + 1;
 }
 
 void PathTraceDriver::setSuspended(bool suspended) {

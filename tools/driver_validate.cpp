@@ -298,6 +298,26 @@ ENGINE_CHECK(max_samples_cap_is_respected, Slow, Exact) {
     ENGINE_EXPECT(ctx, fixture->driver->accumulatedSamples() == kCap, detail);
 }
 
+// The generation requestTrace returns is the one its passes carry, so a caller can tell its own accumulation's records from a superseded request's; a request replaced before pickup never runs.
+ENGINE_CHECK(request_generation_labels_its_passes, Slow, Exact) {
+    constexpr int kCap = 3;
+    ctx.plan(2);
+    std::unique_ptr<DriverFixture> fixture = makeFixture();
+    if (!fixture->valid()) {
+        ENGINE_EXPECT(ctx, false, "scene/driver construction failed");
+        ENGINE_EXPECT(ctx, false, "scene/driver construction failed");
+        return;
+    }
+    const std::uint64_t superseded = fixture->driver->requestTrace(makeRequest(kCap, makeCamera()));
+    const std::uint64_t latest = fixture->driver->requestTrace(makeRequest(kCap, makeCamera()));
+    ENGINE_EXPECT(ctx, latest == superseded + 1, "consecutive requests must return consecutive generations");
+    const bool labelled = waitFor([&] {
+        const engine::debug::PassRecord pass = fixture->driver->lastPassRecord();
+        return pass.generation == latest && pass.passIndex == kCap && !pass.cancelled;
+    });
+    ENGINE_EXPECT(ctx, labelled, "the final pass never carried the generation requestTrace returned");
+}
+
 // A new request must RESTART accumulation rather than merge into it: the class comment's central invariant is that the
 // accumulator never mixes samples from two different camera poses. Also pins the invariant the sixteen suppressed
 // unchecked-optional-access reports rest on -- that a generation bump is always accompanied by an engaged request --

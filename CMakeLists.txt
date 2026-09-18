@@ -120,6 +120,7 @@ add_executable(engine
     src/config/scene_config.cpp
     src/debug/system_info.cpp
     src/debug/host_info.cpp
+    src/debug/bench_log.cpp
     src/debug/frame_stats.cpp
     src/debug/gpu_timer.cpp
     src/debug/memory_tracker.cpp
@@ -138,7 +139,7 @@ target_compile_definitions(engine PRIVATE
 target_compile_options(engine PRIVATE -Wall -Wextra -Werror -march=native)
 target_link_libraries(engine PRIVATE
     glfw GLEW::GLEW OpenGL::GL glm::glm
-    OpenEXR::OpenEXR Imath::Imath OpenColorIO::OpenColorIO embree)
+    OpenEXR::OpenEXR Imath::Imath OpenColorIO::OpenColorIO embree ZLIB::ZLIB)
 if(CLANG_TIDY_EXE)
     set_target_properties(engine PROPERTIES CXX_CLANG_TIDY "${CLANG_TIDY_COMMAND}")
 endif()
