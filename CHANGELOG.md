@@ -776,3 +776,10 @@ README §5 (Debug tooling #11): a dashed diagonal on the Cornell back wall in th
   - 7 pixels on the 45° room-corner crease (x−y = 224) change surface. Their centres lie exactly on a boundary two faces share at equal depth: the old code gave them to whichever triangle came first in the list, and the fill rule now decides.
   - 66 Wireframe pixels flip, all on a line boundary.
   - Beauty is untouched: Cornell 640x360/64 passes, PNG and EXR byte-identical.
+
+## Roadmap: adaptive sampling parked, delighted view dropped
+
+- docs: README §5 moves the render-mode selector from Wave 5 to Parked beside the adaptive per-pixel sample budget, so the two adaptive-sampling items sit together and the latter's "builds on tiling above" holds.
+- docs: README §5 drops the delighted DirectDiffuse/DirectSpecular item and its references for now; Wave 4 is now two consumers, with the contact sheet noted as parked and its blocker stated directly.
+- docs: Depth of field's adaptive-sampling pointer now says Parked rather than Wave 5.
+- note: **no image change.** Documentation only.
