@@ -24,6 +24,9 @@
 
 #include "engine/config/scene_config.h"
 #include "engine/gfx/hdr_image.h"
+#include "check.h"
+#include "fixtures.h"
+#include "stats.h"
 #include "engine/scene/bsdf.h"
 #include "engine/scene/camera.h"
 #include "engine/scene/embree_accel.h"
@@ -47,7 +50,27 @@ using engine::scene::ShadingTriangle;
 using engine::scene::ShadingVertex;
 using engine::scene::Triangle;
 
-constexpr float kPi = 3.14159265F;
+using tools::fixtures::kPi;
+using tools::fixtures::makeConstantTexture;
+using tools::fixtures::makeMaterial;
+using tools::fixtures::makeUniformEnvironment;
+using tools::fixtures::referenceLo;
+
+// One pool for the whole binary. Eleven checks each constructed their own, which spun up and tore down
+// hardware_concurrency() worker threads eleven times per run for no isolation gained -- ThreadPool carries no state
+// between dispatches. Sized from the runner's --threads so concurrent ctest jobs do not oversubscribe the machine.
+engine::scene::ThreadPool& sharedPool(int threads) {
+    static engine::scene::ThreadPool pool(static_cast<unsigned int>(threads));
+    return pool;
+}
+
+// Each check below keeps its own `ok` accumulator and its per-row stderr diagnostics -- those messages carry the
+// scene, the row and the measured value, which is what makes a failure diagnosable -- and reports the verdict through
+// one assertion. Rewriting several hundred rows into individual assertions would gain a count and lose the context.
+void finish(tools::check::Context& ctx, bool ok, const char* what) {
+    ctx.plan(1);
+    ENGINE_EXPECT(ctx, ok, what);
+}
 
 // Quad half-extent: large enough that every primary ray in the narrow test FOV lands on it, so no pixel sees the environment directly and the measured value is purely surface radiance.
 constexpr float kQuadExtent = 1000.0F;
@@ -59,26 +82,6 @@ constexpr int kSphereStacks = 32;
 constexpr float kFocalLengthMm = 200.0F;
 constexpr int kImageSize = 16;
 constexpr int kSamplesPerPixel = 512;
-
-engine::gfx::HdrImage makeConstantTexture(glm::vec3 rgb) {
-    engine::gfx::HdrImage image;
-    image.width = 1;
-    image.height = 1;
-    image.rgba = {rgb.x, rgb.y, rgb.z, 1.0F};
-    return image;
-}
-
-// 1x1 textures carrying the neutral values resolveBsdfParams/buildShadingFrame expect: a flat tangent-space normal (0.5,0.5,1), the requested roughness in .r, and f0 in the specular slot. bumpStrength is set to 0 in the settings below, so the bump texture's value is irrelevant.
-engine::scene::Material makeMaterial(float roughness, glm::vec3 f0) {
-    return engine::scene::Material{
-        makeConstantTexture(glm::vec3(1.0F)),                  // baseColor -- white, worst case
-        makeConstantTexture(glm::vec3(0.5F, 0.5F, 1.0F)),      // normal -- flat
-        makeConstantTexture(glm::vec3(0.5F)),                  // bump -- unused, bumpStrength 0
-        makeConstantTexture(glm::vec3(roughness)),             // roughness
-        makeConstantTexture(f0),                               // specular -> f0
-        makeConstantTexture(glm::vec3(1.0F)),                  // AO -- unoccluded
-    };
-}
 
 struct TestScene {
     std::vector<Triangle> worldTriangles;
@@ -219,15 +222,6 @@ TestScene makeTwoInstanceScene(float roughness, glm::vec3 f0) {
     return scene;
 }
 
-EnvironmentMap makeUniformEnvironment() {
-    engine::gfx::HdrImage image;
-    image.width = 64;
-    image.height = 32;
-    image.rgba.assign(static_cast<std::size_t>(image.width) * static_cast<std::size_t>(image.height) * 4,
-                       1.0F);
-    return EnvironmentMap(std::move(image));
-}
-
 // Only `metallic` travels through PathTraceSettings; roughness and f0 reach the renderer through the material's 1x1 roughness and specular textures, which resolveBsdfParams samples (gbuffer_shading.cpp).
 PathTraceSettings makeSettings(int maxBounces, int rrStartBounce, float metallic,
                                float transmission = 0.0F) {
@@ -274,21 +268,6 @@ glm::vec3 centreMean(const engine::gfx::HdrImage& image) {
                        (kImageSize / 2) + 2);
 }
 
-// Independent ground truth, identical in form to nee_validate.cpp's referenceLo: Lo(wo) = integral over the hemisphere of evaluateBsdf(wo,wi)*wi.z dwi, with L0=1. Uniform-hemisphere Monte Carlo, so it under-samples a sharp GGX peak -- callers restrict the tight comparison to roughness values where it converges.
-float referenceLo(const BsdfParams& params, const glm::vec3& wo, int sampleCount, std::mt19937& rng) {
-    std::uniform_real_distribution<float> unit(0.0F, 1.0F);
-    constexpr float kUniformPdf = 1.0F / (2.0F * kPi);
-    glm::vec3 accum(0.0F);
-    for (int i = 0; i < sampleCount; ++i) {
-        const float cosTheta = unit(rng);
-        const float sinTheta = std::sqrt(std::max(0.0F, 1.0F - (cosTheta * cosTheta)));
-        const float phi = 2.0F * kPi * unit(rng);
-        const glm::vec3 wi(sinTheta * std::cos(phi), sinTheta * std::sin(phi), cosTheta);
-        accum += engine::scene::evaluateBsdf(params, wo, wi) * wi.z / kUniformPdf;
-    }
-    return std::max({accum.x, accum.y, accum.z}) / static_cast<float>(sampleCount);
-}
-
 // Runs one full renderPathTraced pass with an explicit per-instance settings vector, the only way to give two instances different materials. showSky gates only the primary ray's own miss, so turning it off zeroes the background term the transport buckets deliberately exclude.
 engine::scene::PathTraceResult renderPassPerInstance(
     const TestScene& scene, const EnvironmentMap& env, const PathTraceSettings& settings,
@@ -333,7 +312,7 @@ struct Case {
     glm::vec3 f0;
 };
 
-bool runCases() {
+ENGINE_CHECK(depth_and_russian_roulette_invariance, Slow, Statistical) {
     // Roughness restricted to values where the uniform-hemisphere reference converges (same limitation nee_validate.cpp documents for its own tight two-sided check); a sharp low-roughness lobe biases the reference low and would produce false failures.
     const std::array<Case, 4> cases{{
         {"diffuse (metallic 0, rough 1.0)", 1.0F, 0.0F, glm::vec3(0.04F)},
@@ -348,7 +327,7 @@ bool runCases() {
     constexpr int kReferenceSamples = 400000;
 
     const EnvironmentMap env = makeUniformEnvironment();
-    engine::scene::ThreadPool pool;
+    engine::scene::ThreadPool& pool = sharedPool(ctx.threads());
     std::mt19937 referenceRng(99);
     bool ok = true;
 
@@ -360,7 +339,8 @@ bool runCases() {
         std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
         if (!accel.has_value()) {
             std::cerr << "integrator_validate: FAILED to build Embree scene for " << testCase.name << '\n';
-            return false;
+            finish(ctx, false, "depth_and_russian_roulette_invariance failed; see the rows above");
+            return;
         }
 
         // rrStartBounce far above maxBounces disables Russian roulette for the first two renders, so depth invariance is measured without RR's extra variance folded in.
@@ -410,12 +390,13 @@ bool runCases() {
             ok = false;
         }
     }
-    return ok;
+    finish(ctx, ok, "depth_and_russian_roulette_invariance failed; see the rows above");
+    return;
 }
 
 // A white, non-absorbing dielectric slab in a uniform L0=1 environment is invisible: the camera must read exactly 1.0 through it. Every photon entering the front face leaves somewhere, and the non-symmetric eta^2 radiance compression applied on entering is undone on exiting, so the round trip is lossless.
 // This is the only case in the suite that reaches a transmissive exiting vertex, gating the far-side NEE guard against the miss branch's MIS weight. Weighting a rough transmission sample at 1.0 (correct only for a delta lobe) while NEE also evaluates the transmission lobe toward the same directions double-counts their overlap, reading above 1.0 here. Both bounds matter: the same test catches a transmissive vertex that loses energy instead.
-bool checkTransmissiveSlab() {
+ENGINE_CHECK(transmissive_slab_energy, Slow, Statistical) {
     // Enough depth for internally reflected paths to converge; truncation only ever darkens.
     constexpr int kSlabBounces = 12;
     constexpr float kThickness = 0.5F;
@@ -424,7 +405,7 @@ bool checkTransmissiveSlab() {
     const std::array<float, 5> roughnesses = {0.02F, 0.05F, 0.4F, 0.7F, 1.0F};
 
     const EnvironmentMap env = makeUniformEnvironment();
-    engine::scene::ThreadPool pool;
+    engine::scene::ThreadPool& pool = sharedPool(ctx.threads());
     bool ok = true;
 
     std::cout << "integrator_validate: white non-absorbing slab, uniform L0=1 (1.0 = invisible)\n";
@@ -433,7 +414,8 @@ bool checkTransmissiveSlab() {
         std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
         if (!accel.has_value()) {
             std::cerr << "integrator_validate: FAILED to build Embree slab scene\n";
-            return false;
+            finish(ctx, false, "transmissive_slab_energy failed; see the rows above");
+            return;
         }
         const float lo = renderCentre(
             scene, env, makeSettings(kSlabBounces, 999, /*metallic=*/0.0F, /*transmission=*/1.0F),
@@ -448,12 +430,13 @@ bool checkTransmissiveSlab() {
             ok = false;
         }
     }
-    return ok;
+    finish(ctx, ok, "transmissive_slab_energy failed; see the rows above");
+    return;
 }
 
 // The curved counterpart of checkTransmissiveSlab, on the same invariant for the same reason: a white, non-absorbing dielectric under a uniform L0=1 environment is invisible WHATEVER ITS SHAPE, since every photon entering leaves again and the eta^2 radiance compression cancels over the round trip. Only the geometry changes, and the geometry is the whole point -- this is the suite's only case where a transmissive vertex sees non-zero curvature, so it is the only one that can see a bug in transmissionOffsetEpsilon or in shadowTerminatorOffset's projection side (see makeSphereScene).
 // A sphere traps far more light than a slab: past the critical angle every internal hit totally internally reflects, so paths ring around the inside for many bounces. Truncation only ever darkens, which is why the depth is well above the slab's and the band is two-sided.
-bool checkTransmissiveSphere() {
+ENGINE_CHECK(transmissive_sphere_energy, Slow, Statistical) {
     // Measured convergence point, not a guess: 32 and 96 bounces are bit-identical to this, and 12 is not.
     constexpr int kSphereBounces = 16;
     constexpr float kTolerance = 0.03F;
@@ -461,7 +444,7 @@ bool checkTransmissiveSphere() {
     const std::array<float, 4> roughnesses = {0.02F, 0.2F, 0.4F, 0.7F};
 
     const EnvironmentMap env = makeUniformEnvironment();
-    engine::scene::ThreadPool pool;
+    engine::scene::ThreadPool& pool = sharedPool(ctx.threads());
     bool ok = true;
 
     std::cout << "integrator_validate: white non-absorbing glass sphere, uniform L0=1 (1.0 = invisible)\n";
@@ -471,7 +454,8 @@ bool checkTransmissiveSphere() {
         std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
         if (!accel.has_value()) {
             std::cerr << "integrator_validate: FAILED to build Embree sphere scene\n";
-            return false;
+            finish(ctx, false, "transmissive_sphere_energy failed; see the rows above");
+            return;
         }
         const float lo = renderCentre(
             scene, env, makeSettings(kSphereBounces, 999, /*metallic=*/0.0F, /*transmission=*/1.0F),
@@ -513,7 +497,8 @@ bool checkTransmissiveSphere() {
         std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
         if (!accel.has_value()) {
             std::cerr << "integrator_validate: FAILED to build Embree sphere scene\n";
-            return false;
+            finish(ctx, false, "transmissive_sphere_energy failed; see the rows above");
+            return;
         }
         PathTraceSettings settings =
             makeSettings(kSphereBounces, 999, /*metallic=*/0.0F, /*transmission=*/1.0F);
@@ -532,14 +517,15 @@ bool checkTransmissiveSphere() {
             }
         }
     }
-    return ok;
+    finish(ctx, ok, "transmissive_sphere_energy failed; see the rows above");
+    return;
 }
 
 // Beer-Lambert volumetric absorption -- the newest thing in the pipeline and, until now, the only part of the transmissive path with no coverage at all: both slabs above are white and non-absorbing, so sigmaAFromTransmission and tracePath's medium attenuation were never once evaluated by this suite.
 // Asserts the documented contract rather than restating its formula: transmissionDepth is "the distance at which transmittance reaches transmissionColor" (scene_config.h), so setting transmissionDepth to the actual traversal distance makes the expected reading exactly transmissionColor, with no exp() written in the test at all. Halving transmissionDepth squares it, which is what separates a true exponential from anything linear in distance -- a test at one depth cannot tell the two apart.
 // ior 1.0 is what makes this exact rather than approximate, and it is a physically real configuration (an index-matched pure absorber), not a test-only dodge. The interface neither bends the ray -- so the traversal distance is the slab thickness or the sphere chord, both known in closed form -- nor reflects any of it, since fresnelDielectric is identically zero at eta 1. The delta transmission lobe contributes nothing through NEE either. Absorption is then the only mechanism left that can move the reading off 1.0.
 // Per-channel colour, distinct in every channel: a swapped or luminance-collapsed sigmaA passes a grey test and fails this one.
-bool checkBeerLambert() {
+ENGINE_CHECK(beer_lambert_absorption, Slow, Statistical) {
     constexpr int kBounces = 8;
     constexpr float kSlabThickness = 0.5F;
     // Relative, since the squared row's green channel is 0.0625 and an absolute band would be vacuous there.
@@ -570,7 +556,7 @@ bool checkBeerLambert() {
     }};
 
     const EnvironmentMap env = makeUniformEnvironment();
-    engine::scene::ThreadPool pool;
+    engine::scene::ThreadPool& pool = sharedPool(ctx.threads());
     bool ok = true;
 
     std::cout << "integrator_validate: Beer-Lambert absorption through an index-matched medium\n";
@@ -582,7 +568,8 @@ bool checkBeerLambert() {
         std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
         if (!accel.has_value()) {
             std::cerr << "integrator_validate: FAILED to build Embree scene for " << testCase.name << '\n';
-            return false;
+            finish(ctx, false, "beer_lambert_absorption failed; see the rows above");
+            return;
         }
         PathTraceSettings settings = makeSettings(kBounces, 999, /*metallic=*/0.0F, /*transmission=*/1.0F);
         settings.ior = 1.0F;
@@ -610,14 +597,15 @@ bool checkBeerLambert() {
             }
         }
     }
-    return ok;
+    finish(ctx, ok, "beer_lambert_absorption failed; see the rows above");
+    return;
 }
 
 // The other half of the transmission-tint convention: transmissionDepth == 0 means there is no interior medium at all, and transmissionColor is a constant on-surface tint instead -- OpenPBR, "if zero, acts as a constant (on-surface) transmission tint"; Arnold renders it as a flat filter colour.
 // Complementary to checkBeerLambert above rather than a restatement of it. That one authors a colour at depth > 0 and requires exactly transmissionColor after one traversal, so an on-surface tint leaking into the volumetric regime would read colour^3 there; this one authors depth 0 and requires exactly transmissionColor^2, one factor per interface crossed, entering and exiting.
 // A flat slab and a sphere, whose traversal distances differ by construction: an on-surface tint is a property of the interface, so it must read the SAME square on both, which is exactly what distinguishes it from absorption. checkBeerLambert's sphere row reads systematically high because the offset epsilon shortens its in-medium path; no reading here depends on distance, so that bias cannot appear at all.
 // ior 1.0 for the same reason as checkBeerLambert: an index-matched interface neither bends nor reflects the ray, and the delta transmission lobe contributes nothing through NEE, so the tint is the only mechanism left that can move the reading off 1.0.
-bool checkOnSurfaceTransmissionTint() {
+ENGINE_CHECK(on_surface_transmission_tint, Slow, Statistical) {
     constexpr int kBounces = 8;
     constexpr float kSlabThickness = 0.5F;
     // Relative, and tight: with no absorption and no refraction there is no distance-dependent bias, so both rows carry only the estimator's own residual -- measured at 3.3e-4 in every channel of both, the same residual checkBeerLambert's flat rows show. 6x headroom on that, not a band wide enough to hide a leaked factor.
@@ -632,7 +620,7 @@ bool checkOnSurfaceTransmissionTint() {
     const std::array<TintCase, 2> cases{{{"flat slab, depth 0", false}, {"sphere, depth 0", true}}};
 
     const EnvironmentMap env = makeUniformEnvironment();
-    engine::scene::ThreadPool pool;
+    engine::scene::ThreadPool& pool = sharedPool(ctx.threads());
     bool ok = true;
 
     std::cout << "integrator_validate: on-surface transmission tint at transmissionDepth 0\n";
@@ -644,7 +632,8 @@ bool checkOnSurfaceTransmissionTint() {
         if (!accel.has_value()) {
             std::cerr << "integrator_validate: FAILED to build Embree scene for " << testCase.name
                       << '\n';
-            return false;
+            finish(ctx, false, "on_surface_transmission_tint failed; see the rows above");
+            return;
         }
         PathTraceSettings settings = makeSettings(kBounces, 999, /*metallic=*/0.0F, /*transmission=*/1.0F);
         settings.ior = 1.0F;
@@ -670,13 +659,14 @@ bool checkOnSurfaceTransmissionTint() {
             }
         }
     }
-    return ok;
+    finish(ctx, ok, "on_surface_transmission_tint failed; see the rows above");
+    return;
 }
 
 // Per-instance material binding, integrator side: nothing asserted that ShadingTriangle::instanceIndex resolves into the RIGHT perInstanceSettings entry. Every other scene in this suite has exactly one instance, so every lookup is index 0 and any mis-indexing is invisible; in a real scene it renders plausibly and silently, which is the whole failure mode.
 // Two coplanar quads, one instance each, identical Materials, distinguished only by a per-instance diffuseColour -- red on the left of x=0, blue on the right. Under a white uniform environment the left block must read red-dominant and the right blue-dominant, and swapping the two vector entries must swap the two readings. The first assertion catches an off-by-one or a constant index; the second catches a reading that happens to come from anywhere other than this vector's order.
 // Probed columns stay 2px clear of the x=0 seam at the image centre, wider than the 1.5px reconstruction filter, so neither block contains a pixel the other instance splatted into.
-bool checkPerInstanceMaterials() {
+ENGINE_CHECK(per_instance_materials, Slow, Statistical) {
     constexpr float kRoughness = 1.0F;
     constexpr float kDominance = 4.0F;   // the off-channel is the white specular coat, not zero, so this is a ratio test rather than an equality one
     constexpr float kSwapTolerance = 0.02F;
@@ -687,11 +677,12 @@ bool checkPerInstanceMaterials() {
     std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
     if (!accel.has_value()) {
         std::cerr << "integrator_validate: FAILED to build Embree two-instance scene\n";
-        return false;
+        finish(ctx, false, "per_instance_materials failed; see the rows above");
+        return;
     }
 
     const EnvironmentMap env = makeUniformEnvironment();
-    engine::scene::ThreadPool pool;
+    engine::scene::ThreadPool& pool = sharedPool(ctx.threads());
     const PathTraceSettings base = makeSettings(1, 999, /*metallic=*/0.0F);
 
     const auto render = [&](const glm::vec3& left, const glm::vec3& right) {
@@ -731,19 +722,21 @@ bool checkPerInstanceMaterials() {
                   << " on the right, blue " << rightBlue.z << " then " << leftBlue.z << ".\n";
         ok = false;
     }
-    return ok;
+    finish(ctx, ok, "per_instance_materials failed; see the rows above");
+    return;
 }
 
 // Per-instance material binding, resolution side: resolvePerInstanceSettings maps each materialOverrides key (a glTF node NAME) onto the instance of that name, leaving every other instance on the scene-wide material, and refuses the whole scene if a key matches nothing.
 // No validator constructs a scene config, so this entire path was uncovered -- all five exit 0 on a build where it is broken, which is exactly what made a one-character typo in cornell.json render a 41% different image with no diagnostic before the unmatched-key gate landed. The bit-identical render that gated that change cannot see it either: a render only exercises the keys that already match.
 // Compared against loadMaterialConfig's own reading of the same file rather than against literals copied out of it, so editing assets/materials/glass.json cannot silently defeat this. The material files are shipped assets, not fixtures, which is the point: this asserts the binding the real scenes use.
-bool checkMaterialBinding() {
+ENGINE_CHECK(material_binding_resolution, Fast, Exact) {
     const std::string assetRoot = ASSET_ROOT_DIR;
     const std::optional<engine::config::MaterialConfig> glass =
         engine::config::loadMaterialConfig(assetRoot + "/materials/glass.json");
     if (!glass.has_value()) {
         std::cerr << "integrator_validate: FAILED to load materials/glass.json\n";
-        return false;
+        finish(ctx, false, "material_binding_resolution failed; see the rows above");
+        return;
     }
 
     // How many of the 13 fields resolvePerInstanceSettings copies currently match the material file. A count rather than a bool so the base settings below can be required to match ZERO of them, which is what makes each individual copy observable. Exact equality is right: this is a copy, not a computation.
@@ -796,7 +789,8 @@ bool checkMaterialBinding() {
                      "agree with glass.json on " << matchingFields(base, *glass)
                   << " field(s), so a dropped copy of those fields would be invisible here. Change "
                      "the sentinel values above, or glass.json has moved onto them.\n";
-        return false;
+        finish(ctx, false, "material_binding_resolution failed; see the rows above");
+        return;
     }
 
     const std::optional<std::vector<PathTraceSettings>> resolved =
@@ -805,7 +799,8 @@ bool checkMaterialBinding() {
     if (!resolved.has_value() || resolved->size() != instances.size()) {
         std::cerr << "integrator_validate: FAILED material binding -- a valid override was rejected, "
                      "or returned the wrong number of entries.\n";
-        return false;
+        finish(ctx, false, "material_binding_resolution failed; see the rows above");
+        return;
     }
     std::cout << "  entry 0/1/2 fields matching glass: " << matchingFields((*resolved)[0], *glass) << '/'
               << matchingFields((*resolved)[1], *glass) << '/'
@@ -848,13 +843,14 @@ bool checkMaterialBinding() {
                      "unloadable material file was accepted.\n";
         ok = false;
     }
-    return ok;
+    finish(ctx, ok, "material_binding_resolution failed; see the rows above");
+    return;
 }
 
 // The five transport buckets are a partition of beauty, not a set of related-looking images: with the background term zeroed (showSky off), DirectDiffuse + IndirectDiffuse + DirectSpecular + IndirectSpecular + Refraction must equal Beauty at every pixel, to float error.
 // Every radiance contribution tracePath adds is written to exactly one bucket at its own physical value, so any gap means a contribution was bucketed twice, dropped, or rescaled, exactly what the previous delighted buckets did by construction (they stripped baseColor at bounce 0 only, leaving direct and indirect in different units and neither summing to anything).
 // The slab rows carry the load: a single quad reaches only the Direct buckets, while the slab's internal reflections populate Indirect and Refraction and exercise the transmissive exiting vertex.
-bool checkTransportPartition() {
+ENGINE_CHECK(transport_aov_partition, Slow, Exact) {
     // Relative to beauty, since the absolute scale differs by case; float error over kSamplesPerPixel accumulations of ~1e-3 each is orders of magnitude below this.
     constexpr float kTolerance = 1e-4F;
 
@@ -884,7 +880,7 @@ bool checkTransportPartition() {
     }};
 
     const EnvironmentMap env = makeUniformEnvironment();
-    engine::scene::ThreadPool pool;
+    engine::scene::ThreadPool& pool = sharedPool(ctx.threads());
     bool ok = true;
 
     std::cout << "integrator_validate: transport buckets partition beauty (showSky off)\n";
@@ -898,7 +894,8 @@ bool checkTransportPartition() {
         std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
         if (!accel.has_value()) {
             std::cerr << "integrator_validate: FAILED to build Embree scene for " << testCase.name << '\n';
-            return false;
+            finish(ctx, false, "transport_aov_partition failed; see the rows above");
+            return;
         }
         PathTraceSettings settings =
             makeSettings(testCase.maxBounces, 999, testCase.metallic, testCase.transmission);
@@ -947,7 +944,8 @@ bool checkTransportPartition() {
             ok = false;
         }
     }
-    return ok;
+    finish(ctx, ok, "transport_aov_partition failed; see the rows above");
+    return;
 }
 
 // Appends a QuadLight's own two emitting triangles to a TestScene, mirroring gltf_loader.cpp's
@@ -1071,9 +1069,9 @@ engine::scene::QuadLight makeOverheadLight(bool twoSided = false) {
 // (irradiance check would read 0 when it should not), absent and this check's blocker stops working
 // (would read the unoccluded illuminance instead of 0). The wall is sized to the light's own footprint
 // as seen from the receiver, offset the same way as the light to keep clear of the camera's own ray.
-bool checkQuadLightIrradianceOneSidedOcclusion() {
+ENGINE_CHECK(quad_light_irradiance_and_occlusion, Slow, Statistical) {
     constexpr float kTolerance = 0.02F;  // Monte Carlo NEE noise at kSamplesPerPixel, not a formula slop
-    engine::scene::ThreadPool pool;
+    engine::scene::ThreadPool& pool = sharedPool(ctx.threads());
     bool ok = true;
 
     struct LightCase {
@@ -1100,7 +1098,8 @@ bool checkQuadLightIrradianceOneSidedOcclusion() {
         std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
         if (!accel.has_value()) {
             std::cerr << "integrator_validate: FAILED to build Embree scene for " << testCase.name << '\n';
-            return false;
+            finish(ctx, false, "quad_light_irradiance_and_occlusion failed; see the rows above");
+            return;
         }
         const std::vector<engine::scene::QuadLight> quads{testCase.light};
         const glm::vec3 lo = centreMean(renderPassWithLights(scene, instanceLightIndex, quads,
@@ -1143,7 +1142,8 @@ bool checkQuadLightIrradianceOneSidedOcclusion() {
         std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
         if (!accel.has_value()) {
             std::cerr << "integrator_validate: FAILED to build Embree scene for one-sided check\n";
-            return false;
+            finish(ctx, false, "quad_light_irradiance_and_occlusion failed; see the rows above");
+            return;
         }
         const std::vector<engine::scene::QuadLight> quads{light};
         const glm::vec3 lo = centreMean(renderPassWithLights(scene, instanceLightIndex, quads,
@@ -1193,7 +1193,8 @@ bool checkQuadLightIrradianceOneSidedOcclusion() {
         std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
         if (!accel.has_value()) {
             std::cerr << "integrator_validate: FAILED to build Embree scene for occlusion check\n";
-            return false;
+            finish(ctx, false, "quad_light_irradiance_and_occlusion failed; see the rows above");
+            return;
         }
         const std::vector<engine::scene::QuadLight> quads{light};
         const glm::vec3 lo = centreMean(renderPassWithLights(scene, instanceLightIndex, quads,
@@ -1211,7 +1212,8 @@ bool checkQuadLightIrradianceOneSidedOcclusion() {
             ok = false;
         }
     }
-    return ok;
+    finish(ctx, ok, "quad_light_irradiance_and_occlusion failed; see the rows above");
+    return;
 }
 
 // checkQuadLightInverseSquare: quadratic falloff is IMPLICIT in this renderer -- NEE divides by
@@ -1227,12 +1229,12 @@ bool checkQuadLightIrradianceOneSidedOcclusion() {
 // from the point-source model by a wide margin, and the renderer must follow the exact Lambert polygon
 // form there rather than the point model. Without it, a renderer that had hardcoded a 1/d^2 point light
 // would pass the far-field rows while being wrong everywhere a real area light differs from a point.
-bool checkQuadLightInverseSquare() {
+ENGINE_CHECK(quad_light_inverse_square, Slow, Statistical) {
     constexpr float kTolerance = 0.02F;  // same Monte Carlo NEE noise band as checkQuadLightIrradiance above, at the same kSamplesPerPixel
     // The far row must reach the point-source limit; 1e-2 is comfortably above the MC noise on the ratio and far below the near-field deviation the guard below demands, so the two cannot be confused.
     constexpr float kPointLimitTolerance = 1e-2F;
     constexpr float kMinNearFieldDeviation = 0.25F;
-    engine::scene::ThreadPool pool;
+    engine::scene::ThreadPool& pool = sharedPool(ctx.threads());
     bool ok = true;
 
     // Small square light facing -Z at the receiver, offset in x to clear the camera's own view cone for
@@ -1273,7 +1275,8 @@ bool checkQuadLightInverseSquare() {
         std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
         if (!accel.has_value()) {
             std::cerr << "integrator_validate: FAILED to build Embree scene for " << row.name << '\n';
-            return false;
+            finish(ctx, false, "quad_light_inverse_square failed; see the rows above");
+            return;
         }
         const std::vector<engine::scene::QuadLight> quads{row.light};
         const glm::vec3 lo = centreMean(renderPassWithLights(scene, instanceLightIndex, quads,
@@ -1333,7 +1336,8 @@ bool checkQuadLightInverseSquare() {
         std::cerr << "integrator_validate: FAILED inverse-square conditioning -- no near-field row deviated from the point-source model by " << kMinNearFieldDeviation << ", so the far-field rows are vacuous\n";
         ok = false;
     }
-    return ok;
+    finish(ctx, ok, "quad_light_inverse_square failed; see the rows above");
+    return;
 }
 
 // --- Ray-traced ambient occlusion (path_tracer.cpp's AO lane) ---------------------------------------
@@ -1394,25 +1398,27 @@ struct AoCase {
 };
 
 // Ray-traced AO against its closed form, over two configurations. An unoccluded plane, where every AO ray escapes and the lane must read exactly 1.0 -- the row an inverted polarity fails outright. Then the corner scene swept over c, which pins the SHAPE of the curve: a sweep and not a point because three wrong integrators pass any single row -- uniform-hemisphere sampling of the same rho, a linear rho, and the hard cutoff this replaced. Rows chosen so the analytic value clears all three by the margins kAoSamplesPerPixel is sized for.
-bool checkAmbientOcclusionAnalytic() {
+ENGINE_CHECK(ambient_occlusion_analytic, Slow, Statistical) {
     std::cout << "integrator_validate: ambient occlusion vs analytic cosine-weighted visibility\n";
     const EnvironmentMap env = makeUniformEnvironment();
-    engine::scene::ThreadPool pool;
-    bool ok = true;
-
+    engine::scene::ThreadPool& pool = sharedPool(ctx.threads());
     const TestScene openScene = makeQuadScene(1.0F, glm::vec3(0.04F));
     std::optional<EmbreeAccel> openAccel = EmbreeAccel::build(openScene.worldTriangles);
     if (!openAccel.has_value()) {
         std::cerr << "integrator_validate: FAILED to build Embree scene for the unoccluded AO plane\n";
-        return false;
+        finish(ctx, false, "ambient_occlusion_analytic failed; see the rows above");
+        return;
     }
-    ok = checkAoRow("unoccluded plane", openScene, env, kAoWallDistance, 1.0F, *openAccel, pool) && ok;
+    // The first row initialises the accumulator; later rows keep `check(...) && ok`, which evaluates each check first
+    // so no row is ever short-circuited away.
+    bool ok = checkAoRow("unoccluded plane", openScene, env, kAoWallDistance, 1.0F, *openAccel, pool);
 
     const TestScene corner = makeCornerScene(1.0F, glm::vec3(0.04F), kAoWallDistance);
     std::optional<EmbreeAccel> cornerAccel = EmbreeAccel::build(corner.worldTriangles);
     if (!cornerAccel.has_value()) {
         std::cerr << "integrator_validate: FAILED to build Embree scene for the AO corner\n";
-        return false;
+        finish(ctx, false, "ambient_occlusion_analytic failed; see the rows above");
+        return;
     }
     const std::array<AoCase, 4> sweep{{{"corner c=0.05 (half-space limit)", 0.05F},
                                         {"corner c=0.15", 0.15F},
@@ -1423,21 +1429,23 @@ bool checkAmbientOcclusionAnalytic() {
                          analyticAmbientOcclusion(testCase.c), *cornerAccel, pool) &&
              ok;
     }
-    return ok;
+    finish(ctx, ok, "ambient_occlusion_analytic failed; see the rows above");
+    return;
 }
 
 // aoMaxDistance bracketed from both sides on one fixed geometry, so the only thing changing between the two rows is the bound itself. At c=0.50 the wall is inside range and darkens the plate by 11 tolerances; at c=1.1 it is outside and every ray escapes, so the lane must read exactly 1.0 -- exact rather than approximate because even the frame-edge sample nearest the wall, at the x=0.3 where the film clips, still sits at c=1.067. A build that ignores aoMaxDistance reads the unbounded half-space value 0.5 in both rows.
 // The inside row sits at c=0.50 and not just under the bound as it did for the hard cutoff: rho'(1) = 0 makes the deficit vanish as (1-c)^(7/2), so c=0.90 now reads 0.99995, within 0.6 tolerances of unoccluded and unresolvable at any practical N. That is the discontinuity being gone, not a lost test.
-bool checkAmbientOcclusionDistanceBound() {
+ENGINE_CHECK(ambient_occlusion_distance_bound, Slow, Statistical) {
     std::cout << "integrator_validate: ambient occlusion respects aoMaxDistance\n";
     const EnvironmentMap env = makeUniformEnvironment();
-    engine::scene::ThreadPool pool;
+    engine::scene::ThreadPool& pool = sharedPool(ctx.threads());
 
     const TestScene corner = makeCornerScene(1.0F, glm::vec3(0.04F), kAoWallDistance);
     std::optional<EmbreeAccel> accel = EmbreeAccel::build(corner.worldTriangles);
     if (!accel.has_value()) {
         std::cerr << "integrator_validate: FAILED to build Embree scene for the AO distance bound\n";
-        return false;
+        finish(ctx, false, "ambient_occlusion_distance_bound failed; see the rows above");
+        return;
     }
     const std::array<AoCase, 2> cases{{{"occluder inside range (c=0.50)", 0.5F},
                                         {"occluder just outside range (c=1.10)", 1.1F}}};
@@ -1447,30 +1455,10 @@ bool checkAmbientOcclusionDistanceBound() {
                          analyticAmbientOcclusion(testCase.c), *accel, pool) &&
              ok;
     }
-    return ok;
+    finish(ctx, ok, "ambient_occlusion_distance_bound failed; see the rows above");
+    return;
 }
 
 }  // namespace
 
-int main() {
-    const bool casesOk = runCases();
-    const bool slabOk = checkTransmissiveSlab();
-    const bool sphereOk = checkTransmissiveSphere();
-    const bool absorptionOk = checkBeerLambert();
-    const bool onSurfaceTintOk = checkOnSurfaceTransmissionTint();
-    const bool bindingOk = checkPerInstanceMaterials();
-    const bool resolveOk = checkMaterialBinding();
-    const bool partitionOk = checkTransportPartition();
-    const bool quadLightOk = checkQuadLightIrradianceOneSidedOcclusion();
-    const bool inverseSquareOk = checkQuadLightInverseSquare();
-    const bool aoAnalyticOk = checkAmbientOcclusionAnalytic();
-    const bool aoDistanceOk = checkAmbientOcclusionDistanceBound();
-    if (!casesOk || !slabOk || !sphereOk || !absorptionOk || !onSurfaceTintOk || !bindingOk ||
-        !resolveOk || !partitionOk || !quadLightOk || !inverseSquareOk || !aoAnalyticOk ||
-        !aoDistanceOk) {
-        std::cerr << "integrator_validate: FAILED\n";
-        return EXIT_FAILURE;
-    }
-    std::cout << "integrator_validate: PASSED\n";
-    return EXIT_SUCCESS;
-}
+ENGINE_CHECK_MAIN("integrator")

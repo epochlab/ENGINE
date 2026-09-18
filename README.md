@@ -267,7 +267,11 @@ Grouped by area of design, each group ordered by importance (most important firs
 
 ### 6. Testing & validation infrastructure
 
-- **Test suite hardening**: `ctest` wires 6 correctness validators (`bsdf_validate`, `embree_validate`, `integrator_validate`, `nee_validate`, `rasterizer_validate`, `sampler_validate`; `enable_testing()`/`add_test` loop, `CMakeLists.txt:275-277`), but each is a standalone binary rolling its own assertions, with no shared unit-test framework behind them, and there is no automated regression-image gate -- `render_beauty`'s `--compare` exists but is deliberately excluded from `add_test` (`CMakeLists.txt:245`, human-judged visual comparison). Add a lightweight unit-test framework for the former, and/or a threshold-based promotion of the image diff into `ctest` for the latter.
+Every validator runs on a shared harness (`tools/check.h`): each check is registered by name and discovered into `ctest` as its own entry (`<suite>.<check>`), labelled by speed (`fast`/`slow`) and kind (`exact`/`statistical`). `ctest -L fast -L exact` is the sub-second pre-commit gate; the full suite is the pre-merge gate. Monte Carlo bands are derived from the run's own variance over independent scramble seeds at one family-wise significance level (`tools/stats.h`), not hand-picked. `render_beauty --assert-deterministic` and `--assert-converged` gate the shipping pipeline with no golden image.
+
+- **Refactor the 11 over-length functions**: `readability-function-size` still fires on `tracePath`, `renderPathTraced`, `sampleBsdf`, `computeLobeProbabilities`, `driverLoop`, `buildSphericalRectangle`, `loadProfileConfig`, and four in `main.cpp`. Deliberately not bundled with the test work: these are hot-path functions, and splitting them risks the image. Needs its own before/after verification.
+- **Histogram coverage**: `debug/histogram.cpp` is FBO/PBO-bound with no CPU-reachable binning function, so it has no validator. Needs the bin arithmetic extracted first.
+- **Band calibration tool**: derived bands are verified by mutation (each converted band detects a smaller error than the one it replaced), but not yet by a standing false-rejection-rate measurement over many seeds.
 
 ### 7. Engineering & maintenance
 

@@ -29,7 +29,13 @@
 
 #include <glm/glm.hpp>
 
+#include "engine/scene/fresnel_dielectric.h"
+
 namespace {
+
+// The shading path's own dielectric interface, so the table is baked against exactly what reads it.
+using engine::scene::cos2Transmitted;
+using engine::scene::fresnelDielectric;
 
 constexpr double kPi = 3.14159265358979323846;
 
@@ -180,34 +186,6 @@ constexpr float kFloatPi = 3.14159265F;
 
 float smithG1f(float ndotV, float alpha) {
     return static_cast<float>(1.0 / (1.0 + smithLambda(ndotV, alpha)));
-}
-
-// Snell in cos^2 form: cos^2(thetaT) = (1 - r^2) + r^2 cos^2(thetaI), r = etaI/etaT. Negative means total internal reflection.
-// Algebraically 1 - r^2 sin^2(thetaI) (PBRT-v4 FrDielectric/Refract, Walter 2007 eq. 40), but never forms 1 - cos^2(thetaI), which rounds to exactly 1.0F below cos 2^-12 and falsely reports TIR.
-// At r == 1 it collapses to cos^2(thetaI), so an index-matched interface cannot total-internally-reflect by construction rather than by a branch; at r < 1 the constant term is positive, so entering a denser medium cannot either.
-// Verbatim twin of bsdf.cpp's: this bakes the table that file reads, so the two must decide TIR identically or the compensation is computed against a different interface than the one shaded.
-float cos2Transmitted(float cosThetaI, float etaRatio) {
-    const float r2 = etaRatio * etaRatio;
-    return (1.0F - r2) + (r2 * cosThetaI * cosThetaI);
-}
-
-// Exact unpolarized dielectric Fresnel reflectance (PBRT's FrDielectric); 1.0 from the critical angle inward, where cosThetaT is 0 and both polarisations are already exactly 1.
-float fresnelDielectric(float cosThetaI, float etaI, float etaT) {
-    cosThetaI = std::clamp(cosThetaI, -1.0F, 1.0F);
-    if (cosThetaI < 0.0F) {
-        std::swap(etaI, etaT);
-        cosThetaI = -cosThetaI;
-    }
-    const float cos2ThetaT = cos2Transmitted(cosThetaI, etaI / etaT);
-    if (cos2ThetaT < 0.0F) {
-        return 1.0F;
-    }
-    const float cosThetaT = std::sqrt(cos2ThetaT);
-    const float rParallel =
-        ((etaT * cosThetaI) - (etaI * cosThetaT)) / ((etaT * cosThetaI) + (etaI * cosThetaT));
-    const float rPerpendicular =
-        ((etaI * cosThetaI) - (etaT * cosThetaT)) / ((etaI * cosThetaI) + (etaT * cosThetaT));
-    return ((rParallel * rParallel) + (rPerpendicular * rPerpendicular)) * 0.5F;
 }
 
 // Heitz 2018 VNDF sampling. wo.z > 0 required.

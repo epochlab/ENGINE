@@ -29,7 +29,10 @@
 #include "engine/debug/aov.h"
 #include "engine/debug/power_spectrum.h"
 #include "engine/debug/render_stats.h"
+#include "check.h"
+#include "stats.h"
 #include "engine/gfx/hdr_image.h"
+#include "engine/gfx/ocio_cpu_transform.h"
 #include "engine/gfx/ocio_display_transform.h"
 #include "engine/scene/camera.h"
 #include "engine/scene/embree_accel.h"
@@ -89,6 +92,16 @@ struct Options {
     // -1 = use the scene's own authored environment.lightEnabled default; 0/1 override it -- lets a
     // headless capture of the classic (env-off) Cornell variant not need a second scene.json.
     int envLight = -1;
+    // Gate modes: these set a non-zero exit code, which is what makes them usable as ctest entries. The reporting
+    // paths above deliberately do not -- their output is a number for a human to read.
+    // Determinism is the claim this file's own header makes ("two runs over unchanged code produce a byte-identical
+    // file") and that nothing verified until this flag existed. It is exact, needs no threshold, and catches the
+    // failure modes that make every other image comparison meaningless: thread-scheduling nondeterminism,
+    // uninitialised reads, sampler state leaking between passes.
+    bool assertDeterministic = false;
+    // Two independent randomizations of the same estimator must agree within their own measured error. No reference
+    // image, no tuned threshold -- see the gate itself for the construction.
+    bool assertConverged = false;
     // Resolved by --aov. Defaulting to Beauty keeps every existing invocation -- and the bit-identity gate built on them -- unchanged.
     PathTracedLane lane = &engine::scene::PathTraceResult::beauty;
     std::string aovName = "Beauty";
@@ -283,17 +296,6 @@ glm::vec3 ditherOffset(float u, float v) {
     return {d, d, d};
 }
 
-// The viewer's sRGB display path, evaluated on the CPU. Built from the same config/colorspace/display/view constants the display shaders are generated from (ocio_display_transform.h), so this is the same transform rather than a second definition of it. In place, RGB triples.
-void applyOcioDisplayTransform(std::vector<float>& rgb, int width, int height) {
-    const OCIO::ConstConfigRcPtr config =
-        OCIO::Config::CreateFromBuiltinConfig(engine::gfx::kOcioConfigName);
-    const OCIO::ConstProcessorRcPtr processor =
-        config->getProcessor(engine::gfx::kOcioSceneColorSpace, engine::gfx::kOcioSrgbDisplay,
-                              engine::gfx::kOcioView, OCIO::TRANSFORM_DIR_FORWARD);
-    OCIO::PackedImageDesc desc(rgb.data(), width, height, OCIO::CHANNEL_ORDERING_RGB);
-    processor->getDefaultCPUProcessor()->apply(desc);
-}
-
 // Scene-referred image -> display-referred 8-bit, matching the viewer's pipeline exactly: exposure multiply, the display curve, then dither and quantize.
 // applyDisplayTransform mirrors presentFrame's `isBeauty ? userLut : Raw`: only Beauty is scene-referred radiance, and putting a data AOV like AO or Shadow through a display curve would distort values that are already display-ready. Raw is the OCIO-free branch, exactly what buildRawFragmentSource does -- exposure, then dither and quantize.
 std::vector<unsigned char> encodeForDisplay(const engine::gfx::HdrImage& image, float exposureEv,
@@ -308,7 +310,7 @@ std::vector<unsigned char> encodeForDisplay(const engine::gfx::HdrImage& image, 
     }
 
     if (applyDisplayTransform) {
-        applyOcioDisplayTransform(rgb, image.width, image.height);
+        engine::gfx::applyOcioDisplayTransform(rgb, image.width, image.height);
     }
 
     std::vector<unsigned char> out(rgb.size());
@@ -418,6 +420,10 @@ bool parseArgs(int argc, char** argv, Options& options) {
         } else if (std::strcmp(argv[i], "--aov") == 0) {
             if (!needsValue("--aov")) { return false; }
             if (!resolveAov(argv[++i], options)) { return false; }
+        } else if (std::strcmp(argv[i], "--assert-deterministic") == 0) {
+            options.assertDeterministic = true;
+        } else if (std::strcmp(argv[i], "--assert-converged") == 0) {
+            options.assertConverged = true;
         } else if (std::strcmp(argv[i], "--env-light") == 0) {
             if (!needsValue("--env-light")) { return false; }
             options.envLight = std::atoi(argv[++i]) != 0 ? 1 : 0;
@@ -425,12 +431,12 @@ bool parseArgs(int argc, char** argv, Options& options) {
             std::cerr << "render_beauty: unknown argument '" << argv[i]
                       << "'\nusage: render_beauty [--scene scenes/x.json] --out out.png [--out-exr out.exr] [--compare-exr ref.exr] "
                          "[--compare ref.png] [--error-spectrum] [--seed N] [--passes N] [--width W] [--height H] "
-                         "[--exposure EV] [--aov name]\n";
+                         "[--exposure EV] [--aov name] [--assert-deterministic] [--assert-converged]\n";
             return false;
         }
     }
-    if (options.outPath.empty()) {
-        std::cerr << "render_beauty: --out is required\n";
+    if (options.outPath.empty() && !options.assertDeterministic && !options.assertConverged) {
+        std::cerr << "render_beauty: --out is required unless running a gate\n";
         return false;
     }
     if (options.passes < 1) {
@@ -563,6 +569,149 @@ int main(int argc, char** argv) {
     // actually did, as opposed to only which values it sampled. Deterministic here where the viewer's are not, since
     // this tool renders a fixed pass count with no cancellation.
     engine::debug::PassStats stats;
+
+    // One accumulation, parameterised by its randomization. Factored out so the gates below can render the same scene
+    // several times: everything above this point (scene, accel, lights, camera) is built once and shared, so a gate
+    // costs renders and nothing else.
+    const auto accumulate = [&](std::uint32_t scrambleSeed, int passes) {
+        engine::scene::PathTraceResult pass = engine::scene::makePathTraceResult(width, height);
+        engine::gfx::HdrImage mean{width, height,
+                                    std::vector<float>(static_cast<std::size_t>(width) *
+                                                        static_cast<std::size_t>(height) * 4, 0.0F)};
+        const std::atomic<std::uint64_t> localGeneration{1};
+        engine::debug::PassStats localStats;
+        for (int p = 0; p < passes; ++p) {
+            engine::scene::renderPathTraced(camera, *accel, model->shadingTriangles, model->instances,
+                                             instanceLightIndex, lights, width, height, /*showSky=*/true,
+                                             baseSettings, *perInstanceSettings, scrambleSeed, /*sampleBase=*/p,
+                                             /*sampleCount=*/passes, localGeneration, /*requestedGeneration=*/1U,
+                                             threadPool, localStats, pass);
+            for (std::size_t i = 0; i < mean.rgba.size(); ++i) {
+                mean.rgba[i] += (pass.*options.lane).rgba[i];
+            }
+        }
+        for (float& v : mean.rgba) {
+            v /= static_cast<float>(passes);
+        }
+        return mean;
+    };
+
+    // --- Determinism gate. Exact, and the only gate here that needs no statistics at all: the same seed must produce
+    // the same floats, because every input to the render is fixed. A failure means the renderer's output depends on
+    // something that is not its inputs -- thread scheduling, an uninitialised read, or sampler state surviving a pass
+    // -- and until that is true no other image comparison in this suite means anything.
+    if (options.assertDeterministic) {
+        const engine::gfx::HdrImage first = accumulate(options.scrambleSeed, options.passes);
+        const engine::gfx::HdrImage second = accumulate(options.scrambleSeed, options.passes);
+        std::size_t differing = 0;
+        double worst = 0.0;
+        for (std::size_t i = 0; i < first.rgba.size(); ++i) {
+            if (first.rgba[i] != second.rgba[i]) {
+                ++differing;
+                worst = std::max(worst, std::fabs(static_cast<double>(first.rgba[i]) -
+                                                   static_cast<double>(second.rgba[i])));
+            }
+        }
+        if (differing != 0) {
+            std::cerr << "render_beauty: FAILED determinism -- " << differing << " of " << first.rgba.size()
+                      << " floats differ between two runs at the same seed (worst " << worst
+                      << "); the render depends on something that is not its inputs\n";
+            return EXIT_FAILURE;
+        }
+        std::cout << "render_beauty: determinism PASSED -- " << first.rgba.size()
+                  << " floats bit-identical across two runs at seed " << options.scrambleSeed << "\n";
+    }
+
+    // --- Convergence gate. Two independent randomizations of an unbiased estimator must agree within their own
+    // measured error, so this needs no reference image and no tuned threshold.
+    // Per-pixel error is estimated by SPLITTING each render into R independent sub-renders and taking the variance
+    // across them. That is the buffer-variance estimator standard in the sampling/denoising literature (Zwicker et al.
+    // 2015 STAR; Rousselle et al. 2011), and it is the only honest construction here: the renderer's samples are one
+    // Owen-scrambled Sobol set, so no closed-form sqrt(N) error applies, and splitting by PASS PARITY would not fix it
+    // either -- consecutive passes are stratified against each other, so parity halves are correlated and their spread
+    // understates the true error. Independent SCRAMBLE SEEDS are what make the sub-renders genuinely independent.
+    // R = 8 rather than 2 for a reason that is easy to miss: two buffers give the variance ONE degree of freedom, and a
+    // chi-square with 1 dof is so heavy-tailed that the standardised statistic is Cauchy-like and no normal quantile
+    // applies to it. Eight gives seven, and a Student-t that means what it says.
+    if (options.assertConverged) {
+        constexpr int kSubRenders = 8;
+        const int perSubRender = std::max(1, options.passes / kSubRenders);
+        const auto family = [&](std::uint32_t base) {
+            std::vector<engine::gfx::HdrImage> members;
+            members.reserve(kSubRenders);
+            for (int r = 0; r < kSubRenders; ++r) {
+                members.push_back(accumulate(base + static_cast<std::uint32_t>(r), perSubRender));
+            }
+            return members;
+        };
+        // Disjoint seed ranges, so no sub-render is shared between the two families -- a shared one would correlate
+        // them and shrink the very difference being tested.
+        const std::vector<engine::gfx::HdrImage> a = family(options.scrambleSeed);
+        const std::vector<engine::gfx::HdrImage> b = family(options.scrambleSeed + 1000U);
+
+        const std::size_t pixels = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+        // Sidak over the pixels actually examined, so the threshold follows the resolution instead of being restated
+        // for it. Luminance rather than per-channel: error visibility is a luminance effect, and a scalar field is what
+        // has a distribution.
+        const double perPixelAlpha = tools::stats::sidak(tools::check::kFamilyAlpha, static_cast<int>(pixels));
+        double worstZ = 0.0;
+        std::size_t worstPixel = 0;
+        std::size_t examined = 0;
+        std::size_t constantDisagreements = 0;
+        for (std::size_t px = 0; px < pixels; ++px) {
+            const auto luminance = [&](const engine::gfx::HdrImage& image) {
+                return (0.2126 * image.rgba[(px * 4) + 0]) + (0.7152 * image.rgba[(px * 4) + 1]) +
+                       (0.0722 * image.rgba[(px * 4) + 2]);
+            };
+            tools::stats::Welford wa;
+            tools::stats::Welford wb;
+            for (int r = 0; r < kSubRenders; ++r) {
+                wa.add(luminance(a[static_cast<std::size_t>(r)]));
+                wb.add(luminance(b[static_cast<std::size_t>(r)]));
+            }
+            const double va = wa.sampleVariance() / kSubRenders;
+            const double vb = wb.sampleVariance() / kSubRenders;
+            const double combined = va + vb;
+            // Zero variance in both families: a z-score is undefined, but the verdict is not -- equal constants agree,
+            // unequal constants disagree with certainty.
+            if (!(combined > 0.0)) {
+                constantDisagreements += wa.mean() != wb.mean() ? 1 : 0;
+                continue;
+            }
+            ++examined;
+            const double z = std::fabs(wa.mean() - wb.mean()) / std::sqrt(combined);
+            if (z > worstZ) {
+                worstZ = z;
+                worstPixel = px;
+            }
+        }
+        // Welch degrees of freedom are bounded below by R-1 for equal-sized samples, so using that is conservative --
+        // it can only widen the threshold, never narrow it into a false failure.
+        const double threshold = tools::stats::studentTTwoSided(perPixelAlpha, kSubRenders - 1);
+        if (examined == 0 || constantDisagreements != 0) {
+            std::cerr << "render_beauty: FAILED convergence -- " << examined << " pixels had measurable variance and "
+                      << constantDisagreements << " zero-variance pixels disagreed between families; a gate that "
+                         "examined nothing, or two constant estimates that differ, is not a pass\n";
+            return EXIT_FAILURE;
+        }
+        if (!(worstZ <= threshold)) {
+            std::cerr << "render_beauty: FAILED convergence -- worst |z| " << worstZ << " at pixel " << worstPixel
+                      << " (" << (worstPixel % static_cast<std::size_t>(width)) << ","
+                      << (worstPixel / static_cast<std::size_t>(width)) << ") exceeds " << threshold
+                      << " at per-pixel alpha " << perPixelAlpha << " over " << pixels
+                      << " pixels; two independent randomizations of the same estimator disagree by more than their "
+                         "own measured error\n";
+            return EXIT_FAILURE;
+        }
+        std::cout << "render_beauty: convergence PASSED -- worst |z| " << worstZ << " against " << threshold
+                  << " over " << pixels << " pixels (" << kSubRenders << " sub-renders x " << perSubRender
+                  << " passes per family)\n";
+    }
+
+    if (options.assertDeterministic || options.assertConverged) {
+        return EXIT_SUCCESS;  // a gate renders for its verdict, not for an image
+    }
+
     // Per-pass wall clock, so a change's traversal cost is measured rather than argued. Only the trace is timed: the accumulate below is O(pixels) and identical across revisions. Mean is the figure to compare -- unlike raster_bench's single-threaded frames, a pass's minimum is set by how the tile queue happened to drain and varies ~12% run to run, where the mean holds to ~1%. Reported alongside best/worst so a run disturbed by other load is visible rather than silently folded in. Pass 0 carries the pool spin-up and first-touch faults and is counted like any other: discarding it would change the image, and it biases both sides of an A/B equally.
     std::vector<double> milliseconds;
     milliseconds.reserve(static_cast<std::size_t>(options.passes));

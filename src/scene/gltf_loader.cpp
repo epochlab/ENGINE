@@ -305,6 +305,9 @@ std::optional<MeshInstance> loadPrimitive(const cgltf_data* data, const cgltf_pr
 // Hard cap on node-graph recursion depth. glTF's node hierarchy is untrusted external data -- cgltf_validate doesn't check for cycles or pathological nesting depth, so an unbounded recursion here would let a malformed/cyclic file overflow the stack. 256 comfortably covers any legitimate scene hierarchy.
 constexpr int kMaxNodeDepth = 256;
 
+// A glTF node hierarchy is a tree, so recursion is its structure; the depth cap above is what makes it safe on
+// untrusted input, and an explicit stack would restate the call stack while gaining no invariant.
+// NOLINTNEXTLINE(misc-no-recursion)
 bool walkNodes(const cgltf_data* data, cgltf_node* const* nodes, cgltf_size count,
                const glm::mat4& parentTransform, const std::string& dir,
                std::vector<MeshInstance>& instances, std::vector<Triangle>& worldTriangles,

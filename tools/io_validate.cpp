@@ -1,0 +1,260 @@
+// Correctness gate for the engine's file-boundary code: the EXR round trip (gfx/hdr_image.cpp) and the JSON scene and
+// profile parsers (config/scene_config.cpp, config/profile_config.cpp).
+//
+// These are the places the engine ingests data it did not produce, which is exactly where validation earns its keep --
+// and none of them had any. hdr_image.cpp is linked into three validators and was invoked by none of them: its round
+// trip was asserted only by a comment claiming losslessness. profile_config.cpp had no coverage at all.
+//
+// Both halves of each parser's contract are asserted, and the rejection half is the load-bearing one: a parser that
+// accepts valid input but silently accepts invalid input too will not fail here on the happy path, and a malformed
+// asset then reaches the renderer as a plausible-looking wrong number rather than an error.
+
+#include <cstdint>
+#include <cstdio>
+#include <filesystem>
+#include <fstream>
+#include <optional>
+#include <string>
+#include <vector>
+
+#include <glm/glm.hpp>
+
+#include "check.h"
+#include "engine/config/profile_config.h"
+#include "engine/config/scene_config.h"
+#include "engine/gfx/hdr_image.h"
+
+namespace {
+
+// Written under the system temp directory rather than the source tree: a validator must not need a writable checkout,
+// and must leave nothing behind for the next run to accidentally pass against.
+std::filesystem::path scratchPath(const char* name) {
+    return std::filesystem::temp_directory_path() / name;
+}
+
+// Values chosen to be hostile to a lossy or narrowing round trip: denormal-scale, exact halves, a value far outside
+// display range, and a negative -- all representable in float32 and all preserved by a full-float EXR channel.
+engine::gfx::HdrImage makeProbeImage() {
+    engine::gfx::HdrImage image;
+    image.width = 7;   // deliberately not a power of two or a multiple of any tile size
+    image.height = 5;
+    image.rgba.resize(static_cast<std::size_t>(image.width) * image.height * 4);
+    for (std::size_t i = 0; i < image.rgba.size(); ++i) {
+        const std::size_t channel = i % 4;
+        const auto t = static_cast<float>(i);
+        switch (channel) {
+            case 0: image.rgba[i] = t * 1.5F; break;              // exact halves
+            case 1: image.rgba[i] = 1.0e-20F * (t + 1.0F); break;  // far below display range
+            case 2: image.rgba[i] = 65504.0F - t; break;           // near the half-float maximum, if one were used
+            default: image.rgba[i] = 1.0F; break;                  // alpha
+        }
+    }
+    return image;
+}
+
+// The losslessness hdr_image.h claims in prose. Bit-exact, not approximate: both directions write full-float channels,
+// so any difference at all means a channel type or a stride is wrong. The 1e-20 and 65504 rows are what would expose a
+// half-float channel, which would round both to something else entirely while leaving the ordinary values intact.
+ENGINE_CHECK(exr_round_trip_is_lossless, Fast, Exact) {
+    ctx.plan(4);
+    const engine::gfx::HdrImage original = makeProbeImage();
+    const std::filesystem::path path = scratchPath("engine_io_validate_roundtrip.exr");
+    std::filesystem::remove(path);
+
+    ENGINE_EXPECT(ctx, engine::gfx::writeExr(path.string(), original), "writeExr failed on a valid image");
+    const std::optional<engine::gfx::HdrImage> loaded = engine::gfx::loadExr(path.string());
+    if (!loaded.has_value()) {
+        ENGINE_EXPECT(ctx, false, "loadExr returned nullopt for a file writeExr had just written");
+        ENGINE_EXPECT(ctx, false, "dimensions unavailable");
+        ENGINE_EXPECT(ctx, false, "contents unavailable");
+        std::filesystem::remove(path);
+        return;
+    }
+
+    char dimDetail[160];
+    std::snprintf(dimDetail, sizeof(dimDetail), "round trip returned %dx%d, wrote %dx%d", loaded->width,
+                  loaded->height, original.width, original.height);
+    ENGINE_EXPECT(ctx, loaded->width == original.width && loaded->height == original.height, dimDetail);
+    ENGINE_EXPECT(ctx, loaded->rgba.size() == original.rgba.size(), "round trip changed the channel count");
+
+    std::size_t differing = 0;
+    float worst = 0.0F;
+    if (loaded->rgba.size() == original.rgba.size()) {
+        for (std::size_t i = 0; i < original.rgba.size(); ++i) {
+            if (loaded->rgba[i] != original.rgba[i]) {
+                ++differing;
+                worst = std::max(worst, std::fabs(loaded->rgba[i] - original.rgba[i]));
+            }
+        }
+    }
+    char detail[192];
+    std::snprintf(detail, sizeof(detail), "%zu of %zu floats changed across the round trip, worst delta %.9g",
+                  differing, original.rgba.size(), static_cast<double>(worst));
+    ENGINE_EXPECT(ctx, differing == 0, detail);
+    std::filesystem::remove(path);
+}
+
+// A missing file must be reported, not treated as an empty image: loadExr's contract is nullopt on failure, and a
+// caller that received a zero-sized image instead would render black and never know why.
+ENGINE_CHECK(exr_load_rejects_bad_input, Fast, Exact) {
+    ctx.plan(2);
+    const std::filesystem::path missing = scratchPath("engine_io_validate_does_not_exist.exr");
+    std::filesystem::remove(missing);
+    ENGINE_EXPECT(ctx, !engine::gfx::loadExr(missing.string()).has_value(),
+                  "loadExr accepted a path that does not exist");
+
+    // A file that exists but is not an EXR at all -- the realistic corruption, and the one a magic-number check alone
+    // would catch while a truncated-header check would not.
+    const std::filesystem::path garbage = scratchPath("engine_io_validate_garbage.exr");
+    {
+        std::ofstream out(garbage, std::ios::binary);
+        out << "this is not an OpenEXR file, but it is definitely a file";
+    }
+    ENGINE_EXPECT(ctx, !engine::gfx::loadExr(garbage.string()).has_value(),
+                  "loadExr accepted a file whose contents are not EXR");
+    std::filesystem::remove(garbage);
+}
+
+// Writes `text` to a scratch .json and hands back the path, so each rejection row states its own malformation inline
+// rather than needing a checked-in fixture file per case.
+std::filesystem::path writeJson(const char* name, const std::string& text) {
+    const std::filesystem::path path = scratchPath(name);
+    std::ofstream out(path);
+    out << text;
+    return path;
+}
+
+// The shipped scene must load: without this row, every rejection row below could pass by rejecting everything.
+ENGINE_CHECK(scene_config_accepts_the_shipped_scene, Fast, Exact) {
+    ctx.plan(1);
+    const std::filesystem::path scene = std::filesystem::path(ASSET_ROOT_DIR) / "scenes" / "cornell.json";
+    const std::optional<engine::config::SceneConfig> loaded = engine::config::loadSceneConfig(scene.string());
+    char detail[256];
+    std::snprintf(detail, sizeof(detail), "loadSceneConfig rejected the shipped scene at %s", scene.string().c_str());
+    ENGINE_EXPECT(ctx, loaded.has_value(), detail);
+}
+
+// The rejection half of the contract. Each row is a malformation a real authoring mistake produces, and each must be
+// reported rather than absorbed into a default -- a quad light with non-perpendicular edges, for instance, would be
+// sampled by a spherical-rectangle sampler that is exact only for rectangles, producing a quietly wrong image.
+ENGINE_CHECK(scene_config_rejects_malformed_input, Fast, Exact) {
+    struct Case {
+        const char* name;
+        const char* file;
+        std::string text;
+    };
+    // Built by mutating a base that loads, so each row fails for the reason it names. Stating a malformed scene
+    // outright risks a vacuous pass: an earlier draft of the two light rows below omitted "environment" and was
+    // rejected for THAT, never reaching the light validation they exist to test.
+    const auto scene = [](const std::string& lights) {
+        return std::string(
+                   "{\"model\":{\"gltfPath\":\"geometry/cornell/cornell_v001.gltf\",\"texturePath\":\"\","
+                   "\"position\":[0,0,0],\"rotation\":[0,0,0]},"
+                   "\"environment\":{\"hdriPath\":\"textures/republiqueHDR_2k.exr\"},"
+                   "\"materialPath\":\"materials/clay.json\"") +
+               lights + "}";
+    };
+    const std::string validLights =
+        ",\"lights\":[{\"type\":\"quad\",\"origin\":[0,0,0],\"edge0\":[1,0,0],\"edge1\":[0,0,1],"
+        "\"color\":[1,1,1],\"intensity\":5.0,\"twoSided\":false}]";
+
+    const std::vector<Case> cases = {
+        {"not JSON at all", "engine_io_scene_notjson.json", "{ this is not json"},
+        {"empty file", "engine_io_scene_empty.json", ""},
+        {"JSON array where an object is required", "engine_io_scene_array.json", "[1, 2, 3]"},
+        {"missing the model section entirely", "engine_io_scene_nomodel.json",
+         "{\"environment\":{\"hdriPath\":\"x.exr\"},\"materialPath\":\"materials/clay.json\"}"},
+        // Negative radiance is not a scene, and would propagate as negative energy through every estimator.
+        {"negative light intensity", "engine_io_scene_negintensity.json",
+         scene(",\"lights\":[{\"type\":\"quad\",\"origin\":[0,0,0],\"edge0\":[1,0,0],\"edge1\":[0,0,1],"
+               "\"color\":[1,1,1],\"intensity\":-5.0,\"twoSided\":false}]")},
+        // The spherical-rectangle sampler (Urena et al. 2013) is exact only for a RECTANGLE, so skewed edges would be
+        // sampled against geometry the light does not have -- a quietly wrong image rather than an error.
+        {"quad light with non-perpendicular edges", "engine_io_scene_skewlight.json",
+         scene(",\"lights\":[{\"type\":\"quad\",\"origin\":[0,0,0],\"edge0\":[1,0,0],\"edge1\":[1,1,0],"
+               "\"color\":[1,1,1],\"intensity\":5.0,\"twoSided\":false}]")},
+        {"negative light colour", "engine_io_scene_negcolor.json",
+         scene(",\"lights\":[{\"type\":\"quad\",\"origin\":[0,0,0],\"edge0\":[1,0,0],\"edge1\":[0,0,1],"
+               "\"color\":[1,-1,1],\"intensity\":5.0,\"twoSided\":false}]")},
+    };
+
+    // Anti-vacuity: the base the three light rows are built from must itself LOAD, or they would prove nothing.
+    const std::filesystem::path basePath = writeJson("engine_io_scene_base.json", scene(validLights));
+    const bool baseLoads = engine::config::loadSceneConfig(basePath.string()).has_value();
+    std::filesystem::remove(basePath);
+
+    ctx.plan(static_cast<int>(cases.size()) + 1);
+    ENGINE_EXPECT(ctx, baseLoads,
+                  "the unmutated base scene must load, or every mutated row below passes vacuously");
+    for (const Case& testCase : cases) {
+        const std::filesystem::path path = writeJson(testCase.file, testCase.text);
+        const bool accepted = engine::config::loadSceneConfig(path.string()).has_value();
+        char detail[224];
+        std::snprintf(detail, sizeof(detail), "loadSceneConfig accepted a scene with %s", testCase.name);
+        ENGINE_EXPECT(ctx, !accepted, detail);
+        std::filesystem::remove(path);
+    }
+}
+
+ENGINE_CHECK(profile_config_accepts_the_shipped_profile, Fast, Exact) {
+    ctx.plan(1);
+    const std::filesystem::path profile = std::filesystem::path(ASSET_ROOT_DIR) / "config" / "profile.json";
+    char detail[256];
+    std::snprintf(detail, sizeof(detail), "loadProfileConfig rejected the shipped profile at %s",
+                  profile.string().c_str());
+    ENGINE_EXPECT(ctx, engine::config::loadProfileConfig(profile.string()).has_value(), detail);
+}
+
+// profile_config.cpp had no coverage of any kind. These rows are the boundary values it is responsible for: a
+// zero-or-negative resolution divides an aspect ratio, and a zero film-back dimension is a denominator inside
+// Camera::verticalFovRadians().
+ENGINE_CHECK(profile_config_rejects_malformed_input, Fast, Exact) {
+    struct Case {
+        const char* name;
+        const char* file;
+        std::string text;
+    };
+    const std::vector<Case> cases = {
+        {"not JSON at all", "engine_io_profile_notjson.json", "{ nope"},
+        {"empty file", "engine_io_profile_empty.json", ""},
+        {"JSON array where an object is required", "engine_io_profile_array.json", "[]"},
+    };
+
+    ctx.plan(static_cast<int>(cases.size()) + 1);
+    for (const Case& testCase : cases) {
+        const std::filesystem::path path = writeJson(testCase.file, testCase.text);
+        char detail[224];
+        std::snprintf(detail, sizeof(detail), "loadProfileConfig accepted a profile with %s", testCase.name);
+        ENGINE_EXPECT(ctx, !engine::config::loadProfileConfig(path.string()).has_value(), detail);
+        std::filesystem::remove(path);
+    }
+
+    const std::filesystem::path missing = scratchPath("engine_io_profile_absent.json");
+    std::filesystem::remove(missing);
+    ENGINE_EXPECT(ctx, !engine::config::loadProfileConfig(missing.string()).has_value(),
+                  "loadProfileConfig accepted a path that does not exist");
+}
+
+// The film-back catalogue's own contract: every preset's dimensions feed Camera::verticalFovRadians() as a
+// denominator and an aspect ratio, so a zero or negative entry is not a cosmetic defect.
+ENGINE_CHECK(film_back_presets_are_physically_valid, Fast, Exact) {
+    ctx.plan(2);
+    const std::filesystem::path camera = std::filesystem::path(ASSET_ROOT_DIR) / "config" / "camera.json";
+    const std::optional<std::vector<engine::scene::Camera::FilmBackPreset>> presets =
+        engine::config::loadFilmBackPresets(camera.string());
+    if (!presets.has_value()) {
+        ENGINE_EXPECT(ctx, false, "loadFilmBackPresets rejected the shipped camera.json");
+        ENGINE_EXPECT(ctx, false, "presets unavailable");
+        return;
+    }
+    ENGINE_EXPECT(ctx, !presets->empty(), "the shipped film-back catalogue is empty");
+    bool allPositive = true;
+    for (const engine::scene::Camera::FilmBackPreset& preset : *presets) {
+        allPositive = allPositive && preset.filmBack.widthMm > 0.0F && preset.filmBack.heightMm > 0.0F;
+    }
+    ENGINE_EXPECT(ctx, allPositive, "a film-back preset has a non-positive dimension");
+}
+
+}  // namespace
+
+ENGINE_CHECK_MAIN("io")

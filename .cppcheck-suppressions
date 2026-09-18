@@ -1,0 +1,41 @@
+# Documented cppcheck suppressions. Each entry states why the finding is not a defect in this codebase; anything not
+# listed here is expected to be fixed rather than silenced.
+
+# Fires on every aggregate struct without a constructor. Every instance in this repo is a pure aggregate that is only
+# ever brace-initialised at its use sites (RasterLineSegment, ChiSquareCase, AbsorptionCase, SobolPolynomial, ...).
+# Adding "= 0" to ~170 members of structs that are never default-constructed would be defensive noise asserting a
+# condition the language already guarantees at every construction site, and would touch a dozen otherwise-untouched
+# files for no behavioural change.
+uninitMemberVarNoCtor
+
+# HudOverlay's and Window's members touch no instance state because ImGui and GLFW hold it in their own globals.
+# Keeping them non-static is a deliberate API choice -- the type is the seam those libraries are reached through -- and
+# making them static would change every call site's spelling to advertise an implementation detail.
+functionStatic
+
+# Fires on the universal C++ setter convention, where setAperture(float aperture) "shadows" the aperture() accessor
+# (debug_camera_controller.h) and setShouldClose(bool shouldClose) shadows shouldClose(). Renaming the parameters would
+# make the public API read worse to silence a name collision that has no scope in which it is ambiguous.
+shadowFunction
+
+# resolveTexture/resolveTextureByIndex (gltf_loader.cpp) take HdrImage by value and `return fallback;`, which the
+# language turns into a move out of the parameter. That lets a caller move in as well, so the by-value form performs
+# zero or one move where a const reference would force a copy on every fallback return. cppcheck scores the parameter
+# in isolation and cannot see the return.
+passedByValue:*/gltf_loader.cpp
+
+# accumulateMean's `sample` is an in/out buffer: the running mean is computed IN the freshly rendered pass buffer,
+# which is what lets the publish be a pointer assignment rather than a whole-image copy. See the function's own
+# comment. Marking it const would not compile against that design.
+constParameterReference:*/path_trace_driver.cpp
+
+# cppcheck's preprocessor cannot evaluate __has_builtin, which sampler.cpp uses to select an intrinsic. Not a defect in
+# the code: the compiler resolves it, and cppcheck simply lacks the builtin. A configuration gap, not a finding.
+syntaxError:*/sampler.cpp
+
+# Suggests replacing raw loops with <algorithm> calls. Applied case by case rather than wholesale: nearly every hit here
+# is a loop that also accumulates a second quantity, records a worst-case row for the failure message, or exits early on
+# a mismatch -- rewriting those as std::any_of/std::accumulate would need a mutable lambda capture to carry the extra
+# state, which reads worse than the loop and hides the early exit. Where the loop genuinely does one thing, the
+# algorithm is already used.
+useStlAlgorithm

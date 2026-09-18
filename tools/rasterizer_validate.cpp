@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <memory>
 #include <optional>
 #include <random>
 #include <vector>
@@ -16,6 +17,7 @@
 #include "engine/scene/false_color.h"
 #include "engine/scene/gbuffer_shading.h"
 #include "engine/scene/gltf_loader.h"
+#include "check.h"
 #include "engine/scene/rasterizer.h"
 #include "engine/scene/ray_types.h"
 #include "engine/scene/shading_scene.h"
@@ -396,59 +398,97 @@ bool checkWireframeSanity(const Camera& camera, const std::vector<ShadingTriangl
     return true;
 }
 
+// Everything the pose checks share. Rebuilt per check rather than hoisted into a global: construction is a few
+// milliseconds at this size, and a check that builds its own world has no ordering dependence on any other.
+struct RasterFixture {
+    std::vector<ShadingTriangle> shadingTriangles;
+    std::vector<Triangle> worldTriangles;
+    std::optional<EmbreeAccel> accel;
+    std::vector<MeshInstance> instances;
+    std::vector<PathTraceSettings> perInstanceSettings;
+    std::vector<AabbBounds> instanceBounds;
+    ThreadPool threadPool;
+};
+
+std::unique_ptr<RasterFixture> makeFixture(const tools::check::Context& ctx) {
+    auto fixture = std::make_unique<RasterFixture>();
+    std::mt19937 rng(static_cast<std::mt19937::result_type>(ctx.seed()));
+    fixture->shadingTriangles = makeSyntheticTriangles(rng);
+    fixture->worldTriangles = worldTrianglesOf(fixture->shadingTriangles);
+    fixture->accel = EmbreeAccel::build(fixture->worldTriangles);
+    fixture->instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.8F, 0.2F, 0.2F), 0.2F), glm::mat4(1.0F), ""});
+    fixture->instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.2F, 0.8F, 0.2F), 0.5F), glm::mat4(1.0F), ""});
+    fixture->instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.2F, 0.2F, 0.8F), 0.8F), glm::mat4(1.0F), ""});
+    fixture->instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.8F, 0.8F, 0.2F), 1.0F), glm::mat4(1.0F), ""});
+    fixture->perInstanceSettings.assign(fixture->instances.size(), makeTestSettings());
+    fixture->instanceBounds =
+        computeInstanceBounds(fixture->shadingTriangles, static_cast<int>(fixture->instances.size()));
+    return fixture;
+}
+
+constexpr Camera::FilmBack kFilmBack{36.0F, 24.0F};
+
+Camera straightOnCamera() {
+    return Camera(glm::vec3(0.0F, 0.0F, 0.0F), 0.0F, 0.0F, kFilmBack, 35.0F, 0.1F, 100.0F, 2.8F, 1.0F / 125.0F, 100.0F);
+}
+
+// Runs one pose's full G-buffer cross-check against the independent per-pixel Embree oracle.
+void runPose(tools::check::Context& ctx, const char* name, const Camera& camera) {
+    const std::unique_ptr<RasterFixture> fixture = makeFixture(ctx);
+    ctx.plan(1);
+    if (!fixture->accel) {
+        ENGINE_EXPECT(ctx, false, "EmbreeAccel::build failed");
+        return;
+    }
+    const bool passed =
+        checkPose(name, camera, *fixture->accel, fixture->shadingTriangles, fixture->instances,
+                   fixture->perInstanceSettings, fixture->instanceBounds, fixture->threadPool);
+    ENGINE_EXPECT(ctx, passed, "G-buffer disagreed with the per-pixel Embree oracle; see the rows above");
+}
+
+// Axis-aligned, near clip 0.1: the ordinary path, where no triangle is clipped and every G-buffer field is compared
+// against a primary ray fired through the same pixel centre.
+ENGINE_CHECK(gbuffer_pose_straight_on, Fast, Statistical) {
+    runPose(ctx, "straightOn", straightOnCamera());
+}
+
+// Yawed and pitched off-axis, which is what separates a correct interpolation from one that happens to work when the
+// triangle's screen-space gradients are axis-aligned.
+ENGINE_CHECK(gbuffer_pose_angled, Fast, Statistical) {
+    runPose(ctx, "angled",
+            Camera(glm::vec3(3.0F, 2.0F, 1.0F), 20.0F, -10.0F, kFilmBack, 35.0F, 0.1F, 100.0F, 2.8F, 1.0F / 125.0F,
+                    100.0F));
+}
+
+// Near clip 5.0 (vs. the other poses' 0.1) puts it mid-cluster: centers in (-16,-5) stay fully in front, centers in
+// (-5,-1) straddle or sit behind -- exercises the Sutherland-Hodgman clip path instead of coincidentally skipping it.
+ENGINE_CHECK(gbuffer_pose_near_clip, Fast, Statistical) {
+    runPose(ctx, "clipTest",
+            Camera(glm::vec3(0.0F, 0.0F, 0.0F), 5.0F, 5.0F, kFilmBack, 35.0F, 5.0F, 100.0F, 2.8F, 1.0F / 125.0F,
+                    100.0F));
+}
+
+ENGINE_CHECK(wireframe_sanity, Fast, Exact) {
+    const std::unique_ptr<RasterFixture> fixture = makeFixture(ctx);
+    ctx.plan(1);
+    const bool passed =
+        checkWireframeSanity(straightOnCamera(), fixture->shadingTriangles, fixture->instances,
+                              fixture->perInstanceSettings, fixture->instanceBounds, fixture->threadPool);
+    ENGINE_EXPECT(ctx, passed, "wireframe was empty or covered more than half the hit pixels");
+}
+
+ENGINE_CHECK(bounding_box_occlusion, Fast, Exact) {
+    ThreadPool threadPool;
+    ctx.plan(1);
+    ENGINE_EXPECT(ctx, checkBoundingBoxOcclusion(threadPool), "box edges were not depth-tested against the occluder");
+}
+
+ENGINE_CHECK(per_instance_boxes, Fast, Exact) {
+    ThreadPool threadPool;
+    ctx.plan(1);
+    ENGINE_EXPECT(ctx, checkPerInstanceBoxes(threadPool), "per-instance boxes were not drawn in disjoint hues/spans");
+}
+
 }  // namespace
 
-int main() {
-    std::mt19937 rng(42);
-    const std::vector<ShadingTriangle> shadingTriangles = makeSyntheticTriangles(rng);
-    const std::vector<Triangle> worldTriangles = worldTrianglesOf(shadingTriangles);
-
-    std::optional<EmbreeAccel> accel = EmbreeAccel::build(worldTriangles);
-    if (!accel) {
-        std::cerr << "rasterizer_validate: EmbreeAccel::build failed\n";
-        return EXIT_FAILURE;
-    }
-
-    std::vector<MeshInstance> instances;
-    instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.8F, 0.2F, 0.2F), 0.2F), glm::mat4(1.0F), ""});
-    instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.2F, 0.8F, 0.2F), 0.5F), glm::mat4(1.0F), ""});
-    instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.2F, 0.2F, 0.8F), 0.8F), glm::mat4(1.0F), ""});
-    instances.push_back(MeshInstance{makeMaterial(glm::vec3(0.8F, 0.8F, 0.2F), 1.0F), glm::mat4(1.0F), ""});
-
-    const std::vector<PathTraceSettings> perInstanceSettings(instances.size(), makeTestSettings());
-    const std::vector<AabbBounds> instanceBounds =
-        computeInstanceBounds(shadingTriangles, static_cast<int>(instances.size()));
-
-    const Camera::FilmBack filmBack{36.0F, 24.0F};
-    const Camera straightOn(glm::vec3(0.0F, 0.0F, 0.0F), 0.0F, 0.0F, filmBack, 35.0F, 0.1F, 100.0F, 2.8F,
-                             1.0F / 125.0F, 100.0F);
-    const Camera angled(glm::vec3(3.0F, 2.0F, 1.0F), 20.0F, -10.0F, filmBack, 35.0F, 0.1F, 100.0F, 2.8F,
-                         1.0F / 125.0F, 100.0F);
-    // Near clip 5.0 (vs. the other poses' 0.1) puts it mid-cluster: centers in (-16,-5) stay fully in front, centers in (-5,-1) straddle/sit behind -- exercises the Sutherland-Hodgman clip path instead of coincidentally skipping it.
-    const Camera clipTest(glm::vec3(0.0F, 0.0F, 0.0F), 5.0F, 5.0F, filmBack, 35.0F, 5.0F, 100.0F, 2.8F,
-                           1.0F / 125.0F, 100.0F);
-
-    ThreadPool threadPool;
-    bool ok = true;
-    ok = checkPose("straightOn", straightOn, *accel, shadingTriangles, instances, perInstanceSettings,
-                   instanceBounds, threadPool) &&
-         ok;
-    ok = checkPose("angled", angled, *accel, shadingTriangles, instances, perInstanceSettings,
-                   instanceBounds, threadPool) &&
-         ok;
-    ok = checkPose("clipTest", clipTest, *accel, shadingTriangles, instances, perInstanceSettings,
-                   instanceBounds, threadPool) &&
-         ok;
-    ok = checkWireframeSanity(straightOn, shadingTriangles, instances, perInstanceSettings, instanceBounds,
-                               threadPool) &&
-         ok;
-    ok = checkBoundingBoxOcclusion(threadPool) && ok;
-    ok = checkPerInstanceBoxes(threadPool) && ok;
-
-    if (!ok) {
-        std::cerr << "rasterizer_validate: FAILED\n";
-        return EXIT_FAILURE;
-    }
-    std::cout << "rasterizer_validate: PASSED\n";
-    return EXIT_SUCCESS;
-}
+ENGINE_CHECK_MAIN("rasterizer")
