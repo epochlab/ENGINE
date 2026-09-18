@@ -347,6 +347,11 @@ if(IPO_SUPPORTED)
     set_target_properties(raster_bench PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
 endif()
 
+# Benchmark-log analysis and randomized interleaved A/B runner (tools/bench_compare.cpp). Not a correctness gate, for the same reason as raster_bench: its verdict is a confidence interval for a human to read.
+add_executable(bench_compare tools/bench_compare.cpp)
+target_include_directories(bench_compare PRIVATE include tools ${JSON_DIR})
+target_compile_options(bench_compare PRIVATE -Wall -Wextra -Werror)
+
 # All correctness tools run under `ctest --test-dir build`; previously buildable but unrun, so a regression only surfaced if someone remembered to invoke them by hand.
 enable_testing()
 
