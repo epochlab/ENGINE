@@ -2,11 +2,17 @@
 // must FAIL, not silently pass) and on seeds being derived from a check's name rather than its position; both are
 // properties nothing else would notice regressing, because a broken assert macro reports success.
 
+#include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <limits>
+#include <random>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "check.h"
+#include "stats.h"
 
 namespace {
 
@@ -50,6 +56,124 @@ ENGINE_CHECK(significance_is_family_wise_corrected, Fast, Exact) {
     ENGINE_EXPECT(ctx, perAssertion > 0.0 && perAssertion < ::tools::check::kFamilyAlpha,
                   "per-assertion alpha must be positive and tighter than the family rate");
     ENGINE_EXPECT(ctx, std::isfinite(perAssertion), "per-assertion alpha must be finite");
+}
+
+// Exact nulls against brute-force enumeration (an independent construction) and against published critical values: Wilcoxon n=10 P(T+ <= 8) = 0.0244, Mann-Whitney 8x8 P(U <= 13) = 0.0249 (Hollander et al. Tables A.4, A.6).
+ENGINE_CHECK(rank_nulls_match_enumeration, Fast, Exact) {
+    ctx.plan(4);
+    double worstSigned = 0.0;
+    for (int n = 1; n <= 12; ++n) {
+        std::vector<double> counted(static_cast<std::size_t>(n * (n + 1) / 2) + 1, 0.0);
+        for (std::uint32_t signs = 0; signs < (1U << static_cast<unsigned>(n)); ++signs) {
+            int t = 0;
+            for (int r = 0; r < n; ++r) {
+                t += ((signs >> static_cast<unsigned>(r)) & 1U) != 0 ? r + 1 : 0;
+            }
+            counted[static_cast<std::size_t>(t)] += 1.0 / static_cast<double>(1U << static_cast<unsigned>(n));
+        }
+        const std::vector<double> pmf = ::tools::stats::signedRankNull(n);
+        for (std::size_t t = 0; t < counted.size(); ++t) {
+            worstSigned = std::max(worstSigned, pmf.size() == counted.size() ? std::fabs(pmf[t] - counted[t]) : 1.0);
+        }
+    }
+    ENGINE_EXPECT(ctx, worstSigned <= 1e-15, "signedRankNull disagrees with subset enumeration");
+
+    // Every placement of n y's among m + n ranks, U counting x's below each y.
+    const auto enumerateRankSum = [](int m, int n) {
+        std::vector<double> counted(static_cast<std::size_t>(m * n) + 1, 0.0);
+        double total = 0.0;
+        for (std::uint32_t mask = 0; mask < (1U << static_cast<unsigned>(m + n)); ++mask) {
+            if (__builtin_popcount(mask) != n) {
+                continue;
+            }
+            int u = 0;
+            int xsBelow = 0;
+            for (int k = 0; k < m + n; ++k) {
+                if (((mask >> static_cast<unsigned>(k)) & 1U) != 0) {
+                    u += xsBelow;
+                } else {
+                    ++xsBelow;
+                }
+            }
+            counted[static_cast<std::size_t>(u)] += 1.0;
+            total += 1.0;
+        }
+        for (double& c : counted) {
+            c /= total;
+        }
+        return counted;
+    };
+    double worstRankSum = 0.0;
+    for (const auto& [m, n] : {std::pair{5, 6}, std::pair{3, 8}, std::pair{7, 2}}) {
+        const std::vector<double> counted = enumerateRankSum(m, n);
+        const std::vector<double> pmf = ::tools::stats::rankSumNull(m, n);
+        for (std::size_t u = 0; u < counted.size(); ++u) {
+            worstRankSum = std::max(worstRankSum, pmf.size() == counted.size() ? std::fabs(pmf[u] - counted[u]) : 1.0);
+        }
+    }
+    ENGINE_EXPECT(ctx, worstRankSum <= 1e-15, "rankSumNull disagrees with placement enumeration");
+
+    const std::vector<double> signed10 = ::tools::stats::signedRankNull(10);
+    double lowerTail = 0.0;
+    for (std::size_t t = 0; t <= 8; ++t) {
+        lowerTail += signed10[t];
+    }
+    ENGINE_EXPECT(ctx, std::fabs(lowerTail - 0.0244) < 5e-5, "Wilcoxon n=10 P(T+ <= 8) is not the tabulated 0.0244");
+    const std::vector<double> rankSum88 = ::tools::stats::rankSumNull(8, 8);
+    double uTail = 0.0;
+    for (std::size_t u = 0; u <= 13; ++u) {
+        uTail += rankSum88[u];
+    }
+    ENGINE_EXPECT(ctx, std::fabs(uTail - 0.0249) < 5e-5, "Mann-Whitney 8x8 P(U <= 13) is not the tabulated 0.0249");
+}
+
+// Hand-computable estimates, and the too-small-sample case: at n = 5 even the most extreme T+ has probability 1/32 > alpha/2 = 0.025, so no interval exists.
+ENGINE_CHECK(hodges_lehmann_point_estimates, Fast, Exact) {
+    ctx.plan(3);
+    ENGINE_EXPECT(ctx, ::tools::stats::hodgesLehmannPaired({1.0, 2.0, 3.0}, 0.05).estimate == 2.0, "Walsh-average median of {1,2,3} must be 2");
+    ENGINE_EXPECT(ctx, ::tools::stats::hodgesLehmannShift({0.0, 1.0}, {10.0, 12.0}, 0.05).estimate == 10.5, "median of pairwise differences {10,12,9,11} must be 10.5");
+    const ::tools::stats::ShiftEstimate tooFew = ::tools::stats::hodgesLehmannPaired({0.1, 0.2, 0.3, 0.4, 0.5}, 0.05);
+    ENGINE_EXPECT(ctx, std::isinf(tooFew.lower) && std::isinf(tooFew.upper), "n = 5 cannot support a 95% signed-rank interval");
+}
+
+// Empirical coverage of each interval under a known shift must match its exact discrete coverage; a one-rank error in the order-statistic index moves coverage far outside the band.
+ENGINE_CHECK(hodges_lehmann_coverage_is_exact, Fast, Statistical) {
+    ctx.plan(2);
+    constexpr int kTrials = 20000;
+    constexpr double kShift = 0.3;
+    constexpr double kAlpha = 0.05;
+    std::mt19937_64 rng(ctx.seed());
+    std::normal_distribution<double> noise(0.0, 1.0);
+
+    long long pairedHits = 0;
+    double pairedCoverage = 0.0;
+    long long shiftHits = 0;
+    double shiftCoverage = 0.0;
+    for (int trial = 0; trial < kTrials; ++trial) {
+        std::vector<double> d(12);
+        for (double& v : d) {
+            v = kShift + noise(rng);
+        }
+        const ::tools::stats::ShiftEstimate paired = ::tools::stats::hodgesLehmannPaired(d, kAlpha);
+        pairedHits += paired.lower <= kShift && kShift <= paired.upper ? 1 : 0;
+        pairedCoverage = paired.coverage;
+
+        std::vector<double> x(7);
+        std::vector<double> y(9);
+        for (double& v : x) {
+            v = noise(rng);
+        }
+        for (double& v : y) {
+            v = kShift + noise(rng);
+        }
+        const ::tools::stats::ShiftEstimate shift = ::tools::stats::hodgesLehmannShift(x, y, kAlpha);
+        shiftHits += shift.lower <= kShift && kShift <= shift.upper ? 1 : 0;
+        shiftCoverage = shift.coverage;
+    }
+    ENGINE_EXPECT(ctx, ::tools::stats::wilsonBand(pairedHits, kTrials, ctx.alpha()).contains(pairedCoverage),
+                  "paired interval's empirical coverage disagrees with its exact coverage");
+    ENGINE_EXPECT(ctx, ::tools::stats::wilsonBand(shiftHits, kTrials, ctx.alpha()).contains(shiftCoverage),
+                  "two-sample interval's empirical coverage disagrees with its exact coverage");
 }
 
 }  // namespace
