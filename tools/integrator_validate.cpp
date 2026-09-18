@@ -997,6 +997,94 @@ engine::scene::PathTraceResult renderPassWithLights(const TestScene& scene,
     return result;
 }
 
+// The rough transmission lobe's half of the transmissionDepth 0 convention, which on_surface_transmission_tint above cannot reach: it authors roughness 0.02 on both its scenes (alpha 4e-4, below bsdf.cpp's kSmoothAlpha), so every reading there comes from sampleBsdf's delta branch. Measured, not assumed: tinting only that branch and reverting evaluateTransmissionLobe and transmitMultiScatter fails bsdf_validate 54 times and leaves this binary entirely green.
+// ior 1.5 -- makeSettings' own, which is why this row does not override it, unlike every other transmissive check here -- and not the 1.0 the delta rows force. At ior 1 the transmission lobe IS the delta branch at every roughness (bsdf.cpp's transmissionIsRough, PBRT-v4's eta == 1 || EffectivelySmooth()), so an index-matched rough row would re-measure the path already covered above rather than the Walter lobe.
+// That costs the closed form -- colour^2 holds only where every path crosses exactly two interfaces -- so the scene supplies the invariant instead of an oracle. ONE interface, not a slab: a rough slab at ior 1.5 internally reflects, giving paths 2, 4, 6 ... crossings and a polynomial in the tint rather than a line. Black environment, one one-sided light behind that interface: a reflected path then sees nothing at all, so there is no untinted term anywhere in the reading and every photon in it crossed exactly once.
+// Lo is therefore exactly linear in transmissionColor through the origin, and Exact rather than Statistical: computeLobeProbabilities never reads transmissionTint and Russian roulette is off, so the three renders of a row draw the identical sampler sequence and select the identical lobe at every vertex. Each path's contribution carries the tint exactly once, so the relation holds path by path, noise and all, and the only residual is float multiplication not distributing over the accumulation sum.
+// The zero row is what makes the linearity worth asserting: linearity alone cannot distinguish transmitted energy that is never tinted from reflected energy, since both are constant in the tint. Here both are zero.
+ENGINE_CHECK(rough_transmission_tint, Slow, Exact) {
+    constexpr int kBounces = 4;
+    // Numerical, not physical: the paths are identical across the three renders, so the only slack is that fl(t*x) summed over a pass is not fl(t * sum(x)). Measured worst 1.37e-06 relative over both rows, and identical at 1, 2, 4 and 8 threads -- the accumulation order is fixed, so this is float non-distributivity and not a reduction-order race. 7x headroom on that; the faults it exists for are percent-scale (see the mutation rows in CHANGELOG), so there is no tension between this being tight and being stable.
+    constexpr float kUlpBand = 1e-5F;
+    const glm::vec3 tint(0.5F, 0.25F, 0.75F);
+    // Straddling the transmit-side multiple-scattering lobe's own switch-on: at ior 1.5 the escape deficit crosses bsdf.cpp's kMinDeficit between roughness 0.15 (0.00071, msTransmit exactly 0) and 0.2 (0.00179), so the first row is single-scatter refraction alone and the second (msTransmit 0.0263 of the selection mass at mu 0.8) carries both far-hemisphere strategies.
+    const std::array<float, 2> roughnesses = {0.15F, 0.6F};
+    // Behind the interface, emitting face (cross(edge0, edge1) = +Z) pointing back at it, so the only way to the camera is through. Centred on the camera column, unlike makeOverheadLight below: the transmissive quad sits between the two, so the camera never reaches this light's face directly.
+    const engine::scene::QuadLight light{glm::vec3(-0.5F, -0.5F, -1.5F), glm::vec3(1.0F, 0.0F, 0.0F),
+                                          glm::vec3(0.0F, 1.0F, 0.0F), glm::vec3(3.0F)};
+    const std::vector<engine::scene::QuadLight> quads{light};
+
+    engine::scene::ThreadPool& pool = sharedPool(ctx.threads());
+    bool ok = true;
+    float worstRelative = 0.0F;
+
+    std::cout << "integrator_validate: rough transmission tint at transmissionDepth 0 (ior 1.5, one interface)\n";
+    for (float roughness : roughnesses) {
+        TestScene scene = makeQuadScene(roughness, glm::vec3(0.04F));
+        std::vector<int> instanceLightIndex(scene.instances.size(), -1);
+        appendLightGeometry(scene, light, /*quadIndex=*/0, instanceLightIndex);
+        std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
+        if (!accel.has_value()) {
+            std::cerr << "integrator_validate: FAILED to build Embree scene at roughness " << roughness
+                      << '\n';
+            finish(ctx, false, "rough_transmission_tint failed; see the rows above");
+            return;
+        }
+        const auto render = [&](const glm::vec3& colour) {
+            PathTraceSettings settings =
+                makeSettings(kBounces, 999, /*metallic=*/0.0F, /*transmission=*/1.0F);
+            settings.transmissionColor = colour;
+            settings.transmissionDepth = 0.0F;
+            return centreMean(renderPassWithLights(scene, instanceLightIndex, quads, /*env=*/nullptr,
+                                                    settings, *accel, pool, /*showSky=*/false)
+                                   .beauty);
+        };
+        const glm::vec3 opaqueTint = render(glm::vec3(0.0F));
+        const glm::vec3 white = render(glm::vec3(1.0F));
+        const glm::vec3 tinted = render(tint);
+
+        // Raw triples rather than the tinted/expected ratio the other tint rows print: the ratio's denominator is the very quantity the guard below allows to be zero, so printing it here would put a nan on the one row a reader most needs to read. The quantitative statement is the worst relative departure, reported once at the end.
+        std::cout << "  roughness " << roughness << "   Lo(1) [" << white.x << ", " << white.y << ", "
+                  << white.z << "]   Lo(tint) [" << tinted.x << ", " << tinted.y << ", " << tinted.z
+                  << "]   Lo(0) [" << opaqueTint.x << ", " << opaqueTint.y << ", " << opaqueTint.z
+                  << "]\n";
+        for (int c = 0; c < 3; ++c) {
+            // Anti-vacuity, per channel: with a black environment and a one-sided light behind the surface, a change that stopped the interface transmitting would send every row to 0 and satisfy both assertions below by vacuum.
+            if (!(white[c] > 0.0F)) {
+                std::cerr << "integrator_validate: FAILED rough transmission tint at roughness="
+                          << roughness << " channel " << c
+                          << " -- an untinted interface transmitted nothing, so the rows below assert "
+                             "about nothing\n";
+                ok = false;
+                continue;
+            }
+            if (opaqueTint[c] != 0.0F) {
+                std::cerr << "integrator_validate: FAILED rough transmission tint at roughness="
+                          << roughness << " channel " << c << " -- transmissionColor 0 read "
+                          << opaqueTint[c]
+                          << ", expected exactly 0. The only light in this scene is behind the "
+                             "interface, so anything arriving that a black tint does not extinguish is "
+                             "transmitted energy the tint never reached.\n";
+                ok = false;
+            }
+            const float expected = tint[c] * white[c];
+            worstRelative = std::max(worstRelative, std::fabs(tinted[c] - expected) / expected);
+            if (std::fabs(tinted[c] - expected) > kUlpBand * expected) {
+                std::cerr << "integrator_validate: FAILED rough transmission tint linearity at roughness="
+                          << roughness << " channel " << c << " -- measured " << tinted[c]
+                          << ", expected " << expected
+                          << ". Every path here crosses exactly one interface, so transmissionColor "
+                             "multiplies the reading once and the rough lobe must be exactly linear in "
+                             "it.\n";
+                ok = false;
+            }
+        }
+    }
+    std::cout << "  worst relative departure from linearity " << worstRelative << '\n';
+    finish(ctx, ok, "rough_transmission_tint failed; see the rows above");
+    return;
+}
+
 // A material with EXACTLY zero specular reflectance at every angle, not merely a small one: ior=1.0
 // makes fresnelDielectric identically zero (the same device checkBeerLambert/checkOnSurfaceTransmissionTint
 // use above for an unbent, unreflected ray), metallicFactor=0 and transmissionFactor=0 keep only the
