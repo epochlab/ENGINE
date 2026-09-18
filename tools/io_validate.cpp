@@ -1,5 +1,5 @@
-// Correctness gate for the engine's file-boundary code: the EXR round trip (gfx/hdr_image.cpp) and the JSON scene and
-// profile parsers (config/scene_config.cpp, config/profile_config.cpp).
+// Correctness gate for the engine's file-boundary code: the EXR round trip (gfx/hdr_image.cpp), the JSON scene and
+// profile parsers (config/scene_config.cpp, config/profile_config.cpp), and the benchmark log writer (debug/bench_log.cpp).
 //
 // These are the places the engine ingests data it did not produce, which is exactly where validation earns its keep --
 // and none of them had any. hdr_image.cpp is linked into three validators and was invoked by none of them: its round
@@ -22,6 +22,7 @@
 #include "check.h"
 #include "engine/config/profile_config.h"
 #include "engine/config/scene_config.h"
+#include "engine/debug/bench_log.h"
 #include "engine/gfx/hdr_image.h"
 
 namespace {
@@ -253,6 +254,53 @@ ENGINE_CHECK(film_back_presets_are_physically_valid, Fast, Exact) {
         allPositive = allPositive && preset.filmBack.widthMm > 0.0F && preset.filmBack.heightMm > 0.0F;
     }
     ENGINE_EXPECT(ctx, allPositive, "a film-back preset has a non-positive dimension");
+}
+
+// Every appended record is exactly one line that parses back with every schema field, and appending never rewrites earlier lines.
+ENGINE_CHECK(bench_log_appends_one_parseable_line_per_record, Fast, Exact) {
+    ctx.plan(5);
+    const std::filesystem::path path = scratchPath("engine_io_validate_bench.jsonl");
+    std::filesystem::remove(path);
+    const engine::debug::BenchRecord first{"io_validate", {"io_validate", "--flag"}, {{"width", 7}}, {{"ms", {1.5, 2.5}}}, {{"crc32", 1}}};
+    const engine::debug::BenchRecord second{"io_validate", {"io_validate"}, {{"width", 9}}, {{"ms", {3.0}}}, {{"crc32", 2}}};
+    ENGINE_EXPECT(ctx, engine::debug::appendBenchRecord(path.string(), first) && engine::debug::appendBenchRecord(path.string(), second), "appendBenchRecord failed on a writable scratch path");
+
+    std::vector<nlohmann::json> records;
+    std::ifstream in(path);
+    for (std::string line; std::getline(in, line);) {
+        records.push_back(nlohmann::json::parse(line, nullptr, /*allow_exceptions=*/false));
+    }
+    ENGINE_EXPECT(ctx, records.size() == 2, "expected exactly two lines after two appends");
+
+    const auto complete = [](const nlohmann::json& r) {
+        return !r.is_discarded() && r.value("schema", 0) == engine::debug::kBenchLogSchema && r.contains("time_utc") && r.contains("pid") &&
+               !r["build"].value("git", std::string()).empty() && r["build"].value("uuid", std::string()).size() == 32 &&
+               r["host"].value("logical_cpus", 0) > 0 && r["rusage"].contains("user_s") && r["rusage"].contains("nivcsw");
+    };
+    ENGINE_EXPECT(ctx, records.size() == 2 && complete(records[0]) && complete(records[1]), "a record is missing a provenance or rusage field");
+    ENGINE_EXPECT(ctx, records.size() == 2 && records[0]["config"] == first.config && records[0]["samples"] == first.samples && records[0]["argv"] == first.argv,
+                  "first record's caller-supplied content did not round-trip");
+    ENGINE_EXPECT(ctx, records.size() == 2 && records[1]["config"] == second.config && records[1]["work"] == second.work,
+                  "second record's caller-supplied content did not round-trip");
+    std::filesystem::remove(path);
+}
+
+// A path that cannot be opened is reported as a failure, never as a silently skipped record.
+ENGINE_CHECK(bench_log_rejects_unwritable_path, Fast, Exact) {
+    ctx.plan(1);
+    const std::filesystem::path path = scratchPath("engine_io_validate_no_such_dir") / "bench.jsonl";
+    std::filesystem::remove_all(path.parent_path());
+    const engine::debug::BenchRecord record{"io_validate", {}, nlohmann::json::object(), nlohmann::json::object(), nlohmann::json::object()};
+    ENGINE_EXPECT(ctx, !engine::debug::appendBenchRecord(path.string(), record), "appendBenchRecord reported success writing into a missing directory");
+}
+
+// Known answers from an independent implementation (Python's zlib.crc32 over the same little-endian bytes).
+ENGINE_CHECK(float_crc32_matches_reference, Fast, Exact) {
+    ctx.plan(2);
+    const std::vector<float> zero{0.0F};
+    const std::vector<float> mixed{1.0F, -2.5F, 0.1F};
+    ENGINE_EXPECT(ctx, engine::debug::floatCrc32(zero) == 0x2144DF1CU, "CRC-32 of four zero bytes is not 0x2144DF1C");
+    ENGINE_EXPECT(ctx, engine::debug::floatCrc32(mixed) == 2706677804U, "CRC-32 of {1, -2.5, 0.1} disagrees with zlib.crc32");
 }
 
 }  // namespace

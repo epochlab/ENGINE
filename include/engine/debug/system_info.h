@@ -41,6 +41,9 @@ struct BuildInfo {
 
 [[nodiscard]] BuildInfo buildInfo();
 
+// The running executable's Mach-O LC_UUID as 32 lowercase hex digits, empty if the image carries none. Identifies the exact binary measured, which the git SHA cannot on a dirty tree. queryHostInfo/buildInfo/executableUuid live in host_info.cpp, which needs no GL, so headless tools can link them.
+[[nodiscard]] std::string executableUuid();
+
 // Dependency versions. GLFW/GLEW are queried at runtime because they are dynamically loaded, so a header constant could lie about what actually got loaded; glm is header-only, so its macro IS the truth. Embree/OpenEXR/OCIO report their compile-time header versions -- a swapped dylib would go unreported, an accepted limitation, since the runtime alternatives need a live RTCDevice or OCIO config this function does not own.
 struct LibraryVersions {
     std::string embree;

@@ -1,6 +1,6 @@
 // Timing harness for engine::scene::renderRasterGBuffer (rasterizer.h), the synchronous per-frame render-thread work behind the 15 primary-hit AOVs. Synthetic dependency-free scene (no glTF/EXR asset, constant-color 1x1 textures), same standalone-CLI convention as rasterizer_validate.cpp: no test framework, non-zero exit on bad input. Deliberately NOT an add_test: a benchmark is not a correctness gate, and the rasterizer's correctness gate is rasterizer_validate.
 // Synthetic rather than asset-driven so the two variables the rasterizer's cost is actually a function of are independently controllable: --triangles sweeps the sub-triangle array past cache (the shipped scene is 20561 triangles = 1.73 MB, resident; the 5M-triangle tier is 420 MB, not), and --layers sweeps depth complexity, which is what a depth prepass is a function of. Neither is adjustable in a fixed asset.
-// Reports best-of-N, not the mean: run-to-run spread on this hardware is +/-10%, wide enough to hide a single change. A/B one change at a time against the same build with only that change stashed.
+// Reports best-of-N, not the mean: run-to-run spread on this hardware is +/-10%, wide enough to hide a single change. --bench-log records the raw frames; bench_compare run makes the A/B.
 
 #include <algorithm>
 #include <array>
@@ -12,10 +12,12 @@
 #include <limits>
 #include <optional>
 #include <random>
+#include <string>
 #include <vector>
 
 #include <glm/glm.hpp>
 
+#include "engine/debug/bench_log.h"
 #include "engine/gfx/hdr_image.h"
 #include "engine/scene/camera.h"
 #include "engine/scene/gltf_loader.h"
@@ -41,6 +43,7 @@ struct Options {
     int frames = 5;
     int layers = 1;
     unsigned int seed = 42;
+    std::string benchLogPath;  // appends the run to this JSON Lines benchmark log (bench_log.h); empty = no log
 };
 
 engine::gfx::HdrImage constantTexture(glm::vec4 color) {
@@ -125,6 +128,10 @@ std::optional<Options> parseOptions(int argc, char** argv) {
         }
         const char* flag = argv[i];
         const char* text = argv[++i];
+        if (std::strcmp(flag, "--bench-log") == 0) {
+            options.benchLogPath = text;
+            continue;
+        }
         char* end = nullptr;
         const long value = std::strtol(text, &end, 10);
         // strtol reports non-numeric input as 0 and stops at the first bad character, so the terminator check is what makes "--seed foo" an error rather than a silent seed of 0.
@@ -151,7 +158,7 @@ std::optional<Options> parseOptions(int argc, char** argv) {
             options.seed = static_cast<unsigned int>(value);
         } else {
             std::cerr << "raster_bench: unknown flag " << flag
-                       << "\n  usage: raster_bench [--triangles N] [--width N] [--height N] [--frames N] [--layers N] [--seed N]\n";
+                       << "\n  usage: raster_bench [--triangles N] [--width N] [--height N] [--frames N] [--layers N] [--seed N] [--bench-log log.jsonl]\n";
             return std::nullopt;
         }
     }
@@ -239,5 +246,24 @@ int main(int argc, char** argv) {
               << options->height << ", " << options->layers << " layer(s), best-of-" << options->frames
               << ": " << *best << " ms  (mean " << total / static_cast<double>(options->frames)
               << ", worst " << *worst << ")\n";
+
+    if (!options->benchLogPath.empty()) {
+        const engine::debug::BenchRecord record{
+            .tool = "raster_bench",
+            .argv = std::vector<std::string>(argv, argv + argc),
+            .config = {{"triangles", options->triangleCount},
+                       {"width", options->width},
+                       {"height", options->height},
+                       {"frames", options->frames},
+                       {"layers", options->layers},
+                       {"seed", options->seed}},
+            .samples = {{"frame_ms", milliseconds}},
+            .work = {{"triangles_emitted", shadingTriangles.size()},
+                     {"crc32", engine::debug::floatCrc32(gbuffer.depth.rgba)}},
+        };
+        if (!engine::debug::appendBenchRecord(options->benchLogPath, record)) {
+            return EXIT_FAILURE;
+        }
+    }
     return EXIT_SUCCESS;
 }
