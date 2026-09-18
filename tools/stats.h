@@ -1,7 +1,9 @@
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
+#include <vector>
 
 // Shared statistics for the validators: quadrature, survival functions, quantiles and confidence bands.
 namespace tools::stats {
@@ -245,6 +247,120 @@ inline Band wilsonBand(long long successes, long long trials, double alpha) {
     const double centre = (phat + (z2 / (2.0 * n))) / denominator;
     const double half = (z * std::sqrt((phat * (1.0 - phat) / n) + (z2 / (4.0 * n * n)))) / denominator;
     return Band{centre - half, centre + half};
+}
+
+// --- Distribution-free location shift (Hollander, Wolfe & Chicken, Nonparametric Statistical Methods, 3rd ed.) -----
+// Timing noise is skewed and heavy-tailed, so normal-theory intervals understate it; these need only continuity (plus symmetry, paired form) and take exact coverage from the discrete null.
+
+// Null pmf of the Wilcoxon signed-rank T+ over 0..n(n+1)/2: the subset-sum distribution of {1..n} under fair-coin signs.
+// Built in probability space, halving per rank, so it cannot overflow and needs no normal approximation at any n.
+inline std::vector<double> signedRankNull(int n) {
+    std::vector<double> pmf{1.0};
+    for (int rank = 1; rank <= n; ++rank) {
+        std::vector<double> next(pmf.size() + static_cast<std::size_t>(rank), 0.0);
+        for (std::size_t t = 0; t < pmf.size(); ++t) {
+            next[t] += 0.5 * pmf[t];
+            next[t + static_cast<std::size_t>(rank)] += 0.5 * pmf[t];
+        }
+        pmf = std::move(next);
+    }
+    return pmf;
+}
+
+// Null pmf of Mann-Whitney U (pairs with y > x) over 0..mn, recursing on whether the largest observation is an x or a y: p(i,j,u) = i/(i+j) p(i-1,j,u) + j/(i+j) p(i,j-1,u-i).
+inline std::vector<double> rankSumNull(int m, int n) {
+    std::vector<std::vector<double>> previous(static_cast<std::size_t>(n) + 1, std::vector<double>{1.0});  // i = 0
+    for (int i = 1; i <= m; ++i) {
+        std::vector<std::vector<double>> current(static_cast<std::size_t>(n) + 1);
+        current[0] = {1.0};
+        for (int j = 1; j <= n; ++j) {
+            const std::vector<double>& xLast = previous[static_cast<std::size_t>(j)];
+            const std::vector<double>& yLast = current[static_cast<std::size_t>(j) - 1];
+            std::vector<double> pmf(static_cast<std::size_t>(i) * static_cast<std::size_t>(j) + 1, 0.0);
+            const double px = static_cast<double>(i) / static_cast<double>(i + j);
+            for (std::size_t u = 0; u < xLast.size(); ++u) {
+                pmf[u] += px * xLast[u];
+            }
+            for (std::size_t u = 0; u < yLast.size(); ++u) {
+                pmf[u + static_cast<std::size_t>(i)] += (1.0 - px) * yLast[u];
+            }
+            current[static_cast<std::size_t>(j)] = std::move(pmf);
+        }
+        previous = std::move(current);
+    }
+    return previous[static_cast<std::size_t>(n)];
+}
+
+// Smallest t with P(X >= t) <= tail under `pmf`; pmf.size() when no value is that extreme (too few observations).
+inline std::size_t upperCritical(const std::vector<double>& pmf, double tail) {
+    double upper = 0.0;
+    std::size_t t = pmf.size();
+    while (t > 0 && upper + pmf[t - 1] <= tail) {
+        upper += pmf[--t];
+    }
+    return t;
+}
+
+// Point estimate with a two-sided interval of coverage >= 1 - alpha; (-inf, +inf) when the sample is too small for any interval at alpha to exist.
+struct ShiftEstimate {
+    double estimate = 0.0;
+    double lower = -std::numeric_limits<double>::infinity();
+    double upper = std::numeric_limits<double>::infinity();
+    double coverage = 1.0;  // achieved coverage of [lower, upper] under the null distribution
+};
+
+// Median of a sorted sample, averaging the middle pair for an even count.
+inline double sortedMedian(const std::vector<double>& sorted) {
+    const std::size_t mid = sorted.size() / 2;
+    return sorted.size() % 2 == 1 ? sorted[mid] : 0.5 * (sorted[mid - 1] + sorted[mid]);
+}
+
+// Order-statistic interval [W_(C), W_(N+1-C)] with C = N + 1 - t, t the upper critical value (Hollander et al. 3.2/4.3).
+inline ShiftEstimate orderStatisticInterval(const std::vector<double>& sorted, const std::vector<double>& nullPmf,
+                                            double alpha) {
+    ShiftEstimate result;
+    result.estimate = sortedMedian(sorted);
+    const std::size_t t = upperCritical(nullPmf, 0.5 * alpha);
+    const std::size_t count = sorted.size();
+    if (t >= nullPmf.size() || t == 0) {
+        return result;
+    }
+    const std::size_t c = count + 1 - t;  // 1-based rank of the lower bound
+    result.lower = sorted[c - 1];
+    result.upper = sorted[count - c];
+    double tailMass = 0.0;
+    for (std::size_t u = t; u < nullPmf.size(); ++u) {
+        tailMass += nullPmf[u];
+    }
+    result.coverage = 1.0 - (2.0 * tailMass);
+    return result;
+}
+
+// Hodges-Lehmann centre of a symmetric distribution from paired differences: median of the n(n+1)/2 Walsh averages, Wilcoxon signed-rank interval (Hodges & Lehmann 1963; Hollander et al. 3.2).
+inline ShiftEstimate hodgesLehmannPaired(const std::vector<double>& d, double alpha) {
+    std::vector<double> walsh;
+    walsh.reserve(d.size() * (d.size() + 1) / 2);
+    for (std::size_t i = 0; i < d.size(); ++i) {
+        for (std::size_t j = i; j < d.size(); ++j) {
+            walsh.push_back(0.5 * (d[i] + d[j]));
+        }
+    }
+    std::sort(walsh.begin(), walsh.end());
+    return orderStatisticInterval(walsh, signedRankNull(static_cast<int>(d.size())), alpha);
+}
+
+// Hodges-Lehmann two-sample shift of y relative to x: median of all y_j - x_i, Mann-Whitney interval (Hollander et al. 4.3); assumes only that y is x shifted.
+inline ShiftEstimate hodgesLehmannShift(const std::vector<double>& x, const std::vector<double>& y, double alpha) {
+    std::vector<double> differences;
+    differences.reserve(x.size() * y.size());
+    for (const double xi : x) {
+        for (const double yj : y) {
+            differences.push_back(yj - xi);
+        }
+    }
+    std::sort(differences.begin(), differences.end());
+    return orderStatisticInterval(differences, rankSumNull(static_cast<int>(x.size()), static_cast<int>(y.size())),
+                                  alpha);
 }
 
 }  // namespace tools::stats
