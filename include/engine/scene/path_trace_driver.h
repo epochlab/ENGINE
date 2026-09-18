@@ -49,8 +49,8 @@ public:
     PathTraceDriver(PathTraceDriver&&) = delete;
     PathTraceDriver& operator=(PathTraceDriver&&) = delete;
 
-    // Render-thread-only. Bumps the generation counter and replaces the pending request -- does not queue.
-    void requestTrace(const Request& request);
+    // Render-thread-only. Bumps the generation counter and replaces the pending request -- does not queue. Returns the new generation, which every PassRecord of this request's accumulation carries.
+    std::uint64_t requestTrace(const Request& request);
 
     // Render-thread-only, call at most once per rendered frame. Null until the first pass of the app's life completes. Cheap (one mutex-guarded shared_ptr copy) -- safe to call every frame, and the strong ref keeps that pass's images alive for as long as the caller holds it, however many newer passes the driver publishes meanwhile.
     [[nodiscard]] std::shared_ptr<const PathTraceResult> latestResult() const;
