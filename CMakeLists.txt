@@ -36,21 +36,17 @@ include(CheckIPOSupported)
 check_ipo_supported(RESULT IPO_SUPPORTED)
 
 # Build provenance for the startup spec block: a timing number without the machine and build it was measured on is not a measurement.
-# Configure-time, not build-time: a commit made without re-running cmake reports the previous SHA, accepted, because the alternative (a custom command re-running git every build) adds two process spawns to every incremental build for a debug string.
-# EXISTS also matches a .git *file*, which is what this repo has -- it is a submodule, so .git is a gitlink, not a directory. Absent git, or a tarball checkout, reports "unknown" rather than failing the configure.
+# Build-time, not configure-time: the SHA keys benchmark-log records, so a commit made without re-running cmake must not be attributed to its parent. Costs two git spawns per build; the header is rewritten only when the SHA changes.
 find_package(Git QUIET)
-set(ENGINE_GIT_SHA "unknown")
-if(GIT_FOUND AND EXISTS ${CMAKE_SOURCE_DIR}/.git)
-    execute_process(COMMAND ${GIT_EXECUTABLE} rev-parse --short HEAD
-                    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-                    OUTPUT_VARIABLE ENGINE_GIT_SHA OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
-    execute_process(COMMAND ${GIT_EXECUTABLE} status --porcelain --untracked-files=no
-                    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-                    OUTPUT_VARIABLE ENGINE_GIT_DIRTY OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
-    if(NOT ENGINE_GIT_DIRTY STREQUAL "")
-        set(ENGINE_GIT_SHA "${ENGINE_GIT_SHA}+dirty")
-    endif()
-endif()
+set(ENGINE_GENERATED_DIR ${CMAKE_BINARY_DIR}/generated)
+add_custom_target(engine_git_sha ALL
+    COMMAND ${CMAKE_COMMAND} -DSOURCE_DIR=${CMAKE_SOURCE_DIR} -DOUTPUT=${ENGINE_GENERATED_DIR}/engine_git_sha.h
+            -DGIT_EXECUTABLE=${GIT_EXECUTABLE} -P ${CMAKE_SOURCE_DIR}/cmake/GitSha.cmake
+    BYPRODUCTS ${ENGINE_GENERATED_DIR}/engine_git_sha.h
+    COMMENT "Stamping git SHA")
+# Compile-time half of BuildInfo, for every target compiling host_info.cpp. Every such target builds with -march=native and IPO-when-supported, which is what these report; a target that differs must not use this list.
+# $<CONFIG>, not CMAKE_BUILD_TYPE: correct under both the single-config generators the guard at the top of this file defaults and the multi-config Xcode generator that ignores it.
+set(ENGINE_PROVENANCE_DEFINITIONS ENGINE_BUILD_TYPE="$<CONFIG>" ENGINE_MARCH="native" ENGINE_IPO=$<BOOL:${IPO_SUPPORTED}>)
 
 find_program(CPPCHECK_EXE NAMES cppcheck)
 if(CPPCHECK_EXE)
@@ -123,6 +119,7 @@ add_executable(engine
     src/config/profile_config.cpp
     src/config/scene_config.cpp
     src/debug/system_info.cpp
+    src/debug/host_info.cpp
     src/debug/frame_stats.cpp
     src/debug/gpu_timer.cpp
     src/debug/memory_tracker.cpp
@@ -131,16 +128,13 @@ add_executable(engine
     src/debug/spec_report.cpp
     src/debug/perf_dashboard.cpp
     $<TARGET_OBJECTS:vendored_no_tidy>)
-target_include_directories(engine PRIVATE include ${IMGUI_DIR} ${IMGUI_DIR}/backends ${CGLTF_DIR} ${JSON_DIR})
+target_include_directories(engine PRIVATE include ${IMGUI_DIR} ${IMGUI_DIR}/backends ${CGLTF_DIR} ${JSON_DIR}
+                           ${ENGINE_GENERATED_DIR})
+add_dependencies(engine engine_git_sha)
 target_compile_definitions(engine PRIVATE
     GL_SILENCE_DEPRECATION
     ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets"
-    ENGINE_GIT_SHA="${ENGINE_GIT_SHA}"
-    # $<CONFIG>, not CMAKE_BUILD_TYPE: correct under both the single-config generators the guard at the top of this file defaults and the multi-config Xcode generator that ignores it.
-    ENGINE_BUILD_TYPE="$<CONFIG>"
-    # Kept adjacent to target_compile_options below, which is the flag it reports, so the two cannot drift unnoticed.
-    ENGINE_MARCH="native"
-    ENGINE_IPO=$<BOOL:${IPO_SUPPORTED}>)
+    ${ENGINE_PROVENANCE_DEFINITIONS})
 target_compile_options(engine PRIVATE -Wall -Wextra -Werror -march=native)
 target_link_libraries(engine PRIVATE
     glfw GLEW::GLEW OpenGL::GL glm::glm
@@ -292,12 +286,15 @@ endif()
 # File-boundary validation (gfx/hdr_image.cpp EXR round trip, config/*.cpp JSON parsing). The EXR path was linked into
 # three validators and invoked by none of them; profile_config.cpp had no coverage at all.
 add_executable(io_validate tools/io_validate.cpp src/gfx/hdr_image.cpp src/config/scene_config.cpp
-               src/config/profile_config.cpp src/scene/camera.cpp
+               src/config/profile_config.cpp src/scene/camera.cpp src/debug/bench_log.cpp src/debug/host_info.cpp
+               src/debug/memory_tracker.cpp
                $<TARGET_OBJECTS:engine_check>)
-target_include_directories(io_validate PRIVATE include tools ${JSON_DIR})
-target_compile_definitions(io_validate PRIVATE ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets")
+target_include_directories(io_validate PRIVATE include tools ${JSON_DIR} ${ENGINE_GENERATED_DIR})
+add_dependencies(io_validate engine_git_sha)
+target_compile_definitions(io_validate PRIVATE ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets"
+                           ${ENGINE_PROVENANCE_DEFINITIONS})
 target_compile_options(io_validate PRIVATE -Wall -Wextra -Werror -march=native)
-target_link_libraries(io_validate PRIVATE glm::glm OpenEXR::OpenEXR Imath::Imath)
+target_link_libraries(io_validate PRIVATE glm::glm OpenEXR::OpenEXR Imath::Imath ZLIB::ZLIB embree)
 if(IPO_SUPPORTED)
     set_target_properties(io_validate PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
 endif()
@@ -321,10 +318,13 @@ add_executable(render_beauty tools/render_beauty.cpp src/debug/power_spectrum.cp
                src/scene/environment_map.cpp src/scene/light.cpp src/scene/camera.cpp src/scene/thread_pool.cpp
                src/scene/gltf_loader.cpp src/scene/material.cpp src/scene/material_binding.cpp
                src/config/scene_config.cpp src/config/profile_config.cpp src/gfx/hdr_image.cpp
-               src/gfx/ocio_cpu_transform.cpp
+               src/gfx/ocio_cpu_transform.cpp src/debug/bench_log.cpp src/debug/host_info.cpp
+               src/debug/memory_tracker.cpp
                $<TARGET_OBJECTS:vendored_no_tidy> $<TARGET_OBJECTS:engine_check>)
-target_include_directories(render_beauty PRIVATE include tools ${CGLTF_DIR} ${JSON_DIR})
-target_compile_definitions(render_beauty PRIVATE ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets")
+target_include_directories(render_beauty PRIVATE include tools ${CGLTF_DIR} ${JSON_DIR} ${ENGINE_GENERATED_DIR})
+add_dependencies(render_beauty engine_git_sha)
+target_compile_definitions(render_beauty PRIVATE ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets"
+                           ${ENGINE_PROVENANCE_DEFINITIONS})
 target_compile_options(render_beauty PRIVATE -Wall -Wextra -Werror -march=native)
 target_link_libraries(render_beauty PRIVATE glm::glm embree OpenEXR::OpenEXR Imath::Imath
                        OpenColorIO::OpenColorIO ZLIB::ZLIB glfw)
@@ -336,10 +336,13 @@ endif()
 add_executable(raster_bench tools/raster_bench.cpp src/scene/rasterizer.cpp
                src/scene/gbuffer_shading.cpp src/scene/embree_accel.cpp src/scene/ray_types.cpp
                src/scene/shading_scene.cpp src/scene/bsdf.cpp src/scene/sampler.cpp
-               src/scene/camera.cpp src/scene/thread_pool.cpp src/gfx/hdr_image.cpp)
-target_include_directories(raster_bench PRIVATE include)
+               src/scene/camera.cpp src/scene/thread_pool.cpp src/gfx/hdr_image.cpp
+               src/debug/bench_log.cpp src/debug/host_info.cpp src/debug/memory_tracker.cpp)
+target_include_directories(raster_bench PRIVATE include ${JSON_DIR} ${ENGINE_GENERATED_DIR})
+add_dependencies(raster_bench engine_git_sha)
+target_compile_definitions(raster_bench PRIVATE ${ENGINE_PROVENANCE_DEFINITIONS})
 target_compile_options(raster_bench PRIVATE -Wall -Wextra -Werror -march=native)
-target_link_libraries(raster_bench PRIVATE glm::glm embree OpenEXR::OpenEXR Imath::Imath)
+target_link_libraries(raster_bench PRIVATE glm::glm embree OpenEXR::OpenEXR Imath::Imath ZLIB::ZLIB)
 if(IPO_SUPPORTED)
     set_target_properties(raster_bench PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
 endif()
