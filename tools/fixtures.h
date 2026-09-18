@@ -1,0 +1,82 @@
+#pragma once
+
+#include <algorithm>
+#include <cmath>
+#include <random>
+
+#include <glm/glm.hpp>
+
+#include "engine/gfx/hdr_image.h"
+#include "engine/scene/bsdf.h"
+#include "engine/scene/environment_map.h"
+#include "engine/scene/material.h"
+
+// Scenes, materials and analytic references shared by the validators that drive the renderer. Each of these existed in
+// two or three validators as an independent transcription; where two copies of an ORACLE drift, the checks built on
+// them silently stop measuring the same thing, which is the failure this header removes.
+//
+// One thing deliberately NOT collapsed: the oracles that re-derive shipped math (bsdf_validate's referenceEon,
+// referenceConductorIor, cosineAverageFresnel) stay independent transcriptions of the literature, written so a
+// transcription error in src/ surfaces here instead of cancelling. Nothing in this header may include or call into
+// src/scene/bsdf.* on a reference path -- an oracle that shares code with the thing it measures proves nothing.
+namespace tools::fixtures {
+
+constexpr float kPi = 3.14159265F;
+
+// Uniform hemisphere direction about +z, pdf = 1/(2*pi). Draws cosTheta then phi, in that order: the order is part of
+// the contract, because a caller reproducing a reference value depends on the rng consumption sequence.
+inline glm::vec3 sampleUniformHemisphere(std::mt19937& rng) {
+    std::uniform_real_distribution<float> unit(0.0F, 1.0F);
+    const float cosTheta = unit(rng);
+    const float sinTheta = std::sqrt(std::max(0.0F, 1.0F - (cosTheta * cosTheta)));
+    const float phi = 2.0F * kPi * unit(rng);
+    return {sinTheta * std::cos(phi), sinTheta * std::sin(phi), cosTheta};
+}
+
+// Independent ground truth: Lo(wo) = integral over the hemisphere of evaluateBsdf(wo,wi)*wi.z dwi, with L0 = 1.
+// Uniform-hemisphere Monte Carlo, so it under-samples a sharp GGX peak -- callers restrict the tight comparison to
+// roughness values where it converges, and say so at the call site.
+inline float referenceLo(const engine::scene::BsdfParams& params, const glm::vec3& wo, int sampleCount,
+                          std::mt19937& rng) {
+    constexpr float kUniformPdf = 1.0F / (2.0F * kPi);
+    glm::vec3 accum(0.0F);
+    for (int i = 0; i < sampleCount; ++i) {
+        const glm::vec3 wi = sampleUniformHemisphere(rng);
+        accum += engine::scene::evaluateBsdf(params, wo, wi) * wi.z / kUniformPdf;
+    }
+    return std::max({accum.x, accum.y, accum.z}) / static_cast<float>(sampleCount);
+}
+
+// Uniform-radiance (L0 = 1) equirect environment: constant regardless of resolution, but a real image so
+// EnvironmentMap's CDF machinery runs its normal (non-degenerate) path rather than the all-black fallback.
+inline engine::scene::EnvironmentMap makeUniformEnvironment() {
+    engine::gfx::HdrImage image;
+    image.width = 64;
+    image.height = 32;
+    image.rgba.assign(static_cast<std::size_t>(image.width) * static_cast<std::size_t>(image.height) * 4, 1.0F);
+    return engine::scene::EnvironmentMap(std::move(image));
+}
+
+inline engine::gfx::HdrImage makeConstantTexture(glm::vec3 rgb) {
+    engine::gfx::HdrImage image;
+    image.width = 1;
+    image.height = 1;
+    image.rgba = {rgb.x, rgb.y, rgb.z, 1.0F};
+    return image;
+}
+
+// 1x1 textures carrying the neutral values resolveBsdfParams/buildShadingFrame expect: a flat tangent-space normal
+// (0.5,0.5,1), the requested roughness in .r, and f0 in the specular slot. Callers set bumpStrength to 0, so the bump
+// texture's value is irrelevant.
+inline engine::scene::Material makeMaterial(float roughness, glm::vec3 f0) {
+    return engine::scene::Material{
+        makeConstantTexture(glm::vec3(1.0F)),              // baseColor -- white, worst case
+        makeConstantTexture(glm::vec3(0.5F, 0.5F, 1.0F)),  // normal -- flat
+        makeConstantTexture(glm::vec3(0.5F)),              // bump -- unused, bumpStrength 0
+        makeConstantTexture(glm::vec3(roughness)),         // roughness
+        makeConstantTexture(f0),                           // specular -> f0
+        makeConstantTexture(glm::vec3(1.0F)),              // AO -- unoccluded
+    };
+}
+
+}  // namespace tools::fixtures

@@ -106,6 +106,7 @@ bool writeExr(const std::string& path, const HdrImage& image) {
         Imf::FrameBuffer frameBuffer;
         // const_cast because OpenEXR's OutputFile API takes a mutable base pointer even though it only reads through it
         // on write; the buffer itself is never modified here.
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast) -- required by the OpenEXR API, see above.
         auto* base = const_cast<float*>(image.rgba.data());
         const std::size_t xStride = sizeof(float) * 4;
         const std::size_t yStride = xStride * static_cast<std::size_t>(image.width);

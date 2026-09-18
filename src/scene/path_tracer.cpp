@@ -481,6 +481,9 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
         engine::debug::RayCounts tileRays;
 
         // Reused for the life of the worker thread, so a pass allocates nothing: sized for a full tile even at the image edge, which keeps the row stride a constant kPathTraceTileSize.
+        // Block scope, so this already has internal linkage; misc-use-internal-linkage targets namespace-scope
+        // variables and misfires on a function-local thread_local.
+        // NOLINTNEXTLINE(misc-use-internal-linkage)
         thread_local std::vector<float> accumulator;
         accumulator.assign(static_cast<std::size_t>(kPathTraceTileSize) * kPathTraceTileSize * kTileLanes, 0.0F);
 

@@ -16,14 +16,29 @@
 
 #include <glm/glm.hpp>
 
+#include "check.h"
+#include "fixtures.h"
 #include "engine/scene/bsdf.h"
+#include "engine/scene/fresnel_dielectric.h"
 #include "engine/scene/sampler.h"
+
+#include "stats.h"
 
 namespace {
 
 using engine::scene::BsdfParams;
+using tools::stats::simpson;
 
-constexpr float kPi = 3.14159265F;
+using tools::fixtures::kPi;
+using tools::fixtures::sampleUniformHemisphere;
+
+// Each check keeps its own `ok` accumulator and its per-row stderr diagnostics -- those carry the parameters, the
+// measured value and the reference, which is what makes a failure diagnosable -- and reports one verdict. The detail
+// is in the rows, not in the assertion count.
+void finish(tools::check::Context& ctx, bool ok, const char* what) {
+    ctx.plan(1);
+    ENGINE_EXPECT(ctx, ok, what);
+}
 
 // edgeTint defaults to white, the no-dip edge Schlick always produced, so every pre-existing case here
 // is a strict subset of the swept coverage rather than a shifted version of it.
@@ -48,20 +63,12 @@ BsdfParams makeColoredMetalParams(float roughness, glm::vec3 edgeTint = glm::vec
 }
 
 // Uniform-solid-angle hemisphere sample (PBRT-style inversion, same as furnace_test.cpp): z=u1, r=sqrt(1-u1^2), phi=2*pi*u2, pdf=1/(2*pi).
-glm::vec3 sampleUniformHemisphere(std::mt19937& rng) {
-    std::uniform_real_distribution<float> unit(0.0F, 1.0F);
-    const float cosTheta = unit(rng);
-    const float sinTheta = std::sqrt(std::max(0.0F, 1.0F - (cosTheta * cosTheta)));
-    const float phi = 2.0F * kPi * unit(rng);
-    return {sinTheta * std::cos(phi), sinTheta * std::sin(phi), cosTheta};
-}
-
 // Integrates pdfBsdf(wo, .) over the hemisphere; for an opaque material (transmissionFactor=0) this must not exceed 1.0, since all sampling probability mass is in the two continuous lobes the pdf covers.
 // Multiple importance sampling with the balance heuristic (Veach 1997 sec. 9.2) over two proposals that between them cover both regimes: uniform hemisphere for the tails, sampleBsdf's own density for the lobe. Uniform alone stops working once the lobe is narrow -- at roughness 0.05 it spans ~2e-5 sr, which 200k uniform draws hit a handful of times at O(100) weight each, and the estimate is then too noisy to bound at all (measured 1.67 against a truth of <= 1, and still 1.17 at a hundred times the samples).
 // sampleBsdf draws from exactly pdfBsdf, so the second proposal's density IS the integrand and the combined balance-heuristic density collapses to N1/(2*pi) + N2*p(x): one pdf evaluation per sample, bounded below by the uniform term and above by N2*p, so it is well conditioned at every roughness. Unbiased despite that density being sub-normalised (sampleBsdf returns nullopt below the horizon), because the heuristic needs only the expected sample count per solid angle, which is N2*q2 either way.
 // Upper-bound only, not an equality: VNDF reflection sampling discards samples reflected below the horizon, so the true integral is the horizon-clipped mass, which has no closed form. The estimator is now tight enough that a real double-counted pdf shows up as an excess rather than drowning in variance.
 // diffuseRoughness is swept because at 0 -- the only value this used to test, and the one principled.json ships -- eonUniformMixWeight is pow(0, 0.1) = 0 exactly, so pdfEon degenerates to cltcPdf alone and CLTC itself degenerates to plain cosine. Neither the LTC fit's own normalisation nor the uniform/CLTC one-sample MIS mixture was reached at all. The metallic=1 rows matter most here: metallic zeroes diffuseKd but NOT diffuseProb, so a conductor still carries the full CLTC density with none of its value, and a mis-normalised fit shows up in the mixture denominator rather than in any picture.
-bool checkPdfNormalization() {
+ENGINE_CHECK(pdf_normalization, Slow, Statistical) {
     std::mt19937 rng(7);
     constexpr int kUniformSamples = 200000;
     constexpr int kBsdfSamples = 200000;
@@ -119,14 +126,15 @@ bool checkPdfNormalization() {
     }
     std::cout << "bsdf_validate: pdf normalization, worst integral " << worstIntegral << " (must be <= "
               << 1.0 + kTolerance << ")\n";
-    return ok;
+    finish(ctx, ok, "pdf_normalization failed; see the rows above");
+    return;
 }
 
 // sampleBsdf's reported density must equal pdfBsdf re-evaluated at the direction it returned -- the contract BsdfSample::pdf states in bsdf.h ("exactly what pdfBsdf would return for it") and that nothing asserted. checkPdfNormalization above reads sample->pdf, the density the sampler reports about itself, and never re-evaluates it, so that contract had no instrument at all.
 // What it covers was measured, not assumed. NOT a mixture term missing from the density: sampleBsdf reports evaluateContinuousLobes' own pdf, so both sides are then wrong together and this stays green -- deleting the msReflect density term leaves 0 failures here and fails checkFurnace at Lo=1.28 instead -- checkSamplingChiSquare below is the instrument that does catch it directly. What it does cover is the sign-mirroring round trip, since sampleBsdf returns wi in woLocal's convention and pdfBsdf re-mirrors it and nothing else in the suite closes that loop, and any future strategy reporting a hand-computed density beside the mixture rather than through it -- the usual optimisation once a lobe's own pdf is already in hand.
 // Exact equality, not a tolerance: both sides are the same arithmetic over the same deterministic LobeProbabilities, so any difference is a broken round trip rather than drift. Delta transmission reports 0 on both sides and is asserted like every other row.
 // Swept over checkPdfNormalization's grid plus transmissionFactor, including the ndotV<0 exiting rows the mirroring claim rests on, so every strategy in the ladder is drawn: VNDF reflection, EON, both multiple-scattering cosine lobes, rough and smooth refraction.
-bool checkSampleDensityConsistency() {
+ENGINE_CHECK(sample_density_consistency, Slow, Exact) {
     constexpr int kSampleCount = 8000;
     constexpr std::uint32_t kSeed = 11;
     const std::array<float, 4> roughnesses = {0.05F, 0.25F, 0.5F, 1.0F};
@@ -174,7 +182,8 @@ bool checkSampleDensityConsistency() {
     }
     std::cout << "bsdf_validate: sample/pdf consistency, " << compared
               << " sampled directions re-evaluated (exact equality)\n";
-    return ok;
+    finish(ctx, ok, "sample_density_consistency failed; see the rows above");
+    return;
 }
 
 glm::vec3 furnaceLo(const BsdfParams& params, const glm::vec3& wo, int sampleCount, std::uint32_t seed) {
@@ -202,7 +211,7 @@ bool withinBand(const glm::vec3& value, float centre, float tolerance) {
 // ndotV sweep includes negative values (woLocal.z<0, the exiting side of a transmissive dielectric) and a value past the ior=1.5 critical angle (~41.8deg, cosTheta~0.745) to force total internal reflection.
 // Energy bound is 1.0 (L0) everywhere except the exiting side (ndotV<0) of a transmissive material below the critical angle, where sampleBsdf's eta^2 non-symmetric radiance-compression factor (Veach 1997 sec. 5.2, see bsdf.cpp's transmission branch) legitimately raises Lo above L0: L/n^2 is the invariant along a ray, so radiance increases going from a denser medium (ior=1.5, inside) into a rarer one (1.0, outside) by up to ior^2.
 // The naive Lo<=1 bound only holds for eta==1 interfaces (pure reflection) or the entering side, where this same factor is <1, exactly compensating so a round trip through the surface loses no net energy.
-bool checkFurnace() {
+ENGINE_CHECK(furnace_energy_bound, Slow, Statistical) {
     constexpr int kSampleCount = 200000;
     constexpr float kTolerance = 0.1F;
     constexpr float kIor = 1.5F;  // matches makeParams/makeColoredMetalParams
@@ -251,7 +260,8 @@ bool checkFurnace() {
             }
         }
     }
-    return ok;
+    finish(ctx, ok, "furnace_energy_bound failed; see the rows above");
+    return;
 }
 
 // TWO-SIDED white furnace: a white, non-absorbing surface under uniform L0=1 radiance must return exactly 1.0 (every photon it receives leaves again); checkFurnace above only ever asserts Lo<=bound, so it cannot see energy loss, this BSDF's actual failure mode.
@@ -264,7 +274,7 @@ struct WhiteFurnaceCase {
     bool offGrid;
 };
 
-bool checkWhiteFurnaceTwoSided() {
+ENGINE_CHECK(white_furnace_two_sided, Slow, Statistical) {
     constexpr int kSampleCount = 400000;
     constexpr float kTolerance = 0.02F;
     const std::array<WhiteFurnaceCase, 14> cases = {{
@@ -313,7 +323,8 @@ bool checkWhiteFurnaceTwoSided() {
             }
         }
     }
-    return ok;
+    finish(ctx, ok, "white_furnace_two_sided failed; see the rows above");
+    return;
 }
 
 // EON rough-diffuse energy preservation: the same two-sided white furnace test as
@@ -330,7 +341,7 @@ bool checkWhiteFurnaceTwoSided() {
 // unguarded while the reflected multiple-scattering lobe borrowed the diffuse strategy -- a conductor
 // then drew a CLTC shape set by diffuseRoughness for a lobe of zero value, measurable only as variance,
 // which an energy band cannot see.
-bool checkEonDiffuseFurnace() {
+ENGINE_CHECK(eon_diffuse_furnace, Slow, Statistical) {
     constexpr int kSampleCount = 400000;
     constexpr float kTolerance = 0.02F;
     constexpr float kRoughness = 0.5F;
@@ -374,7 +385,8 @@ bool checkEonDiffuseFurnace() {
             }
         }
     }
-    return ok;
+    finish(ctx, ok, "eon_diffuse_furnace failed; see the rows above");
+    return;
 }
 
 // Paper Listing 1's E_EON at normal incidence, the EON directional albedo rho*E_F + rho_ms*(1-E_F), transcribed here independently of bsdf.cpp's evaluateEon and re-deriving c1/c2 from literals, so the check is not the same arithmetic tested against itself -- the discipline checkAverageFresnel applies to the Fresnel averages.
@@ -427,7 +439,7 @@ AlbedoEstimate measureDiffuseAlbedo(const BsdfParams& params, int sampleCount, s
 // The observed albedo must equal the AUTHORED albedo: the property EON's Appendix A inversion exists to provide, and the one thing nothing else in this suite can see. Every other case in every validator runs at either baseColor 1 or diffuseRoughness 0, where the inversion is exactly the identity -- measured, by reverting it and finding all five validators byte-identical -- so without this check the inversion could be deleted silently.
 // Two assertions per row, complementary rather than redundant. The analytic one is closed-form against closed-form and catches an error in the inversion algebra; the Monte Carlo one integrates the shipped lobe and additionally catches a diffuseRho that is computed and never consumed, which no closed-form identity can.
 // The chromatic row carries the weight: the multiple-scattering saturation the inversion undoes is per-channel, so a grey row cannot distinguish a correct inversion from one that merely preserves overall brightness. r=0 and baseColor=1 rows must read the identity exactly, which is what proves this change is a strict superset of the old behaviour rather than a shift of it.
-bool checkEonAlbedoInversion() {
+ENGINE_CHECK(eon_albedo_inversion, Slow, Statistical) {
     constexpr int kSampleCount = 400000;
     // Two named, bounded residuals and nothing else. kSigmaBand is a confidence level on the estimator's own measured standard error; kFitTolerance is the paper's stated <0.1% bound on evalFonAlbedoApprox, the quartic the renderer evaluates in place of the exact FON albedo this check's reference uses. Neither is a tuned number: the first is derived per row from the run, the second is the documented error of an approximation the renderer deliberately ships.
     constexpr float kSigmaBand = 5.0F;
@@ -477,7 +489,8 @@ bool checkEonAlbedoInversion() {
             }
         }
     }
-    return ok;
+    finish(ctx, ok, "eon_albedo_inversion failed; see the rows above");
+    return;
 }
 
 // EON BRDF value (paper eq. 16-19) in double, transcribed independently of bsdf.cpp's evaluateEon: c1/c2 re-derived from their literals and every term written out rather than shared, the discipline referenceEonAlbedo applies one level up to the albedo.
@@ -518,7 +531,7 @@ glm::vec3 referenceEon(const glm::vec3& rho, float r, const glm::vec3& wi, const
 // Two facts that set the sweep, both against instinct. The deviation peaks at NORMAL incidence, not grazing: coat = msTint*(1-E(mu)) and E rises toward grazing at high roughness (0.31 at mu=1, ~0.99 at the first grid column), so a grazing-first sweep is much weaker. And it changes sign below mu~0.3 at roughness 1, so only |delta|==0 is a safe predicate; any signed bound breaks.
 // The sweep reaches mu 1e-5 deliberately, and the four rows below 2.44e-4 are the regression test for the cos^2 Snell form: the old 1 - r^2*(1 - mu*mu) transcription rounded 1.0F-mu*mu to exactly 1.0F there, reported total internal reflection at an interface that has no critical angle, and returned fresnelDielectric(mu,1,1) = 1.0F instead of +0, which breaks every term of the collapse above. cos2Transmitted collapses to mu*mu at r == 1, so the sliver is now exact rather than excluded. Do NOT extend the sweep to ior>1 -- the identity is exact only at index match.
 // Residual, deliberate: any g(ior) with g(1)=0 passes here, notably 2*dielectricFresnelAvg(ior). This check pins the argument's collapse; checkAverageFresnel pins the function's value. Neither alone is sufficient and both are cheap.
-bool checkIndexMatchedCoat() {
+ENGINE_CHECK(index_matched_coat, Fast, Exact) {
     // Exact, from the collapse above. The second bound is a float32-vs-double residual on the same closed form, ~15 operations deep, measured worst 2.03e-7 at the grazing tail -- 4.9x under, thin on purpose. It is not the instrument; it is the backstop that stops a roughness-INDEPENDENT corruption (a pinned diffuseKd, a lost 1/(1-coatAvg) normalisation, a channel swap) from passing as bit-identical, which the invariance assertion alone cannot see.
     constexpr float kInvarianceTolerance = 0.0F;
     constexpr float kValueTolerance = 1e-6F;
@@ -612,7 +625,8 @@ bool checkIndexMatchedCoat() {
         std::cerr << "bsdf_validate: FAILED index-matched coat -- no rows asserted\n";
         ok = false;
     }
-    return ok;
+    finish(ctx, ok, "index_matched_coat failed; see the rows above");
+    return;
 }
 
 // Mean throughput through sampleBsdf with every transmitted draw converted back from radiance to energy. sampleBsdf applies the non-symmetric eta^2 radiance compression on refraction (Veach 1997 sec. 5.2), so a transmitted sample carries radiance and a raw mean is bounded by ior^2, not 1.0, which is why checkFurnace can only assert an upper bound on its transmissive rows and never sees energy loss there.
@@ -640,7 +654,7 @@ glm::vec3 transmissiveEnergyLo(const BsdfParams& params, const glm::vec3& wo, in
 // In the energy domain 1.0 is correct everywhere: a white, non-absorbing interface reflects, refracts, or hands the rest to the diffuse substrate, and the multiple-scattering lobes return what smithG2 masked; nothing is absorbed at any roughness, side, or transmissionFactor.
 // Gates two failure modes the radiance-domain checks structurally cannot see: multiple-scattering compensation delivered over the refraction-reachable cone only rather than the whole far hemisphere, and a transmission lobe whose value drops transmissionFactor or (1-metallic) while its selection probability keeps them (the factors cancel out of throughput, so only an absolute bound catches it).
 // metallic=1 rows cover a conductor, which must transmit nothing however its transmissionFactor is set.
-bool checkTransmissiveEnergyBalance() {
+ENGINE_CHECK(transmissive_energy_balance, Slow, Statistical) {
     constexpr int kSampleCount = 200000;
     // Same tolerance as the opaque white furnace: 1.0 is a correctness target, not a baseline. Residual is albedo-table interpolation error, worst across the TIR boundary where the transmitted channel steps in mu and eta=1.5 falls between two table slices.
     constexpr float kTolerance = 0.02F;
@@ -676,7 +690,8 @@ bool checkTransmissiveEnergyBalance() {
             }
         }
     }
-    return ok;
+    finish(ctx, ok, "transmissive_energy_balance failed; see the rows above");
+    return;
 }
 
 // A white, non-absorbing transmissive dielectric with an explicit baseColor and transmissionTint -- the one configuration this suite never had, makeParams above hardcoding baseColor 1 and every transmissive row leaving the tint white.
@@ -717,7 +732,7 @@ std::optional<glm::vec3> deltaTransmitThroughput(const BsdfParams& params, const
 // Two complementary assertions per row. Independence of baseColor is asserted EXACTLY: at metallic 0 baseColor reaches f0 not at all, and the diffuse lobe is identically zero on the far side, so no term of the transmission value can legitimately move by one bit.
 // Linearity in the tint carries a few-ULP relative band instead, because the rough lobe sums a single-scattering and a multiple-scattering term and FP multiplication does not distribute over a sum. That band is numerical, not physical slack: a tint applied to only one of the two terms misses by the other term's whole share.
 // Rows span both code paths a tint must travel: the rough continuous lobe (evaluateTransmissionLobe plus transmitMultiScatter, which share one returned value here) and sampleBsdf's smooth delta branch.
-bool checkTransmissionTint() {
+ENGINE_CHECK(transmission_tint, Fast, Exact) {
     constexpr float kUlpBand = 1e-6F;
     constexpr float kSmoothRoughness = 0.005F;   // below bsdf.cpp's smooth threshold, so transmission is the delta branch
     const glm::vec3 baseColour(0.2F, 0.5F, 0.9F);
@@ -794,7 +809,8 @@ bool checkTransmissionTint() {
                      "nothing was asserted\n";
         ok = false;
     }
-    return ok;
+    finish(ctx, ok, "transmission_tint failed; see the rows above");
+    return;
 }
 
 // Gulbrandsen 2014 eq 12 and eq 2 exactly as the paper's Appendix A prints them -- the LITERAL k^2, not
@@ -856,7 +872,7 @@ double cosineAverageFresnel(Fresnel fresnel) {
 // The instrument the suite never had. F_avg attenuates every repeated bounce of the Kulla-Conty multiple-scattering lobe, and NO energy test in this file can see an error in it: checkWhiteFurnaceTwoSided runs at f0=1, where Schlick's mean, the quadrature rule and the truth all agree to 1e-4, and checkFurnace's coloured-metal rows are upper-bound-only and so blind to a loss. Measuring F_avg directly is the honest fix; testing around it is not available, because a two-sided grey-conductor furnace has no closed form.
 // Truth is this file's own independent reference -- literal k^2, complex arithmetic, double -- not the shipped Fresnel, so a transcription error in bsdf.cpp shows up here instead of cancelling. The two inversions agree to 4e-12 (checkConductorFresnel pins that), twelve orders under the tolerance, so what this measures is the quadrature rule's own fit error and nothing else.
 // Conductor tolerance is the fit's measured bound (max 4.0e-4 over the full clamped domain, worst near r=0.48) plus headroom. Karis' Schlick mean fails it by 216x at r=0.255 g=1, which is the point: reverting bsdf.cpp to schlickFresnelAvg must fail this test, and must NOT fail at g=1 r=1 where the old suite did all its conductor energy checking.
-bool checkAverageFresnel() {
+ENGINE_CHECK(average_fresnel, Fast, Exact) {
     constexpr double kConductorTolerance = 5e-4;
     // dielectricFresnelAvg's own long-standing claim, now asserted rather than only written down. Loose next to the conductor rule because it is a two-constant rational fit, not a fitted quadrature. Headroom is thin and deliberately not widened: measured worst is 0.00597 at ior 3.0 and 0.00588 at ior 1.1, ~9% under the bound, so any refit or tolerance change trips this rather than passing silently.
     constexpr double kDielectricTolerance = 0.0065;
@@ -909,7 +925,8 @@ bool checkAverageFresnel() {
             ok = false;
         }
     }
-    return ok;
+    finish(ctx, ok, "average_fresnel failed; see the rows above");
+    return;
 }
 
 // --- Independent reference for the reflect-side albedo table, and with it the instrument for coatAlbedo's fresnelAvg VALUE.
@@ -923,15 +940,6 @@ double referenceSmithLambda(double ndotV, double alpha) {
 }
 
 // Composite Simpson over [lower, upper] with an even panel count, on any value type with + and scalar *.
-template <typename Integrand>
-auto simpson(double lower, double upper, int panels, Integrand f) -> decltype(f(0.0)) {
-    const double h = (upper - lower) / panels;
-    auto sum = f(lower) + f(upper);
-    for (int i = 1; i < panels; ++i) {
-        sum = sum + ((i % 2 == 1 ? 4.0 : 2.0) * f(lower + (i * h)));
-    }
-    return (h / 3.0) * sum;
-}
 
 // Schlick-split directional albedo: .x is the a channel, .y the b, so Ess(f0) = f0*a + b and a + b = E.
 glm::dvec2 referenceDirectionalAlbedo(double mu, double alpha) {
@@ -1023,7 +1031,7 @@ double referenceCoupling(const CoatGeometry& geometry, double fresnelAvg) {
 // Which is the whole difficulty, and why the ior range is what it is. Karis' schlickFresnelAvg(coatF0), the candidate a revert would install, is not uniformly worse: it misses truth by 0.00269 at ior 1.3 where the fit misses by 0.00544, crosses over near ior 1.42, and only then diverges. Starting at 1.5 is what makes the separation real rather than a coin toss; stopping at 1.8 is because the fit's own error climbs back to 0.00369 by ior 2.0 and would fail its own bound.
 // Both candidates measured by mutation, which is the only way this claim means anything. Reverting all three sites to schlickFresnelAvg(coatF0) recovers 0.0856466 against that function's own 0.0857143 -- the instrument names it, to 7e-5 -- and fails by 1.8x at ior 1.5 rising to 2.5x at 1.8. Substituting 2*dielectricFresnelAvg recovers 0.179022 against its 0.178996 and fails by 25x to 39x. Unmutated, the recovery lands 6.6e-5 from dielectricFresnelAvg's own value, so what the tolerance is actually spending is the fit's error and not the instrument's.
 // The albedo table is the other reason this could not exist before: F_avg enters coatAlbedo only through multiScatterTint(F, Eavg)*(1-E(mu)), whose derivative in F is ~0.054 here, so an error e in E recovers as e/0.054 in F_avg. At the old 32x32 startup table's ~1.5e-3 that is 0.028, eight times the tolerance below; at the offline bake's measured 3e-5 quadrature plus 3.2e-5 bilinear it is ~1.2e-3, a third of it.
-bool checkCoatFresnelAvg() {
+ENGINE_CHECK(coat_fresnel_average, Slow, Exact) {
     constexpr double kTolerance = 0.0035;
     // Residual of the recovered root, not an accuracy claim: it catches a coupling the model cannot reproduce at ANY fresnelAvg (a lost 1/(1-coatAvg), a dropped wi-side factor), which an in-range root would otherwise launder into a plausible number.
     constexpr double kResidualTolerance = 1e-6;
@@ -1113,7 +1121,8 @@ bool checkCoatFresnelAvg() {
         ok = false;
     }
     std::cout << "  " << rowsChecked << " rows inverted\n";
-    return ok;
+    finish(ctx, ok, "coat_fresnel_average failed; see the rows above");
+    return;
 }
 
 // Cauchy dispersion (bsdf.cpp's cauchyIor), asserted against the contract it exists to satisfy rather than
@@ -1124,7 +1133,7 @@ bool checkCoatFresnelAvg() {
 // where B is exactly 0 and dispersion is identically the no-op -- deliberately, since that is what lets
 // checkBeerLambert isolate the channel estimator from the refraction geometry. This check carries the
 // whole proof of the optics.
-bool checkCauchyDispersion() {
+ENGINE_CHECK(cauchy_dispersion, Fast, Exact) {
     // Both bands are float32 rounding headroom, not fit error: the algebra is exact. The Abbe band is
     // relative because n_F - n_C is a ~0.008 difference of two ~1.5 quantities, so it carries the ~187x
     // cancellation amplification of their own ulp; the d-line band is absolute since nothing cancels there.
@@ -1214,7 +1223,8 @@ bool checkCauchyDispersion() {
             }
         }
     }
-    return ok;
+    finish(ctx, ok, "cauchy_dispersion failed; see the rows above");
+    return;
 }
 
 // Conductor Fresnel (bsdf.cpp's conductorIorFromReflectivity/fresnelConductor), verified through the
@@ -1236,7 +1246,7 @@ bool checkCauchyDispersion() {
 // wo/wi are a coplanar pair mirrored about the normal, unlike checkReciprocity's deliberately
 // non-coplanar ones: that puts nh exactly on +z so woDotNh IS the swept cosine, which is what makes the
 // comparison against a reference evaluated at that cosine exact rather than approximate.
-bool checkConductorFresnel() {
+ENGINE_CHECK(conductor_fresnel, Fast, Exact) {
     // The ratio is a quotient of differences of float BSDF values, so it carries the cancellation of both.
     constexpr float kRatioTolerance = 2e-3F;
     // Normal incidence is an exact identity, not a fit: R(theta=0) == r for every g (paper sec. 2.3.1).
@@ -1409,7 +1419,8 @@ bool checkConductorFresnel() {
     }
     std::cout << "  conductor Fresnel curve: " << ratiosChecked << " points vs reference, "
               << monotonicRowsChecked << " rough rows monotone in edgeTint\n";
-    return ok;
+    finish(ctx, ok, "conductor_fresnel failed; see the rows above");
+    return;
 }
 
 // The specular lobe's closed form at the mirrored pair, in double: nh is exactly +z there, so sin(theta_h) is 0 and the GGX denominator collapses to alpha^2, giving D = 1/(pi*alpha^2) without evaluating the shipped D at all.
@@ -1431,7 +1442,7 @@ double specularGeometry(double alpha, double cosine) {
 // Roughness stays at or below checkConductorFresnel's kMsNegligibleRoughness so M sits under the tolerance -- it measures below float32 noise here, two orders under it; the two lowest rows are glass.json's and chrome.json's own values, which is what makes this the regression test for both D errors.
 // The sweep only reaches nh = +z, so it pins D at the lobe peak and says nothing about the tails; that is the right trade, since the peak is what a direct highlight is made of and the tails carry no absolute reference to compare against.
 // The grazing end stops at cos=0.02, where singleScatter's 4*muO*muI is 1.6e-3 -- three orders above its own 1e-6 floor, so the reference K's unfloored 4*c^2 is the divisor the lobe actually used and the row is a real comparison rather than a clamped one.
-bool checkDielectricFresnel() {
+ENGINE_CHECK(dielectric_fresnel, Fast, Exact) {
     // Float32 round-off in the shipped lobe against a double reference, nothing else: M is not resolvable at these roughnesses. Measured worst 2.57e-7 at ior 1.5, roughness 0.1, cos 0.08, plus ~17% headroom. A fit-shaped error cannot hide under a bound this tight -- Schlick misses by 0.02 at ior 1.5168 cos 0.5, five orders above it.
     constexpr double kFresnelTolerance = 3e-7;
     // Normal incidence is an exact identity, not a fit: referenceDielectricFresnel(1, n) is ((n-1)/(n+1))^2 with both polarisations equal, and nh, woDotNh and G2 are all exactly 1 there, so the only residual is float32 evaluation of F itself. Measured worst 2.54e-8 at ior 2.5, plus ~18% headroom.
@@ -1537,13 +1548,14 @@ bool checkDielectricFresnel() {
     // No conditioning skip anywhere above, unlike checkConductorFresnel's normalised ratio: every row of the sweep is compared, and the count is printed so that stays visible.
     std::cout << "  dielectric Fresnel: " << rowsChecked << " points vs reference, "
               << indexMatchedRows << " index-matched rows at exactly zero\n";
-    return ok;
+    finish(ctx, ok, "dielectric_fresnel failed; see the rows above");
+    return;
 }
 
 // Helmholtz reciprocity: f(wo->wi) == f(wi->wo). The continuous lobes are symmetric by construction after the directional-albedo diffuse coupling landed: D and G2 are symmetric, Fresnel is evaluated at the shared half-vector, and both the coupling and the multiple-scattering lobe are products of matching wo-side and wi-side factors, so this is an equality to float precision, not a statistical bound.
 // It fails hard on the pre-coupling code, where the diffuse lobe carried (1 - F(mu_o)) alone; not an energy error (the furnace passed throughout) but a misdistribution across view/light geometry, and the blocker for every bidirectional transport algorithm (BDPT, VCM, light tracing, photon mapping), all of which require symmetric f.
 // Transmission is excluded (transmissionFactor=0, both cosines positive): radiance transport across a refracting interface is genuinely non-symmetric, so f(wo->wi)==f(wi->wo) is the wrong invariant there; the eta^2-corrected one it does satisfy lives in checkTransmissionReciprocity below.
-bool checkReciprocity() {
+ENGINE_CHECK(reciprocity, Fast, Exact) {
     constexpr float kRelativeTolerance = 1e-4F;
     const std::array<float, 4> roughnesses = {0.05F, 0.25F, 0.5F, 1.0F};
     const std::array<float, 3> metallics = {0.0F, 0.5F, 1.0F};
@@ -1580,7 +1592,8 @@ bool checkReciprocity() {
             }
         }
     }
-    return ok;
+    finish(ctx, ok, "reciprocity failed; see the rows above");
+    return;
 }
 
 // eta^2-corrected reciprocity for the transmission lobe: f_t(wo->wi)*eta_wi^2 == f_t(wi->wo)*eta_wo^2. Every term in evaluateTransmissionLobe is symmetric under the swap except denom = (wo.h) + etaR*(wi.h), which the reversed frame rescales by etaI/etaT; squared, that is exactly the eta ratio above. With wo outside and wi inside it reads f(wo->wi)*ior^2 == f(wi->wo).
@@ -1589,7 +1602,7 @@ bool checkReciprocity() {
 // Isolated with no new accessor by staying under bsdf.cpp's kMinDeficit, where the multiple-scattering term switches itself off: 1 - escapeAvg measures 1.4e-4 at roughness 0.10 and 1.8e-3 at 0.20 against a 1e-3 gate, so 0.15 upward is not safe. Both roughnesses stay above kSmoothAlpha or there is no continuous lobe to test at all.
 // wi is CONSTRUCTED, not sampled: at these roughnesses the lobe is a fraction of a degree wide, so an arbitrary far-side direction returns zero on both sides and the check passes having tested nothing. Refract wo through the macro normal, then perturb by a multiple of alpha for off-peak pairs; the non-zero-pair count is asserted for the same reason.
 // transmissionFactor is pinned at 1.0. Between 0 and 1 the entering side scales the lobe by it and the exiting side by 1.0 -- a modelling asymmetry (inside the medium there is no substrate to withhold anything), not a Jacobian error, so sweeping it would test the convention rather than the invariant.
-bool checkTransmissionReciprocity() {
+ENGINE_CHECK(transmission_reciprocity, Fast, Exact) {
     // Not checkReciprocity's 1e-4: D is sharply peaked at these alphas (2.5e-3 to 1e-2) and the two queries build ht from differently scaled sums, so a few-ULP direction difference is amplified by dD/D ~ 4/alpha^2 off the peak. Worst measured 6.4e-3 at roughness 0.05, 2.1e-3 at 0.10; full discriminating power against the O(1) structural errors above survives at 1e-2.
     constexpr float kRelativeTolerance = 1e-2F;
     const std::array<float, 2> roughnesses = {0.05F, 0.10F};
@@ -1653,12 +1666,13 @@ bool checkTransmissionReciprocity() {
         ok = false;
     }
     std::cout << "  transmission reciprocity: " << pairsSeen << " non-zero pairs\n";
-    return ok;
+    finish(ctx, ok, "transmission_reciprocity failed; see the rows above");
+    return;
 }
 
 // Round trip through a transmissive interface: sampleBsdf applies a non-symmetric eta^2 compression on refraction (Veach 1997 sec. 5.2), entering scales by (1/ior)^2, exiting by ior^2, so a ray that enters and leaves the same surface must lose no net energy.
 // checkFurnace tests each side separately against a per-side bound (1.0 entering, ior^2 exiting), which passes even if the two factors do not actually cancel; this asserts the invariant bsdf.cpp's own comment claims.
-bool checkTransmissionRoundTrip() {
+ENGINE_CHECK(transmission_round_trip, Slow, Statistical) {
     constexpr int kSampleCount = 200000;
     // Not tight to 1.0: each side's furnace value also contains that interface's reflected lobe, so the product carries a Fresnel cross-term that grows toward grazing (measured 1.027 at normal incidence, 1.058 at 60 degrees).
     // The band still has large discriminating power: factors that compounded rather than cancelled would land near ior^2=2.25, and ones that under-cancelled near 1/2.25=0.44.
@@ -1692,13 +1706,14 @@ bool checkTransmissionRoundTrip() {
             ok = false;
         }
     }
-    return ok;
+    finish(ctx, ok, "transmission_round_trip failed; see the rows above");
+    return;
 }
 
 // Transmission through an index-matched interface, the one configuration where the answer needs no reference at all: at ior 1 there is no interface, so a transmissive surface must pass every ray straight through, at every angle, and lose nothing.
 // This is the only check in the suite that reaches sampleBsdf's two refraction sites -- refractAbout for the rough branch and the Snell block in the smooth one. Both decided total internal reflection from 1 - cos^2(thetaI), which rounds to exactly 1.0F below cos 2^-12, so both reported TIR at an interface with no critical angle and returned no sample at all. A lost transmission sample is silent: it is energy deleted from the estimator, not a wrong value, so no furnace, reciprocity or chi-square row above can see it -- only the absence asserted here.
 // The existence assertion is binary and carries the check; it needs no tolerance and cannot be tuned. The direction and throughput assertions are the backstop that stops a sample that merely EXISTS from passing while pointing somewhere an index-matched interface cannot send it.
-bool checkIndexMatchedTransmission() {
+ENGINE_CHECK(index_matched_transmission, Fast, Exact) {
     // Straight-through is algebraic at r == 1 -- cos(thetaT) == cos(thetaI) and the tangential components scale by exactly 1 -- but it is reached through sqrt(fl(wo.z*wo.z)), which is not required to return |wo.z| to the last bit. Measured worst 0 over the whole sweep; the bound is one float32 epsilon of headroom, not a fitted number.
     constexpr float kDirectionTolerance = 1.2e-7F;
     // NOT throughput == tint: sampleBsdf returns f/pdf, which divides by the lobe-selection probability, so a single draw carries tint/P and reads 0.842105 against a 0.8 tint at P = 0.95. That factor is what makes the estimator unbiased, and asserting it away would assert a bias in.
@@ -1799,7 +1814,179 @@ bool checkIndexMatchedTransmission() {
     std::cout << "  " << rowsChecked << " angles asserted, worst direction error " << worstDirection
               << ", worst chromaticity spread " << worstChromaticity << ", rough rejections "
               << roughRejections << " of " << kRoughDraws * static_cast<int>(cosines.size()) << '\n';
-    return ok;
+    finish(ctx, ok, "index_matched_transmission failed; see the rows above");
+    return;
+}
+
+
+// --- Total internal reflection at a real critical angle.
+// checkIndexMatchedTransmission and checkIndexMatchedCoat pin the ior == 1 degeneracy, where there IS no critical angle
+// -- that is the case the cos^2 Snell form exists to fix. Neither says anything about TIR where it genuinely occurs,
+// which until now was covered by a single checkFurnace row past the ior 1.5 critical angle. These two close that.
+namespace {
+
+// cos of the critical angle for a ray leaving the denser medium: sin(thetaC) = etaT/etaI, so cos(thetaC) =
+// sqrt(1 - (etaT/etaI)^2). Stated in this file independently of bsdf.cpp's cos2Transmitted, so a fault in that
+// predicate cannot define away the angle it is being measured against.
+double criticalCosine(double iorDense) {
+    const double ratio = 1.0 / iorDense;
+    return std::sqrt(std::max(0.0, 1.0 - (ratio * ratio)));
+}
+
+}  // namespace
+
+// Inside the TIR cone the interface must reflect EXACTLY all of it: at and past the critical angle cosThetaT is zero,
+// both polarisation terms are exactly +/-1, and their mean is exactly 1.0F. Asserting exact equality rather than a
+// tolerance is what makes this a regression test for the predicate rather than for the Fresnel arithmetic -- a
+// formulation that merely approaches 1 near grazing would pass a banded check and fail this one.
+// Outside the cone the reflectance must be strictly below 1, or the lobe has reported a critical angle that the
+// interface does not have -- the exact defect the cos^2 form fixed at ior 1, here at ior > 1 where the cone is real.
+ENGINE_CHECK(critical_angle_onset, Fast, Exact) {
+    // Spans the shipped range: glass.json is 1.5, clay.json's coat is 1.55, and 1.33/2.4 bracket it with water and
+    // diamond so the cone's width varies by more than a factor of two across the sweep.
+    const std::array<double, 5> iors = {1.33, 1.5, 1.5168, 1.55, 2.4};
+    // Offsets in cos, straddling the critical cosine. The two smallest are below 2^-12, the scale at which the old
+    // 1 - cos^2 transcription lost the distinction entirely.
+    const std::array<double, 6> offsets = {1e-5, 2.44e-4, 1e-3, 1e-2, 0.1, 0.3};
+
+    bool ok = true;
+    int rowsChecked = 0;
+    float worstOutside = 0.0F;
+    std::cout << "bsdf_validate: total internal reflection onset at the critical angle (ior > 1)\n";
+    for (double ior : iors) {
+        const double muC = criticalCosine(ior);
+        for (double offset : offsets) {
+            // Exiting orientation: etaI is the dense medium. Inside the cone means a SMALLER cosine than critical.
+            const double inside = muC - offset;
+            if (inside > 0.0) {
+                ++rowsChecked;
+                const float f = engine::scene::fresnelDielectric(static_cast<float>(inside),
+                                                                  static_cast<float>(ior), 1.0F);
+                if (!(f == 1.0F)) {
+                    std::cerr << "bsdf_validate: FAILED TIR onset at ior=" << ior << " cos=" << inside
+                              << " (critical " << muC << ", inside the cone by " << offset << ") -- reflectance "
+                              << f << ", must be exactly 1.0: past the critical angle cosThetaT is zero and both "
+                                 "polarisation terms are exactly one\n";
+                    ok = false;
+                }
+            }
+            const double outside = muC + offset;
+            if (outside <= 1.0) {
+                ++rowsChecked;
+                const float f = engine::scene::fresnelDielectric(static_cast<float>(outside),
+                                                                  static_cast<float>(ior), 1.0F);
+                worstOutside = std::max(worstOutside, f);
+                if (!(f < 1.0F)) {
+                    std::cerr << "bsdf_validate: FAILED TIR onset at ior=" << ior << " cos=" << outside
+                              << " (critical " << muC << ", outside the cone by " << offset << ") -- reflectance "
+                              << f << ", must be below 1.0: this direction refracts, so reporting total internal "
+                                 "reflection deletes the transmitted energy entirely\n";
+                    ok = false;
+                }
+            }
+        }
+    }
+    // A sweep that checked nothing would pass vacuously, and the bracket above is conditional on both sides.
+    if (rowsChecked == 0) {
+        std::cerr << "bsdf_validate: FAILED TIR onset -- no rows checked\n";
+        ok = false;
+    }
+    std::cout << "  rows " << rowsChecked << ", worst reflectance just outside the cone " << worstOutside << '\n';
+    finish(ctx, ok, "critical_angle_onset failed; see the rows above");
+    return;
+}
+
+// The two sites that decide TIR from the MACRO normal -- fresnelDielectric and sampleBsdf's smooth transmission branch
+// -- now share one cos2Transmitted predicate rather than two separately-rounded transcriptions. That they agree is the
+// property the shared helper buys, and it is exactly what a future refactor would break: a site that re-derives the
+// condition locally stays self-consistent and silently disagrees with the other.
+// Deliberately NOT asserted against the rough branch. refractAbout decides TIR per sampled MICROFACET, so the macro
+// critical angle does not bound it, and the transmit-side multiple-scattering lobe is cosine-distributed over the far
+// hemisphere and is not a refraction at all -- measured 115/4096 transmitted draws at roughness 0.3 a full 0.3 in
+// cosine INSIDE the cone, which is correct behaviour and not a disagreement. A macro-level assertion there would be
+// asserting something untrue.
+// Both directions carry weight and fail differently: a transmitted sample inside the cone is energy arriving from a
+// direction Snell cannot reach, and no transmitted sample outside it is energy deleted from the estimator rather than
+// redirected -- the silent failure mode checkIndexMatchedTransmission exists to catch at ior 1, here at ior > 1.
+ENGINE_CHECK(tir_predicate_agreement, Fast, Exact) {
+    // Enough draws that "transmission is reachable" is not a statement about one lucky lobe selection: just outside the
+    // cone the transmitted share is already ~26% (measured 1068/4096 at ior 1.33), so a zero count over this many draws
+    // is a structural absence rather than a sampling accident.
+    constexpr int kDraws = 4096;
+    // Angular resolution is set by the finest offset below: a divergence that moves the critical cosine by less than
+    // 1e-3 falls between rows and is not detectable here. Measured by mutation -- shifting the smooth branch's
+    // threshold to cos^2ThetaT < 0.05 (critical cosine +0.021 at ior 1.33) raises 5 rows, while < 0.002 (+0.0009)
+    // raises none. That is the honest bound on this check, not a claim of exactness.
+    constexpr float kSmoothRoughness = 0.02F;  // below bsdf.cpp's kSmoothAlpha: the delta branch
+    const std::array<double, 3> iors = {1.33, 1.5, 2.4};
+    const std::array<double, 4> offsets = {1e-3, 1e-2, 0.1, 0.25};
+
+    bool ok = true;
+    int rowsChecked = 0;
+    std::cout << "bsdf_validate: TIR predicate agreement, fresnelDielectric vs the smooth refraction branch\n";
+    for (double ior : iors) {
+        const double muC = criticalCosine(ior);
+        for (double offset : offsets) {
+            for (const bool insideCone : {true, false}) {
+                const double mu = insideCone ? muC - offset : muC + offset;
+                if (mu <= 0.0 || mu > 1.0) {
+                    continue;
+                }
+                ++rowsChecked;
+                const float muF = static_cast<float>(mu);
+                const bool fresnelSaysTir =
+                    engine::scene::fresnelDielectric(muF, static_cast<float>(ior), 1.0F) == 1.0F;
+
+                // Exiting side: woLocal.z < 0 is the orientation in which the dense medium is the incident one, and the
+                // only one in which a critical angle exists at all.
+                const float sine = std::sqrt(std::max(0.0F, 1.0F - (muF * muF)));
+                const glm::vec3 wo(sine, 0.0F, -muF);
+                // ior taken from the row, not makeParams' fixed 1.5: the critical angle above is derived from this
+                // same value, and a material at a different ior would be measured against the wrong cone.
+                const BsdfParams base = makeParams(kSmoothRoughness, 0.0F, 1.0F);
+                const BsdfParams params{base.baseColor,          base.metallic,
+                                         base.roughness,          base.f0,
+                                         base.edgeTint,           static_cast<float>(ior),
+                                         base.transmissionFactor, base.diffuseRoughness,
+                                         base.diffuseRho,         base.transmissionTint};
+
+                int transmitted = 0;
+                for (int i = 0; i < kDraws; ++i) {
+                    engine::scene::Sampler sampler(0, 0, i, kDraws, 5100U);
+                    const std::optional<engine::scene::BsdfSample> sample =
+                        engine::scene::sampleBsdf(params, wo, sampler);
+                    transmitted +=
+                        sample.has_value() && sample->type == engine::scene::LobeType::Transmission ? 1 : 0;
+                }
+
+                // The two sites must reach the same verdict from the same macro geometry. Stated as the agreement
+                // itself rather than as two independent thresholds, so the check cannot pass by both being wrong.
+                if (!(fresnelSaysTir == (transmitted == 0))) {
+                    std::cerr << "bsdf_validate: FAILED TIR agreement at ior=" << ior << " cos=" << mu
+                              << " (critical " << muC << ") -- fresnelDielectric "
+                              << (fresnelSaysTir ? "reports" : "does not report")
+                              << " total internal reflection, but the smooth branch transmitted " << transmitted
+                              << " of " << kDraws << " draws; the two sites decide from the same cos2Transmitted and "
+                                 "must agree\n";
+                    ok = false;
+                }
+                // Inside the cone the count must be exactly zero, not merely small: a delta lobe has one Snell
+                // direction and inside the cone it does not exist, so any transmitted draw is unreachable energy.
+                if (fresnelSaysTir && !(transmitted == 0)) {
+                    std::cerr << "bsdf_validate: FAILED TIR agreement at ior=" << ior << " cos=" << mu
+                              << " -- " << transmitted << " transmitted draws inside the critical cone\n";
+                    ok = false;
+                }
+            }
+        }
+    }
+    if (rowsChecked == 0) {
+        std::cerr << "bsdf_validate: FAILED TIR agreement -- no rows checked\n";
+        ok = false;
+    }
+    std::cout << "  rows " << rowsChecked << '\n';
+    finish(ctx, ok, "tir_predicate_agreement failed; see the rows above");
+    return;
 }
 
 }  // namespace
@@ -1809,40 +1996,6 @@ bool checkIndexMatchedTransmission() {
 // Pearson's chi-square over equal-solid-angle bins of the whole sphere, with expected counts from integrating pdfBsdf over each bin (Mitsuba's chi2test; PBRT-v4's BSDF sampling tests). Bins are uniform in (cos theta, phi) because that is the measure of dw, so every bin subtends the same solid angle and the quadrature below integrates the density directly.
 // Rejected draws are a cell in their own right, which is what makes this a test of the total sampling mass as well as its shape: sampleBsdf returning nullopt is exactly the event "wi left the sampled support", of probability 1 - integral(pdf), and a pdf that integrates to the wrong total shows up here as a rejection-cell mismatch rather than passing unnoticed.
 // scrambleSeed is drawn fresh per sample -- the one configuration sampler.h warns forfeits stratification -- deliberately: a chi-square needs iid draws, and a low-discrepancy point set would make the null distribution wrong in the dangerous direction, understating the statistic and hiding a real mismatch.
-// Regularized upper incomplete gamma Q(a, x): series below the crossover, continued fraction above (Numerical Recipes 3rd ed. 6.2). Supplies the chi-square survival function so the test can state a significance level rather than carry a critical-value table indexed by degrees of freedom.
-double regularizedGammaQ(double a, double x) {
-    constexpr int kMaxIterations = 300;
-    constexpr double kEpsilon = 1e-14;
-    const double logGammaA = std::lgamma(a);
-    const double tiny = std::numeric_limits<double>::min();
-    if (x < a + 1.0) {
-        double term = 1.0 / a;
-        double sum = term;
-        for (int n = 1; n < kMaxIterations && std::fabs(term) > std::fabs(sum) * kEpsilon; ++n) {
-            term *= x / (a + n);
-            sum += term;
-        }
-        return 1.0 - (sum * std::exp(-x + (a * std::log(x)) - logGammaA));
-    }
-    double b = x + 1.0 - a;
-    double c = 1.0 / tiny;
-    double d = 1.0 / b;
-    double h = d;
-    for (int i = 1; i < kMaxIterations; ++i) {
-        const double an = -i * (i - a);
-        b += 2.0;
-        d = (an * d) + b;
-        if (std::fabs(d) < tiny) { d = tiny; }
-        c = b + (an / c);
-        if (std::fabs(c) < tiny) { c = tiny; }
-        d = 1.0 / d;
-        const double delta = d * c;
-        h *= delta;
-        if (std::fabs(delta - 1.0) <= kEpsilon) { break; }
-    }
-    return h * std::exp(-x + (a * std::log(x)) - logGammaA);
-}
-
 struct ChiSquareCase {
     float roughness;
     float metallic;
@@ -1850,14 +2003,14 @@ struct ChiSquareCase {
     float ndotV;
 };
 
-bool checkSamplingChiSquare() {
+ENGINE_CHECK(sampling_chi_square, Slow, Statistical) {
     constexpr double kPiDouble = 3.14159265358979324;
     constexpr int kCosBins = 16;
     constexpr int kPhiBins = 8;
     constexpr int kPanels = 256;            // even, for Simpson, per axis per bin; measured, not guessed: the peaked refraction lobe at roughness 0.2 is mis-integrated badly enough to report p=1e-78 on correct code at 48 panels and to still fail at 64, passes from 96, and the p-value stops moving past this
-    constexpr int kSampleCount = 200000;
+    // Sized for power at the suite's family-wise rate: 200000 draws at the former 1% family rate, scaled by the noncentrality ratio for equal 99% power at 128 dof (119.2 -> 165.6, x1.39), so moving to kFamilyAlpha loses no detectable effect.
+    constexpr int kSampleCount = 280000;
     constexpr double kMinExpected = 5.0;    // Cochran's rule, the count below which a cell's chi-square term is not trustworthy and must be pooled
-    constexpr double kSignificance = 0.01;
     constexpr std::uint32_t kSeed = 0x9E3779B9U;
 
     // Transmissive rows sit either side of the interface so the transmitted multiple-scattering lobe is drawn at both eta orientations; the metallic rows are where the reflected one carries the whole diffuse selection mass.
@@ -1869,8 +2022,9 @@ bool checkSamplingChiSquare() {
         {0.3F, 1.0F, 0.0F, 0.7F},  {0.8F, 1.0F, 0.0F, 0.7F},
         {0.5F, 0.0F, 0.0F, 0.5F},  {1.0F, 0.0F, 0.0F, 0.5F},
     }};
-    // Sidak correction across the grid: without it, twelve independent tests at 1% would fail one time in eight on correct code.
-    const double perCase = 1.0 - std::pow(1.0 - kSignificance, 1.0 / static_cast<double>(cases.size()));
+    // The suite's corrected significance, split across the grid by Sidak so twelve independent cases share it.
+    ctx.plan(1);
+    const double perCase = tools::stats::sidak(ctx.alpha(), static_cast<int>(cases.size()));
 
     bool ok = true;
     double worstP = 1.0;
@@ -1939,7 +2093,7 @@ bool checkSamplingChiSquare() {
             ++cells;
         }
         const int dof = cells - 1;
-        const double p = regularizedGammaQ(0.5 * dof, 0.5 * chiSquare);
+        const double p = tools::stats::chiSquareUpperTail(chiSquare, dof);
         worstP = std::min(worstP, p);
         if (p >= perCase) {
             continue;
@@ -1953,36 +2107,8 @@ bool checkSamplingChiSquare() {
     std::cout << "bsdf_validate: sampling chi-square over " << cases.size() << " configurations, "
               << kSampleCount << " draws each, worst p-value " << worstP << " against a Sidak threshold of "
               << perCase << "\n";
-    return ok;
+    finish(ctx, ok, "sampling_chi_square failed; see the rows above");
+    return;
 }
 
-int main() {
-    const bool pdfOk = checkPdfNormalization();
-    const bool densityOk = checkSampleDensityConsistency();
-    const bool furnaceOk = checkFurnace();
-    const bool whiteFurnaceOk = checkWhiteFurnaceTwoSided();
-    const bool eonDiffuseOk = checkEonDiffuseFurnace();
-    const bool eonInversionOk = checkEonAlbedoInversion();
-    const bool indexMatchedCoatOk = checkIndexMatchedCoat();
-    const bool transmissiveEnergyOk = checkTransmissiveEnergyBalance();
-    const bool transmissionTintOk = checkTransmissionTint();
-    const bool conductorFresnelOk = checkConductorFresnel();
-    const bool dielectricFresnelOk = checkDielectricFresnel();
-    const bool averageFresnelOk = checkAverageFresnel();
-    const bool coatFresnelAvgOk = checkCoatFresnelAvg();
-    const bool dispersionOk = checkCauchyDispersion();
-    const bool reciprocityOk = checkReciprocity();
-    const bool transmissionReciprocityOk = checkTransmissionReciprocity();
-    const bool roundTripOk = checkTransmissionRoundTrip();
-    const bool indexMatchedTransmissionOk = checkIndexMatchedTransmission();
-    const bool chiSquareOk = checkSamplingChiSquare();
-
-    if (!pdfOk || !densityOk || !furnaceOk || !whiteFurnaceOk || !eonDiffuseOk || !eonInversionOk || !indexMatchedCoatOk ||
-        !transmissiveEnergyOk || !transmissionTintOk || !conductorFresnelOk || !dielectricFresnelOk || !averageFresnelOk || !coatFresnelAvgOk || !dispersionOk ||
-        !reciprocityOk || !transmissionReciprocityOk || !roundTripOk || !indexMatchedTransmissionOk || !chiSquareOk) {
-        std::cerr << "bsdf_validate: FAILED\n";
-        return EXIT_FAILURE;
-    }
-    std::cout << "bsdf_validate: PASSED\n";
-    return EXIT_SUCCESS;
-}
+ENGINE_CHECK_MAIN("bsdf")

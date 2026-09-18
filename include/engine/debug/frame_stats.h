@@ -13,6 +13,11 @@ public:
     // Call exactly once per frame, right after window.pollEvents().
     void tick();
 
+    // The same tick with the clock supplied by the caller. Exists so the ring buffer, its warm-up bound and the
+    // percentiles are testable exactly rather than by sleeping: reading steady_clock internally made every assertion
+    // about this class a timing race. tick() above forwards to it, so there is one implementation.
+    void tick(std::chrono::steady_clock::time_point now);
+
     [[nodiscard]] float fps() const;
     [[nodiscard]] float avgMs() const;
     [[nodiscard]] float minMs() const;

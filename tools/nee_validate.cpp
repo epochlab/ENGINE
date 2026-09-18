@@ -18,6 +18,9 @@
 #include <glm/gtc/constants.hpp>
 
 #include "engine/gfx/hdr_image.h"
+#include "check.h"
+#include "fixtures.h"
+#include "stats.h"
 #include "engine/scene/bsdf.h"
 #include "engine/scene/environment_map.h"
 #include "engine/scene/light.h"
@@ -33,7 +36,10 @@ using engine::scene::LobeType;
 using engine::scene::QuadLight;
 using engine::scene::Sampler;
 
-constexpr float kPi = 3.14159265F;
+using tools::fixtures::kPi;
+using tools::fixtures::makeUniformEnvironment;
+using tools::fixtures::referenceLo;
+using tools::fixtures::sampleUniformHemisphere;
 
 BsdfParams makeParams(float roughness, float metallic) {
     const glm::vec3 baseColor(1.0F);  // worst case: full white albedo
@@ -42,14 +48,6 @@ BsdfParams makeParams(float roughness, float metallic) {
                        /*ior=*/1.5F, /*transmissionFactor=*/0.0F, /*diffuseRoughness=*/0.0F,
                        engine::scene::eonAlbedoInversion(baseColor, 0.0F),
                        /*transmissionTint=*/glm::vec3(1.0F)};
-}
-
-glm::vec3 sampleUniformHemisphere(std::mt19937& rng) {
-    std::uniform_real_distribution<float> unit(0.0F, 1.0F);
-    const float cosTheta = unit(rng);
-    const float sinTheta = std::sqrt(std::max(0.0F, 1.0F - (cosTheta * cosTheta)));
-    const float phi = 2.0F * kPi * unit(rng);
-    return {sinTheta * std::cos(phi), sinTheta * std::sin(phi), cosTheta};
 }
 
 // Structured environment: a dim background with one small bright patch, so the luminance CDF has real
@@ -79,17 +77,17 @@ EnvironmentMap makeStructuredEnvironment() {
 // independently recovers that density from a direction. MIS divides by the first and weights by the
 // second, so any disagreement between them silently corrupts every MIS weight in the renderer while
 // leaving each function looking individually reasonable. Nothing tested this before.
-bool checkEnvPdfConsistency() {
+ENGINE_CHECK(environment_pdf_consistency, Fast, Exact) {
     constexpr int kSampleCount = 20000;
     constexpr float kTolerance = 1e-3F;
     const EnvironmentMap env = makeStructuredEnvironment();
-    std::mt19937 rng(1234);
+    std::mt19937 rng(static_cast<std::mt19937::result_type>(ctx.seed()));
     std::uniform_real_distribution<float> unit(0.0F, 1.0F);
 
     // Non-zero rotation: the sample path rotates by +angle and the query path by -angle, so a sign slip
     // between them cancels at 0 and only shows up here.
     constexpr float kRotation = 0.7F;
-    bool ok = true;
+    ctx.plan(1);
     int worstIndex = -1;
     float worstRelative = 0.0F;
     for (int i = 0; i < kSampleCount; ++i) {
@@ -102,35 +100,13 @@ bool checkEnvPdfConsistency() {
             worstIndex = i;
         }
     }
-    if (worstRelative > kTolerance) {
-        std::cerr << "nee_validate: FAILED env pdf consistency -- worst relative mismatch "
-                  << worstRelative << " at sample " << worstIndex
-                  << "; importanceSampleDirection's own pdf and pdf() must agree for the same "
-                     "direction, or every MIS weight is wrong.\n";
-        ok = false;
-    }
-    return ok;
-}
-
-// Uniform-radiance (L0=1) equirect environment: constant regardless of resolution, but a real image so EnvironmentMap's CDF machinery runs its normal (non-degenerate) path, not the all-black fallback.
-EnvironmentMap makeUniformEnvironment() {
-    engine::gfx::HdrImage image;
-    image.width = 64;
-    image.height = 32;
-    image.rgba.assign(static_cast<std::size_t>(image.width) * static_cast<std::size_t>(image.height) * 4,
-                       1.0F);
-    return EnvironmentMap(std::move(image));
-}
-
-// Independent ground truth: Lo(wo) = integral_hemisphere evaluateBsdf(wo,wi) * wi.z dwi, L0=1.
-float referenceLo(const BsdfParams& params, const glm::vec3& wo, int sampleCount, std::mt19937& rng) {
-    constexpr float kUniformPdf = 1.0F / (2.0F * kPi);
-    glm::vec3 accum(0.0F);
-    for (int i = 0; i < sampleCount; ++i) {
-        const glm::vec3 wi = sampleUniformHemisphere(rng);
-        accum += engine::scene::evaluateBsdf(params, wo, wi) * wi.z / kUniformPdf;
-    }
-    return std::max({accum.x, accum.y, accum.z}) / static_cast<float>(sampleCount);
+    // An agreement between two code paths over the same direction, so this is an exactness assertion with a
+    // floating-point tolerance, not a statistical one: the two must agree or every MIS weight is wrong.
+    char detail[192];
+    std::snprintf(detail, sizeof(detail),
+                  "worst relative mismatch %.3e at sample %d, between importanceSampleDirection's own pdf and pdf()",
+                  static_cast<double>(worstRelative), worstIndex);
+    ENGINE_EXPECT(ctx, worstRelative <= kTolerance, detail);
 }
 
 // MIS-combined NEE + BSDF-sampled estimator, mirroring path_tracer.cpp's tracePath exactly: power heuristic, no occlusion since there's no geometry here, so both strategies always reach the environment (matching a flat unoccluded surface).
@@ -168,40 +144,56 @@ float misCombinedLo(const BsdfParams& params, const glm::vec3& wo, const Environ
     return std::max({accum.x, accum.y, accum.z}) / static_cast<float>(sampleCount);
 }
 
-bool checkMisAgreement() {
-    constexpr int kSampleCount = 100000;
-    constexpr float kTolerance = 0.05F;
-    // Excludes low roughness (e.g. 0.05): uniform-hemisphere sampling under-samples a sharp GGX peak there (same limitation as furnace_test.cpp/bsdf_validate.cpp), biasing the reference low.
-    // Those two files only check an upper bound for that reason; this test needs a tight two-sided equality, so it needs roughness values where the reference itself converges reliably.
+// The MIS estimator and the brute-force reference must agree. BOTH sides are noisy, which is what the old
+// "5% of max(reference, 0.1)" band got wrong twice over: it modelled the reference as exact, and its 0.1 floor was
+// standing in for the fact that a relative band is undefined as the denominator approaches zero.
+// Replaced by the difference of two independent estimators, whose variances add (Welch 1947). The reference is drawn
+// with std::mt19937 and is genuinely iid, so its replicates are iid trivially; the MIS side is Sampler-driven and is
+// replicated over independent scramble seeds, which is what makes ITS replicate means iid (see stats.h kReplicates).
+// Total sample budget is unchanged -- the same count, redistributed across replicates.
+ENGINE_CHECK(mis_agreement_environment, Slow, Statistical) {
+    constexpr int kTotalSamples = 100000;
+    constexpr int kPerReplicate = kTotalSamples / tools::stats::kReplicates;
+    // Excludes low roughness (e.g. 0.05): uniform-hemisphere sampling under-samples a sharp GGX peak there (the same
+    // limitation bsdf_validate documents), biasing the reference low. Those checks bound one side only for that
+    // reason; this one needs a tight two-sided equality, so it needs roughness values where the reference converges.
     const std::array<float, 3> roughnesses = {0.25F, 0.5F, 1.0F};
     const std::array<float, 2> metallics = {0.0F, 1.0F};
     const std::array<float, 3> ndotVs = {0.2F, 0.6F, 1.0F};
 
-    bool ok = true;
-    std::uint32_t seed = 0;
-    std::mt19937 referenceRng(99);
+    ctx.plan(static_cast<int>(roughnesses.size() * metallics.size() * ndotVs.size()));
     const EnvironmentMap env = makeUniformEnvironment();
 
     for (float roughness : roughnesses) {
         for (float metallic : metallics) {
             for (float ndotV : ndotVs) {
-                ++seed;
+                char label[96];
+                std::snprintf(label, sizeof(label), "env r=%g m=%g n=%g", static_cast<double>(roughness),
+                              static_cast<double>(metallic), static_cast<double>(ndotV));
                 const BsdfParams params = makeParams(roughness, metallic);
                 const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (ndotV * ndotV))), 0.0F, ndotV);
 
-                const float reference = referenceLo(params, wo, kSampleCount, referenceRng);
-                const float combined = misCombinedLo(params, wo, env, kSampleCount, seed);
-
-                if (std::fabs(combined - reference) > kTolerance * std::max(reference, 0.1F)) {
-                    std::cerr << "nee_validate: FAILED MIS agreement at roughness=" << roughness
-                              << " metallic=" << metallic << " ndotV=" << ndotV
-                              << " reference=" << reference << " misCombined=" << combined << '\n';
-                    ok = false;
+                const std::uint64_t rowSeed = ctx.subSeed(label);
+                std::mt19937 referenceRng(static_cast<std::mt19937::result_type>(rowSeed));
+                tools::stats::Welford reference;
+                tools::stats::Welford combined;
+                for (int r = 0; r < tools::stats::kReplicates; ++r) {
+                    reference.add(referenceLo(params, wo, kPerReplicate, referenceRng));
+                    // A fresh scramble seed per replicate: that independence is the whole basis of the band.
+                    combined.add(misCombinedLo(params, wo, env, kPerReplicate,
+                                                static_cast<std::uint32_t>(rowSeed + r)));
                 }
+
+                const double difference = combined.mean() - reference.mean();
+                const tools::stats::Band band = tools::stats::differenceBand(reference, combined, ctx.alpha());
+                char detail[256];
+                std::snprintf(detail, sizeof(detail),
+                              "%s: reference %.5f, MIS %.5f, difference %+.3e vs +/-%.3e", label,
+                              reference.mean(), combined.mean(), difference, band.halfWidth());
+                ENGINE_EXPECT(ctx, band.contains(difference), detail);
             }
         }
     }
-    return ok;
 }
 
 // Uniform over the FULL sphere (unlike sampleUniformHemisphere above), for the quad-light checks
@@ -240,55 +232,56 @@ bool directionHitsQuad(const QuadLight& quad, const glm::vec3& p, const glm::vec
 // shares no code with the analytic formula -- and every direction SphericalRectangle::sample() itself
 // draws checked against the same oracle, which catches a bug in the xu/yv inversion even if the scalar
 // solid angle above happens to come out right.
-bool checkQuadLightSolidAngle() {
+ENGINE_CHECK(quad_light_solid_angle, Slow, Statistical) {
     const QuadLight quad{glm::vec3(-0.5F, 1.0F, -0.5F), glm::vec3(1.0F, 0.0F, 0.0F),
-                         glm::vec3(0.0F, 0.0F, 1.0F), glm::vec3(1.0F), false};
+                          glm::vec3(0.0F, 0.0F, 1.0F), glm::vec3(1.0F), false};
     const glm::vec3 p(0.0F, 0.0F, 0.0F);
     const std::optional<engine::scene::SphericalRectangle> rect =
         engine::scene::buildSphericalRectangle(quad, p);
+    ctx.plan(3);
     if (!rect.has_value()) {
-        std::cerr << "nee_validate: FAILED quad solid angle -- buildSphericalRectangle returned "
-                     "nullopt for a valid configuration\n";
-        return false;
+        ENGINE_EXPECT(ctx, false, "buildSphericalRectangle returned nullopt for a valid configuration");
+        ctx.plan(1);
+        return;
     }
 
     constexpr int kSampleCount = 2000000;
-    std::mt19937 rng(42);
-    int hits = 0;
+    std::mt19937 rng(static_cast<std::mt19937::result_type>(ctx.seed()));
+    long long hits = 0;
     for (int i = 0; i < kSampleCount; ++i) {
-        if (directionHitsQuad(quad, p, sampleUniformSphere(rng))) {
-            ++hits;
-        }
+        hits += directionHitsQuad(quad, p, sampleUniformSphere(rng)) ? 1 : 0;
     }
-    const float hitFraction = static_cast<float>(hits) / static_cast<float>(kSampleCount);
-    const float mcSolidAngle = 4.0F * kPi * hitFraction;
-    // Binomial standard error on the hit fraction, propagated to solid angle -- the tolerance comes
-    // from the estimator's own statistics, not a hand-picked constant.
-    const float stderrSolidAngle =
-        4.0F * kPi * std::sqrt(hitFraction * (1.0F - hitFraction) / static_cast<float>(kSampleCount));
-    const float tolerance = 6.0F * stderrSolidAngle;  // ~6 sigma
+    // Wilson score interval on the hit fraction rather than the Wald interval the 6-sigma form used: Wald's width
+    // collapses toward zero as the fraction approaches 0 or 1, which is exactly where a small light lands. Scaled to
+    // solid angle by the same 4*pi the estimator uses, so the band is the estimator's own statistics throughout.
+    const tools::stats::Band fraction = tools::stats::wilsonBand(hits, kSampleCount, ctx.alpha());
+    const tools::stats::Band solidAngle{4.0 * kPi * fraction.lo, 4.0 * kPi * fraction.hi};
+    char detail[224];
+    std::snprintf(detail, sizeof(detail), "analytic %.6f vs Monte Carlo interval [%.6f, %.6f] from %lld/%d hits",
+                  static_cast<double>(rect->solidAngle), solidAngle.lo, solidAngle.hi, hits, kSampleCount);
+    ENGINE_EXPECT(ctx, solidAngle.contains(static_cast<double>(rect->solidAngle)), detail);
 
-    bool ok = true;
-    if (std::fabs(mcSolidAngle - rect->solidAngle) > tolerance) {
-        std::cerr << "nee_validate: FAILED quad solid angle -- analytic " << rect->solidAngle
-                  << " vs Monte Carlo " << mcSolidAngle << " (tolerance " << tolerance << ")\n";
-        ok = false;
-    }
-
+    // Every direction sample() draws must land on the rectangle: an exact assertion on the xu/yv inversion, which the
+    // scalar solid angle above could be right about while the mapping is wrong.
     std::uniform_real_distribution<float> unit(0.0F, 1.0F);
     constexpr int kDrawCount = 20000;
+    int misses = 0;
+    glm::vec2 firstMiss(0.0F);
     for (int i = 0; i < kDrawCount; ++i) {
         const glm::vec2 u(unit(rng), unit(rng));
-        const glm::vec3 point = rect->sample(u);
-        const glm::vec3 dir = glm::normalize(point - p);
+        const glm::vec3 dir = glm::normalize(rect->sample(u) - p);
         if (!directionHitsQuad(quad, p, dir)) {
-            std::cerr << "nee_validate: FAILED quad solid angle -- sample() at u=(" << u.x << ", "
-                      << u.y << ") produced a direction missing the rectangle\n";
-            ok = false;
-            break;
+            if (misses == 0) {
+                firstMiss = u;
+            }
+            ++misses;
         }
     }
-    return ok;
+    char missDetail[192];
+    std::snprintf(missDetail, sizeof(missDetail), "%d of %d sample() directions missed the rectangle (first at u=%g,%g)",
+                  misses, kDrawCount, static_cast<double>(firstMiss.x), static_cast<double>(firstMiss.y));
+    ENGINE_EXPECT(ctx, misses == 0, missDetail);
+    ENGINE_EXPECT(ctx, rect->solidAngle > 0.0F, "a valid rectangle must subtend positive solid angle");
 }
 
 // Same brute-force reference method as referenceLo, restricted to the hemisphere directions the quad
@@ -349,57 +342,54 @@ float misCombinedLoQuad(const BsdfParams& params, const glm::vec3& wo, const Qua
     return std::max({accum.x, accum.y, accum.z}) / static_cast<float>(sampleCount);
 }
 
-bool checkQuadLightMisAgreement() {
-    constexpr int kSampleCount = 200000;
-    constexpr float kTolerance = 0.05F;
+// Same identity as mis_agreement_environment, against an area light rather than the environment, and converted the
+// same way and for the same reason: both sides are estimators, so their variances add.
+ENGINE_CHECK(mis_agreement_quad_light, Slow, Statistical) {
+    constexpr int kTotalSamples = 200000;
+    constexpr int kPerReplicate = kTotalSamples / tools::stats::kReplicates;
     const std::array<float, 3> roughnesses = {0.25F, 0.5F, 1.0F};
     const std::array<float, 2> metallics = {0.0F, 1.0F};
     const std::array<float, 3> ndotVs = {0.2F, 0.6F, 1.0F};
 
-    // Directly overhead: a 1x1 rectangle at height 2, subtending a modest solid angle -- large enough
-    // that BSDF sampling alone finds it often enough to converge in this many samples, small enough
-    // that light sampling still matters at grazing wo, so both one-strategy estimators (folded into
-    // misCombinedLoQuad above) are load-bearing here, not just the combined one.
+    // Directly overhead: a 1x1 rectangle at height 2, subtending a modest solid angle -- large enough that BSDF
+    // sampling alone finds it often enough to converge in this many samples, small enough that light sampling still
+    // matters at grazing wo, so both one-strategy estimators are load-bearing here, not just the combined one.
     const QuadLight quad{glm::vec3(-0.5F, -0.5F, 2.0F), glm::vec3(0.0F, 1.0F, 0.0F),
-                         glm::vec3(1.0F, 0.0F, 0.0F), glm::vec3(3.0F), false};
+                          glm::vec3(1.0F, 0.0F, 0.0F), glm::vec3(3.0F), false};
     const glm::vec3 p(0.0F);
 
-    bool ok = true;
-    std::uint32_t seed = 1000;
-    std::mt19937 referenceRng(7);
+    ctx.plan(static_cast<int>(roughnesses.size() * metallics.size() * ndotVs.size()));
     for (float roughness : roughnesses) {
         for (float metallic : metallics) {
             for (float ndotV : ndotVs) {
-                ++seed;
+                char label[96];
+                std::snprintf(label, sizeof(label), "quad r=%g m=%g n=%g", static_cast<double>(roughness),
+                              static_cast<double>(metallic), static_cast<double>(ndotV));
                 const BsdfParams params = makeParams(roughness, metallic);
                 const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (ndotV * ndotV))), 0.0F, ndotV);
 
-                const float reference = referenceLoQuad(params, wo, quad, p, kSampleCount, referenceRng);
-                const float combined = misCombinedLoQuad(params, wo, quad, p, kSampleCount, seed);
-
-                if (std::fabs(combined - reference) > kTolerance * std::max(reference, 0.1F)) {
-                    std::cerr << "nee_validate: FAILED quad MIS agreement at roughness=" << roughness
-                              << " metallic=" << metallic << " ndotV=" << ndotV
-                              << " reference=" << reference << " misCombined=" << combined << '\n';
-                    ok = false;
+                const std::uint64_t rowSeed = ctx.subSeed(label);
+                std::mt19937 referenceRng(static_cast<std::mt19937::result_type>(rowSeed));
+                tools::stats::Welford reference;
+                tools::stats::Welford combined;
+                for (int r = 0; r < tools::stats::kReplicates; ++r) {
+                    reference.add(referenceLoQuad(params, wo, quad, p, kPerReplicate, referenceRng));
+                    combined.add(misCombinedLoQuad(params, wo, quad, p, kPerReplicate,
+                                                    static_cast<std::uint32_t>(rowSeed + r)));
                 }
+
+                const double difference = combined.mean() - reference.mean();
+                const tools::stats::Band band = tools::stats::differenceBand(reference, combined, ctx.alpha());
+                char detail[256];
+                std::snprintf(detail, sizeof(detail),
+                              "%s: reference %.5f, MIS %.5f, difference %+.3e vs +/-%.3e", label,
+                              reference.mean(), combined.mean(), difference, band.halfWidth());
+                ENGINE_EXPECT(ctx, band.contains(difference), detail);
             }
         }
     }
-    return ok;
 }
 
 }  // namespace
 
-int main() {
-    const bool envPdfOk = checkEnvPdfConsistency();
-    const bool misOk = checkMisAgreement();
-    const bool quadSolidAngleOk = checkQuadLightSolidAngle();
-    const bool quadMisOk = checkQuadLightMisAgreement();
-    if (!envPdfOk || !misOk || !quadSolidAngleOk || !quadMisOk) {
-        std::cerr << "nee_validate: FAILED\n";
-        return EXIT_FAILURE;
-    }
-    std::cout << "nee_validate: PASSED\n";
-    return EXIT_SUCCESS;
-}
+ENGINE_CHECK_MAIN("nee")
