@@ -182,19 +182,27 @@ float smithG1f(float ndotV, float alpha) {
     return static_cast<float>(1.0 / (1.0 + smithLambda(ndotV, alpha)));
 }
 
-// Exact unpolarized dielectric Fresnel reflectance (PBRT's FrDielectric); 1.0 past total internal reflection.
+// Snell in cos^2 form: cos^2(thetaT) = (1 - r^2) + r^2 cos^2(thetaI), r = etaI/etaT. Negative means total internal reflection.
+// Algebraically 1 - r^2 sin^2(thetaI) (PBRT-v4 FrDielectric/Refract, Walter 2007 eq. 40), but never forms 1 - cos^2(thetaI), which rounds to exactly 1.0F below cos 2^-12 and falsely reports TIR.
+// At r == 1 it collapses to cos^2(thetaI), so an index-matched interface cannot total-internally-reflect by construction rather than by a branch; at r < 1 the constant term is positive, so entering a denser medium cannot either.
+// Verbatim twin of bsdf.cpp's: this bakes the table that file reads, so the two must decide TIR identically or the compensation is computed against a different interface than the one shaded.
+float cos2Transmitted(float cosThetaI, float etaRatio) {
+    const float r2 = etaRatio * etaRatio;
+    return (1.0F - r2) + (r2 * cosThetaI * cosThetaI);
+}
+
+// Exact unpolarized dielectric Fresnel reflectance (PBRT's FrDielectric); 1.0 from the critical angle inward, where cosThetaT is 0 and both polarisations are already exactly 1.
 float fresnelDielectric(float cosThetaI, float etaI, float etaT) {
     cosThetaI = std::clamp(cosThetaI, -1.0F, 1.0F);
     if (cosThetaI < 0.0F) {
         std::swap(etaI, etaT);
         cosThetaI = -cosThetaI;
     }
-    const float sinThetaI = std::sqrt(std::max(0.0F, 1.0F - (cosThetaI * cosThetaI)));
-    const float sinThetaT = (etaI / etaT) * sinThetaI;
-    if (sinThetaT >= 1.0F) {
+    const float cos2ThetaT = cos2Transmitted(cosThetaI, etaI / etaT);
+    if (cos2ThetaT < 0.0F) {
         return 1.0F;
     }
-    const float cosThetaT = std::sqrt(std::max(0.0F, 1.0F - (sinThetaT * sinThetaT)));
+    const float cosThetaT = std::sqrt(cos2ThetaT);
     const float rParallel =
         ((etaT * cosThetaI) - (etaI * cosThetaT)) / ((etaT * cosThetaI) + (etaI * cosThetaT));
     const float rPerpendicular =
@@ -226,11 +234,11 @@ bool refractAbout(const glm::vec3& wo, const glm::vec3& ht, float eta, glm::vec3
     if (cosI <= 0.0F) {
         return false;
     }
-    const float sin2T = eta * eta * std::max(0.0F, 1.0F - (cosI * cosI));
-    if (sin2T >= 1.0F) {
+    const float cos2T = cos2Transmitted(cosI, eta);
+    if (cos2T < 0.0F) {
         return false;
     }
-    wi = ((eta * cosI) - std::sqrt(1.0F - sin2T)) * ht - (eta * wo);
+    wi = ((eta * cosI) - std::sqrt(cos2T)) * ht - (eta * wo);
     return true;
 }
 
