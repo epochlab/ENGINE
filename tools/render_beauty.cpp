@@ -1,5 +1,6 @@
 // Headless beauty render, for before/after comparison across a code change. Loads a scene exactly as main.cpp does, accumulates N path-traced passes, and writes one path-traced AOV (--aov, Beauty by default) as an 8-bit PNG through the same display encoding the viewer shows it under.
 // Exists because the renderer is a GLFW application: comparing two revisions otherwise means two manual screenshots, which cannot be pixel-differenced and cannot be trusted to share a camera. Everything here is deterministic -- fixed camera from profile.json, a fixed scramble seed for the whole render with the sample index advancing per pass, no interaction -- so two runs over unchanged code produce a byte-identical file, which is what makes a non-zero diff meaningful.
+// --bench-log appends the timing run to the benchmark log (bench_log.h), for bench_compare.
 // --compare takes a previously written PNG and reports max/RMS channel deviation against the render just produced, so "did this change the picture, and where" is answered numerically rather than by eye.
 // Same standalone-CLI convention as the validate tools: no test framework, non-zero exit on failure.
 
@@ -27,6 +28,7 @@
 #include "engine/config/profile_config.h"
 #include "engine/config/scene_config.h"
 #include "engine/debug/aov.h"
+#include "engine/debug/bench_log.h"
 #include "engine/debug/power_spectrum.h"
 #include "engine/debug/render_stats.h"
 #include "check.h"
@@ -105,6 +107,8 @@ struct Options {
     // Resolved by --aov. Defaulting to Beauty keeps every existing invocation -- and the bit-identity gate built on them -- unchanged.
     PathTracedLane lane = &engine::scene::PathTraceResult::beauty;
     std::string aovName = "Beauty";
+    // Appends the timing run to this JSON Lines benchmark log (bench_log.h); empty = no log.
+    std::string benchLogPath;
 };
 
 // Case- and separator-insensitive match against kAovNames, whose entries are HUD labels ("Bounce Count", "Indirect Specular"): the CLI takes bounce-count, bounce_count or bouncecount for the same AOV rather than introducing a second vocabulary to keep in sync.
@@ -376,6 +380,32 @@ void reportErrorSpectrum(const engine::gfx::HdrImage& image, const engine::gfx::
     }
 }
 
+// Everything the timed loop's cost depends on goes in `config`; output paths and exposure do not, so they never split two otherwise comparable runs.
+bool appendTimingRecord(const Options& options, int argc, char** argv, int width, int height,
+                        const engine::scene::PathTraceSettings& settings, bool envLightEnabled,
+                        const std::vector<double>& milliseconds, const engine::debug::RayCounts& rays,
+                        const engine::gfx::HdrImage& accumulated) {
+    const engine::debug::BenchRecord record{
+        .tool = "render_beauty",
+        .argv = std::vector<std::string>(argv, argv + argc),
+        .config = {{"scene", options.scenePath},
+                   {"width", width},
+                   {"height", height},
+                   {"passes", options.passes},
+                   {"seed", options.scrambleSeed},
+                   {"aov", options.aovName},
+                   {"env_light", envLightEnabled},
+                   {"spp_per_pass", settings.samplesPerPixel},
+                   {"max_bounces", settings.maxBounces},
+                   {"rr_start_bounce", settings.russianRouletteStartBounce},
+                   {"ao_max_distance", settings.aoMaxDistance}},
+        .samples = {{"pass_ms", milliseconds}},
+        .work = {{"rays", {{"primary", rays.primary}, {"bounce", rays.bounce}, {"ao", rays.ao}, {"shadow", rays.shadow}}},
+                 {"crc32", engine::debug::floatCrc32(accumulated.rgba)}},
+    };
+    return engine::debug::appendBenchRecord(options.benchLogPath, record);
+}
+
 bool parseArgs(int argc, char** argv, Options& options) {
     for (int i = 1; i < argc; ++i) {
         const auto needsValue = [&](const char* flag) {
@@ -424,6 +454,9 @@ bool parseArgs(int argc, char** argv, Options& options) {
             options.assertDeterministic = true;
         } else if (std::strcmp(argv[i], "--assert-converged") == 0) {
             options.assertConverged = true;
+        } else if (std::strcmp(argv[i], "--bench-log") == 0) {
+            if (!needsValue("--bench-log")) { return false; }
+            options.benchLogPath = argv[++i];
         } else if (std::strcmp(argv[i], "--env-light") == 0) {
             if (!needsValue("--env-light")) { return false; }
             options.envLight = std::atoi(argv[++i]) != 0 ? 1 : 0;
@@ -431,12 +464,17 @@ bool parseArgs(int argc, char** argv, Options& options) {
             std::cerr << "render_beauty: unknown argument '" << argv[i]
                       << "'\nusage: render_beauty [--scene scenes/x.json] --out out.png [--out-exr out.exr] [--compare-exr ref.exr] "
                          "[--compare ref.png] [--error-spectrum] [--seed N] [--passes N] [--width W] [--height H] "
-                         "[--exposure EV] [--aov name] [--assert-deterministic] [--assert-converged]\n";
+                         "[--exposure EV] [--aov name] [--env-light 0|1] [--bench-log log.jsonl] [--assert-deterministic] [--assert-converged]\n";
             return false;
         }
     }
     if (options.outPath.empty() && !options.assertDeterministic && !options.assertConverged) {
         std::cerr << "render_beauty: --out is required unless running a gate\n";
+        return false;
+    }
+    // The gates return before the timed loop, so a log request alongside one would silently record nothing.
+    if (!options.benchLogPath.empty() && (options.assertDeterministic || options.assertConverged)) {
+        std::cerr << "render_beauty: --bench-log records the timing path, which the --assert-* gates do not run\n";
         return false;
     }
     if (options.passes < 1) {
@@ -741,6 +779,12 @@ int main(int argc, char** argv) {
     std::cout << "render_beauty: best-of-" << options.passes << ": " << *best << " ms/pass  (mean "
               << totalMs / static_cast<double>(options.passes) << ", worst " << *worst << ", total "
               << totalMs << ")\n";
+    // Before any output encode, so the record's rusage covers load, build and the timed passes but not PNG/EXR writing.
+    if (!options.benchLogPath.empty() &&
+        !appendTimingRecord(options, argc, argv, width, height, baseSettings, envLightEnabled, milliseconds, rays,
+                            accumulated)) {
+        return EXIT_FAILURE;
+    }
 
     if (!options.outExrPath.empty()) {
         if (!engine::gfx::writeExr(options.outExrPath, accumulated)) {
