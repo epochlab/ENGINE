@@ -9,5 +9,4 @@ renders/
 *.exr
 
 # Before/after measurement captures: renders, bench logs and validator output, kept locally for review
-results/
 /results
