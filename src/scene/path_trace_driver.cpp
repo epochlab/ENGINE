@@ -191,6 +191,11 @@ void PathTraceDriver::driverLoop(std::stop_token stopToken) {
             accumulatedSamples_.store(0, std::memory_order_relaxed);
         }
 
+        // NOLINTBEGIN(bugprone-unchecked-optional-access) -- activeRequest is engaged for every line below, by the
+        // invariant stated where it is assigned: the loop reaches here only when requestedGeneration != 0, and
+        // generation_ goes non-zero only inside requestTrace(), under the same lock that sets pendingRequest_. The
+        // analyser cannot see across that lock, and guarding a value that is always present would be dead branches
+        // asserting a condition this thread has already established. tools/driver_validate.cpp pins it behaviourally.
         if (activeRequest->width <= 0 || activeRequest->height <= 0) {
             std::this_thread::sleep_for(kIdlePollInterval);
             continue;
@@ -233,6 +238,7 @@ void PathTraceDriver::driverLoop(std::stop_token stopToken) {
                           static_cast<std::uint32_t>(activeGeneration), sampleBase, activeRequest->maxSamples,
                           generation_, activeGeneration,
                           threadPool_, passStats_, *pass);
+        // NOLINTEND(bugprone-unchecked-optional-access)
         const double traceMs = millisecondsSince(traceStart);
 
         if (generation_.load(std::memory_order_relaxed) != activeGeneration) {

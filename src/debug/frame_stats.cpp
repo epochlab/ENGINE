@@ -4,8 +4,9 @@
 
 namespace engine::debug {
 
-void FrameStats::tick() {
-    const auto now = std::chrono::steady_clock::now();
+void FrameStats::tick() { tick(std::chrono::steady_clock::now()); }
+
+void FrameStats::tick(std::chrono::steady_clock::time_point now) {
     if (hasLastTick_) {
         const float ms =
             std::chrono::duration<float, std::milli>(now - lastTick_).count();

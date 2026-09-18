@@ -22,6 +22,8 @@
 
 #include <glm/glm.hpp>
 
+#include "check.h"
+#include "stats.h"
 #include "engine/debug/power_spectrum.h"
 #include "engine/scene/sampler.h"
 
@@ -36,17 +38,16 @@ constexpr int kPixelX = 37;
 constexpr int kPixelY = 41;
 // Must match sampler.cpp's kMaskSize: the mask is baked into that translation unit and reached only through
 // blueNoiseDither, so this is the one place the size is restated and the permutation check is what would catch a drift.
+// 2^7 = 128 points, matching profile.json's maxSamples accumulation cap.
+constexpr int kM = 7;
+// A 12-bounce path (integrator_validate's slab case) consumes ~5 sets per bounce plus 2 at the camera, so set 64+ is
+// genuinely reached in practice and is where an unpadded sampler would have degraded.
+constexpr int kSetCount = 72;
+// Depths spanning the padded range, including the last two sets, where a shuffle that ran out of distinct scrambles
+// would show first.
+constexpr std::array<int, 7> kNetDepths = {0, 1, 2, 7, 31, 64, 71};
 constexpr int kMaskSize = 128;
 constexpr int kMaskPixels = kMaskSize * kMaskSize;
-
-int failures = 0;
-
-void report(bool passed, const char* name, const char* detail) {
-    std::printf("  %-46s %s%s%s\n", name, passed ? "PASS" : "FAIL", detail[0] != '\0' ? "  " : "", detail);
-    if (!passed) {
-        ++failures;
-    }
-}
 
 // Every draw comes out toroidally shifted by its pixel's blue-noise dither (sampler.h), so recovering the underlying
 // sequence means subtracting that shift back off, modulo 1. Exact, not approximate: the shift and the drawn value are
@@ -89,7 +90,9 @@ std::size_t binOf(float value, int binCount) {
 // Guaranteed by the direction vectors forming a nonsingular generator matrix and preserved by both the Owen scramble
 // and the per-set index shuffle -- so this fails on a mis-derived recurrence, a mistranscribed seed row, or a shuffle
 // that moved a power-of-two prefix off its strata.
-void checkOneDimensionalNet(int m, int setCount) {
+ENGINE_CHECK(one_dimensional_net, Fast, Exact) {
+    const int m = kM;
+    const int setCount = kSetCount;
     const int n = 1 << m;
     int worstSet = -1;
     for (int set = 0; set < setCount && worstSet < 0; ++set) {
@@ -110,7 +113,8 @@ void checkOneDimensionalNet(int m, int setCount) {
     } else {
         std::snprintf(detail, sizeof(detail), "set %d is not a (0,m,1)-net", worstSet);
     }
-    report(worstSet < 0, "(0,m,1)-net: every 1D set", detail);
+    ctx.plan(1);
+    ENGINE_EXPECT(ctx, worstSet < 0, detail);
 }
 
 // Net quality t of a 2D set: the smallest t for which the first 2^m samples form a (t,m,2)-net, i.e. every 2^a x 2^b
@@ -149,7 +153,9 @@ int measureNetQuality(int m, int set) {
 // the sets a deep path reaches. Drawing dimension pairs out of one high-dimensional sequence instead would degrade with
 // depth -- Sobol's (62,63) projection is only a (4,m,2)-net, sixteen points per cell -- so a 12-bounce path would
 // sample its last bounces worse than white noise. Asserted at depths a path actually reaches, exactly, no tolerance.
-void checkEverySetIsPerfectNet(int m, const std::vector<int>& sets) {
+ENGINE_CHECK(every_set_is_perfect_net, Fast, Exact) {
+    const int m = kM;
+    const std::array<int, 7>& sets = kNetDepths;
     int worstSet = -1;
     int worstT = 0;
     std::string measured;
@@ -167,13 +173,16 @@ void checkEverySetIsPerfectNet(int m, const std::vector<int>& sets) {
     } else {
         std::snprintf(detail, sizeof(detail), "set %d is only a (%d,m,2)-net", worstSet, worstT);
     }
-    report(worstSet < 0, "(0,m,2)-net: every 2D set, at any depth", detail);
+    ctx.plan(1);
+    ENGINE_EXPECT(ctx, worstSet < 0, detail);
 }
 
 // The regression test for the defect this sampler replaces. Drives it exactly as PathTraceDriver does -- one sample per
 // pass, index advancing, seed fixed -- and requires the accumulated points to be stratified. Under the old white-noise
 // behaviour every dimension left ~N/e (36.8%) of bins empty; a correct sequence leaves none.
-void checkPassDirectionOccupancy(int m, int setCount) {
+ENGINE_CHECK(pass_direction_occupancy, Fast, Exact) {
+    const int m = kM;
+    const int setCount = kSetCount;
     const int n = 1 << m;
     int worstSet = -1;
     int worstEmpty = 0;
@@ -198,7 +207,8 @@ void checkPassDirectionOccupancy(int m, int setCount) {
         std::snprintf(detail, sizeof(detail), "set %d leaves %d/%d bins empty (%.1f%%)", worstSet, worstEmpty, n,
                       100.0 * worstEmpty / n);
     }
-    report(worstSet < 0, "pass-direction occupancy (white-noise guard)", detail);
+    ctx.plan(1);
+    ENGINE_EXPECT(ctx, worstSet < 0, detail);
 }
 
 // Sobol's index-0 point is all zeros before scrambling, and the renderer's very first displayed pass is index 0 for
@@ -207,7 +217,7 @@ void checkPassDirectionOccupancy(int m, int setCount) {
 // deliberately, since the shift is the mechanism under test. A chi-square well BELOW its 15 dof is the expected result
 // rather than a suspicious one: a blue-noise mask distributes its values more evenly over any local region than the
 // independent draws the statistic is defined against.
-void checkIndexZeroIsScrambled() {
+ENGINE_CHECK(index_zero_is_scrambled, Fast, Statistical) {
     constexpr int kPixels = 4096;
     constexpr int kBins = 16;
     std::vector<int> bins(kBins, 0);
@@ -215,22 +225,31 @@ void checkIndexZeroIsScrambled() {
         Sampler sampler(i % 64, i / 64, 0, kSampleCount, kSeed);
         ++bins[binOf(sampler.next1D(), kBins)];
     }
-    // Chi-square against uniform over 16 bins, 15 degrees of freedom. The 1e-6 critical value is ~54; a correct scramble
-    // sits near 15, and the degenerate all-zeros case would pile every sample into bin 0 (chi2 = kPixels * 15).
+    // Chi-square against uniform over 16 bins. A correct scramble sits near its 15 dof; the degenerate all-zeros case
+    // would pile every sample into bin 0 (chi2 = kPixels * 15).
     double chiSquare = 0.0;
     const double expected = static_cast<double>(kPixels) / kBins;
     for (const int count : bins) {
         const double delta = count - expected;
         chiSquare += delta * delta / expected;
     }
-    char detail[128];
-    std::snprintf(detail, sizeof(detail), "chi2 = %.1f over 15 dof (degenerate would be %d)", chiSquare, kPixels * 15);
-    report(chiSquare < 54.0, "index 0 is scrambled, not degenerate", detail);
+    // One-sided upper tail: only an excessive statistic is evidence against uniformity. A chi2 well BELOW its dof is
+    // the EXPECTED result here rather than a suspicious one -- a blue-noise mask distributes its values more evenly over
+    // any local region than the independent draws the statistic is defined against -- so a two-sided test would reject
+    // correct code. The critical value now comes from the distribution at the suite's corrected significance, replacing
+    // a transcribed constant that silently fixed both the level and the degrees of freedom.
+    constexpr int kDof = kBins - 1;
+    ctx.plan(1);
+    const double p = tools::stats::chiSquareUpperTail(chiSquare, kDof);
+    char detail[192];
+    std::snprintf(detail, sizeof(detail), "chi2 = %.1f over %d dof, p = %.3g vs alpha %.3g (degenerate would be %d)",
+                  chiSquare, kDof, p, ctx.alpha(), kPixels * 15);
+    ENGINE_EXPECT(ctx, p >= ctx.alpha(), detail);
 }
 
 // Padding's other requirement: consecutive sets must be uncorrelated, or a path's successive decisions would move in
 // lockstep. Two sets sharing one shuffled index and scramble would return identical values.
-void checkSetsAreDecorrelated() {
+ENGINE_CHECK(sets_are_decorrelated, Fast, Exact) {
     constexpr int kSamples = 128;
     int identical = 0;
     for (int i = 0; i < kSamples; ++i) {
@@ -238,13 +257,14 @@ void checkSetsAreDecorrelated() {
     }
     char detail[128];
     std::snprintf(detail, sizeof(detail), "%d/%d collisions between set 0 and set 1", identical, kSamples);
-    report(identical == 0, "adjacent dimension sets decorrelate", detail);
+    ctx.plan(1);
+    ENGINE_EXPECT(ctx, identical == 0, detail);
 }
 
 // Neighbouring pixels must not draw the same values, or every pixel would share one noise realization. What separates
 // them is now the dither shift rather than a per-pixel scramble, and the mask being a permutation is what guarantees it:
 // adjacent cells hold distinct ranks, so adjacent pixels are shifted by distinct amounts.
-void checkPixelsAreDecorrelated() {
+ENGINE_CHECK(pixels_are_decorrelated, Fast, Exact) {
     constexpr int kSamples = 128;
     int identical = 0;
     for (int i = 0; i < kSamples; ++i) {
@@ -254,7 +274,8 @@ void checkPixelsAreDecorrelated() {
     }
     char detail[128];
     std::snprintf(detail, sizeof(detail), "%d/%d collisions between adjacent pixels", identical, kSamples);
-    report(identical == 0, "adjacent pixels decorrelate", detail);
+    ctx.plan(1);
+    ENGINE_EXPECT(ctx, identical == 0, detail);
 }
 
 // The shift must be a property of the pixel ALONE -- one value, reused at every sample index and in every dimension set.
@@ -263,7 +284,8 @@ void checkPixelsAreDecorrelated() {
 // It must vary per channel, and separately does: see checkChannelsAreDecorrelated.
 // Asserted directly and exactly: with each pixel's own shift removed, two different pixels must recover bit-identical
 // values everywhere, which is true only if they share one sequence and each shift is rigid.
-void checkShiftIsRigid(int setCount) {
+ENGINE_CHECK(shift_is_rigid, Fast, Exact) {
+    const int setCount = kSetCount;
     constexpr int kSamples = 64;
     int mismatches = 0;
     for (int sample = 0; sample < kSamples; ++sample) {
@@ -275,7 +297,8 @@ void checkShiftIsRigid(int setCount) {
     }
     char detail[128];
     std::snprintf(detail, sizeof(detail), "%d/%d draws disagree after unshifting", mismatches, kSamples * setCount);
-    report(mismatches == 0, "dither shift is rigid across index and set", detail);
+    ctx.plan(1);
+    ENGINE_EXPECT(ctx, mismatches == 0, detail);
 }
 
 // Distinct dither channels must carry distinct, uncorrelated shift fields. This is the direct regression test for the
@@ -285,7 +308,8 @@ void checkShiftIsRigid(int setCount) {
 // Two channels landing on the same translation would reintroduce it silently, since the image would still look like
 // noise. Gate at |r| < 0.1: two independent fields of kMaskPixels samples have a sample correlation of SD 1/128, so 0.1
 // is ~13 SD and cannot fire by chance, while a repeated translation reads exactly 1.
-void checkChannelsAreDecorrelated(int channelCount) {
+ENGINE_CHECK(channels_are_decorrelated, Fast, Statistical) {
+    const int channelCount = (2 * kSetCount) + 2;
     std::vector<std::vector<double>> fields(static_cast<std::size_t>(channelCount));
     for (int c = 0; c < channelCount; ++c) {
         std::vector<double>& field = fields[static_cast<std::size_t>(c)];
@@ -323,13 +347,14 @@ void checkChannelsAreDecorrelated(int channelCount) {
     char detail[160];
     std::snprintf(detail, sizeof(detail), "worst |r| = %.4f between channels %d and %d, over %d channels", worst,
                   worstA, worstB, channelCount);
-    report(worst < 0.1, "dither channels decorrelate", detail);
+    ctx.plan(1);
+    ENGINE_EXPECT(ctx, worst < 0.1, detail);
 }
 
 // The mask must be a permutation of [0, kMaskPixels): every shift used exactly once, so the set of shifts is precisely
 // the uniform grid a toroidal shift needs -- no value doubled, none missing. The rank is recovered exactly rather than
 // rounded, since (rank + 0.5) / kMaskPixels is a multiple of 2^-24 and scaling it back is a power-of-two multiply.
-void checkMaskIsPermutation() {
+ENGINE_CHECK(mask_is_permutation, Fast, Exact) {
     std::vector<int> seen(kMaskPixels, 0);
     int bad = 0;
     for (int y = 0; y < kMaskSize; ++y) {
@@ -345,7 +370,8 @@ void checkMaskIsPermutation() {
     }
     char detail[128];
     std::snprintf(detail, sizeof(detail), "%d/%d ranks out of range or repeated", bad, kMaskPixels);
-    report(bad == 0, "dither mask is a permutation", detail);
+    ctx.plan(1);
+    ENGINE_EXPECT(ctx, bad == 0, detail);
 }
 
 // The mask must actually be blue noise, which is a statement about its spectrum and nothing else: a permutation with the
@@ -358,7 +384,7 @@ void checkMaskIsPermutation() {
 // controls for, and the flat spectrum white noise is DEFINED by needs no sampling at all.
 // The gate is a factor of two below the null: a wide margin, since void-and-cluster suppresses this band by four orders
 // of magnitude and the failure guarded against -- a mask that degenerated toward white noise -- sits at 1.0x.
-void checkMaskIsBlueNoise() {
+ENGINE_CHECK(mask_is_blue_noise, Fast, Statistical) {
     std::vector<double> mask(kMaskPixels);
     for (int y = 0; y < kMaskSize; ++y) {
         for (int x = 0; x < kMaskSize; ++x) {
@@ -381,29 +407,10 @@ void checkMaskIsBlueNoise() {
     char detail[160];
     std::snprintf(detail, sizeof(detail), "low band %.5f%% of power vs %.3f%% white-noise null (%.0fx suppressed)",
                   100.0 * measured, 100.0 * expected, expected / measured);
-    report(measured < 0.5 * expected, "dither mask has a blue-noise spectrum", detail);
+    ctx.plan(1);
+    ENGINE_EXPECT(ctx, measured < 0.5 * expected, detail);
 }
 
 }  // namespace
 
-int main() {
-    constexpr int kM = 7;  // 2^7 = 128 points, matching profile.json's maxSamples accumulation cap
-    // A 12-bounce path (integrator_validate's slab case) consumes ~5 sets per bounce plus 2 at the camera, so set 64+
-    // is genuinely reached in practice and is where an unpadded sampler would have degraded.
-    constexpr int kSetCount = 72;
-    std::printf("sampler_validate: padded Owen-scrambled Sobol, blue-noise dithered, 2^%d-sample prefixes\n\n", kM);
-
-    checkOneDimensionalNet(kM, kSetCount);
-    checkEverySetIsPerfectNet(kM, {0, 1, 2, 7, 31, 64, 71});
-    checkPassDirectionOccupancy(kM, kSetCount);
-    checkIndexZeroIsScrambled();
-    checkSetsAreDecorrelated();
-    checkPixelsAreDecorrelated();
-    checkShiftIsRigid(kSetCount);
-    checkChannelsAreDecorrelated((2 * kSetCount) + 2);
-    checkMaskIsPermutation();
-    checkMaskIsBlueNoise();
-
-    std::printf("\nsampler_validate: %s\n", failures == 0 ? "all checks passed" : "FAILURES PRESENT");
-    return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
-}
+ENGINE_CHECK_MAIN("sampler")

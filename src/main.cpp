@@ -331,7 +331,7 @@ HsvDisplayUniforms setupHsvDisplayShader(const engine::gfx::ShaderProgram& hsvDi
 // All one-time startup work: camera/model/shader/environment loading (nullopt on any failure -- matches the shader/model/OCIO all-or-nothing gate this replaces), Embree scene build, and cached uniform-location lookups for the shared edge-filter/HSV shaders. Doesn't wire input callbacks -- those capture a stable AppResources& and must be set up by the caller only after this returns (see main()), since a callback capturing a reference into an AppResources that's still about to be moved into its final std::optional storage would dangle.
 std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sceneConfig,
                                            const engine::config::ProfileConfig& profileConfig,
-                                           engine::platform::Window& window,
+                                           const engine::platform::Window& window,
                                            const std::string& scenePath, bool statsEnabled) {
     const engine::debug::GpuInfo gpuInfo = engine::debug::queryGpuInfo();
 
@@ -619,7 +619,7 @@ void wireCallbacks(engine::platform::Window& window, AppResources& app) {
     });
 }
 
-engine::scene::Camera updateCamera(engine::platform::Window& window, AppResources& app,
+engine::scene::Camera updateCamera(const engine::platform::Window& window, AppResources& app,
                                     float dtSeconds) {
     if (app.debugCamera.isOrbiting()) {
         const auto [cursorX, cursorY] = window.cursorPosition();
@@ -921,6 +921,9 @@ void presentFrame(AppResources& app,
             GL_CALL(glUniform1i(app.uHsvChannelViewLoc, app.channelView));
             GL_CALL(glUniform1f(app.uHsvExposureLoc, exposure));
             GL_CALL(glUniform1i(app.uHsvInvertLoc, app.invert ? 1 : 0));
+            // Engaged by the ensurePathTraceDisplayTexture call above, which either uploads into the existing
+            // texture or creates one on every path; the analyser cannot carry that through the call.
+            // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
             app.postProcess.draw(app.pathTraceDisplayTexture->id(), app.hsvDisplayShader,
                                   {winWidth, winHeight});
         } else {
