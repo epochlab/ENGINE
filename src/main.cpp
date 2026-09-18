@@ -26,6 +26,7 @@
 #include "engine/config/profile_config.h"
 #include "engine/config/scene_config.h"
 #include "engine/debug/aov.h"
+#include "engine/debug/bench_log.h"
 #include "engine/debug/colormap.h"
 #include "engine/debug/frame_stats.h"
 #include "engine/debug/gpu_timer.h"
@@ -164,6 +165,26 @@ int scaledExtent(int framebufferExtent, float scale) {
 }
 
 // Everything the render loop touches every frame, plus the one-time-computed state (cached uniform locations, Embree scene) that must stay alive for the run's duration. A pure aggregate (no user-declared constructors) so initializeApp can return it by value via designated initializers -- each RAII member's own move constructor (already verified elsewhere to correctly transfer GL handles/tracked byte counts) handles the actual transfer.
+// -bench: raw frame and pass columns for one accumulation, appended to the benchmark log at exit. restart() on every dispatched request, so the capture always holds a fixed workload: the last accumulation, which with no input is the settled full-resolution convergence to maxSamples.
+struct BenchCapture {
+    std::string logPath;
+    std::vector<std::string> argv;
+    std::uint64_t generation = 0;  // requestTrace's generation for the accumulation being captured
+    std::vector<engine::debug::PassRecord> passes;
+    std::vector<engine::debug::FrameStageTimes> frames;
+    std::vector<float> frameMs;
+    std::vector<float> presentGpuMs;
+    bool finalPassDisplayed = false;
+
+    void restart(std::uint64_t requestGeneration) {
+        generation = requestGeneration;
+        passes.clear();
+        frames.clear();
+        frameMs.clear();
+        presentGpuMs.clear();
+    }
+};
+
 struct AppResources {
     engine::gfx::ShaderProgram edgeFilterShader;
     engine::gfx::ShaderProgram hsvDisplayShader;
@@ -263,6 +284,7 @@ struct AppResources {
     std::uint64_t systemTotalBytes;
     std::chrono::steady_clock::time_point lastRamSample;
     std::chrono::steady_clock::time_point lastFrameTime;
+    std::optional<BenchCapture> bench;  // engaged by -bench
 };
 
 struct RequiredShaders {
@@ -572,6 +594,7 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         .systemTotalBytes = engine::debug::totalSystemBytes(),
         .lastRamSample = std::chrono::steady_clock::now(),
         .lastFrameTime = std::chrono::steady_clock::now(),
+        .bench = std::nullopt,
     };
 }
 
@@ -971,10 +994,10 @@ void presentFrame(AppResources& app,
     clearToBlack(winWidth, winHeight);
 }
 
-// Non-blocking: hands a fresh request to the background PathTraceDriver, which restarts progressive accumulation at this camera pose/window size (superseding whatever it was accumulating before) and converges over subsequent passes on its own thread. Called only from renderFrame, whenever PathTraceTriggerState detects camera/scene state renderPathTraced depends on has changed.
-void requestPathTrace(AppResources& app, const engine::scene::Camera& camera, int winWidth,
-                      int winHeight) {
-    app.pathTraceDriver->requestTrace(engine::scene::PathTraceDriver::Request{
+// Non-blocking: hands a fresh request to the background PathTraceDriver, which restarts progressive accumulation at this camera pose/window size (superseding whatever it was accumulating before) and converges over subsequent passes on its own thread. Called only from renderFrame, whenever PathTraceTriggerState detects camera/scene state renderPathTraced depends on has changed. Returns the request's generation, which labels its passes.
+std::uint64_t requestPathTrace(AppResources& app, const engine::scene::Camera& camera, int winWidth,
+                               int winHeight) {
+    return app.pathTraceDriver->requestTrace(engine::scene::PathTraceDriver::Request{
         camera, winWidth, winHeight, glm::radians(static_cast<float>(app.envRotationDegrees)),
         app.showSky, app.envLightEnabled, std::exp2(app.envExposureStops), app.pathTraceSettings,
         app.maxSamples});
@@ -1016,7 +1039,10 @@ void requestPathTraceIfTriggerChanged(AppResources& app, const engine::scene::Ca
     // Park the driver whenever the selected AOV is one it does not produce. Without this it keeps accumulating passes of an image no longer on screen, on every core, for as long as a rasterizer AOV stays selected -- competing with the rasterizer the render thread is running synchronously right here.
     app.pathTraceDriver->setSuspended(!needsLightTransport);
     if (needsLightTransport) {
-        requestPathTrace(app, camera, renderWidth, renderHeight);
+        const std::uint64_t generation = requestPathTrace(app, camera, renderWidth, renderHeight);
+        if (app.bench) {
+            app.bench->restart(generation);
+        }
     }
     // The complement of needsLightTransport is exactly the rasterizer's 14 AOVs: aovNeedsLightTransport covers 13 of AovId::Count's 27 and selectPathTracedImage routes the other 14 here, so the two sets partition the enum and no AOV needs neither producer. On Beauty -- the default -- the rasterizer now does not run at all, where before it rasterized the full framebuffer on the render thread every frame of camera interaction to produce 14 images nobody was looking at.
     if (!needsLightTransport && renderWidth > 0 && renderHeight > 0) {
@@ -1174,6 +1200,113 @@ void updateDashboard(AppResources& app, float frameMs, int winWidth, int winHeig
     app.dashboard.update(frame);
 }
 
+// Appends this frame's stage times and any newly finished pass of the captured accumulation, and closes the window once the final pass has been displayed. `pass` was read before this frame's snapshot: the driver publishes a pass's record after its result, so a final record there means this frame presented the final image.
+void captureBenchFrame(engine::platform::Window& window, AppResources& app, BenchCapture& bench,
+                       const engine::debug::PassRecord& pass, float frameMs) {
+    const bool ours = pass.generation == bench.generation && !pass.cancelled;
+    if (ours && (bench.passes.empty() || bench.passes.back().passIndex != pass.passIndex)) {
+        bench.passes.push_back(pass);
+    }
+    bench.frames.push_back(app.stages);
+    bench.frameMs.push_back(frameMs);
+    bench.presentGpuMs.push_back(app.postTimer.millisecondsElapsed());
+    if (ours && pass.passIndex == app.maxSamples) {
+        bench.finalPassDisplayed = true;
+        window.setShouldClose(true);
+    }
+}
+
+// Everything the captured workload's cost depends on; two engine records are comparable iff these are equal.
+nlohmann::json benchConfig(const AppResources& app, const BenchCapture& bench) {
+    const engine::scene::Camera camera = app.debugCamera.snapshot();
+    return {{"scene", app.sceneName},
+            {"width", bench.passes.back().width},
+            {"height", bench.passes.back().height},
+            {"max_samples", app.maxSamples},
+            {"spp_per_pass", app.pathTraceSettings.samplesPerPixel},
+            {"max_bounces", app.pathTraceSettings.maxBounces},
+            {"rr_start_bounce", app.pathTraceSettings.russianRouletteStartBounce},
+            {"ao_max_distance", app.pathTraceSettings.aoMaxDistance},
+            {"aov", engine::debug::kAovNames[app.aov]},
+            {"camera", {{"position", {camera.position().x, camera.position().y, camera.position().z}},
+                        {"yaw", app.debugCamera.yawDegrees()},
+                        {"pitch", app.debugCamera.pitchDegrees()},
+                        {"focal_mm", app.debugCamera.focalLengthMm()},
+                        {"film_height_mm", app.debugCamera.filmBack().heightMm}}},
+            {"env", {{"rotation_deg", app.envRotationDegrees}, {"exposure_stops", app.envExposureStops},
+                     {"light", app.envLightEnabled}, {"show_sky", app.showSky}}},
+            {"hud", app.showHud},
+            {"refresh_hz", app.gpuInfo.refreshRateHz}};
+}
+
+// Raw columns: one entry per captured frame for render-thread stages (0 = the stage did not run that frame), one per pass for driver phases.
+nlohmann::json benchSamples(const BenchCapture& bench) {
+    const auto frameColumn = [&](float engine::debug::FrameStageTimes::*stage) {
+        std::vector<float> column;
+        column.reserve(bench.frames.size());
+        for (const engine::debug::FrameStageTimes& frame : bench.frames) {
+            column.push_back(frame.*stage);
+        }
+        return column;
+    };
+    const auto passColumn = [&](double engine::debug::PassRecord::*phase) {
+        std::vector<double> column;
+        column.reserve(bench.passes.size());
+        for (const engine::debug::PassRecord& pass : bench.passes) {
+            column.push_back(pass.*phase);
+        }
+        return column;
+    };
+    using Stages = engine::debug::FrameStageTimes;
+    using Pass = engine::debug::PassRecord;
+    return {{"frame_ms", bench.frameMs},
+            {"poll_ms", frameColumn(&Stages::pollMs)},
+            {"camera_ms", frameColumn(&Stages::cameraMs)},
+            {"raster_ms", frameColumn(&Stages::rasterMs)},
+            {"upload_ms", frameColumn(&Stages::uploadMs)},
+            {"present_ms", frameColumn(&Stages::presentMs)},
+            {"present_gpu_ms", bench.presentGpuMs},
+            {"histogram_ms", frameColumn(&Stages::histogramMs)},
+            {"over_range_ms", frameColumn(&Stages::overRangeMs)},
+            {"probe_ms", frameColumn(&Stages::probeMs)},
+            {"hud_ms", frameColumn(&Stages::hudMs)},
+            {"hud_render_ms", frameColumn(&Stages::hudRenderMs)},
+            {"swap_ms", frameColumn(&Stages::swapMs)},
+            {"pass_trace_ms", passColumn(&Pass::traceMs)},
+            {"pass_accumulate_ms", passColumn(&Pass::accumulateMs)},
+            {"pass_over_range_ms", passColumn(&Pass::overRangeMs)},
+            {"pass_publish_ms", passColumn(&Pass::publishMs)},
+            {"pass_ms", passColumn(&Pass::passMs)}};
+}
+
+// Writes the captured accumulation as one benchmark-log record. Refuses an incomplete capture -- closed early, or a pass whose record was overwritten before a frame read it -- rather than logging a workload that differs from its config.
+bool finishBench(const AppResources& app, const BenchCapture& bench) {
+    if (!bench.finalPassDisplayed) {
+        std::cerr << "engine: -bench closed before the accumulation reached maxSamples; nothing logged\n";
+        return false;
+    }
+    for (std::size_t i = 0; i < bench.passes.size(); ++i) {
+        if (bench.passes[i].passIndex != static_cast<int>(i) + 1) {
+            std::cerr << "engine: -bench captured " << bench.passes.size() << " of " << app.maxSamples
+                      << " pass records (two passes finished within one frame); nothing logged\n";
+            return false;
+        }
+    }
+    engine::debug::RayCounts rays;
+    for (const engine::debug::PassRecord& pass : bench.passes) {
+        rays.add(pass.rays);
+    }
+    const engine::debug::BenchRecord record{
+        .tool = "engine",
+        .argv = bench.argv,
+        .config = benchConfig(app, bench),
+        .samples = benchSamples(bench),
+        .work = {{"rays", {{"primary", rays.primary}, {"bounce", rays.bounce}, {"ao", rays.ao}, {"shadow", rays.shadow}}},
+                 {"crc32", engine::debug::floatCrc32(app.pathTraceDriver->latestResult()->beauty.rgba)}},
+    };
+    return engine::debug::appendBenchRecord(bench.logPath, record);
+}
+
 // One frame: poll -> update camera -> request a fresh path trace if input changed -> orbit-pick from the path tracer's own G-buffer -> post-process blit to the default framebuffer -> swap.
 void renderFrame(engine::platform::Window& window, AppResources& app) {
     // Every stage zeroed first: a stage that does not run this frame must read 0, or the dashboard reports the last time it did run as if it were still happening.
@@ -1197,6 +1330,9 @@ void renderFrame(engine::platform::Window& window, AppResources& app) {
 
     requestPathTraceIfTriggerChanged(app, camera, winWidth, winHeight, frameNow);
 
+    // Read before the snapshot so a final record guarantees the snapshot holds the final image -- see captureBenchFrame.
+    const engine::debug::PassRecord benchPass =
+        app.bench ? app.pathTraceDriver->lastPassRecord() : engine::debug::PassRecord{};
     // Held for the rest of this frame so the images behind it stay valid even if the driver publishes a newer result mid-frame -- a strong ref, not a raw fetch. Null until the first pass of the app's life completes.
     const std::shared_ptr<const engine::scene::PathTraceResult> pathTraceSnapshot =
         app.pathTraceDriver != nullptr ? app.pathTraceDriver->latestResult() : nullptr;
@@ -1225,12 +1361,17 @@ void renderFrame(engine::platform::Window& window, AppResources& app) {
         // After swapBuffers, so the dashboard's own write(2) lands in the frame's slack rather than ahead of the present. It times its own draw internally -- a timer here could never be observed, since the stages it would write to are zeroed before the next frame accumulates them.
         updateDashboard(app, dtSeconds * 1000.0F, winWidth, winHeight);
     }
+    if (app.bench) {
+        captureBenchFrame(window, app, *app.bench, benchPass, dtSeconds * 1000.0F);
+    }
 }
 
 struct Options {
     std::string scenePath = ASSET_ROOT_DIR "/scenes/cornell.json";
     // Off by default: the live dashboard redraws in place, which is right for a session a human is watching and wrong for anything scripted. The instrumentation behind it is always compiled in, so -stats measures the exact binary that ships rather than a differently-built one.
     bool stats = false;
+    // -bench PATH: run one accumulation to profile.json's maxSamples, append it to this benchmark log (bench_log.h), exit.
+    std::string benchLogPath;
 };
 
 // Returns nullopt on an unrecognized flag or a missing value -- argv is a system
@@ -1246,9 +1387,15 @@ std::optional<Options> parseOptions(int argc, char** argv) {
             options.scenePath = argv[++i];
         } else if (std::strcmp(argv[i], "-stats") == 0) {
             options.stats = true;
+        } else if (std::strcmp(argv[i], "-bench") == 0) {
+            if (i + 1 >= argc) {
+                std::cerr << "engine: -bench expects a value\n";
+                return std::nullopt;
+            }
+            options.benchLogPath = argv[++i];
         } else {
             std::cerr << "engine: unknown flag " << argv[i]
-                       << "\n  usage: engine [-scene path/to/scene.json] [-stats]\n";
+                       << "\n  usage: engine [-scene path/to/scene.json] [-stats] [-bench log.jsonl]\n";
             return std::nullopt;
         }
     }
@@ -1280,6 +1427,12 @@ int main(int argc, char** argv) {
 
         if (!sceneConfig || !profileConfig) {
             std::cerr << "main: scene/profile config load failed, aborting startup\n";
+            exitCode = EXIT_FAILURE;
+        } else if (!options->benchLogPath.empty() &&
+                   (profileConfig->pathTracer.maxSamples <= 0 ||
+                    !aovNeedsLightTransport(static_cast<engine::debug::AovId>(profileConfig->render.defaultAov)))) {
+            // An unbounded accumulation never ends, and a rasterizer AOV parks the driver, so neither is a benchmark workload.
+            std::cerr << "main: -bench needs profile.json maxSamples > 0 and a path-traced defaultAOV\n";
             exitCode = EXIT_FAILURE;
         } else {
             // Window construction creates the GL 4.1 core/fwd-compat context and makes it current; fatal failure inside it exits the process directly (see window.cpp) since nothing recoverable exists yet.
@@ -1313,9 +1466,17 @@ int main(int argc, char** argv) {
                         app->perInstanceSettings);
 
                     wireCallbacks(window, *app);
+                    if (!options->benchLogPath.empty()) {
+                        app->bench.emplace();
+                        app->bench->logPath = options->benchLogPath;
+                        app->bench->argv.assign(argv, argv + argc);
+                    }
 
                     while (!window.shouldClose()) {
                         renderFrame(window, *app);
+                    }
+                    if (app->bench && !finishBench(*app, *app->bench)) {
+                        exitCode = EXIT_FAILURE;
                     }
                 }
             }
