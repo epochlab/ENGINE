@@ -7,6 +7,7 @@
 #include <memory>
 #include <optional>
 #include <random>
+#include <string>
 #include <vector>
 
 #include <glm/glm.hpp>
@@ -398,6 +399,61 @@ bool checkWireframeSanity(const Camera& camera, const std::vector<ShadingTriangl
     return true;
 }
 
+// A closed cube of side 2*halfExtent centred on the origin, each face an n x n grid of quads split along one diagonal. Each lattice point is generated once and shared by every triangle that uses it, so neighbours hold bitwise-identical positions -- the input watertight rasterization is defined against. jitter perturbs each shared point in 3D; the surface stays closed around the origin, so a camera there sees it through every pixel.
+std::vector<ShadingTriangle> makeClosedCube(int n, float halfExtent, float jitter, std::mt19937& rng) {
+    const int side = n + 1;
+    const float cell = 2.0F * halfExtent / static_cast<float>(n);
+    std::uniform_real_distribution<float> offset(-jitter, jitter);
+    const auto index = [side](glm::ivec3 c) {
+        return static_cast<std::size_t>((((c.x * side) + c.y) * side) + c.z);
+    };
+    std::vector<glm::vec3> lattice(static_cast<std::size_t>(side) * side * side);
+    for (int i = 0; i < side; ++i) {
+        for (int j = 0; j < side; ++j) {
+            for (int k = 0; k < side; ++k) {
+                const glm::vec3 jitterOffset(offset(rng), offset(rng), offset(rng));
+                lattice[index({i, j, k})] =
+                    ((glm::vec3(i, j, k) - (static_cast<float>(n) * 0.5F)) * cell) + jitterOffset;
+            }
+        }
+    }
+    std::vector<ShadingTriangle> triangles;
+    triangles.reserve(static_cast<std::size_t>(12 * n * n));
+    for (int axis = 0; axis < 3; ++axis) {
+        const int u = (axis + 1) % 3;
+        const int v = (axis + 2) % 3;
+        for (const int layer : {0, n}) {
+            glm::vec3 normal(0.0F);
+            normal[axis] = layer == 0 ? 1.0F : -1.0F;  // facing inward, toward the camera
+            const glm::vec4 tangent = tangentFor(normal);
+            for (int p = 0; p < n; ++p) {
+                for (int q = 0; q < n; ++q) {
+                    const auto corner = [&](int du, int dv) {
+                        glm::ivec3 c(0);
+                        c[axis] = layer;
+                        c[u] = p + du;
+                        c[v] = q + dv;
+                        return ShadingVertex{lattice[index(c)], normal, glm::vec2(du, dv), tangent};
+                    };
+                    triangles.push_back(ShadingTriangle{corner(0, 0), corner(1, 0), corner(1, 1), 0});
+                    triangles.push_back(ShadingTriangle{corner(0, 0), corner(1, 1), corner(0, 1), 0});
+                }
+            }
+        }
+    }
+    return triangles;
+}
+
+int uncoveredPixels(const RasterGBuffer& raster) {
+    int uncovered = 0;
+    for (int y = 0; y < kHeight; ++y) {
+        for (int x = 0; x < kWidth; ++x) {
+            uncovered += texelAt(raster.alpha, x, y).x > 0.5F ? 0 : 1;
+        }
+    }
+    return uncovered;
+}
+
 // Everything the pose checks share. Rebuilt per check rather than hoisted into a global: construction is a few
 // milliseconds at this size, and a check that builds its own world has no ordering dependence on any other.
 struct RasterFixture {
@@ -487,6 +543,74 @@ ENGINE_CHECK(per_instance_boxes, Fast, Exact) {
     ThreadPool threadPool;
     ctx.plan(1);
     ENGINE_EXPECT(ctx, checkPerInstanceBoxes(threadPool), "per-instance boxes were not drawn in disjoint hues/spans");
+}
+
+// Watertightness, exact: from inside a closed mesh every pixel must be covered, with no oracle and no tolerance. Straight on, the front face's shared diagonals run exactly through pixel centres -- the configuration that cracked the Cornell back wall -- so a centre on a shared edge must go to exactly one side by the fill rule; the seeded poses view a jittered cube from arbitrary angles, so shared edges are clipped against every frustum plane.
+ENGINE_CHECK(watertight_closed_mesh, Fast, Exact) {
+    constexpr int kCells = 16;
+    constexpr float kHalfExtent = 5.0F;
+    constexpr int kSeededPoses = 8;
+    // Any jitter that keeps the origin inside leaves the surface closed around the camera; a quarter cell keeps triangles well-shaped.
+    constexpr float kJitter = 0.25F * (2.0F * kHalfExtent / static_cast<float>(kCells));
+    std::mt19937 rng(static_cast<std::mt19937::result_type>(ctx.seed()));
+    ThreadPool threadPool;
+    const std::vector<MeshInstance> instances{
+        MeshInstance{makeMaterial(glm::vec3(0.5F), 0.5F), glm::mat4(1.0F), ""}};
+    const std::vector<PathTraceSettings> perInstanceSettings(instances.size(), makeTestSettings());
+    ctx.plan(1 + kSeededPoses);
+
+    const auto expectWatertight = [&](const std::string& pose, const Camera& camera,
+                                      const std::vector<ShadingTriangle>& mesh) {
+        RasterGBuffer raster;
+        renderRasterGBuffer(camera, mesh, instances, perInstanceSettings, computeInstanceBounds(mesh, 1), kWidth,
+                             kHeight, threadPool, raster);
+        const int uncovered = uncoveredPixels(raster);
+        std::cout << "rasterizer_validate: watertight " << pose << " -- " << uncovered << " uncovered pixels\n";
+        ENGINE_EXPECT(ctx, uncovered == 0, pose + ": pixels uncovered from inside a closed mesh (a crack)");
+    };
+
+    expectWatertight("straightOn", straightOnCamera(), makeClosedCube(kCells, kHalfExtent, 0.0F, rng));
+    const std::vector<ShadingTriangle> jittered = makeClosedCube(kCells, kHalfExtent, kJitter, rng);
+    std::uniform_real_distribution<float> yaw(0.0F, 360.0F);
+    std::uniform_real_distribution<float> pitch(-85.0F, 85.0F);
+    for (int i = 0; i < kSeededPoses; ++i) {
+        const float poseYaw = yaw(rng);
+        const float posePitch = pitch(rng);
+        expectWatertight("yaw " + std::to_string(poseYaw) + " pitch " + std::to_string(posePitch),
+                         Camera(glm::vec3(0.0F), poseYaw, posePitch, kFilmBack, 35.0F, 0.1F, 100.0F, 2.8F,
+                                1.0F / 125.0F, 100.0F),
+                         jittered);
+    }
+}
+
+// Clip-plane and fan edges are not mesh edges: one triangle far larger than the view, tilted so it also reaches behind the camera, is clipped against every frustum plane yet has no edge on screen -- so every pixel is covered and none is wireframe.
+ENGINE_CHECK(wireframe_ignores_clip_edges, Fast, Exact) {
+    ThreadPool threadPool;
+    const std::vector<MeshInstance> instances{
+        MeshInstance{makeMaterial(glm::vec3(0.5F), 0.5F), glm::mat4(1.0F), ""}};
+    const std::vector<PathTraceSettings> perInstanceSettings(instances.size(), makeTestSettings());
+    // Plane z = -10 - 0.3y: every frustum ray meets it in front of the camera, while its y = -1000 vertices sit at z = +290, behind it.
+    const glm::vec3 normal = glm::normalize(glm::vec3(0.0F, 0.3F, 1.0F));
+    const glm::vec4 tangent = tangentFor(normal);
+    const std::vector<ShadingTriangle> scene{ShadingTriangle{
+        ShadingVertex{glm::vec3(-1000.0F, -1000.0F, 290.0F), normal, glm::vec2(0.0F, 0.0F), tangent},
+        ShadingVertex{glm::vec3(1000.0F, -1000.0F, 290.0F), normal, glm::vec2(1.0F, 0.0F), tangent},
+        ShadingVertex{glm::vec3(0.0F, 1000.0F, -310.0F), normal, glm::vec2(0.0F, 1.0F), tangent}, 0}};
+    RasterGBuffer raster;
+    renderRasterGBuffer(straightOnCamera(), scene, instances, perInstanceSettings, computeInstanceBounds(scene, 1),
+                         kWidth, kHeight, threadPool, raster);
+    int wirePixels = 0;
+    for (int y = 0; y < kHeight; ++y) {
+        for (int x = 0; x < kWidth; ++x) {
+            wirePixels += isWireframeColor(texelAt(raster.wireframe, x, y)) ? 1 : 0;
+        }
+    }
+    const int uncovered = uncoveredPixels(raster);
+    std::cout << "rasterizer_validate: clip edges -- " << uncovered << " uncovered, " << wirePixels
+              << " wireframe pixels\n";
+    ctx.plan(2);
+    ENGINE_EXPECT(ctx, uncovered == 0, "the screen-covering triangle left pixels uncovered");
+    ENGINE_EXPECT(ctx, wirePixels == 0, "clip-plane or fan edges were drawn as mesh wireframe");
 }
 
 }  // namespace
