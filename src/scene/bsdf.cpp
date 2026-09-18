@@ -1,4 +1,5 @@
 #include "engine/scene/bsdf.h"
+#include "engine/scene/fresnel_dielectric.h"
 
 #include <algorithm>
 #include <array>
@@ -31,33 +32,6 @@ float smithG1(float ndotV, float alpha) { return 1.0F / (1.0F + smithLambda(ndot
 
 float smithG2(float ndotV, float ndotL, float alpha) {
     return 1.0F / (1.0F + smithLambda(ndotV, alpha) + smithLambda(ndotL, alpha));
-}
-
-// Snell in cos^2 form: cos^2(thetaT) = (1 - r^2) + r^2 cos^2(thetaI), r = etaI/etaT. Negative means total internal reflection.
-// Algebraically 1 - r^2 sin^2(thetaI) (PBRT-v4 FrDielectric/Refract, Walter 2007 eq. 40), but never forms 1 - cos^2(thetaI), which rounds to exactly 1.0F below cos 2^-12 and falsely reports TIR.
-// At r == 1 it collapses to cos^2(thetaI), so an index-matched interface cannot total-internally-reflect by construction rather than by a branch; at r < 1 the constant term is positive, so entering a denser medium cannot either.
-float cos2Transmitted(float cosThetaI, float etaRatio) {
-    const float r2 = etaRatio * etaRatio;
-    return (1.0F - r2) + (r2 * cosThetaI * cosThetaI);
-}
-
-// Exact unpolarized dielectric Fresnel reflectance (PBRT's FrDielectric); 1.0 from the critical angle inward, where cosThetaT is 0 and both polarisations are already exactly 1.
-float fresnelDielectric(float cosThetaI, float etaI, float etaT) {
-    cosThetaI = std::clamp(cosThetaI, -1.0F, 1.0F);
-    if (cosThetaI < 0.0F) {
-        std::swap(etaI, etaT);
-        cosThetaI = -cosThetaI;
-    }
-    const float cos2ThetaT = cos2Transmitted(cosThetaI, etaI / etaT);
-    if (cos2ThetaT < 0.0F) {
-        return 1.0F;
-    }
-    const float cosThetaT = std::sqrt(cos2ThetaT);
-    const float rParallel =
-        ((etaT * cosThetaI) - (etaI * cosThetaT)) / ((etaT * cosThetaI) + (etaI * cosThetaT));
-    const float rPerpendicular =
-        ((etaI * cosThetaI) - (etaT * cosThetaT)) / ((etaI * cosThetaI) + (etaT * cosThetaT));
-    return ((rParallel * rParallel) + (rPerpendicular * rPerpendicular)) * 0.5F;
 }
 
 // --- Conductor Fresnel: Gulbrandsen 2014, "Artist Friendly Metallic Fresnel", JCGT 3(4), ported

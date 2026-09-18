@@ -56,8 +56,10 @@ find_program(CPPCHECK_EXE NAMES cppcheck)
 if(CPPCHECK_EXE)
     add_custom_target(cppcheck
         COMMAND ${CPPCHECK_EXE} --enable=warning,style,performance --std=c++20
-                --suppress=missingInclude -I ${CMAKE_SOURCE_DIR}/include
-                ${CMAKE_SOURCE_DIR}/src
+                --suppress=missingInclude
+                --suppressions-list=${CMAKE_SOURCE_DIR}/.cppcheck-suppressions
+                -I ${CMAKE_SOURCE_DIR}/include
+                ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tools
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
         COMMENT "cppcheck over src/")
 endif()
@@ -186,29 +188,48 @@ endif()
 # ctest loop. Neither -march=native nor IPO, unlike every other tool here -- the output is committed source and must
 # reproduce bit-for-bit on any machine, and FMA contraction is free to differ; the bake runs in seconds regardless.
 add_executable(albedo_table tools/albedo_table.cpp)
+target_include_directories(albedo_table PRIVATE include)
 target_compile_options(albedo_table PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(albedo_table PRIVATE glm::glm)
 
 # Headless correctness checks (Phase 4): no test framework exists yet, so these follow test_pattern/downsample's standalone-CLI convention (non-zero exit on failure).
 # -march=native/IPO mirror the engine target's flags so these tools validate the exact codegen that ships, not a differently-optimized build of the same math.
-add_executable(embree_validate tools/embree_validate.cpp src/scene/embree_accel.cpp src/scene/ray_types.cpp)
-target_include_directories(embree_validate PRIVATE include)
+# Shared validator harness (tools/check.h, tools/stats.h). Deliberately depends on nothing but glm: the light
+# validators (sampler, embree) must not be forced to link Embree or OpenEXR just to reach a chi-square survival
+# function. Built with the same flags as the tools it serves so the harness is not a different codegen from them.
+add_library(engine_check OBJECT tools/check.cpp)
+target_include_directories(engine_check PUBLIC tools)
+target_compile_options(engine_check PRIVATE -Wall -Wextra -Werror -march=native)
+target_link_libraries(engine_check PRIVATE glm::glm)
+
+# Guards the harness's own invariants -- NaN rejection and name-derived seeds -- which nothing else would notice
+# regressing, because a broken assert macro reports success.
+add_executable(check_selftest tools/check_selftest.cpp $<TARGET_OBJECTS:engine_check>)
+target_include_directories(check_selftest PRIVATE tools)
+target_compile_options(check_selftest PRIVATE -Wall -Wextra -Werror -march=native)
+target_link_libraries(check_selftest PRIVATE glm::glm)
+
+add_executable(embree_validate tools/embree_validate.cpp src/scene/embree_accel.cpp src/scene/ray_types.cpp
+               $<TARGET_OBJECTS:engine_check>)
+target_include_directories(embree_validate PRIVATE include tools)
 target_compile_options(embree_validate PRIVATE -Wall -Wextra -Werror -march=native)
 target_link_libraries(embree_validate PRIVATE glm::glm embree)
 if(IPO_SUPPORTED)
     set_target_properties(embree_validate PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
 endif()
 
-add_executable(bsdf_validate tools/bsdf_validate.cpp src/scene/bsdf.cpp src/scene/sampler.cpp)
-target_include_directories(bsdf_validate PRIVATE include)
+add_executable(bsdf_validate tools/bsdf_validate.cpp src/scene/bsdf.cpp src/scene/sampler.cpp
+               $<TARGET_OBJECTS:engine_check>)
+target_include_directories(bsdf_validate PRIVATE include tools)
 target_compile_options(bsdf_validate PRIVATE -Wall -Wextra -Werror -march=native)
 target_link_libraries(bsdf_validate PRIVATE glm::glm)
 if(IPO_SUPPORTED)
     set_target_properties(bsdf_validate PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
 endif()
 
-add_executable(sampler_validate tools/sampler_validate.cpp src/scene/sampler.cpp src/debug/power_spectrum.cpp)
-target_include_directories(sampler_validate PRIVATE include)
+add_executable(sampler_validate tools/sampler_validate.cpp src/scene/sampler.cpp src/debug/power_spectrum.cpp
+               $<TARGET_OBJECTS:engine_check>)
+target_include_directories(sampler_validate PRIVATE include tools)
 target_compile_options(sampler_validate PRIVATE -Wall -Wextra -Werror -march=native)
 target_link_libraries(sampler_validate PRIVATE glm::glm)
 if(IPO_SUPPORTED)
@@ -216,8 +237,9 @@ if(IPO_SUPPORTED)
 endif()
 
 add_executable(nee_validate tools/nee_validate.cpp src/scene/bsdf.cpp src/scene/sampler.cpp
-               src/scene/environment_map.cpp src/scene/light.cpp src/gfx/hdr_image.cpp)
-target_include_directories(nee_validate PRIVATE include)
+               src/scene/environment_map.cpp src/scene/light.cpp src/gfx/hdr_image.cpp
+               $<TARGET_OBJECTS:engine_check>)
+target_include_directories(nee_validate PRIVATE include tools)
 target_compile_options(nee_validate PRIVATE -Wall -Wextra -Werror -march=native)
 target_link_libraries(nee_validate PRIVATE glm::glm OpenEXR::OpenEXR Imath::Imath)
 if(IPO_SUPPORTED)
@@ -227,8 +249,9 @@ endif()
 add_executable(rasterizer_validate tools/rasterizer_validate.cpp src/scene/rasterizer.cpp
                src/scene/gbuffer_shading.cpp src/scene/embree_accel.cpp src/scene/ray_types.cpp
                src/scene/shading_scene.cpp src/scene/bsdf.cpp src/scene/sampler.cpp
-               src/scene/camera.cpp src/scene/thread_pool.cpp src/gfx/hdr_image.cpp)
-target_include_directories(rasterizer_validate PRIVATE include)
+               src/scene/camera.cpp src/scene/thread_pool.cpp src/gfx/hdr_image.cpp
+               $<TARGET_OBJECTS:engine_check>)
+target_include_directories(rasterizer_validate PRIVATE include tools)
 target_compile_options(rasterizer_validate PRIVATE -Wall -Wextra -Werror -march=native)
 target_link_libraries(rasterizer_validate PRIVATE glm::glm embree OpenEXR::OpenEXR Imath::Imath)
 if(IPO_SUPPORTED)
@@ -239,15 +262,56 @@ add_executable(integrator_validate tools/integrator_validate.cpp src/scene/path_
                src/scene/gbuffer_shading.cpp src/scene/embree_accel.cpp src/scene/ray_types.cpp
                src/scene/shading_scene.cpp src/scene/bsdf.cpp src/scene/sampler.cpp
                src/scene/environment_map.cpp src/scene/light.cpp src/scene/camera.cpp src/scene/thread_pool.cpp
-               src/scene/material_binding.cpp src/config/scene_config.cpp src/gfx/hdr_image.cpp)
+               src/scene/material_binding.cpp src/config/scene_config.cpp src/gfx/hdr_image.cpp
+               $<TARGET_OBJECTS:engine_check>)
 # material_binding/scene_config and the asset root are for checkMaterialBinding, which resolves real assets/materials/*.json files against named instances -- the materialOverrides path no other validator touches.
-target_include_directories(integrator_validate PRIVATE include ${JSON_DIR})
+target_include_directories(integrator_validate PRIVATE include tools ${JSON_DIR})
 target_compile_definitions(integrator_validate PRIVATE
     ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets")
 target_compile_options(integrator_validate PRIVATE -Wall -Wextra -Werror -march=native)
 target_link_libraries(integrator_validate PRIVATE glm::glm embree OpenEXR::OpenEXR Imath::Imath)
 if(IPO_SUPPORTED)
     set_target_properties(integrator_validate PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
+endif()
+
+# Progressive-accumulation driver (src/scene/path_trace_driver.cpp), previously the largest CPU component with no
+# coverage at all. Links the same transport sources integrator_validate does, plus the driver itself.
+add_executable(driver_validate tools/driver_validate.cpp src/scene/path_trace_driver.cpp
+               src/scene/path_tracer.cpp src/scene/gbuffer_shading.cpp src/scene/embree_accel.cpp
+               src/scene/ray_types.cpp src/scene/shading_scene.cpp src/scene/bsdf.cpp src/scene/sampler.cpp
+               src/scene/environment_map.cpp src/scene/light.cpp src/scene/camera.cpp
+               src/scene/thread_pool.cpp src/gfx/hdr_image.cpp
+               $<TARGET_OBJECTS:engine_check>)
+target_include_directories(driver_validate PRIVATE include tools)
+target_compile_options(driver_validate PRIVATE -Wall -Wextra -Werror -march=native)
+target_link_libraries(driver_validate PRIVATE glm::glm embree OpenEXR::OpenEXR Imath::Imath)
+if(IPO_SUPPORTED)
+    set_target_properties(driver_validate PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
+endif()
+
+# File-boundary validation (gfx/hdr_image.cpp EXR round trip, config/*.cpp JSON parsing). The EXR path was linked into
+# three validators and invoked by none of them; profile_config.cpp had no coverage at all.
+add_executable(io_validate tools/io_validate.cpp src/gfx/hdr_image.cpp src/config/scene_config.cpp
+               src/config/profile_config.cpp src/scene/camera.cpp
+               $<TARGET_OBJECTS:engine_check>)
+target_include_directories(io_validate PRIVATE include tools ${JSON_DIR})
+target_compile_definitions(io_validate PRIVATE ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets")
+target_compile_options(io_validate PRIVATE -Wall -Wextra -Werror -march=native)
+target_link_libraries(io_validate PRIVATE glm::glm OpenEXR::OpenEXR Imath::Imath)
+if(IPO_SUPPORTED)
+    set_target_properties(io_validate PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
+endif()
+
+# CPU-evaluable display and statistics path. The OCIO transform's pinned-config property was asserted only by a
+# comment in its own header; frame_stats is testable exactly now that tick() takes an injectable clock.
+add_executable(display_validate tools/display_validate.cpp src/gfx/ocio_cpu_transform.cpp
+               src/debug/frame_stats.cpp
+               $<TARGET_OBJECTS:engine_check>)
+target_include_directories(display_validate PRIVATE include tools)
+target_compile_options(display_validate PRIVATE -Wall -Wextra -Werror -march=native)
+target_link_libraries(display_validate PRIVATE glm::glm OpenColorIO::OpenColorIO)
+if(IPO_SUPPORTED)
+    set_target_properties(display_validate PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
 endif()
 
 # Headless before/after comparison renders (tools/render_beauty.cpp). Not a correctness gate and deliberately absent from the add_test loop below: its output is a picture for a human to look at, and a full-scene render is far slower than any validator. Needs OCIO (the display transform, evaluated on the CPU) and zlib (PNG encode) on top of the usual render dependencies.
@@ -257,8 +321,9 @@ add_executable(render_beauty tools/render_beauty.cpp src/debug/power_spectrum.cp
                src/scene/environment_map.cpp src/scene/light.cpp src/scene/camera.cpp src/scene/thread_pool.cpp
                src/scene/gltf_loader.cpp src/scene/material.cpp src/scene/material_binding.cpp
                src/config/scene_config.cpp src/config/profile_config.cpp src/gfx/hdr_image.cpp
-               $<TARGET_OBJECTS:vendored_no_tidy>)
-target_include_directories(render_beauty PRIVATE include ${CGLTF_DIR} ${JSON_DIR})
+               src/gfx/ocio_cpu_transform.cpp
+               $<TARGET_OBJECTS:vendored_no_tidy> $<TARGET_OBJECTS:engine_check>)
+target_include_directories(render_beauty PRIVATE include tools ${CGLTF_DIR} ${JSON_DIR})
 target_compile_definitions(render_beauty PRIVATE ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets")
 target_compile_options(render_beauty PRIVATE -Wall -Wextra -Werror -march=native)
 target_link_libraries(render_beauty PRIVATE glm::glm embree OpenEXR::OpenEXR Imath::Imath
@@ -279,8 +344,47 @@ if(IPO_SUPPORTED)
     set_target_properties(raster_bench PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
 endif()
 
-# All six correctness tools run under `ctest --test-dir build`; previously buildable but unrun, so a regression only surfaced if someone remembered to invoke them by hand.
+# All correctness tools run under `ctest --test-dir build`; previously buildable but unrun, so a regression only surfaced if someone remembered to invoke them by hand.
 enable_testing()
-foreach(validator embree_validate bsdf_validate nee_validate rasterizer_validate integrator_validate sampler_validate)
-    add_test(NAME ${validator} COMMAND ${validator})
-endforeach()
+
+# Concurrent checks would each build a pool sized to hardware_concurrency(), so `ctest -j` would oversubscribe by that
+# factor. Each discovered test declares PROCESSORS to match, so ctest's job pool accounts for what it will actually use.
+include(ProcessorCount)
+ProcessorCount(ENGINE_HOST_PROCESSORS)
+if(ENGINE_HOST_PROCESSORS EQUAL 0)
+    set(ENGINE_HOST_PROCESSORS 1)
+endif()
+math(EXPR ENGINE_TEST_THREADS "${ENGINE_HOST_PROCESSORS} / 4")
+if(ENGINE_TEST_THREADS LESS 1)
+    set(ENGINE_TEST_THREADS 1)
+endif()
+
+include(${CMAKE_SOURCE_DIR}/cmake/EngineChecks.cmake)
+
+# Image-level gates. Not part of a validator binary because they need the real scene, the real glTF and the real
+# material stack -- what they assert is a property of the shipping pipeline, not of a synthetic fixture.
+# Deliberately small and short: both are statements about the ESTIMATOR, which does not need a converged image to
+# test, and a gate that takes minutes stops being run.
+add_test(NAME image.determinism
+         COMMAND render_beauty --scene scenes/cornell.json --width 48 --height 36 --passes 8
+                 --assert-deterministic)
+set_tests_properties(image.determinism PROPERTIES LABELS "image;fast;exact" TIMEOUT 300)
+
+add_test(NAME image.convergence
+         COMMAND render_beauty --scene scenes/cornell.json --width 48 --height 36 --passes 64
+                 --assert-converged)
+set_tests_properties(image.convergence PROPERTIES LABELS "image;slow;statistical" TIMEOUT 900
+                     PROCESSORS ${ENGINE_TEST_THREADS})
+
+# Migrated to tools/check.h: one ctest entry per check, discovered from the binary itself.
+engine_discover_checks(check_selftest)
+engine_discover_checks(sampler_validate)
+engine_discover_checks(embree_validate)
+engine_discover_checks(rasterizer_validate)
+engine_discover_checks(nee_validate)
+engine_discover_checks(integrator_validate)
+engine_discover_checks(bsdf_validate)
+engine_discover_checks(driver_validate)
+engine_discover_checks(io_validate)
+engine_discover_checks(display_validate)
+
