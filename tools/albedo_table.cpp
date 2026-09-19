@@ -49,6 +49,7 @@ constexpr int kAlbedoRes = 128;
 
 // Transmit side, sized by the energy closure it buys: linear interpolation in mu (the steep grazing rise) and in eta (curvature through the TIR onset) sets the per-vertex error once the quadrature is converged.
 // Measured on a white ior-1.5 interface: 32 mu nodes lose 2% at mu 0.02, and 32 eta nodes lose 9e-4 midway between eta nodes against 1e-4 on them; 64 x 64 closes to within 3e-4. Roughness keeps 32 nodes, where node and midpoint already agree to that level.
+// Uniform in mu, 64 nodes still left 1e-2 at mu 0.01 at roughness 0.15, where E climbs over mu ~ alpha; the escape tables' mu axis is uniform in sqrt(mu) (escapeMu).
 constexpr int kTransmitRoughnessRes = 32;
 constexpr int kTransmitMuRes = 64;
 constexpr int kEtaRes = 64;
@@ -64,14 +65,25 @@ double smithLambda(double ndotV, double alpha) {
     return 0.5 * (-1.0 + std::sqrt(1.0 + (alpha * alpha * tan2)));
 }
 
+// Reflect side only, where the grid starts at mu = 1e-3 and this agrees with the radical form below to 1e-16: re-associating it would move the committed opaque table by float rounding for nothing.
 double smithG2(double ndotV, double ndotL, double alpha) {
     return 1.0 / (1.0 + smithLambda(ndotV, alpha) + smithLambda(ndotL, alpha));
+}
+
+double smithRadical(double cosTheta, double alpha) {
+    const double alpha2 = alpha * alpha;
+    return std::sqrt(alpha2 + ((1.0 - alpha2) * cosTheta * cosTheta));
+}
+
+// Height-correlated G2 divided by cosO, 2 cosI/(cosI s(cosO) + cosO s(cosI)) (bsdf.cpp's smithVisibility times 4 cosI): no cosine divides, so it holds to cosO = 0, where it is 2/alpha.
+double smithG2OverCosO(double cosO, double cosI, double alpha) {
+    return 2.0 * cosI / ((cosI * smithRadical(cosO, alpha)) + (cosO * smithRadical(cosI, alpha)));
 }
 
 // --- Reflect side: exact-domain Gauss-Legendre, not Monte Carlo.
 //
 // The quantity is the directional albedo of the single-scattering GGX lobe with Fresnel forced to 1, the fraction of
-// energy smithG2 lets through, so 1-E is exactly what the multiple-scattering lobe must return. It depends on nothing
+// energy G2 lets through, so 1-E is exactly what the multiple-scattering lobe must return. It depends on nothing
 // but (mu, alpha): Fresnel, metallic, baseColor and lobe-selection probabilities are all applied by the caller.
 //
 // Sampling it (VNDF draws, discarding wi.z <= 0) puts a jump discontinuity -- the horizon -- inside the integration
@@ -237,19 +249,19 @@ EscapeSums escapeAlbedo(double mu, double alpha, const GaussLegendre& rule) {
                         const double thetaH = std::atan(alpha * std::tan(psi));
                         const glm::dvec3 h(std::sin(thetaH) * std::cos(phi), std::sin(thetaH) * std::sin(phi), std::cos(thetaH));
                         const double woDotH = glm::dot(wo, h);
-                        // phi and psi panel widths, measure sin(psi)cos(psi)/pi doubled for the half circle.
+                        // phi and psi panel widths, measure sin(psi)cos(psi)/pi doubled for the half circle; the escape's 1/mu is in smithG2OverCosO.
                         const double weight = rule.weight[p] * rule.weight[q] * (phiHi - phiLo) * (psiHi - psiLo) *
-                                              (2.0 * std::sin(psi) * std::cos(psi) / kPi) * (woDotH / (mu * h.z));
+                                              (2.0 * std::sin(psi) * std::cos(psi) / kPi) * (woDotH / h.z);
                         const double fresnel = fresnelDielectric(static_cast<float>(woDotH), eta, 1.0F);
                         const double wiZ = (2.0 * woDotH * h.z) - mu;
                         if (wiZ > 0.0) {
-                            sums.reflect[e] += weight * fresnel * smithG2(mu, wiZ, alpha);
+                            sums.reflect[e] += weight * fresnel * smithG2OverCosO(mu, wiZ, alpha);
                         }
                         const double cos2T = cos2Transmitted(static_cast<float>(woDotH), eta);
                         if (cos2T >= 0.0) {
                             const double wtZ = (((eta * woDotH) - std::sqrt(cos2T)) * h.z) - (eta * mu);
                             if (wtZ < 0.0) {
-                                sums.transmit[e] += weight * (1.0 - fresnel) * smithG2(mu, -wtZ, alpha);
+                                sums.transmit[e] += weight * (1.0 - fresnel) * smithG2OverCosO(mu, -wtZ, alpha);
                             }
                         }
                     }
@@ -303,6 +315,13 @@ double gridMu(int index, int resolution) {
     return std::max(static_cast<double>(index) / static_cast<double>(resolution - 1), 1e-3);
 }
 
+// The escape tables' mu axis, uniform in sqrt(mu): E climbs from its grazing limit over mu ~ alpha (G1 ~ 2mu/alpha below it), which a uniform mu grid spans with under two cells at roughness 0.15, so nodes crowd toward grazing as sqrt spacing puts them. bsdf.cpp's escapeAlbedo indexes by sqrt(mu) to match.
+// Node 0 is mu = 0 itself, the grazing limit smithG2OverCosO holds to.
+double escapeMu(int index) {
+    const double t = static_cast<double>(index) / static_cast<double>(kTransmitMuRes - 1);
+    return t * t;
+}
+
 double gridAlpha(int index, int resolution) {
     const double roughness = static_cast<double>(index) / static_cast<double>(resolution - 1);
     return std::max(roughness * roughness, static_cast<double>(kMinAlpha));
@@ -352,12 +371,13 @@ void buildTransmit(AlbedoTable& table, int nodes) {
         const double alpha = gridAlpha(ri, kTransmitRoughnessRes);
         std::array<double, kEtaRes> rWeighted{};
         std::array<double, kEtaRes> tWeighted{};
+        EscapeSums previous{};
         for (int mi = 0; mi < kTransmitMuRes; ++mi) {
-            const double mu = gridMu(mi, kTransmitMuRes);
+            const double mu = escapeMu(mi);
             const EscapeSums sums = escapeAlbedo(mu, alpha, rule);
-            // Trapezoid over the mu axis: the grid is edge-aligned, so the two endpoints span half a cell each and the
-            // step is 1/(kTransmitMuRes-1), not 1/kTransmitMuRes. First order.
-            const double endpoint = (mi == 0 || mi == kTransmitMuRes - 1) ? 0.5 : 1.0;
+            // Trapezoid of 2*E*mu over the node spacing, which sqrt spacing makes non-uniform. First order.
+            const double previousMu = mi > 0 ? escapeMu(mi - 1) : 0.0;
+            const double width = mu - previousMu;
             for (int ei = 0; ei < kEtaRes; ++ei) {
                 const auto e = static_cast<std::size_t>(ei);
                 const double r = sums.reflect[e];
@@ -366,16 +386,15 @@ void buildTransmit(AlbedoTable& table, int nodes) {
                     static_cast<float>(r);
                 table.t[static_cast<std::size_t>((((ri * kTransmitMuRes) + mi) * kEtaRes) + ei)] =
                     static_cast<float>(t);
-                rWeighted[e] += endpoint * 2.0 * r * mu;
-                tWeighted[e] += endpoint * 2.0 * t * mu;
+                rWeighted[e] += width * ((r * mu) + (previous.reflect[e] * previousMu));
+                tWeighted[e] += width * ((t * mu) + (previous.transmit[e] * previousMu));
             }
+            previous = sums;
         }
         for (int ei = 0; ei < kEtaRes; ++ei) {
             const auto e = static_cast<std::size_t>(ei);
-            table.ravg[static_cast<std::size_t>((ri * kEtaRes) + ei)] =
-                static_cast<float>(rWeighted[e] / (kTransmitMuRes - 1));
-            table.tavg[static_cast<std::size_t>((ri * kEtaRes) + ei)] =
-                static_cast<float>(tWeighted[e] / (kTransmitMuRes - 1));
+            table.ravg[static_cast<std::size_t>((ri * kEtaRes) + ei)] = static_cast<float>(rWeighted[e]);
+            table.tavg[static_cast<std::size_t>((ri * kEtaRes) + ei)] = static_cast<float>(tWeighted[e]);
         }
     });
 }
@@ -428,9 +447,22 @@ void buildMultipleScatteringShape(AlbedoTable& table) {
     }
 }
 
+// Escape total at a uniform-mu density node, read through the sqrt(mu) axis exactly as bsdf.cpp's escapeAlbedo reads it at that roughness and eta node, float arithmetic included.
+float escapeAtUniformMu(const AlbedoTable& table, int ri, int mi, int ei) {
+    const float mf = std::sqrt(static_cast<float>(mi) / static_cast<float>(kTransmitMuRes - 1)) * (kTransmitMuRes - 1);
+    const int m0 = std::min(static_cast<int>(mf), kTransmitMuRes - 2);
+    const float mt = mf - static_cast<float>(m0);
+    const auto at = [&](int m) {
+        const auto index = static_cast<std::size_t>((((ri * kTransmitMuRes) + m) * kEtaRes) + ei);
+        return table.r[index] + table.t[index];
+    };
+    return at(m0) + (mt * (at(m0 + 1) - at(m0)));
+}
+
 // Escape-deficit shape for the transmissive multiple-scattering lobes, the far-hemisphere twin of the shape above, one axis wider because the escape it is built from is eta-dependent and the Schlick split cannot factor that out.
 // bsdf.cpp reads it as both value and density: each transmissive share is its energy times this normalised (1-Escape(mu_i))*cos density divided by cos, so the density is the zero-variance one and the share integrates to its energy exactly -- cosine sampling paid relative variance 25 at roughness 0.13.
 // Unlike the reflect shape this is stored UNNORMALISED: bsdf.cpp blends four rows over (roughness, eta) and divides by the blended total, which reproduces the raw-deficit interpolation escapeAlbedo itself performs, where a blend of per-row-normalised shapes would not commute with it.
+// Uniform in mu, unlike the escape tables' sqrt(mu) axis, so bsdf.cpp's piecewise-linear inversion keeps one step width; each node reads the escape through that axis as the shading does.
 // Unnormalised storage is also what removes the degenerate row: a row whose deficit is numerically zero carries near-zero weight into the blend rather than a unit-mass shape of amplified noise, so this needs neither the reflect side's bake-time abort nor a substituted fallback.
 void buildTransmitMultipleScatteringShape(AlbedoTable& table) {
     const double step = 1.0 / (kTransmitMuRes - 1);
@@ -442,9 +474,9 @@ void buildTransmitMultipleScatteringShape(AlbedoTable& table) {
             double cdf = 0.0;
             for (int mi = 0; mi < kTransmitMuRes; ++mi) {
                 const auto index = static_cast<std::size_t>((((ri * kTransmitMuRes) + mi) * kEtaRes) + ei);
-                // Clamped at the grid point: the escape table is stratified-sampled, so a cell can land a few 1e-8 past unity, and a negative segment would break the CDF monotonicity the exact inversion depends on.
+                // Clamped: the quadrature can land a few 1e-8 past unity, and a negative segment would break the CDF monotonicity the exact inversion depends on.
                 // bsdf.cpp derives each share's value from this same density, so value and pdf share one support by construction.
-                const double deficit = std::max(1.0 - (table.r[index] + table.t[index]), 0.0);
+                const double deficit = std::max(1.0 - static_cast<double>(escapeAtUniformMu(table, ri, mi, ei)), 0.0);
                 const auto density = static_cast<float>(deficit * mi * step);
                 if (mi > 0) {
                     // Trapezoid over the float density as emitted, not the double behind it, so the stored pair is exactly consistent at the precision bsdf.cpp reads them back at.
@@ -563,6 +595,9 @@ bool writeInc(const std::string& path, const AlbedoTable& table, double residual
         << residual << " against a doubled rule.\n"
            "// Transmit side (r, t, ravg, tavg) is Gauss-Legendre in the NDF measure at "
         << transmitNodes << " nodes per panel, residual " << transmitResidual << " against a doubled rule.\n"
+           "// Its mu axis is uniform in sqrt(mu), mu = (k/(res-1))^2, so nodes crowd where E climbs from its\n"
+           "// grazing limit over mu ~ alpha; bsdf.cpp's escapeAlbedo indexes it by sqrt(mu). The msTransmit\n"
+           "// shape below stays uniform in mu, where its piecewise-linear inversion has one step width.\n"
            "// kMsReflectDensity/kMsReflectCdf are the reflected multiple-scattering lobe's sampling shape: a\n"
            "// piecewise-linear density over mu, proportional to (1-E(mu))*mu and normalised to 1, with its exact\n"
            "// prefix integrals. bsdf.cpp inverts the first and evaluates it for the matching pdf.\n"
