@@ -1,5 +1,5 @@
 // Correctness gate for PathTraceDriver (path_trace_driver.h), previously untested. Driven only through its public API
-// (requestTrace / accumulatedSamples / latestResult, maxSamples as the stop condition); also pins the request invariant
+// (requestTrace / latestResult / lastPassRecord, maxSamples as the stop condition); also pins the request invariant
 // that driverLoop's suppressed unchecked-optional-access reports rely on.
 
 #include <array>
@@ -7,8 +7,10 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <limits>
 #include <memory>
 #include <optional>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -44,9 +46,13 @@ using engine::scene::Triangle;
 // transport, so the image only has to be non-trivial, not converged.
 constexpr int kImageSize = 8;
 constexpr float kQuadExtent = 50.0F;
+// The camera sits at z = 5 looking down -z; the wall stands inside its field of view, right of centre.
+constexpr float kFloorZ = -3.0F;
+constexpr float kWallX = 1.0F;
+constexpr float kWallTopZ = 3.0F;
 
-// A single quad facing the camera, the same shape integrator_validate uses, kept local because this file must build
-// its scene at a permanent address that outlives the driver (see PathTraceDriver's constructor contract).
+// A floor facing the camera and a transmissive wall standing on it, kept local because this file must build its scene
+// at a permanent address that outlives the driver (see PathTraceDriver's constructor contract).
 struct TestScene {
     std::vector<Triangle> worldTriangles;
     std::vector<ShadingTriangle> shadingTriangles;
@@ -56,13 +62,11 @@ struct TestScene {
     std::vector<PathTraceSettings> perInstanceSettings;
 };
 
-void pushQuad(TestScene& scene, float z) {
-    const glm::vec3 corners[4] = {{-kQuadExtent, -kQuadExtent, z},
-                                   {kQuadExtent, -kQuadExtent, z},
-                                   {kQuadExtent, kQuadExtent, z},
-                                   {-kQuadExtent, kQuadExtent, z}};
-    const glm::vec3 normal(0.0F, 0.0F, 1.0F);
+// Corners wound counter-clockwise about `normal`, split along the 0-2 diagonal. The tangent is the first edge, which
+// lies in the quad's plane and so is orthogonal to the normal as the shading frame requires.
+void pushQuad(TestScene& scene, const std::array<glm::vec3, 4>& corners, glm::vec3 normal, int instance) {
     const std::array<int, 6> order = {0, 1, 2, 0, 2, 3};
+    const glm::vec4 tangent(glm::normalize(corners[1] - corners[0]), 1.0F);
     for (int t = 0; t < 2; ++t) {
         Triangle world{};
         ShadingTriangle shading{};
@@ -72,11 +76,11 @@ void pushQuad(TestScene& scene, float z) {
             ShadingVertex vertex{};
             vertex.position = p;
             vertex.normal = normal;
-            vertex.tangent = glm::vec4(1.0F, 0.0F, 0.0F, 1.0F);
+            vertex.tangent = tangent;
             vertex.uv = glm::vec2(0.0F);
             (v == 0 ? shading.v0 : v == 1 ? shading.v1 : shading.v2) = vertex;
         }
-        shading.instanceIndex = 0;
+        shading.instanceIndex = instance;
         scene.worldTriangles.push_back(world);
         scene.shadingTriangles.push_back(shading);
     }
@@ -112,11 +116,25 @@ struct DriverFixture {
 
 std::unique_ptr<DriverFixture> makeFixture() {
     auto fixture = std::make_unique<DriverFixture>();
-    pushQuad(fixture->scene, -3.0F);
-    fixture->scene.instances.push_back(
-        MeshInstance{tools::fixtures::makeMaterial(1.0F, glm::vec3(0.04F)), glm::mat4(1.0F), ""});
-    fixture->scene.instanceLightIndex.assign(fixture->scene.instances.size(), -1);
-    fixture->scene.perInstanceSettings.assign(fixture->scene.instances.size(), makeSettings());
+    TestScene& scene = fixture->scene;
+    // Every accumulated image must vary across passes, or a missing accumulate entry for it is invisible (asserted in
+    // running_mean_matches_batch_mean): the wall's contact with the floor drives ao, the floor-wall interreflection
+    // the indirect lanes, and the wall's transmission lobe refraction.
+    pushQuad(scene,
+             {glm::vec3(-kQuadExtent, -kQuadExtent, kFloorZ), glm::vec3(kQuadExtent, -kQuadExtent, kFloorZ),
+              glm::vec3(kQuadExtent, kQuadExtent, kFloorZ), glm::vec3(-kQuadExtent, kQuadExtent, kFloorZ)},
+             glm::vec3(0.0F, 0.0F, 1.0F), 0);
+    pushQuad(scene,
+             {glm::vec3(kWallX, -kQuadExtent, kFloorZ), glm::vec3(kWallX, -kQuadExtent, kWallTopZ),
+              glm::vec3(kWallX, kQuadExtent, kWallTopZ), glm::vec3(kWallX, kQuadExtent, kFloorZ)},
+             glm::vec3(-1.0F, 0.0F, 0.0F), 1);
+    for (int i = 0; i < 2; ++i) {
+        scene.instances.push_back(
+            MeshInstance{tools::fixtures::makeMaterial(1.0F, glm::vec3(0.04F)), glm::mat4(1.0F), ""});
+    }
+    scene.instanceLightIndex.assign(scene.instances.size(), -1);
+    scene.perInstanceSettings.assign(scene.instances.size(), makeSettings());
+    scene.perInstanceSettings[1].transmissionFactor = 1.0F;
     fixture->accel = EmbreeAccel::build(fixture->scene.worldTriangles);
     if (!fixture->accel.has_value()) {
         return fixture;
@@ -160,13 +178,54 @@ bool waitFor(Predicate predicate) {
     return false;
 }
 
-// Renders the same passes the driver would, synchronously, and forms the batch mean in double. The driver's own
-// scramble seed is its generation, which is 1 for the first request of a driver's life.
-engine::gfx::HdrImage oracleBatchMean(DriverFixture& fixture, const Camera& camera, int passes,
-                                       std::uint32_t scrambleSeed) {
+// Polls until the driver publishes a result of `generation` averaging at least `samples` passes; nullptr on timeout. Keyed on the snapshot's own fields, which publish with its images, so the result returned is exactly the one counted.
+std::shared_ptr<const PathTraceResult> waitForPublished(const PathTraceDriver& driver, std::uint64_t generation,
+                                                        int samples) {
+    std::shared_ptr<const PathTraceResult> result;
+    const bool published = waitFor([&] {
+        result = driver.latestResult();
+        return result != nullptr && result->generation == generation && result->samples >= samples;
+    });
+    return published ? result : nullptr;
+}
+
+// Every image the driver averages, index-aligned with accumulateMean's lists (path_trace_driver.cpp).
+struct Lane {
+    engine::gfx::HdrImage PathTraceResult::*image;
+    const char* name;
+};
+constexpr std::array<Lane, 9> kLanes{{{&PathTraceResult::beauty, "beauty"},
+                                      {&PathTraceResult::bounceHeatmap, "bounceHeatmap"},
+                                      {&PathTraceResult::ao, "ao"},
+                                      {&PathTraceResult::shadow, "shadow"},
+                                      {&PathTraceResult::directDiffuse, "directDiffuse"},
+                                      {&PathTraceResult::indirectDiffuse, "indirectDiffuse"},
+                                      {&PathTraceResult::directSpecular, "directSpecular"},
+                                      {&PathTraceResult::indirectSpecular, "indirectSpecular"},
+                                      {&PathTraceResult::refraction, "refraction"}}};
+
+// Per float of every lane: the batch mean rounded once to float, and the bound on the driver's distance from it. Per
+// lane: whether any float changed between passes, without which the lane cannot expose an accumulation defect.
+struct OracleMean {
+    std::array<std::vector<float>, kLanes.size()> mean;
+    std::array<std::vector<double>, kLanes.size()> tolerance;
+    std::array<bool, kLanes.size()> varies{};
+};
+
+// Renders the passes the driver would, synchronously, forming the exact batch mean m_k in double and, beside it, the
+// forward-error bound E_k of the driver's float32 running mean (derivation at running_mean_matches_batch_mean).
+OracleMean oracleBatchMean(DriverFixture& fixture, const Camera& camera, int passes, std::uint32_t scrambleSeed) {
+    constexpr double kUnitRoundoff = std::numeric_limits<float>::epsilon() / 2.0;
+    constexpr double kGamma4 = (4.0 * kUnitRoundoff) / (1.0 - (4.0 * kUnitRoundoff));
     const engine::scene::LightSet lights(&fixture.environment, 0.0F, 1.0F, fixture.scene.quadLights);
     PathTraceResult pass = engine::scene::makePathTraceResult(kImageSize, kImageSize);
-    std::vector<double> sum(static_cast<std::size_t>(kImageSize) * kImageSize * 4, 0.0);
+    const std::size_t floats = static_cast<std::size_t>(kImageSize) * kImageSize * 4;
+    std::array<std::vector<double>, kLanes.size()> sum;
+    OracleMean oracle;
+    for (std::size_t lane = 0; lane < kLanes.size(); ++lane) {
+        sum[lane].assign(floats, 0.0);
+        oracle.tolerance[lane].assign(floats, 0.0);
+    }
     const std::atomic<std::uint64_t> generation{scrambleSeed};
     engine::debug::PassStats stats;
     for (int p = 0; p < passes; ++p) {
@@ -177,75 +236,114 @@ engine::gfx::HdrImage oracleBatchMean(DriverFixture& fixture, const Camera& came
                                          fixture.scene.perInstanceSettings, scrambleSeed, /*sampleBase=*/p,
                                          /*sampleCount=*/passes, generation, scrambleSeed, fixture.pool, stats,
                                          pass);
-        for (std::size_t i = 0; i < sum.size(); ++i) {
-            sum[i] += static_cast<double>(pass.beauty.rgba[i]);
+        const double k = p + 1;
+        for (std::size_t lane = 0; lane < kLanes.size(); ++lane) {
+            const std::vector<float>& x = (pass.*kLanes[lane].image).rgba;
+            for (std::size_t i = 0; i < floats; ++i) {
+                const double previousMean = p == 0 ? 0.0 : sum[lane][i] / (k - 1.0);
+                sum[lane][i] += static_cast<double>(x[i]);
+                // E_1 = 0: the driver publishes its first pass unaltered.
+                if (p > 0) {
+                    oracle.varies[lane] = oracle.varies[lane] || static_cast<double>(x[i]) != previousMean;
+                    const double e = oracle.tolerance[lane][i];
+                    oracle.tolerance[lane][i] = ((1.0 - (1.0 / k)) * (1.0 + kUnitRoundoff) * e) +
+                                                (kGamma4 * (std::fabs(x[i] - previousMean) + e) / k) +
+                                                (kUnitRoundoff * std::fabs(sum[lane][i] / k));
+                }
+            }
         }
     }
-    engine::gfx::HdrImage mean{kImageSize, kImageSize,
-                                std::vector<float>(static_cast<std::size_t>(kImageSize) * kImageSize * 4, 0.0F)};
-    for (std::size_t i = 0; i < sum.size(); ++i) {
-        mean.rgba[i] = static_cast<float>(sum[i] / static_cast<double>(passes));
+    for (std::size_t lane = 0; lane < kLanes.size(); ++lane) {
+        oracle.mean[lane].resize(floats);
+        for (std::size_t i = 0; i < floats; ++i) {
+            const double mean = sum[lane][i] / static_cast<double>(passes);
+            oracle.mean[lane][i] = static_cast<float>(mean);
+            // Plus the oracle's own single rounding of the exact mean to float.
+            oracle.tolerance[lane][i] += kUnitRoundoff * std::fabs(mean);
+        }
     }
-    return mean;
+    return oracle;
 }
 
 // --- Checks ------------------------------------------------------------------------------------------------------
 
-// The core accumulation property. The driver publishes a RUNNING mean, m_n = m_{n-1} + (x_n - m_{n-1})/n, which is a
-// different rounding sequence from the batch mean sum(x)/n -- so the two are close but NOT bit-identical, and the band
-// is a deterministic forward-error bound rather than a statistical one (Higham, Accuracy and Stability of Numerical
-// Algorithms, 2nd ed. 4.2). There is no probability in this assertion.
-// The bound is still extremely tight relative to the failures it must catch: a running sum published without its
-// division, a stale previous mean, or a missing entry in the nine-image accumulate loop (whose own comment warns that
-// nothing guards it at compile time) all miss by orders of magnitude, not by ulps.
+// The core accumulation property, on all nine images. The driver publishes a RUNNING mean (Welford 1962; West 1979),
+// m_k = m_{k-1} + (x_k - m_{k-1})/k, a different rounding sequence from the batch mean sum(x)/n, so the two differ by a
+// deterministic forward error with no probability in it. Its float32 step, FMA-contracted or not, is
+// m^_k = fl(m^_{k-1} + fl(fl(x_k - m^_{k-1}) * fl(1/k))), and in Higham's theta/gamma calculus (Accuracy and Stability
+// of Numerical Algorithms, 2nd ed., Lemmas 3.1 and 3.3) its error e_k = m^_k - m_k obeys, exactly,
+// e_k = (1 - 1/k)(1 + d)e_{k-1} + (1 + d)theta_3 (x_k - m^_{k-1})/k + d m_k, |d| <= u, |theta_3| <= gamma_3, e_1 = 0,
+// so |e_k| <= E_k = (1 - 1/k)(1 + u)E_{k-1} + gamma_4(|x_k - m_{k-1}| + E_{k-1})/k + u|m_k| -- the updating-mean
+// analysis of Chan, Golub & LeVeque (1983) carried to a rigorous per-element bound. The oracle evaluates E_n per float
+// from the exact data plus u|m_n| for its own rounding; evaluating it in double perturbs it by ~2^-29 of itself.
+// A running sum published without its division, a stale previous mean, a wrong 1/n, or a missing entry in the
+// nine-image accumulate loop all miss by orders of magnitude over it.
 ENGINE_CHECK(running_mean_matches_batch_mean, Slow, Exact) {
     constexpr int kPasses = 8;
-    ctx.plan(1);
+    ctx.plan(3);
     std::unique_ptr<DriverFixture> fixture = makeFixture();
     if (!fixture->valid()) {
-        ENGINE_EXPECT(ctx, false, "scene/driver construction failed");
+        for (int i = 0; i < 3; ++i) {
+            ENGINE_EXPECT(ctx, false, "scene/driver construction failed");
+        }
         return;
     }
     const Camera camera = makeCamera();
-    fixture->driver->requestTrace(makeRequest(kPasses, camera));
-    const bool reached = waitFor([&] { return fixture->driver->accumulatedSamples() >= kPasses; });
-    if (!reached) {
-        ENGINE_EXPECT(ctx, false, "driver never reached its maxSamples cap");
-        return;
-    }
-    const std::shared_ptr<const PathTraceResult> published = fixture->driver->latestResult();
+    const std::uint64_t generation = fixture->driver->requestTrace(makeRequest(kPasses, camera));
+    const std::shared_ptr<const PathTraceResult> published =
+        waitForPublished(*fixture->driver, generation, kPasses);
     if (published == nullptr) {
-        ENGINE_EXPECT(ctx, false, "driver published nothing after reaching its cap");
+        for (int i = 0; i < 3; ++i) {
+            ENGINE_EXPECT(ctx, false, "driver never published its maxSamples cap");
+        }
         return;
     }
-    // Generation 1: the first requestTrace of this driver's life, and the driver uses the generation AS the seed.
-    const engine::gfx::HdrImage expected = oracleBatchMean(*fixture, camera, kPasses, 1U);
+    char countDetail[96];
+    std::snprintf(countDetail, sizeof(countDetail), "published %d samples against a cap of %d", published->samples,
+                  kPasses);
+    ENGINE_EXPECT(ctx, published->samples == kPasses, countDetail);
 
-    double worstError = 0.0;
-    double maxTerm = 0.0;
-    for (float v : expected.rgba) {
-        maxTerm = std::max(maxTerm, static_cast<double>(std::fabs(v)));
+    // The driver's scramble seed is its generation (driverLoop).
+    const OracleMean expected = oracleBatchMean(*fixture, camera, kPasses, static_cast<std::uint32_t>(generation));
+    std::string constantLanes;
+    for (std::size_t lane = 0; lane < kLanes.size(); ++lane) {
+        if (!expected.varies[lane]) {
+            constantLanes += std::string(" ") + kLanes[lane].name;
+        }
     }
-    // gamma_n = n*u/(1 - n*u) with u = 2^-24 for float32, applied to the magnitude being accumulated.
-    constexpr double kUnitRoundoff = 5.9604644775390625e-08;  // 2^-24
-    const double gamma = (kPasses * kUnitRoundoff) / (1.0 - (kPasses * kUnitRoundoff));
-    const double bound = gamma * std::max(maxTerm, 1e-6);
-    for (std::size_t i = 0; i < expected.rgba.size(); ++i) {
-        const double error = std::fabs(static_cast<double>(published->beauty.rgba[i]) -
-                                        static_cast<double>(expected.rgba[i]));
-        worstError = std::max(worstError, error);
+    const std::string coverageDetail = "lanes identical in every pass, so blind to accumulation:" + constantLanes;
+    ENGINE_EXPECT(ctx, constantLanes.empty(), coverageDetail);
+    std::size_t violations = 0;
+    std::size_t floats = 0;
+    double worstRatio = 0.0;
+    const char* worstLane = kLanes[0].name;
+    for (std::size_t lane = 0; lane < kLanes.size(); ++lane) {
+        const std::vector<float>& running = ((*published).*kLanes[lane].image).rgba;
+        for (std::size_t i = 0; i < running.size(); ++i) {
+            const double error = std::fabs(static_cast<double>(running[i]) - expected.mean[lane][i]);
+            const double tolerance = expected.tolerance[lane][i];
+            // Negated so a NaN counts as a violation; a zero bound admits only an exact match.
+            violations += !(error <= tolerance) ? 1 : 0;
+            const double ratio =
+                tolerance > 0.0 ? error / tolerance : (error == 0.0 ? 0.0 : std::numeric_limits<double>::infinity());
+            if (ratio > worstRatio) {
+                worstRatio = ratio;
+                worstLane = kLanes[lane].name;
+            }
+        }
+        floats += running.size();
     }
-    char detail[224];
+    char detail[192];
     std::snprintf(detail, sizeof(detail),
-                  "worst |running - batch| = %.3e over %zu texels, forward-error bound %.3e (gamma_%d, peak %.3f)",
-                  worstError, expected.rgba.size(), bound, kPasses, maxTerm);
-    ENGINE_EXPECT(ctx, worstError <= bound, detail);
+                  "%zu of %zu floats over their forward-error bound; worst |running - batch|/bound = %.3e (%s)",
+                  violations, floats, worstRatio, worstLane);
+    ENGINE_EXPECT(ctx, violations == 0, detail);
 }
 
 // The sampler's two inputs are not interchangeable (sampler.h), and a driver that held sampleBase at 0 would publish
 // the mean of N IDENTICAL passes -- the exact defect sampler_validate's pass-direction check was written against,
 // here asserted through the driver that would commit it.
-// Checked exactly at maxSamples = 1, where the published image must be bit-identical to the single oracle pass: no
+// Checked exactly at maxSamples = 1, where every published image must be bit-identical to the single oracle pass: no
 // averaging has happened yet, so there is no rounding difference to admit a tolerance.
 ENGINE_CHECK(first_pass_is_bit_identical_to_oracle, Slow, Exact) {
     ctx.plan(1);
@@ -255,24 +353,25 @@ ENGINE_CHECK(first_pass_is_bit_identical_to_oracle, Slow, Exact) {
         return;
     }
     const Camera camera = makeCamera();
-    fixture->driver->requestTrace(makeRequest(1, camera));
-    if (!waitFor([&] { return fixture->driver->accumulatedSamples() >= 1; })) {
-        ENGINE_EXPECT(ctx, false, "driver never completed its first pass");
-        return;
-    }
-    const std::shared_ptr<const PathTraceResult> published = fixture->driver->latestResult();
+    const std::uint64_t generation = fixture->driver->requestTrace(makeRequest(1, camera));
+    const std::shared_ptr<const PathTraceResult> published = waitForPublished(*fixture->driver, generation, 1);
     if (published == nullptr) {
-        ENGINE_EXPECT(ctx, false, "driver published nothing");
+        ENGINE_EXPECT(ctx, false, "driver never published its first pass");
         return;
     }
-    const engine::gfx::HdrImage expected = oracleBatchMean(*fixture, camera, 1, 1U);
+    const OracleMean expected = oracleBatchMean(*fixture, camera, 1, static_cast<std::uint32_t>(generation));
     std::size_t differing = 0;
-    for (std::size_t i = 0; i < expected.rgba.size(); ++i) {
-        differing += published->beauty.rgba[i] != expected.rgba[i] ? 1 : 0;
+    std::size_t floats = 0;
+    for (std::size_t lane = 0; lane < kLanes.size(); ++lane) {
+        const std::vector<float>& image = ((*published).*kLanes[lane].image).rgba;
+        for (std::size_t i = 0; i < image.size(); ++i) {
+            differing += image[i] != expected.mean[lane][i] ? 1 : 0;
+        }
+        floats += image.size();
     }
     char detail[192];
     std::snprintf(detail, sizeof(detail), "%zu of %zu floats differ from a direct single-pass render", differing,
-                  expected.rgba.size());
+                  floats);
     ENGINE_EXPECT(ctx, differing == 0, detail);
 }
 
@@ -280,22 +379,23 @@ ENGINE_CHECK(first_pass_is_bit_identical_to_oracle, Slow, Exact) {
 // image moving under a caller that had asked it to stop, and would burn a core doing it.
 ENGINE_CHECK(max_samples_cap_is_respected, Slow, Exact) {
     constexpr int kCap = 4;
-    ctx.plan(2);
+    ctx.plan(1);
     std::unique_ptr<DriverFixture> fixture = makeFixture();
     if (!fixture->valid()) {
         ENGINE_EXPECT(ctx, false, "scene/driver construction failed");
-        ENGINE_EXPECT(ctx, false, "scene/driver construction failed");
         return;
     }
-    fixture->driver->requestTrace(makeRequest(kCap, makeCamera()));
-    const bool reached = waitFor([&] { return fixture->driver->accumulatedSamples() >= kCap; });
-    ENGINE_EXPECT(ctx, reached, "driver never reached its maxSamples cap");
+    const std::uint64_t generation = fixture->driver->requestTrace(makeRequest(kCap, makeCamera()));
+    if (waitForPublished(*fixture->driver, generation, kCap) == nullptr) {
+        ENGINE_EXPECT(ctx, false, "driver never reached its maxSamples cap");
+        return;
+    }
     // Long enough that an uncapped driver would have run many further passes at this image size.
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    const int samples = fixture->driver->latestResult()->samples;
     char detail[128];
-    std::snprintf(detail, sizeof(detail), "accumulated %d samples against a cap of %d",
-                  fixture->driver->accumulatedSamples(), kCap);
-    ENGINE_EXPECT(ctx, fixture->driver->accumulatedSamples() == kCap, detail);
+    std::snprintf(detail, sizeof(detail), "published %d samples against a cap of %d", samples, kCap);
+    ENGINE_EXPECT(ctx, samples == kCap, detail);
 }
 
 // The generation requestTrace returns is the one its passes carry, so a caller can tell its own accumulation's records from a superseded request's; a request replaced before pickup never runs.
@@ -330,8 +430,8 @@ ENGINE_CHECK(new_request_restarts_accumulation, Slow, Exact) {
         ENGINE_EXPECT(ctx, false, "scene/driver construction failed");
         return;
     }
-    fixture->driver->requestTrace(makeRequest(4, makeCamera()));
-    if (!waitFor([&] { return fixture->driver->accumulatedSamples() >= 4; })) {
+    const std::uint64_t first = fixture->driver->requestTrace(makeRequest(4, makeCamera()));
+    if (waitForPublished(*fixture->driver, first, 4) == nullptr) {
         ENGINE_EXPECT(ctx, false, "driver never reached the first cap");
         ENGINE_EXPECT(ctx, false, "driver never reached the first cap");
         return;
@@ -340,14 +440,15 @@ ENGINE_CHECK(new_request_restarts_accumulation, Slow, Exact) {
     // A different camera: a genuinely different image, which must not be averaged into the first.
     const Camera moved(glm::vec3(0.5F, 0.25F, 5.0F), 10.0F, -5.0F, Camera::FilmBack{36.0F, 24.0F}, 50.0F, 0.01F,
                         1000.0F, 2.8F, 1.0F / 125.0F, 100.0F);
-    fixture->driver->requestTrace(makeRequest(4, moved));
-    // The counter must return to a value at or below the new cap having restarted, not continue climbing past it.
-    const bool restarted = waitFor([&] { return fixture->driver->accumulatedSamples() >= 4; });
-    ENGINE_EXPECT(ctx, restarted, "driver never reached the second cap after the camera moved");
+    const std::uint64_t second = fixture->driver->requestTrace(makeRequest(4, moved));
+    // Keyed on the second generation: the first's result already holds 4 samples, so a count alone would pass unrestarted.
+    const std::shared_ptr<const PathTraceResult> restarted = waitForPublished(*fixture->driver, second, 4);
+    ENGINE_EXPECT(ctx, restarted != nullptr, "driver never reached the second cap after the camera moved");
+    // Restarted, the count returns to the new cap rather than continuing past it.
+    const int samples = restarted != nullptr ? restarted->samples : 0;
     char detail[160];
-    std::snprintf(detail, sizeof(detail), "accumulated %d after restart, which must equal the new cap of 4",
-                  fixture->driver->accumulatedSamples());
-    ENGINE_EXPECT(ctx, fixture->driver->accumulatedSamples() == 4, detail);
+    std::snprintf(detail, sizeof(detail), "published %d after restart, which must equal the new cap of 4", samples);
+    ENGINE_EXPECT(ctx, samples == 4, detail);
 }
 
 // Suspension parks the driver while a rasterizer-backed AOV is shown. Entering it bumps the generation (cancelling the
@@ -361,25 +462,26 @@ ENGINE_CHECK(suspension_halts_and_resumes, Slow, Exact) {
         return;
     }
     // Uncapped, so only suspension can stop it.
-    fixture->driver->requestTrace(makeRequest(0, makeCamera()));
-    if (!waitFor([&] { return fixture->driver->accumulatedSamples() >= 2; })) {
+    const std::uint64_t generation = fixture->driver->requestTrace(makeRequest(0, makeCamera()));
+    if (waitForPublished(*fixture->driver, generation, 2) == nullptr) {
         ENGINE_EXPECT(ctx, false, "driver never started accumulating");
         ENGINE_EXPECT(ctx, false, "driver never started accumulating");
         return;
     }
     fixture->driver->setSuspended(true);
-    // Let any pass already in flight finish and be discarded before sampling the counter.
+    // Let any pass already in flight finish and be discarded before sampling what is published.
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
-    const int parked = fixture->driver->accumulatedSamples();
+    const std::shared_ptr<const PathTraceResult> parked = fixture->driver->latestResult();
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    const std::shared_ptr<const PathTraceResult> later = fixture->driver->latestResult();
     char haltDetail[160];
-    std::snprintf(haltDetail, sizeof(haltDetail), "accumulated %d while suspended, was %d when parked",
-                  fixture->driver->accumulatedSamples(), parked);
-    ENGINE_EXPECT(ctx, fixture->driver->accumulatedSamples() == parked, haltDetail);
+    std::snprintf(haltDetail, sizeof(haltDetail), "published %d samples while suspended, %d when parked",
+                  later->samples, parked->samples);
+    ENGINE_EXPECT(ctx, later == parked, haltDetail);
 
     fixture->driver->setSuspended(false);
-    ENGINE_EXPECT(ctx, waitFor([&] { return fixture->driver->accumulatedSamples() > parked; }),
-                  "driver did not resume accumulating after suspension was lifted");
+    ENGINE_EXPECT(ctx, waitFor([&] { return fixture->driver->latestResult()->generation > parked->generation; }),
+                  "driver did not resume accumulating under a new generation after suspension was lifted");
 }
 
 // The buffer pool holds four images for up to three simultaneously-pinned results, an arithmetic nothing tested. A
@@ -392,17 +494,18 @@ ENGINE_CHECK(published_results_are_not_overwritten, Slow, Exact) {
         ENGINE_EXPECT(ctx, false, "scene/driver construction failed");
         return;
     }
-    fixture->driver->requestTrace(makeRequest(0, makeCamera()));
-    if (!waitFor([&] { return fixture->driver->latestResult() != nullptr; })) {
+    const std::uint64_t generation = fixture->driver->requestTrace(makeRequest(0, makeCamera()));
+    // Pin a published result and snapshot it, then let the driver run many further passes. The running mean changes
+    // every pass, so if the pinned buffer were recycled its contents would move.
+    const std::shared_ptr<const PathTraceResult> pinned = waitForPublished(*fixture->driver, generation, 1);
+    if (pinned == nullptr) {
         ENGINE_EXPECT(ctx, false, "driver published nothing");
         return;
     }
-    // Pin a published result and snapshot it, then let the driver run many further passes. The running mean changes
-    // every pass, so if the pinned buffer were recycled its contents would move.
-    const std::shared_ptr<const PathTraceResult> pinned = fixture->driver->latestResult();
     const std::vector<float> snapshot = pinned->beauty.rgba;
-    const int startedAt = fixture->driver->accumulatedSamples();
-    if (!waitFor([&] { return fixture->driver->accumulatedSamples() >= startedAt + 6; })) {
+    const std::shared_ptr<const PathTraceResult> later =
+        waitForPublished(*fixture->driver, generation, pinned->samples + 6);
+    if (later == nullptr) {
         ENGINE_EXPECT(ctx, false, "driver stalled while a single result was pinned");
         return;
     }
@@ -412,7 +515,7 @@ ENGINE_CHECK(published_results_are_not_overwritten, Slow, Exact) {
     }
     char detail[192];
     std::snprintf(detail, sizeof(detail), "%zu of %zu floats in a pinned result changed while %d further passes ran",
-                  moved, snapshot.size(), fixture->driver->accumulatedSamples() - startedAt);
+                  moved, snapshot.size(), later->samples - pinned->samples);
     ENGINE_EXPECT(ctx, moved == 0, detail);
 }
 
@@ -427,17 +530,11 @@ ENGINE_CHECK(over_range_stats_match_serial_scan, Slow, Exact) {
         }
         return;
     }
-    fixture->driver->requestTrace(makeRequest(2, makeCamera()));
-    if (!waitFor([&] { return fixture->driver->accumulatedSamples() >= 2; })) {
-        for (int i = 0; i < 4; ++i) {
-            ENGINE_EXPECT(ctx, false, "driver never reached its cap");
-        }
-        return;
-    }
-    const std::shared_ptr<const PathTraceResult> published = fixture->driver->latestResult();
+    const std::uint64_t generation = fixture->driver->requestTrace(makeRequest(2, makeCamera()));
+    const std::shared_ptr<const PathTraceResult> published = waitForPublished(*fixture->driver, generation, 2);
     if (published == nullptr) {
         for (int i = 0; i < 4; ++i) {
-            ENGINE_EXPECT(ctx, false, "driver published nothing");
+            ENGINE_EXPECT(ctx, false, "driver never reached its cap");
         }
         return;
     }
