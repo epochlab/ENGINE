@@ -207,6 +207,74 @@ bool withinBand(const glm::vec3& value, float centre, float tolerance) {
     return minChannel(value) >= centre - tolerance && maxChannel(value) <= centre + tolerance;
 }
 
+// Support coverage: every direction the BSDF has value at must carry mixture density, the condition under which the one-sample MIS estimator is unbiased (Veach 1997 sec. 9.2); where it fails, that energy is never drawn and the render is darker by it, not noisier.
+// The gap it closes: sampling_chi_square tests the shape a strategy draws, and the furnaces test totals within a band, so a strategy whose selection is gated off while its lobe still has value is invisible to both -- msTransmit's forward-eta selection gate against its reciprocal-eta value gate did exactly that at roughness 0.128-0.168 on the entering side, under 1e-3 of the energy.
+// Exact, not a tolerance: f > 0 with pdf == 0 is a support defect at any magnitude. The converse (density on a zero-valued lobe) is variance, not bias, and is not asserted.
+// Roughness is swept at 8 steps per escape-table node through the band where the msTransmit lobe switches on, plus coarse points either side; both sides of the interface, every authored-range ior, the whole sphere of wi.
+ENGINE_CHECK(strategy_coverage, Fast, Exact) {
+    constexpr int kMuNodes = 16;
+    constexpr int kPhiNodes = 8;
+    constexpr float kBandStep = 1.0F / 248.0F;
+    std::vector<float> roughnesses = {0.05F, 0.25F, 0.5F, 1.0F};
+    for (float roughness = 0.12F; roughness <= 0.18F; roughness += kBandStep) {
+        roughnesses.push_back(roughness);
+    }
+    const std::array<float, 7> iors = {1.063F, 1.2F, 1.33F, 1.5F, 1.5168F, 2.0F, 2.4F};
+    const std::array<float, 6> ndotVs = {0.95F, 0.6F, 0.2F, -0.2F, -0.6F, -0.95F};
+    const std::array<float, 2> transmissions = {0.5F, 1.0F};
+
+    bool ok = true;
+    long long valued = 0;
+    long long farValued = 0;
+    long long uncovered = 0;
+    for (float roughness : roughnesses) {
+        for (float ior : iors) {
+            for (float transmission : transmissions) {
+                const BsdfParams params{glm::vec3(1.0F), 0.0F, roughness,
+                                         glm::vec3(0.04F), glm::vec3(1.0F), ior,
+                                         transmission, /*diffuseRoughness=*/0.0F,
+                                         engine::scene::eonAlbedoInversion(glm::vec3(1.0F), 0.0F),
+                                         /*transmissionTint=*/glm::vec3(1.0F)};
+                for (float ndotV : ndotVs) {
+                    const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (ndotV * ndotV))), 0.0F, ndotV);
+                    for (int mi = 0; mi < 2 * kMuNodes; ++mi) {
+                        const float z = -1.0F + ((static_cast<float>(mi) + 0.5F) / kMuNodes);
+                        const float r = std::sqrt(std::max(0.0F, 1.0F - (z * z)));
+                        for (int pi = 0; pi < kPhiNodes; ++pi) {
+                            const float phi = 2.0F * kPi * (static_cast<float>(pi) + 0.5F) / kPhiNodes;
+                            const glm::vec3 wi(r * std::cos(phi), r * std::sin(phi), z);
+                            if (!(maxChannel(engine::scene::evaluateBsdf(params, wo, wi)) > 0.0F)) {
+                                continue;
+                            }
+                            ++valued;
+                            farValued += (wi.z * wo.z < 0.0F) ? 1 : 0;
+                            if (engine::scene::pdfBsdf(params, wo, wi) > 0.0F) {
+                                continue;
+                            }
+                            if (uncovered++ < 8) {
+                                std::cerr << "bsdf_validate: FAILED strategy coverage at roughness=" << roughness
+                                          << " ior=" << ior << " transmission=" << transmission
+                                          << " ndotV=" << ndotV << " wi.z=" << wi.z << " phi=" << phi
+                                          << " -- the BSDF has value here and no strategy samples it\n";
+                            }
+                            ok = false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Anti-vacuity: the far hemisphere is where the gated lobe lives, so a sweep that never found value there tested nothing.
+    if (farValued == 0) {
+        std::cerr << "bsdf_validate: FAILED strategy coverage found no far-side direction with value\n";
+        ok = false;
+    }
+    std::cout << "  strategy coverage: " << valued << " valued directions (" << farValued << " far-side), "
+              << uncovered << " with zero mixture density\n";
+    finish(ctx, ok, "strategy_coverage failed; see the rows above");
+    return;
+}
+
 // Furnace test through sampleBsdf: uniform radiance L0=1 from every direction (both hemispheres, since transmission can receive from the far side); estimator Lo = mean(throughputWeight) since throughputWeight already folds in f*cosTheta/pdf.
 // ndotV sweep includes negative values (woLocal.z<0, the exiting side of a transmissive dielectric) and a value past the ior=1.5 critical angle (~41.8deg, cosTheta~0.745) to force total internal reflection.
 // Energy bound is 1.0 (L0) everywhere except the exiting side (ndotV<0) of a transmissive material below the critical angle, where sampleBsdf's eta^2 non-symmetric radiance-compression factor (Veach 1997 sec. 5.2, see bsdf.cpp's transmission branch) legitimately raises Lo above L0: L/n^2 is the invariant along a ray, so radiance increases going from a denser medium (ior=1.5, inside) into a rarer one (1.0, outside) by up to ior^2.
@@ -1598,8 +1666,8 @@ ENGINE_CHECK(reciprocity, Fast, Exact) {
 
 // eta^2-corrected reciprocity for the transmission lobe: f_t(wo->wi)*eta_wi^2 == f_t(wi->wo)*eta_wo^2. Every term in evaluateTransmissionLobe is symmetric under the swap except denom = (wo.h) + etaR*(wi.h), which the reversed frame rescales by etaI/etaT; squared, that is exactly the eta ratio above. With wo outside and wi inside it reads f(wo->wi)*ior^2 == f(wi->wo).
 // Catches a misplaced etaR^2, a flipped denom orientation or an un-flipped ht -- O(1) errors (a stray eta^2 is 2.25x or 0.44x at ior 1.5) invisible to the furnace and round-trip tests, which assert only totals and in which the two sides' errors cancel.
-// SINGLE SCATTER ONLY, permanently -- not a symptom of a fixable bug. multiScatterShape (bsdf.cpp) now looks up escapeWi at the correct per-branch eta (reciprocal for a transmitted wi, matching wo's orientation for a reflected one, each paired with its own averageEscapeAlbedo normalisation), which restores the total-energy identity (checkTransmissiveEnergyBalance sweeps this at roughness up to 1.0) but does not and cannot make the multi-scatter transmit lobe itself reciprocal: its numerator is symmetric under the wo/wi swap but its denominator (deficitAvg, tied to each side's own physical eta orientation) is not, which is inherent to transmissive multiple scattering, not an implementation gap. Known limitation (README sec. 4): it blocks bidirectional transport through rough glass, not this unidirectional integrator. Confirmed empirically: extending this sweep to roughness 0.20 still passes (the multi-scatter term stays under kMinDeficit there), but 0.40 fails hard (up to 5x forward/reverse mismatch) for exactly this reason -- do not chase that by widening the sweep.
-// Isolated with no new accessor by staying under bsdf.cpp's kMinDeficit, where the multiple-scattering term switches itself off: 1 - escapeAvg measures 1.4e-4 at roughness 0.10 and 1.8e-3 at 0.20 against a 1e-3 gate, so 0.15 upward is not safe. Both roughnesses stay above kSmoothAlpha or there is no continuous lobe to test at all.
+// SINGLE SCATTER ONLY, permanently -- not a symptom of a fixable bug. transmitMultiScatter (bsdf.cpp) is (1-escapeWo) at wo's eta times the escape-deficit density at the reciprocal eta, each normalised within its own orientation, which makes its total exact (checkTransmissiveEnergyBalance sweeps this to roughness 1.0) but cannot make it reciprocal: the swap exchanges which orientation each factor is read at, which is inherent to transmissive multiple scattering, not an implementation gap. Known limitation (README sec. 4): it blocks bidirectional transport through rough glass, not this unidirectional integrator. 0.40 fails hard (up to 5x forward/reverse mismatch) for exactly this reason -- do not chase that by widening the sweep.
+// Isolated by magnitude, with no new accessor: the multiple-scattering term is live at every rough roughness, but at 0.05 and 0.10 its deficit is so far below the single-scatter peak these constructed pairs sit on that the worst mismatch is unchanged by it (7.7e-5 and 3.0e-5 with the term on and off), two orders inside the tolerance. Both roughnesses stay above kSmoothAlpha or there is no continuous lobe to test at all.
 // wi is CONSTRUCTED, not sampled: at these roughnesses the lobe is a fraction of a degree wide, so an arbitrary far-side direction returns zero on both sides and the check passes having tested nothing. Refract wo through the macro normal, then perturb by a multiple of alpha for off-peak pairs; the non-zero-pair count is asserted for the same reason.
 // transmissionFactor is pinned at 1.0. Between 0 and 1 the entering side scales the lobe by it and the exiting side by 1.0 -- a modelling asymmetry (inside the medium there is no substrate to withhold anything), not a Jacobian error, so sweeping it would test the convention rather than the invariant.
 ENGINE_CHECK(transmission_reciprocity, Fast, Exact) {
