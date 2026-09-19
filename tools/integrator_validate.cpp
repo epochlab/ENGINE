@@ -1007,7 +1007,7 @@ ENGINE_CHECK(rough_transmission_tint, Slow, Exact) {
     // Numerical, not physical: the paths are identical across the three renders, so the only slack is that fl(t*x) summed over a pass is not fl(t * sum(x)). Measured worst 1.37e-06 relative over both rows, and identical at 1, 2, 4 and 8 threads -- the accumulation order is fixed, so this is float non-distributivity and not a reduction-order race. 7x headroom on that; the faults it exists for are percent-scale (see the mutation rows in CHANGELOG), so there is no tension between this being tight and being stable.
     constexpr float kUlpBand = 1e-5F;
     const glm::vec3 tint(0.5F, 0.25F, 0.75F);
-    // Straddling the transmit-side multiple-scattering lobe's own switch-on: at ior 1.5 the escape deficit crosses bsdf.cpp's kMinDeficit between roughness 0.15 (0.00071, msTransmit exactly 0) and 0.2 (0.00179), so the first row is single-scatter refraction alone and the second (msTransmit 0.0263 of the selection mass at mu 0.8) carries both far-hemisphere strategies.
+    // Both far-hemisphere strategies, at the two ends of their split: at ior 1.5 and mu 0.8 msTransmit carries 2.6e-5 of the selection mass at roughness 0.15, where single-scatter refraction dominates, and 0.0263 at 0.6, where the multiple-scattering lobe is drawn in earnest.
     const std::array<float, 2> roughnesses = {0.15F, 0.6F};
     // Behind the interface, emitting face (cross(edge0, edge1) = +Z) pointing back at it, so the only way to the camera is through. Centred on the camera column, unlike makeOverheadLight below: the transmissive quad sits between the two, so the camera never reaches this light's face directly.
     const engine::scene::QuadLight light{glm::vec3(-0.5F, -0.5F, -1.5F), glm::vec3(1.0F, 0.0F, 0.0F),

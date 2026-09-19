@@ -439,8 +439,8 @@ void buildMultipleScatteringShape(AlbedoTable& table) {
     }
 }
 
-// Sampling shape for the transmitted multiple-scattering lobe, the far-hemisphere twin of the shape above, one axis wider because the escape it is built from is eta-dependent and the Schlick split cannot factor that out.
-// transmitMultiScatter's value is constant in wi times (1-Escape(mu_i))/(pi*deficitAvg), so the zero-variance density is (1-Escape(mu_i))*cos, and cosine sampling pays (1-Escape(mu_i))/(1-EscapeAvg) as weight variance -- relative variance 25 at roughness 0.13, under 0.15 by roughness 1.
+// Escape-deficit shape for the transmissive multiple-scattering lobes, the far-hemisphere twin of the shape above, one axis wider because the escape it is built from is eta-dependent and the Schlick split cannot factor that out.
+// bsdf.cpp reads it as both value and density: each transmissive share is its energy times this normalised (1-Escape(mu_i))*cos density divided by cos, so the density is the zero-variance one and the share integrates to its energy exactly -- cosine sampling paid relative variance 25 at roughness 0.13.
 // Unlike the reflect shape this is stored UNNORMALISED: bsdf.cpp blends four rows over (roughness, eta) and divides by the blended total, which reproduces the raw-deficit interpolation escapeAlbedo itself performs, where a blend of per-row-normalised shapes would not commute with it.
 // Unnormalised storage is also what removes the degenerate row: a row whose deficit is numerically zero carries near-zero weight into the blend rather than a unit-mass shape of amplified noise, so this needs neither the reflect side's bake-time abort nor a substituted fallback.
 void buildTransmitMultipleScatteringShape(AlbedoTable& table) {
@@ -453,8 +453,8 @@ void buildTransmitMultipleScatteringShape(AlbedoTable& table) {
             double cdf = 0.0;
             for (int mi = 0; mi < kTransmitRes; ++mi) {
                 const auto index = static_cast<std::size_t>((((ri * kTransmitRes) + mi) * kEtaRes) + ei);
-                // Clamped at the grid point, where multiScatterShape clamps after interpolating: the escape table is stratified-sampled, so a cell can land a few 1e-8 past unity, and a negative segment would break the CDF monotonicity the exact inversion depends on.
-                // The clamp only ever raises the density, so the pdf stays non-zero everywhere the value is.
+                // Clamped at the grid point: the escape table is stratified-sampled, so a cell can land a few 1e-8 past unity, and a negative segment would break the CDF monotonicity the exact inversion depends on.
+                // bsdf.cpp derives each share's value from this same density, so value and pdf share one support by construction.
                 const double deficit = std::max(1.0 - (table.r[index] + table.t[index]), 0.0);
                 const auto density = static_cast<float>(deficit * mi * step);
                 if (mi > 0) {
