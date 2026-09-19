@@ -1092,13 +1092,11 @@ void updateHud(AppResources& app, const engine::platform::Window& window,
                const std::shared_ptr<const engine::scene::PathTraceResult>& pathTraceSnapshot,
                int winWidth,
                int winHeight) {
-    const int accumulatedSamples =
-        app.pathTraceDriver != nullptr ? app.pathTraceDriver->accumulatedSamples() : 0;
     const engine::debug::PathTracedStatus pathTracedStatus{
-        accumulatedSamples > 0,
+        pathTraceSnapshot != nullptr,
         // PassRecord is the single source of truth for pass timing now; the HUD wants seconds, the record carries milliseconds.
         app.pathTraceDriver != nullptr ? app.pathTraceDriver->lastPassRecord().passMs / 1000.0 : 0.0,
-        accumulatedSamples, app.maxSamples};
+        pathTraceSnapshot != nullptr ? pathTraceSnapshot->samples : 0, app.maxSamples};
     const engine::debug::SceneStats sceneStats{
         static_cast<int>(app.stumpModel.instances.size()),
         app.totalTriangles,
@@ -1176,7 +1174,9 @@ void sampleDisplayedFrame(AppResources& app,
 }
 
 // Assembles one DashboardFrame and hands it to the dashboard, which decides on its own whether this frame is a redraw. Split out of renderFrame so that function stays a readable sequence of stages rather than half a screen of field initialisation.
-void updateDashboard(AppResources& app, float frameMs, int winWidth, int winHeight) {
+void updateDashboard(AppResources& app,
+                     const std::shared_ptr<const engine::scene::PathTraceResult>& pathTraceSnapshot, float frameMs,
+                     int winWidth, int winHeight) {
     const engine::debug::PassRecord pass =
         app.pathTraceDriver != nullptr ? app.pathTraceDriver->lastPassRecord()
                                         : engine::debug::PassRecord{};
@@ -1187,7 +1187,7 @@ void updateDashboard(AppResources& app, float frameMs, int winWidth, int winHeig
         pass,
         frameMs,
         app.postTimer.millisecondsElapsed(),
-        app.pathTraceDriver != nullptr ? app.pathTraceDriver->accumulatedSamples() : 0,
+        pathTraceSnapshot != nullptr ? pathTraceSnapshot->samples : 0,
         app.maxSamples,
         !aovNeedsLightTransport(static_cast<engine::debug::AovId>(app.aov)),
         app.ramBytes,
@@ -1399,7 +1399,7 @@ void renderFrame(engine::platform::Window& window, engine::platform::DisplayLink
 
     if (app.statsEnabled) {
         // After swapBuffers, so the dashboard's own write(2) lands in the frame's slack rather than ahead of the present. It times its own draw internally -- a timer here could never be observed, since the stages it would write to are zeroed before the next frame accumulates them.
-        updateDashboard(app, dtSeconds * 1000.0F, winWidth, winHeight);
+        updateDashboard(app, pathTraceSnapshot, dtSeconds * 1000.0F, winWidth, winHeight);
     }
     if (app.bench) {
         captureBenchFrame(window, app, *app.bench, benchPass, pathTraceSnapshot, dtSeconds * 1000.0F);
