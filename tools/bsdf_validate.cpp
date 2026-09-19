@@ -334,7 +334,7 @@ ENGINE_CHECK(furnace_energy_bound, Slow, Statistical) {
 
 // TWO-SIDED white furnace: a white, non-absorbing surface under uniform L0=1 radiance must return exactly 1.0 (every photon it receives leaves again); checkFurnace above only ever asserts Lo<=bound, so it cannot see energy loss, this BSDF's actual failure mode.
 // Restricted to cases where 1.0 is analytically correct: white base color, no transmission, entering side. A colored conductor (f0=0.5) legitimately absorbs with no closed-form expectation, so it stays upper-bound-only in checkFurnace.
-// Single-scatter GGX loses the energy smithG2 masks away (Heitz, Hanika, d'Eon, Dachsbacher 2016): a white conductor at roughness 1.0 measured 0.307, under a third of the light received. Kulla-Conty multiple-scattering compensation plus the directional-albedo diffuse coupling (bsdf.cpp) return it, making 1.0 a correctness target, not a regression baseline: both bounds share the same tolerance and a shortfall is a bug.
+// Single-scatter GGX loses the energy the Smith G2 masks away (Heitz, Hanika, d'Eon, Dachsbacher 2016): a white conductor at roughness 1.0 measured 0.307, under a third of the light received. Kulla-Conty multiple-scattering compensation plus the directional-albedo diffuse coupling (bsdf.cpp) return it, making 1.0 a correctness target, not a regression baseline: both bounds share the same tolerance and a shortfall is a bug.
 // Half the rows sit deliberately off the albedo table's grid; there the measured value is E_true + (1 - E_interpolated), so these rows test the table's bilinear error directly. They are the only bound on it: checkCoatFresnelAvg's quadrature reference reads the table's VALUES, not its interpolation, and deliberately sweeps on-grid to keep the two errors separate.
 struct WhiteFurnaceCase {
     float roughness;
@@ -719,7 +719,7 @@ glm::vec3 transmissiveEnergyLo(const BsdfParams& params, const glm::vec3& wo, in
 }
 
 // TWO-SIDED energy balance for a transmissive interface: the counterpart to checkWhiteFurnaceTwoSided, which is restricted to "no transmission, entering side" since those are the only rows where 1.0 is correct in the radiance domain.
-// In the energy domain 1.0 is correct everywhere: a white, non-absorbing interface reflects, refracts, or hands the rest to the diffuse substrate, and the multiple-scattering lobes return what smithG2 masked; nothing is absorbed at any roughness, side, or transmissionFactor.
+// In the energy domain 1.0 is correct everywhere: a white, non-absorbing interface reflects, refracts, or hands the rest to the diffuse substrate, and the multiple-scattering lobes return what the Smith G2 masked; nothing is absorbed at any roughness, side, or transmissionFactor.
 // Gates two failure modes the radiance-domain checks structurally cannot see: multiple-scattering compensation delivered over the refraction-reachable cone only rather than the whole far hemisphere, and a transmission lobe whose value drops transmissionFactor or (1-metallic) while its selection probability keeps them (the factors cancel out of throughput, so only an absolute bound catches it).
 // metallic=1 rows cover a conductor, which must transmit nothing however its transmissionFactor is set.
 ENGINE_CHECK(transmissive_energy_balance, Slow, Statistical) {
@@ -1492,7 +1492,7 @@ ENGINE_CHECK(conductor_fresnel, Fast, Exact) {
 }
 
 // The specular lobe's closed form at the mirrored pair, in double: nh is exactly +z there, so sin(theta_h) is 0 and the GGX denominator collapses to alpha^2, giving D = 1/(pi*alpha^2) without evaluating the shipped D at all.
-// G2 is Smith height-correlated with both lambdas at the same cosine, matching bsdf.cpp's smithLambda/smithG2.
+// G2 is Smith height-correlated with both lambdas at the same cosine, the quantity bsdf.cpp's smithVisibility evaluates in its division-free form.
 double specularGeometry(double alpha, double cosine) {
     constexpr double kPiDouble = 3.14159265358979324;
     const double alpha2 = alpha * alpha;
@@ -1509,21 +1509,22 @@ double specularGeometry(double alpha, double cosine) {
 // metallic=0 gates the conductor path (and params.f0) off entirely, transmissionFactor=0 leaves the reflection lobe as the only thing present, and reading .specular off BsdfEval isolates it from the diffuse substrate, so no black-baseColor trick is needed.
 // Roughness stays at or below checkConductorFresnel's kMsNegligibleRoughness so M sits under the tolerance -- it measures below float32 noise here, two orders under it; the two lowest rows are glass.json's and chrome.json's own values, which is what makes this the regression test for both D errors.
 // The sweep only reaches nh = +z, so it pins D at the lobe peak and says nothing about the tails; that is the right trade, since the peak is what a direct highlight is made of and the tails carry no absolute reference to compare against.
-// The grazing end stops at cos=0.02, where singleScatter's 4*muO*muI is 1.6e-3 -- three orders above its own 1e-6 floor, so the reference K's unfloored 4*c^2 is the divisor the lobe actually used and the row is a real comparison rather than a clamped one.
+// The grazing rows run to cos 1e-7, through the band where a 1e-6 floor on 4*muO*muI (engaging at cos 5e-4) used to darken the lobe as 4c^2/1e-6: it is the regression test for smithVisibility's clamp-free form, which must match the unfloored reference K all the way to the silhouette.
 ENGINE_CHECK(dielectric_fresnel, Fast, Exact) {
-    // Float32 round-off in the shipped lobe against a double reference, nothing else: M is not resolvable at these roughnesses. Measured worst 2.57e-7 at ior 1.5, roughness 0.1, cos 0.08, plus ~17% headroom. A fit-shaped error cannot hide under a bound this tight -- Schlick misses by 0.02 at ior 1.5168 cos 0.5, five orders above it.
-    constexpr double kFresnelTolerance = 3e-7;
+    // Float32 round-off in the shipped lobe against a double reference, relative to F since rounding is: M is not resolvable at these roughnesses. Measured worst 3.98e-7 (6.7 float32 unit roundoffs) at ior 2.5, roughness 0.05, cos 4e-4, plus ~17% headroom. A fit-shaped error cannot hide under a bound this tight -- Schlick misses by 0.02 at ior 1.5168 cos 0.5, five orders above it.
+    constexpr double kFresnelTolerance = 4.7e-7;
     // Normal incidence is an exact identity, not a fit: referenceDielectricFresnel(1, n) is ((n-1)/(n+1))^2 with both polarisations equal, and nh, woDotNh and G2 are all exactly 1 there, so the only residual is float32 evaluation of F itself. Measured worst 2.54e-8 at ior 2.5, plus ~18% headroom.
     constexpr double kNormalIncidenceTolerance = 3e-8;
     constexpr float kMinAlpha = 0.02F * 0.02F;   // bsdf.cpp's roughness floor, mirrored so K uses the alpha the lobe actually used
     const std::array<double, 4> iors = {1.1, 1.5, 1.5168, 2.5};   // 1.5168 is glass.json's own N-BK7 value
     const std::array<float, 3> roughnesses = {0.02F, 0.05F, 0.1F};
-    const std::array<float, 9> cosines = {1.0F, 0.9F, 0.7F, 0.5F, 0.35F, 0.25F, 0.15F, 0.08F, 0.02F};
+    const std::array<float, 14> cosines = {1.0F,  0.9F,  0.7F,  0.5F,  0.35F, 0.25F, 0.15F,
+                                           0.08F, 0.02F, 4e-4F, 2e-4F, 1e-4F, 1e-5F, 1e-7F};
 
     bool ok = true;
     int rowsChecked = 0;
     std::cout << "bsdf_validate: dielectric Fresnel, absolute lobe magnitude vs exact unpolarized\n";
-    std::cout << "  ior      rough   worst |err|   F(cos=0.02) measured / exact\n";
+    std::cout << "  ior      rough   worst |err|/tol   F(cos=1e-7) measured / exact\n";
     for (double ior : iors) {
         for (float roughness : roughnesses) {
             const double alpha =
@@ -1550,9 +1551,9 @@ ENGINE_CHECK(dielectric_fresnel, Fast, Exact) {
                     static_cast<double>(engine::scene::evaluateBsdfSplit(params, wo, wi).specular.x) /
                     specularGeometry(alpha, cosine);
                 const double expected = referenceDielectricFresnel(cosine, ior);
-                const double tolerance = cosine == 1.0F ? kNormalIncidenceTolerance : kFresnelTolerance;
+                const double tolerance = cosine == 1.0F ? kNormalIncidenceTolerance : kFresnelTolerance * expected;
                 ++rowsChecked;
-                worstError = std::max(worstError, std::abs(measured - expected));
+                worstError = std::max(worstError, std::abs(measured - expected) / tolerance);
                 atGrazing = measured;
                 if (!(std::abs(measured - expected) <= tolerance)) {
                     std::cerr << "bsdf_validate: FAILED dielectric Fresnel at ior=" << ior
