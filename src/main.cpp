@@ -44,6 +44,7 @@
 #include "engine/gfx/post_process_pass.h"
 #include "engine/gfx/shader_program.h"
 #include "engine/gfx/texture.h"
+#include "engine/platform/display_link.h"
 #include "engine/platform/window.h"
 #include "engine/scene/camera.h"
 #include "engine/scene/debug_camera_controller.h"
@@ -174,6 +175,7 @@ struct BenchCapture {
     std::vector<engine::debug::FrameStageTimes> frames;
     std::vector<float> frameMs;
     std::vector<float> presentGpuMs;
+    std::vector<float> uploadMs;  // one entry per display-texture upload, not per frame
     bool finalPassDisplayed = false;
 
     void restart(std::uint64_t requestGeneration) {
@@ -182,6 +184,7 @@ struct BenchCapture {
         frames.clear();
         frameMs.clear();
         presentGpuMs.clear();
+        uploadMs.clear();
     }
 };
 
@@ -285,6 +288,8 @@ struct AppResources {
     std::chrono::steady_clock::time_point lastRamSample;
     std::chrono::steady_clock::time_point lastFrameTime;
     std::optional<BenchCapture> bench;  // engaged by -bench
+    GLsync frameFence;  // the last presented frame's GPU completion, waited on before the next frame begins
+    double refreshHz;   // 1 / DisplayLink::refreshPeriodSeconds, refreshed each frame so it follows the window across displays
 };
 
 struct RequiredShaders {
@@ -354,7 +359,8 @@ HsvDisplayUniforms setupHsvDisplayShader(const engine::gfx::ShaderProgram& hsvDi
 std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sceneConfig,
                                            const engine::config::ProfileConfig& profileConfig,
                                            const engine::platform::Window& window,
-                                           const std::string& scenePath, bool statsEnabled) {
+                                           const std::string& scenePath, bool statsEnabled,
+                                           double refreshHz) {
     const engine::debug::GpuInfo gpuInfo = engine::debug::queryGpuInfo();
 
     // Loaded separately from profile.json (not gated on window size, unlike profile.json itself), then resolved by name against profileConfig.camera.defaultFilmBackPresetName -- mirrors loadMaterialConfig's "standalone JSON file" precedent below.
@@ -513,6 +519,7 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         engine::scene::embreeAllocatedBytes(),
         engine::gfx::khrDebugAvailable(),
         engine::debug::gpuTimerQueryAvailable(),
+        refreshHz,
     };
     engine::debug::printSpec(spec, gpuInfo);
 
@@ -595,6 +602,8 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         .lastRamSample = std::chrono::steady_clock::now(),
         .lastFrameTime = std::chrono::steady_clock::now(),
         .bench = std::nullopt,
+        .frameFence = nullptr,
+        .refreshHz = refreshHz,
     };
 }
 
@@ -864,6 +873,7 @@ void ensurePathTraceDisplayTexture(AppResources& app, const std::shared_ptr<cons
     }
     // Started after the cache-key check, never before it: on a cache hit this function does nothing and must report 0, not the cost of the last real upload.
     const engine::debug::ScopedCpuTimer uploadTimer(app.stages.uploadMs);
+    app.stages.uploaded = true;
     if (app.aov == static_cast<int>(engine::debug::AovId::Depth)) {
         float maxDepth = 0.0F;
         for (int i = 0; i < image.width * image.height; ++i) {
@@ -1098,6 +1108,7 @@ void updateHud(AppResources& app, const engine::platform::Window& window,
     };
     const engine::debug::HudFrameData hudFrameData{
         app.gpuInfo,
+        app.refreshHz,
         app.frameStats,
         app.postTimer.millisecondsElapsed(),
         app.ramBytes,
@@ -1195,14 +1206,15 @@ void updateDashboard(AppResources& app, float frameMs, int winWidth, int winHeig
         pass.height,
         app.lastPathTraceTrigger.renderScale,
         interactive,
-        app.gpuInfo.refreshRateHz,
+        app.refreshHz,
     };
     app.dashboard.update(frame);
 }
 
 // Appends this frame's stage times and any newly finished pass of the captured accumulation, and closes the window once the final pass has been displayed. `pass` was read before this frame's snapshot: the driver publishes a pass's record after its result, so a final record there means this frame presented the final image.
 void captureBenchFrame(engine::platform::Window& window, AppResources& app, BenchCapture& bench,
-                       const engine::debug::PassRecord& pass, float frameMs) {
+                       const engine::debug::PassRecord& pass,
+                       const std::shared_ptr<const engine::scene::PathTraceResult>& snapshot, float frameMs) {
     const bool ours = pass.generation == bench.generation && !pass.cancelled;
     if (ours && (bench.passes.empty() || bench.passes.back().passIndex != pass.passIndex)) {
         bench.passes.push_back(pass);
@@ -1210,6 +1222,10 @@ void captureBenchFrame(engine::platform::Window& window, AppResources& app, Benc
     bench.frames.push_back(app.stages);
     bench.frameMs.push_back(frameMs);
     bench.presentGpuMs.push_back(app.postTimer.millisecondsElapsed());
+    // Only uploads of this accumulation: the superseded request's in-flight pass can still publish after restart.
+    if (app.stages.uploaded && snapshot->generation == bench.generation) {
+        bench.uploadMs.push_back(app.stages.uploadMs);
+    }
     if (ours && pass.passIndex == app.maxSamples) {
         bench.finalPassDisplayed = true;
         window.setShouldClose(true);
@@ -1236,10 +1252,10 @@ nlohmann::json benchConfig(const AppResources& app, const BenchCapture& bench) {
             {"env", {{"rotation_deg", app.envRotationDegrees}, {"exposure_stops", app.envExposureStops},
                      {"light", app.envLightEnabled}, {"show_sky", app.showSky}}},
             {"hud", app.showHud},
-            {"refresh_hz", app.gpuInfo.refreshRateHz}};
+            {"refresh_hz", app.refreshHz}};
 }
 
-// Raw columns: one entry per captured frame for render-thread stages (0 = the stage did not run that frame), one per pass for driver phases.
+// Raw columns, one entry per event of their own: per captured frame for render-thread stages, per upload for upload_ms, per pass for driver phases.
 nlohmann::json benchSamples(const BenchCapture& bench) {
     const auto frameColumn = [&](float engine::debug::FrameStageTimes::*stage) {
         std::vector<float> column;
@@ -1260,10 +1276,12 @@ nlohmann::json benchSamples(const BenchCapture& bench) {
     using Stages = engine::debug::FrameStageTimes;
     using Pass = engine::debug::PassRecord;
     return {{"frame_ms", bench.frameMs},
+            {"fence_ms", frameColumn(&Stages::fenceMs)},
+            {"pace_ms", frameColumn(&Stages::paceMs)},
             {"poll_ms", frameColumn(&Stages::pollMs)},
             {"camera_ms", frameColumn(&Stages::cameraMs)},
             {"raster_ms", frameColumn(&Stages::rasterMs)},
-            {"upload_ms", frameColumn(&Stages::uploadMs)},
+            {"upload_ms", bench.uploadMs},
             {"present_ms", frameColumn(&Stages::presentMs)},
             {"present_gpu_ms", bench.presentGpuMs},
             {"histogram_ms", frameColumn(&Stages::histogramMs)},
@@ -1307,10 +1325,31 @@ bool finishBench(const AppResources& app, const BenchCapture& bench) {
     return engine::debug::appendBenchRecord(bench.logPath, record);
 }
 
-// One frame: poll -> update camera -> request a fresh path trace if input changed -> orbit-pick from the path tracer's own G-buffer -> post-process blit to the default framebuffer -> swap.
-void renderFrame(engine::platform::Window& window, AppResources& app) {
+// Bounds GPU work to one frame in flight: at swap interval 0 flushBuffer never blocks, so nothing else stops the command queue outgrowing the GPU.
+void waitForPreviousFrame(AppResources& app) {
+    if (app.frameFence == nullptr) {
+        return;
+    }
+    GL_CALL(glClientWaitSync(app.frameFence, GL_SYNC_FLUSH_COMMANDS_BIT, std::numeric_limits<GLuint64>::max()));
+    GL_CALL(glDeleteSync(app.frameFence));
+    app.frameFence = nullptr;
+}
+
+// One frame: vblank -> previous frame's GPU completion -> poll -> update camera -> request a fresh path trace if input changed -> orbit-pick from the path tracer's own G-buffer -> post-process blit to the default framebuffer -> swap.
+void renderFrame(engine::platform::Window& window, engine::platform::DisplayLink& displayLink, AppResources& app) {
     // Every stage zeroed first: a stage that does not run this frame must read 0, or the dashboard reports the last time it did run as if it were still happening.
     app.stages = {};
+    {
+        // Before the poll, so input is sampled right after the vblank this frame will be latched against.
+        const engine::debug::ScopedCpuTimer paceTimer(app.stages.paceMs);
+        displayLink.waitForNextVblank();
+    }
+    {
+        // After the vblank wait, which the GPU drains the previous frame during, so this is non-zero only for a GPU-bound frame.
+        const engine::debug::ScopedCpuTimer fenceTimer(app.stages.fenceMs);
+        waitForPreviousFrame(app);
+    }
+    app.refreshHz = 1.0 / displayLink.refreshPeriodSeconds();
     {
         const engine::debug::ScopedCpuTimer pollTimer(app.stages.pollMs);
         window.pollEvents();
@@ -1356,13 +1395,14 @@ void renderFrame(engine::platform::Window& window, AppResources& app) {
         const engine::debug::ScopedCpuTimer swapTimer(app.stages.swapMs);
         window.swapBuffers();
     }
+    GL_CALL(app.frameFence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0));
 
     if (app.statsEnabled) {
         // After swapBuffers, so the dashboard's own write(2) lands in the frame's slack rather than ahead of the present. It times its own draw internally -- a timer here could never be observed, since the stages it would write to are zeroed before the next frame accumulates them.
         updateDashboard(app, dtSeconds * 1000.0F, winWidth, winHeight);
     }
     if (app.bench) {
-        captureBenchFrame(window, app, *app.bench, benchPass, dtSeconds * 1000.0F);
+        captureBenchFrame(window, app, *app.bench, benchPass, pathTraceSnapshot, dtSeconds * 1000.0F);
     }
 }
 
@@ -1450,12 +1490,13 @@ int main(int argc, char** argv) {
                           << reinterpret_cast<const char*>(glewGetErrorString(glewStatus)) << '\n';
                 exitCode = EXIT_FAILURE;
             } else {
-                // With heavy scene content, an uncapped CPU submits draw calls faster than the GPU can drain them, growing the driver's command queue unboundedly. Keep vsync on; disable it only for a deliberate, short-lived uncapped-FPS measurement.
-                glfwSwapInterval(1);
+                // Off: NSGL's interval lets two swaps through per refresh on current macOS, and while it is non-zero GLFW paces an occluded window with a fixed 60 Hz usleep. DisplayLink paces to the real vblank and the frame fence bounds the GPU queue instead.
+                glfwSwapInterval(0);
+                engine::platform::DisplayLink displayLink(window);
 
                 std::optional<AppResources> app =
                     initializeApp(*sceneConfig, *profileConfig, window, options->scenePath,
-                                   options->stats);
+                                   options->stats, 1.0 / displayLink.refreshPeriodSeconds());
                 if (!app) {
                     exitCode = EXIT_FAILURE;
                 } else {
@@ -1473,8 +1514,9 @@ int main(int argc, char** argv) {
                     }
 
                     while (!window.shouldClose()) {
-                        renderFrame(window, *app);
+                        renderFrame(window, displayLink, *app);
                     }
+                    GL_CALL(glDeleteSync(app->frameFence));
                     if (app->bench && !finishBench(*app, *app->bench)) {
                         exitCode = EXIT_FAILURE;
                     }
