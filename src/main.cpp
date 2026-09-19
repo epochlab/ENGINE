@@ -1325,7 +1325,7 @@ bool finishBench(const AppResources& app, const BenchCapture& bench) {
     return engine::debug::appendBenchRecord(bench.logPath, record);
 }
 
-// Bounds GPU work to one frame in flight: at swap interval 0 flushBuffer never blocks, so nothing else stops the command queue outgrowing the GPU.
+// Bounds GPU work to one frame in flight: at swap interval 0 flushBuffer waits on neither the vblank nor the GPU (only on a synchronous WindowServer query), so nothing else stops the command queue outgrowing the GPU.
 void waitForPreviousFrame(AppResources& app) {
     if (app.frameFence == nullptr) {
         return;
