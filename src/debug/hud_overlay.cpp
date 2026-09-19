@@ -280,7 +280,7 @@ void drawGpuSection(const HudFrameData& frame) {
     ImGui::TextColored(kCyan, "GPU");
     ImGui::Text("%s", frame.gpuInfo.renderer.c_str());
     ImGui::Text("%s", frame.gpuInfo.version.c_str());
-    ImGui::Text("%d Hz", frame.gpuInfo.refreshRateHz);
+    ImGui::Text("%.2f Hz", frame.refreshHz);
     ImGui::Separator();
 }
 

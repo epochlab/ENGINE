@@ -31,6 +31,7 @@ struct EngineSpec {
     std::size_t bvhBytes;
     bool khrDebugAvailable;
     bool gpuTimerAvailable;
+    double refreshHz;  // the window's display, measured by DisplayLink
 };
 
 // One-shot provenance block on stdout, printed once at startup after the GL context exists (queryGpuInfo) and after the scene has loaded, so every number in it is real rather than a default.
