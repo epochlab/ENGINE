@@ -103,6 +103,7 @@ struct PathTraceResult {
     // Reduced from `beauty` by PathTraceDriver immediately before publish, so it describes exactly the pixels published with it. Here rather than on PassRecord for that reason: PassRecord is republished for cancelled passes too, whose pixels never reach the screen. Left zeroed by renderPathTraced, which does not write it.
     OverRangeStats overRange;
     std::uint64_t generation = 0;  // the request whose accumulation this is, stamped by PathTraceDriver at publish; 0 from renderPathTraced
+    int samples = 0;  // passes averaged into these images, stamped with generation so image and count publish as one snapshot; 0 from renderPathTraced
 };
 
 // All 9 images zeroed at width x height -- what renderPathTraced's `out` parameter must be, allocated once by the caller and reused across passes.
