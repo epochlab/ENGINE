@@ -90,17 +90,20 @@ struct PassRecord {
 // Per-frame render-thread CPU stage times in milliseconds. Plain floats with no synchronization because exactly one thread is involved: renderFrame writes them and the dashboard, called from renderFrame, reads them.
 // MUST be zeroed at the top of every frame: a stage that did not run this frame (the rasterizer, the texture upload on a cache hit) has to read 0, not the last value it happened to have. Skip that and the rasterizer reports 150 ms forever after one rasterization.
 struct FrameStageTimes {
+    float fenceMs = 0.0F;       // wait for the previous frame's GPU work: non-zero only when the GPU, not the display, bounds the frame
+    float paceMs = 0.0F;        // DisplayLink::waitForNextVblank: slack, not engine cost
     float pollMs = 0.0F;
     float cameraMs = 0.0F;
     float rasterMs = 0.0F;      // renderRasterGBuffer, only on a trigger change into a rasterizer AOV
     float uploadMs = 0.0F;      // the display texture upload, only when a newly published pass invalidates it
+    bool uploaded = false;      // the upload ran this frame: an explicit event flag, since a timed stage can legitimately read 0
     float presentMs = 0.0F;     // presentFrame, INCLUSIVE of uploadMs -- the blit's own cost is the difference
     float histogramMs = 0.0F;
     float overRangeMs = 0.0F;   // the O(kOverRangeBinCount) read of the driver's reduction, every frame
     float probeMs = 0.0F;       // samplePixelProbe, including its synchronous glReadPixels on the post-filter AOVs
     float hudMs = 0.0F;         // HUD draw + camera write-back + render, INCLUSIVE of hudRenderMs -- the build half is the difference
     float hudRenderMs = 0.0F;   // HudOverlay::render (ImGui::Render + RenderDrawData), unconditional so it is paid with the HUD hidden
-    float swapMs = 0.0F;        // swapBuffers: the vsync wait, i.e. slack, not engine cost
+    float swapMs = 0.0F;        // swapBuffers at swap interval 0: the flushBuffer hand-off to the compositor, no vblank wait
 };
 
 // RAII steady_clock scope timer writing elapsed milliseconds into a caller-owned float.

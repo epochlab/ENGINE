@@ -42,6 +42,7 @@ struct PixelProbeSample {
 // Everything HudOverlay::draw needs for one frame, bundled to keep its signature from growing indefinitely as sections are added. aov and FramingOverlayState stay as separate mutable out-parameters on draw() itself since ImGui widgets bind directly to them.
 struct HudFrameData {
     const GpuInfo& gpuInfo;
+    double refreshHz;  // the window's display, measured by DisplayLink
     const FrameStats& frameStats;
     float postMs;
     std::size_t ramBytes;

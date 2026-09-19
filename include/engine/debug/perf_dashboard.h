@@ -38,7 +38,7 @@ struct DashboardFrame {
     int renderHeight;
     float renderScale;
     bool interactiveScale;
-    int refreshRateHz;
+    double refreshHz;  // the window's display, measured by DisplayLink
 };
 
 // Live terminal dashboard: redraws a fixed-height block in place at kRefreshHz using ANSI cursor-up plus erase-line, so the terminal shows one screenful rather than accumulating scrollback. Render-thread only -- update() is called at the end of renderFrame and reads that thread's own FrameStageTimes/FrameStats with no synchronization.
