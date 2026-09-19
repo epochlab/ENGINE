@@ -702,11 +702,12 @@ ENGINE_CHECK(index_matched_coat, Fast, Exact) {
 
 // Mean throughput through sampleBsdf with every transmitted draw converted back from radiance to energy. sampleBsdf applies the non-symmetric eta^2 radiance compression on refraction (Veach 1997 sec. 5.2), so a transmitted sample carries radiance and a raw mean is bounded by ior^2, not 1.0, which is why checkFurnace can only assert an upper bound on its transmissive rows and never sees energy loss there.
 // Dividing those draws by eta^2 puts every sample in one domain with an analytic answer; LobeType::Transmission is exactly the far-hemisphere draws, delta and rough alike.
+// Accumulated in double: at 200k samples of about 1 a float sum carries an ulp of 0.008, and throughputs that cluster just above an exact 1 round down every time -- a systematic 1e-3 that reads as model error.
 glm::vec3 transmissiveEnergyLo(const BsdfParams& params, const glm::vec3& wo, int sampleCount,
                                 std::uint32_t seed) {
     const float eta = wo.z < 0.0F ? params.ior : 1.0F / params.ior;  // etaI/etaT, exiting vs entering
     const float etaSq = eta * eta;
-    glm::vec3 accum(0.0F);
+    glm::dvec3 accum(0.0);
     for (int i = 0; i < sampleCount; ++i) {
         engine::scene::Sampler sampler(0, 0, i, sampleCount, seed);
         const std::optional<engine::scene::BsdfSample> sample =
@@ -714,11 +715,11 @@ glm::vec3 transmissiveEnergyLo(const BsdfParams& params, const glm::vec3& wo, in
         if (!sample.has_value()) {
             continue;
         }
-        accum += sample->type == engine::scene::LobeType::Transmission
-                      ? sample->throughputWeight / etaSq
-                      : sample->throughputWeight;
+        accum += glm::dvec3(sample->type == engine::scene::LobeType::Transmission
+                                 ? sample->throughputWeight / etaSq
+                                 : sample->throughputWeight);
     }
-    return accum / static_cast<float>(sampleCount);
+    return glm::vec3(accum / static_cast<double>(sampleCount));
 }
 
 // TWO-SIDED energy balance for a transmissive interface: the counterpart to checkWhiteFurnaceTwoSided, which is restricted to "no transmission, entering side" since those are the only rows where 1.0 is correct in the radiance domain.
@@ -727,7 +728,8 @@ glm::vec3 transmissiveEnergyLo(const BsdfParams& params, const glm::vec3& wo, in
 // metallic=1 rows cover a conductor, which must transmit nothing however its transmissionFactor is set.
 ENGINE_CHECK(transmissive_energy_balance, Slow, Statistical) {
     constexpr int kSampleCount = 200000;
-    // Same tolerance as the opaque white furnace: 1.0 is a correctness target, not a baseline. Residual is albedo-table interpolation error, worst across the TIR boundary where the transmitted channel steps in mu and eta=1.5 falls between two table slices.
+    // Same tolerance as the opaque white furnace: 1.0 is a correctness target, not a baseline, and the residual under it is deterministic model error rather than noise, which is why this stays a fixed target and not a replicate-derived band.
+    // Measured worst 0.0036, at transmissionFactor 0.5 entering, where the diffuse coat coupling renormalises by an averaged rescale (the white furnace bounds that residual under 1%). The fully transmissive rows sit at 0.0012, the escape table's interpolation between its nodes.
     constexpr float kTolerance = 0.02F;
     const std::array<float, 4> roughnesses = {0.05F, 0.4F, 0.7F, 1.0F};
     const std::array<float, 4> ndotVs = {1.0F, 0.6F, -0.9F, -0.4F};  // entering, entering, exiting, TIR
@@ -768,10 +770,12 @@ ENGINE_CHECK(transmissive_energy_balance, Slow, Statistical) {
 // Round-trip energy closure of a rough dielectric: a white, non-absorbing slab reads exactly 1.0 under a uniform environment, since every photon that enters leaves and the eta^2 compression cancels over the crossing pair.
 // Unlike transmissive_energy_balance, which weighs one vertex at a handful of directions, this integrates the escape table over every direction a transmitted path actually visits, entering and exiting, which is where its interpolation error in mu and eta accumulated: 1.2% / 0.6% / 0.9% dark at roughness 0.4 / 0.7 / 1.0 on the 16^2-sample, 32 x 32 x 16 table this replaced.
 // BSDF sampling alone (fixtures::slabWalkLo), so no integrator term can move it; integrator_validate's transmissive_slab_energy holds the Embree render to this same walk.
-// Replicated over independent scramble seeds, so the band is the run's own Student-t interval about 1.0, not a hand-set tolerance.
+// Replicated over independent scramble seeds, so the statistical half-width is the run's own Student-t interval rather than a hand-set tolerance. Closure also has a deterministic floor: the escape a vertex reads is interpolated between table nodes, and a path crosses several, so the band adds that floor times the walk's own measured vertices per path.
+// The floor is the table's accuracy against the generator's exact quadrature, not a fitted tolerance: 1e-3 over a measured worst 6.2e-4 (tools/albedo_table.cpp's grid read through bsdf.cpp's lookup, ior 1.5, roughness 0.4 to 1, both sides, all mu). Without it the check would reject the table's own resolution as an error the moment variance dropped below it.
 ENGINE_CHECK(transmissive_slab_walk, Slow, Statistical) {
     // Sized so the band resolves the smallest shortfall the old table left, 0.6% at roughness 0.7, with room to spare.
     constexpr int kPathsPerReplicate = 1 << 20;
+    constexpr double kEscapeInterpolationFloor = 1e-3;
     const std::array<float, 3> roughnesses = {0.4F, 0.7F, 1.0F};
 
     ctx.plan(static_cast<int>(2 * roughnesses.size()));
@@ -796,14 +800,17 @@ ENGINE_CHECK(transmissive_slab_walk, Slow, Statistical) {
             worker.join();
         }
         tools::stats::Welford lo;
+        tools::stats::Welford vertices;
         long long truncated = 0;
         for (const tools::fixtures::SlabWalk& replicate : replicates) {
             lo.add(replicate.mean);
+            vertices.add(replicate.verticesPerPath);
             truncated += replicate.truncated;
         }
-        const double half = tools::stats::studentTTwoSided(ctx.alpha(), tools::stats::kReplicates - 1) * lo.standardError();
+        const double half = (tools::stats::studentTTwoSided(ctx.alpha(), tools::stats::kReplicates - 1) * lo.standardError()) +
+                            (kEscapeInterpolationFloor * vertices.mean());
         char detail[256];
-        std::snprintf(detail, sizeof(detail), "%s: Lo %.5f vs 1 +/- %.5f", label, lo.mean(), half);
+        std::snprintf(detail, sizeof(detail), "%s: Lo %.5f vs 1 +/- %.5f over %.2f vertices per path", label, lo.mean(), half, vertices.mean());
         std::cout << "  " << detail << '\n';
         ENGINE_EXPECT(ctx, std::abs(lo.mean() - 1.0) <= half, detail);
         std::snprintf(detail, sizeof(detail), "%s: %lld paths reached the depth cap, which would truncate the estimate", label, truncated);
