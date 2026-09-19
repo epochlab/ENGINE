@@ -817,3 +817,15 @@ README §5 Wave 0: `driver.running_mean_matches_batch_mean` failed about one run
 - note: the fixture's first draft hard-coded tangent (1,0,0), parallel to the wall's normal, and rendered NaN in beauty and refraction; `pushQuad` now takes the tangent from the quad's first edge. A fixture defect, not a renderer one
 - note: **no image change.** `-bench` CRC and ray counts identical to `main`; `render_beauty` for all nine path-traced AOVs, cornell 640x360/64 passes, PNG and EXR byte-identical
 - docs: README §5 Wave 0 drops the driver item; README §6 cites the running mean and its error analysis
+
+## Frame pacing: the swap tail attributed to WindowServer
+
+README §5 Wave 0: `flushBuffer` blocked 14-26 ms at swap interval 0 on a few frames per convergence, cause unmeasured. System Trace needs Developer Mode, which is off on this host, so a scratch in-process probe (`results/wave0/swap_probe`, not committed) recorded every swap's wall and render-thread CPU time and sampled the render thread every 1 ms during swaps over a quarter period: Mach run state, CPU progress and a frame-pointer backtrace.
+
+- note: **blocked on WindowServer, not waiting for a core and not working.** 808 of the 827 samples that found the render thread blocked were in a synchronous WindowServer query inside NSOpenGL's flush, `-[NSOpenGLContext flushBuffer]` -> `SLSFlushSurfaceWithOptionsAndIndex` -> `_CGSWindowIsOrderedIn` -> `mach_msg`; none found it runnable-waiting; swaps over half a period were 96-98% off-CPU. Not drawable back-pressure: no sample waits on a drawable
+- note: the render thread already runs at user-interactive QoS (measured 0x21 on the main thread of a shell-launched process); the 8 trace workers and the driver thread are default (0x15). Dropping those nine threads to utility QoS, interleaved 3 against 3 convergences (~37.6k frames each), left the tail unchanged: 13 vs 9 swaps over half a period, exact conditional binomial P = 0.52; `swap_ms` p99.9 7.1-7.7 ms in both arms. The engine's own CPU load does not drive it
+- note: long swaps are over-represented right after display-texture upload frames (7 of 41 against 1.3 expected, P = 3e-4), so the frame's GPU load raises the odds of a slow reply; 34 of 41 are not near an upload
+- note: no in-process fix exists on the NSOpenGL present path; the query is inside Apple's flush. Removing it means presenting through `CAMetalLayer`
+- docs: README §2 Frame pacing states the attributed tail and that a per-frame maximum of `swap_ms`/`frame_ms` measures WindowServer; `render_stats.h` `swapMs` and `waitForPreviousFrame`'s comment no longer claim the flush never blocks
+- docs: README §5 Wave 0 closed: both items are done
+- note: **no image change.** Comments and documentation only

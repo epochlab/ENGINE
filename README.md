@@ -110,7 +110,7 @@ It prints B/A with a distribution-free confidence interval, and says "not resolv
 |---|---|
 | Startup spec block | One plain-text provenance block on stdout: GPU/driver/refresh rate, host CPU topology and cache line from `sysctl`, compiler/build type/`-march`/IPO/git SHA, runtime-queried library versions, and the scene's load/BVH-build cost — confirms the actual GPU/backend before a wrong-adapter bug masquerades as a render bug, and makes every timing number attributable |
 | Render telemetry (`-stats`) | 78-column terminal dashboard redrawn in place at 3 Hz via a single `write(2)`: render-thread stages with share-of-frame bars, path-trace phases, ray counts by type with Mray/s, and a `cpu total` / `frame measured` / `unaccounted` reconciliation — shows where every millisecond goes, and what it can't account for |
-| Frame pacing | `DisplayLink` (`display_link.mm`): `-[NSView displayLinkWithTarget:selector:]` on a user-interactive-QoS thread wakes the render loop once per vblank of the window's own display, at swap interval 0 with a one-frame GPU fence -- NSGL's swap interval lets two swaps through per refresh on current macOS and GLFW substitutes a fixed 60 Hz `usleep` while occluded, so neither is used. A minimised window, whose link stops ticking, free-runs on the display's period grid. The measured period is the refresh rate every consumer reports |
+| Frame pacing | `DisplayLink` (`display_link.mm`): `-[NSView displayLinkWithTarget:selector:]` on a user-interactive-QoS thread wakes the render loop once per vblank of the window's own display, at swap interval 0 with a one-frame GPU fence -- NSGL's swap interval lets two swaps through per refresh on current macOS and GLFW substitutes a fixed 60 Hz `usleep` while occluded, so neither is used. A minimised window, whose link stops ticking, free-runs on the display's period grid. The measured period is the refresh rate every consumer reports. `swap_ms` still has a tail outside the engine: NSOpenGL's flush makes a synchronous WindowServer query (`SLSFlushSurfaceWithOptionsAndIndex` -> `_CGSWindowIsOrderedIn`), and in 7 visible convergences (88k frames) 808 of the 827 1 ms samples that found the render thread blocked inside a swap over a quarter period were in it, and none found it runnable-waiting for a core; swaps over half a period were 96-98% off-CPU, unchanged with the trace and driver threads at utility QoS (13 vs 9, P = 0.52) and over-represented right after display-texture uploads (7 vs 1.3 expected). A per-frame maximum of `swap_ms` or `frame_ms` therefore measures WindowServer, not the engine |
 | Frame-timing HUD | Ring buffer of recent frame times; rolling FPS/avg/min/max, GPU timer query around the post-process blit — makes blit cost measurable frame to frame |
 | Memory HUD | Live RAM readout plus GPU allocation tracked at alloc/free (the path-traced display texture is the only GPU allocation left) — surfaces a memory regression immediately, not after VRAM exhaustion |
 | Scene stats | Object/triangle/point counts, viewport resolution — a scene-complexity readout |
@@ -207,12 +207,6 @@ Every AOV below is computed by the path tracer each pass, except: the 14 primary
 
 Execution order by waves, each wave enabling/measuring the next. **Large**, the closing section, is a strict dependency chain reflecting transport order rather than priority. Items within each wave have no hard blocker on one another; a wave ships once all its items pass their per-item verification (measure, never infer).
 
-### Wave 0: Instruments (cheap, unblock later waves)
-
-These are prerequisite measurement/validation infrastructure: build them first, then use them to measure/validate everything that follows.
-
-- **`flushBuffer` occasionally blocks at swap interval 0**: 11 of 12570 and 1 of 12409 frames in two visible `engine -bench` convergences exceed 1.5 refresh periods, those in the first each with `swap_ms` 14-26 ms against a p90 of 2.0 ms. Cause not measured -- compositor drawable back-pressure is one candidate. Attribute it before reading any per-frame maximum.
-
 ### Wave 1: Transmissive multi-scatter lobe (one workstream, same code in `bsdf.cpp`)
 
 - **`msTransmit`'s selection gate and its value gate test different quantities** (bias): `computeLobeProbabilities` (`bsdf.cpp`) allocates selection mass when `1 - escapeAvg > kMinDeficit`, at the forward orientation `eta = etaI/etaT`, while the value being sampled switches off in `multiScatterShape` when `1 - escapeAvgRecip <= kMinDeficit`, at the reciprocal one. The comment at the gate claims these are the same test. They are not: escape is not symmetric in eta, measured 0.00036 at eta 0.941 against 0.00105 at its reciprocal 1.063 at roughness 0.129, straddling `kMinDeficit`.
@@ -291,7 +285,7 @@ Unblocks the path-traced Fresnel AOV and AOV-switch restarts (the last one measu
 
 Every validator runs on a shared harness (`tools/check.h`): each check is registered by name and discovered into `ctest` as its own entry (`<suite>.<check>`), labelled by speed (`fast`/`slow`) and kind (`exact`/`statistical`). `ctest -L fast -L exact` is the sub-second pre-commit gate; the full suite is the pre-merge gate. Monte Carlo bands are derived from the run's own variance over independent scramble seeds at one family-wise significance level (`tools/stats.h`), not hand-picked. `render_beauty --assert-deterministic` and `--assert-converged` gate the shipping pipeline with no golden image.
 
-(Band calibration tool and Histogram coverage moved to Wave 3, above; the `-bench` frame-pacing and driver-nondeterminism instrument gaps moved to Wave 0, above.)
+(Band calibration tool and Histogram coverage moved to Wave 3, above; the `-bench` frame-pacing and driver-nondeterminism instrument gaps closed Wave 0, CHANGELOG.)
 
 ### Parked (low value, or needs a use-case first)
 
