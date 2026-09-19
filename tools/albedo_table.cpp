@@ -47,21 +47,16 @@ constexpr float kMinAlpha = 0.02F * 0.02F;
 // error source beside the quadrature's, and at 32 it is the same order (~1e-3 near grazing, where E climbs steeply).
 constexpr int kAlbedoRes = 128;
 
-// Transmit side, unchanged at 32. It carries a third eta axis, so sharing the reflect side's 128 would take r and t to
-// 128*128*16 = 262144 floats each -- a multi-megabyte .inc for an axis nothing on the roadmap is waiting on.
-constexpr int kTransmitRes = 32;
-constexpr int kEtaRes = 16;
+// Transmit side, sized by the energy closure it buys: linear interpolation in mu (the steep grazing rise) and in eta (curvature through the TIR onset) sets the per-vertex error once the quadrature is converged.
+// Measured on a white ior-1.5 interface: 32 mu nodes lose 2% at mu 0.02, and 32 eta nodes lose 9e-4 midway between eta nodes against 1e-4 on them; 64 x 64 closes to within 3e-4. Roughness keeps 32 nodes, where node and midpoint already agree to that level.
+constexpr int kTransmitRoughnessRes = 32;
+constexpr int kTransmitMuRes = 64;
+constexpr int kEtaRes = 64;
 constexpr double kEtaMin = 1.0 / 2.5;  // exiting a 2.5-ior medium; the reciprocal end is entering one
 constexpr double kEtaMax = 2.5;
 
-// Stratified midpoint samples per axis on the transmit side, 16*16 = 256 per cell, the count this table has always
-// used. Deliberately NOT raised with the move offline, though it is now free: at 128 the escape total at roughness 1
-// falls 0.00165 (measured 0.81216 vs 0.81381 at eta index 5), the compensation returns that much more, and
-// integrator_validate's white slab goes 1.02428 -> 1.03017, past its 0.03 band. The slab was already 2.4% over, so
-// what the coarse table was doing was partly funding that error, not avoiding it -- the defect is in the transmit
-// compensation, not here, and it is README section 5.1's rough-transmission item to fix. Overridable so that
-// measurement reproduces.
-int gTransmitSamples = 16;
+// Gauss-Legendre nodes per panel on the transmit side, in phi and in each psi panel; verifyTransmit reports the table's residual against a doubled rule on every bake.
+constexpr int kTransmitNodes = 48;
 
 double smithLambda(double ndotV, double alpha) {
     const double ndotV2 = std::max(ndotV * ndotV, 1e-8);
@@ -173,52 +168,14 @@ Split reflectAlbedo(double mu, double alpha, const GaussLegendre& phiRule, const
     return {a / mu, b / mu};
 }
 
-// --- Transmit side: the stratified midpoint VNDF quadrature this table has always used, moved verbatim.
+// --- Transmit side: Gauss-Legendre in the reflect side's NDF measure, panelled at the interface's own boundaries.
 //
-// Its energy curve is not the reflect side's: the below-horizon reflections that drive E down are the valid side for
-// refraction, so far fewer samples are discarded (measured 0.559 combined vs 0.307 reflect-only at roughness 1.0).
-// Unlike the reflect side it genuinely depends on eta (G2 uses the refracted |wi.z|, and TIR gates validity), so the
-// Schlick split cannot factor it out. One axis in log(eta) covers entering and exiting, since the two are reciprocals.
-// It keeps the sampled scheme rather than the exact-domain rule above because its valid set is the intersection of the
-// horizon clip, the TIR cone and wt.z < 0, and only the first of those has a closed-form boundary; the sample count is
-// simply raised, which is free offline. Sampling and refraction stay in float glm, the shipped arithmetic.
-constexpr float kFloatPi = 3.14159265F;
-
-float smithG1f(float ndotV, float alpha) {
-    return static_cast<float>(1.0 / (1.0 + smithLambda(ndotV, alpha)));
-}
-
-// Heitz 2018 VNDF sampling. wo.z > 0 required.
-glm::vec3 sampleGGXVNDF(const glm::vec3& wo, float alpha, glm::vec2 u) {
-    const glm::vec3 vh = glm::normalize(glm::vec3(alpha * wo.x, alpha * wo.y, wo.z));
-    const float lensq = (vh.x * vh.x) + (vh.y * vh.y);
-    const glm::vec3 t1 = lensq > 0.0F ? glm::vec3(-vh.y, vh.x, 0.0F) * (1.0F / std::sqrt(lensq))
-                                       : glm::vec3(1.0F, 0.0F, 0.0F);
-    const glm::vec3 t2 = glm::cross(vh, t1);
-    const float r = std::sqrt(u.x);
-    const float phi = 2.0F * kFloatPi * u.y;
-    const float t1p = r * std::cos(phi);
-    float t2p = r * std::sin(phi);
-    const float s = 0.5F * (1.0F + vh.z);
-    t2p = ((1.0F - s) * std::sqrt(std::max(0.0F, 1.0F - (t1p * t1p)))) + (s * t2p);
-    const glm::vec3 nh = (t1p * t1) + (t2p * t2) +
-                          (std::sqrt(std::max(0.0F, 1.0F - (t1p * t1p) - (t2p * t2p))) * vh);
-    return glm::normalize(glm::vec3(alpha * nh.x, alpha * nh.y, std::max(0.0F, nh.z)));
-}
-
-// Refract wo about microfacet normal ht. Returns false on total internal reflection at that facet.
-bool refractAbout(const glm::vec3& wo, const glm::vec3& ht, float eta, glm::vec3& wi) {
-    const float cosI = glm::dot(wo, ht);
-    if (cosI <= 0.0F) {
-        return false;
-    }
-    const float cos2T = cos2Transmitted(cosI, eta);
-    if (cos2T < 0.0F) {
-        return false;
-    }
-    wi = ((eta * cosI) - std::sqrt(cos2T)) * ht - (eta * wo);
-    return true;
-}
+// Its energy curve is not the reflect side's: the below-horizon reflections that drive E down are the valid side for refraction (measured 0.559 combined vs 0.307 reflect-only at roughness 1.0).
+// It depends on eta (G2 uses the refracted |wt.z|, and TIR gates validity), so the Schlick split cannot factor it out; one axis in log(eta) covers entering and exiting, since the two are reciprocals.
+// Same measure as reflectAlbedo, D(h)cos(theta_h) dw = sin(psi)cos(psi) dpsi dphi / pi with tan(theta_h) = alpha*tan(psi), which flattens the peak and resolves the GGX slope tail; a stratified VNDF midpoint rule lumped that tail into its last stratum and converged first order (3.6e-3 at roughness 0.19, mu 1, eta 1.56).
+// Same closed forms too: wo.h = R cos(theta_h - d) and wi.z = R cos(2 theta_h - d), so per phi the visibility bound, the reflection horizon and the TIR onset wo.h = sqrt(1 - 1/eta^2) are all exact theta_h breakpoints, the TIR circle's tangency R = sqrt(1 - 1/eta^2) is an exact phi breakpoint, and each panel between them is integrated on its own.
+// That matters most at TIR, where 1-F has a square-root singularity no fixed rule resolves (3.9e-3 residual at a doubled rule without the split); the one boundary left unaligned, wt.z = 0, is a kink where G2 vanishes linearly.
+// VNDF weight G1*(wo.h)*D/mu divided by G1 per escaping path leaves (wo.h)/(mu*cos(theta_h)) * G2 in this measure; Fresnel and the TIR predicate are the shipped fresnel_dielectric.h, so the table is baked against the interface it is shaded against.
 
 // log-spaced so eta and 1/eta are symmetric about index kEtaRes/2.
 double etaAtIndex(int index) {
@@ -231,44 +188,74 @@ struct EscapeSums {
     std::array<double, kEtaRes> transmit;
 };
 
-// Escaping fraction of a dielectric interface, split into the reflected and transmitted shares. Both use exact
-// dielectric Fresnel rather than the Schlick split above: inside the total-internal-reflection cone exact Fresnel is
-// 1.0 while Schlick reads ~0.1, so no rescale of a Schlick-basis number can stand in for it, and the escape budget
-// would under-count the reflected share by the whole TIR cone. A facet reflects with probability F and refracts with
-// 1-F, so the two shares are Fresnel-weighted complements of one throughput, never independent quantities.
-EscapeSums escapeAlbedo(float mu, float alpha) {
-    const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (mu * mu))), 0.0F, mu);
-    const float g1 = smithG1f(mu, alpha);
+// Escaping fraction of a dielectric interface, split into the reflected and transmitted shares, with exact dielectric Fresnel: inside the TIR cone Fresnel is 1.0 where Schlick reads ~0.1, so no Schlick-basis rescale can stand in for it.
+// A facet reflects with probability F and refracts with 1-F, so the two shares are Fresnel-weighted complements of one throughput, never independent quantities.
+EscapeSums escapeAlbedo(double mu, double alpha, const GaussLegendre& rule) {
+    const double sinTv = std::sqrt(std::max(0.0, 1.0 - (mu * mu)));
+    const glm::dvec3 wo(sinTv, 0.0, mu);
     EscapeSums sums{};
-    for (int i = 0; i < gTransmitSamples; ++i) {
-        for (int j = 0; j < gTransmitSamples; ++j) {
-            const glm::vec2 u((static_cast<float>(i) + 0.5F) / gTransmitSamples,
-                               (static_cast<float>(j) + 0.5F) / gTransmitSamples);
-            const glm::vec3 nh = sampleGGXVNDF(wo, alpha, u);
-            const glm::vec3 wi = glm::reflect(-wo, nh);
-            // Same visible normal, reflected and refracted: the VNDF sample is the expensive part and is shared across
-            // every eta, so the third axis costs only the refraction.
-            const float woDotNh = glm::dot(wo, nh);
-            for (int ei = 0; ei < kEtaRes; ++ei) {
-                const auto eta = static_cast<float>(etaAtIndex(ei));
-                const float fresnel = fresnelDielectric(woDotNh, eta, 1.0F);
-                if (wi.z > 0.0F) {
-                    sums.reflect[static_cast<std::size_t>(ei)] +=
-                        (static_cast<double>(smithG2(mu, wi.z, alpha)) / std::max(g1, 1e-8F)) * fresnel;
+    for (int ei = 0; ei < kEtaRes; ++ei) {
+        const auto e = static_cast<std::size_t>(ei);
+        const auto eta = static_cast<float>(etaAtIndex(ei));
+        // wo.h below which a facet totally internally reflects; zero when entering, where there is no cone.
+        const double criticalCos = eta > 1.0F ? std::sqrt(1.0 - (1.0 / (static_cast<double>(eta) * eta))) : 0.0;
+        // phi is even about 0, so half the circle is integrated and doubled. Split at pi/2 as reflectAlbedo is, for the grazing boundary layer, and where the TIR circle turns tangent (R = criticalCos), where the inner integral has a square-root kink in phi.
+        std::array<double, 5> phiBreaks{0.0, 0.5 * kPi, kPi, 0.0, 0.0};
+        int phiCount = 3;
+        if (criticalCos > mu && sinTv > 0.0) {
+            const double tangent = std::acos(std::sqrt((criticalCos * criticalCos) - (mu * mu)) / sinTv);
+            phiBreaks[3] = tangent;
+            phiBreaks[4] = kPi - tangent;
+            phiCount = 5;
+        }
+        std::sort(phiBreaks.begin(), phiBreaks.begin() + phiCount);
+        for (int phiPanel = 0; phiPanel + 1 < phiCount; ++phiPanel) {
+            const double phiLo = phiBreaks[static_cast<std::size_t>(phiPanel)];
+            const double phiHi = phiBreaks[static_cast<std::size_t>(phiPanel) + 1];
+            for (std::size_t p = 0; p < rule.node.size(); ++p) {
+                const double phi = phiLo + ((phiHi - phiLo) * rule.node[p]);
+                const double horizontal = sinTv * std::cos(phi);
+                const double radius = std::hypot(horizontal, mu);
+                const double delta = std::atan2(horizontal, mu);
+                const double visible = std::min(0.5 * kPi, delta + (0.5 * kPi));
+                std::array<double, 5> breaks{0.0, visible, std::min(visible, 0.5 * (delta + (0.5 * kPi))), 0.0, 0.0};
+                int count = 3;
+                if (criticalCos > 0.0 && criticalCos < radius) {
+                    const double half = std::acos(criticalCos / radius);
+                    for (const double at : {delta - half, delta + half}) {
+                        if (at > 0.0 && at < visible) {
+                            breaks[static_cast<std::size_t>(count++)] = at;
+                        }
+                    }
                 }
-                glm::vec3 wt;
-                if (refractAbout(wo, nh, eta, wt) && wt.z < 0.0F) {
-                    sums.transmit[static_cast<std::size_t>(ei)] +=
-                        (static_cast<double>(smithG2(mu, -wt.z, alpha)) / std::max(g1, 1e-8F)) *
-                        (1.0F - fresnel);
+                std::sort(breaks.begin(), breaks.begin() + count);
+                for (int panel = 0; panel + 1 < count; ++panel) {
+                    const double psiLo = std::atan(std::tan(breaks[static_cast<std::size_t>(panel)]) / alpha);
+                    const double psiHi = std::atan(std::tan(breaks[static_cast<std::size_t>(panel) + 1]) / alpha);
+                    for (std::size_t q = 0; q < rule.node.size(); ++q) {
+                        const double psi = psiLo + ((psiHi - psiLo) * rule.node[q]);
+                        const double thetaH = std::atan(alpha * std::tan(psi));
+                        const glm::dvec3 h(std::sin(thetaH) * std::cos(phi), std::sin(thetaH) * std::sin(phi), std::cos(thetaH));
+                        const double woDotH = glm::dot(wo, h);
+                        // phi and psi panel widths, measure sin(psi)cos(psi)/pi doubled for the half circle.
+                        const double weight = rule.weight[p] * rule.weight[q] * (phiHi - phiLo) * (psiHi - psiLo) *
+                                              (2.0 * std::sin(psi) * std::cos(psi) / kPi) * (woDotH / (mu * h.z));
+                        const double fresnel = fresnelDielectric(static_cast<float>(woDotH), eta, 1.0F);
+                        const double wiZ = (2.0 * woDotH * h.z) - mu;
+                        if (wiZ > 0.0) {
+                            sums.reflect[e] += weight * fresnel * smithG2(mu, wiZ, alpha);
+                        }
+                        const double cos2T = cos2Transmitted(static_cast<float>(woDotH), eta);
+                        if (cos2T >= 0.0) {
+                            const double wtZ = (((eta * woDotH) - std::sqrt(cos2T)) * h.z) - (eta * mu);
+                            if (wtZ < 0.0) {
+                                sums.transmit[e] += weight * (1.0 - fresnel) * smithG2(mu, -wtZ, alpha);
+                            }
+                        }
+                    }
                 }
             }
         }
-    }
-    const auto cells = static_cast<double>(gTransmitSamples) * gTransmitSamples;
-    for (int ei = 0; ei < kEtaRes; ++ei) {
-        sums.reflect[static_cast<std::size_t>(ei)] /= cells;
-        sums.transmit[static_cast<std::size_t>(ei)] /= cells;
     }
     return sums;
 }
@@ -300,7 +287,7 @@ struct AlbedoTable {
     std::vector<float> b;
     std::vector<float> aavg;  // cosine-weighted means, 2*integral(.(mu)*mu dmu)
     std::vector<float> bavg;
-    std::vector<float> r;  // [roughnessIndex][muIndex][etaIndex], kTransmitRes^2 * kEtaRes
+    std::vector<float> r;  // [roughnessIndex][muIndex][etaIndex], kTransmitRoughnessRes * kTransmitMuRes * kEtaRes
     std::vector<float> t;
     std::vector<float> ravg;
     std::vector<float> tavg;
@@ -354,28 +341,30 @@ void buildReflect(AlbedoTable& table, int phiNodes, int psiNodes, int muNodes) {
     });
 }
 
-void buildTransmit(AlbedoTable& table) {
-    table.r.assign(static_cast<std::size_t>(kTransmitRes) * kTransmitRes * kEtaRes, 0.0F);
-    table.t.assign(static_cast<std::size_t>(kTransmitRes) * kTransmitRes * kEtaRes, 0.0F);
-    table.ravg.assign(static_cast<std::size_t>(kTransmitRes) * kEtaRes, 0.0F);
-    table.tavg.assign(static_cast<std::size_t>(kTransmitRes) * kEtaRes, 0.0F);
-    parallelRows(kTransmitRes, [&](int ri) {
-        const auto alpha = static_cast<float>(gridAlpha(ri, kTransmitRes));
+void buildTransmit(AlbedoTable& table, int nodes) {
+    const GaussLegendre rule = gaussLegendre(nodes);
+    const auto cells = static_cast<std::size_t>(kTransmitRoughnessRes) * kTransmitMuRes * kEtaRes;
+    table.r.assign(cells, 0.0F);
+    table.t.assign(cells, 0.0F);
+    table.ravg.assign(static_cast<std::size_t>(kTransmitRoughnessRes) * kEtaRes, 0.0F);
+    table.tavg.assign(static_cast<std::size_t>(kTransmitRoughnessRes) * kEtaRes, 0.0F);
+    parallelRows(kTransmitRoughnessRes, [&](int ri) {
+        const double alpha = gridAlpha(ri, kTransmitRoughnessRes);
         std::array<double, kEtaRes> rWeighted{};
         std::array<double, kEtaRes> tWeighted{};
-        for (int mi = 0; mi < kTransmitRes; ++mi) {
-            const double mu = gridMu(mi, kTransmitRes);
-            const EscapeSums sums = escapeAlbedo(static_cast<float>(mu), alpha);
+        for (int mi = 0; mi < kTransmitMuRes; ++mi) {
+            const double mu = gridMu(mi, kTransmitMuRes);
+            const EscapeSums sums = escapeAlbedo(mu, alpha, rule);
             // Trapezoid over the mu axis: the grid is edge-aligned, so the two endpoints span half a cell each and the
-            // step is 1/(kTransmitRes-1), not 1/kTransmitRes. First order, matching the sampled quadrature it averages.
-            const double endpoint = (mi == 0 || mi == kTransmitRes - 1) ? 0.5 : 1.0;
+            // step is 1/(kTransmitMuRes-1), not 1/kTransmitMuRes. First order.
+            const double endpoint = (mi == 0 || mi == kTransmitMuRes - 1) ? 0.5 : 1.0;
             for (int ei = 0; ei < kEtaRes; ++ei) {
                 const auto e = static_cast<std::size_t>(ei);
                 const double r = sums.reflect[e];
                 const double t = sums.transmit[e];
-                table.r[static_cast<std::size_t>((((ri * kTransmitRes) + mi) * kEtaRes) + ei)] =
+                table.r[static_cast<std::size_t>((((ri * kTransmitMuRes) + mi) * kEtaRes) + ei)] =
                     static_cast<float>(r);
-                table.t[static_cast<std::size_t>((((ri * kTransmitRes) + mi) * kEtaRes) + ei)] =
+                table.t[static_cast<std::size_t>((((ri * kTransmitMuRes) + mi) * kEtaRes) + ei)] =
                     static_cast<float>(t);
                 rWeighted[e] += endpoint * 2.0 * r * mu;
                 tWeighted[e] += endpoint * 2.0 * t * mu;
@@ -384,9 +373,9 @@ void buildTransmit(AlbedoTable& table) {
         for (int ei = 0; ei < kEtaRes; ++ei) {
             const auto e = static_cast<std::size_t>(ei);
             table.ravg[static_cast<std::size_t>((ri * kEtaRes) + ei)] =
-                static_cast<float>(rWeighted[e] / (kTransmitRes - 1));
+                static_cast<float>(rWeighted[e] / (kTransmitMuRes - 1));
             table.tavg[static_cast<std::size_t>((ri * kEtaRes) + ei)] =
-                static_cast<float>(tWeighted[e] / (kTransmitRes - 1));
+                static_cast<float>(tWeighted[e] / (kTransmitMuRes - 1));
         }
     });
 }
@@ -444,15 +433,15 @@ void buildMultipleScatteringShape(AlbedoTable& table) {
 // Unlike the reflect shape this is stored UNNORMALISED: bsdf.cpp blends four rows over (roughness, eta) and divides by the blended total, which reproduces the raw-deficit interpolation escapeAlbedo itself performs, where a blend of per-row-normalised shapes would not commute with it.
 // Unnormalised storage is also what removes the degenerate row: a row whose deficit is numerically zero carries near-zero weight into the blend rather than a unit-mass shape of amplified noise, so this needs neither the reflect side's bake-time abort nor a substituted fallback.
 void buildTransmitMultipleScatteringShape(AlbedoTable& table) {
-    const double step = 1.0 / (kTransmitRes - 1);
-    const auto size = static_cast<std::size_t>(kTransmitRes) * kTransmitRes * kEtaRes;
+    const double step = 1.0 / (kTransmitMuRes - 1);
+    const auto size = static_cast<std::size_t>(kTransmitRoughnessRes) * kTransmitMuRes * kEtaRes;
     table.msTransmitDensity.assign(size, 0.0F);
     table.msTransmitCdf.assign(size, 0.0F);
-    for (int ri = 0; ri < kTransmitRes; ++ri) {
+    for (int ri = 0; ri < kTransmitRoughnessRes; ++ri) {
         for (int ei = 0; ei < kEtaRes; ++ei) {
             double cdf = 0.0;
-            for (int mi = 0; mi < kTransmitRes; ++mi) {
-                const auto index = static_cast<std::size_t>((((ri * kTransmitRes) + mi) * kEtaRes) + ei);
+            for (int mi = 0; mi < kTransmitMuRes; ++mi) {
+                const auto index = static_cast<std::size_t>((((ri * kTransmitMuRes) + mi) * kEtaRes) + ei);
                 // Clamped at the grid point: the escape table is stratified-sampled, so a cell can land a few 1e-8 past unity, and a negative segment would break the CDF monotonicity the exact inversion depends on.
                 // bsdf.cpp derives each share's value from this same density, so value and pdf share one support by construction.
                 const double deficit = std::max(1.0 - (table.r[index] + table.t[index]), 0.0);
@@ -508,6 +497,38 @@ Residual verifyReflect(const AlbedoTable& table, int phiNodes, int psiNodes, int
     return worst;
 }
 
+// Largest disagreement between the shipped transmit tables and a rebake at twice the nodes per axis: the quadrature's own error, measured on every bake as verifyReflect measures the reflect side's.
+double verifyTransmit(const AlbedoTable& table, int nodes) {
+    AlbedoTable reference;
+    buildTransmit(reference, nodes * 2);
+    double worst = 0.0;
+    const std::array<std::pair<const char*, std::pair<const std::vector<float>*, const std::vector<float>*>>, 4>
+        channels = {{{"r", {&table.r, &reference.r}},
+                     {"t", {&table.t, &reference.t}},
+                     {"ravg", {&table.ravg, &reference.ravg}},
+                     {"tavg", {&table.tavg, &reference.tavg}}}};
+    for (const auto& [name, pair] : channels) {
+        double channelWorst = 0.0;
+        std::size_t at = 0;
+        for (std::size_t i = 0; i < pair.first->size(); ++i) {
+            const double delta = std::abs(static_cast<double>((*pair.first)[i]) - static_cast<double>((*pair.second)[i]));
+            if (delta > channelWorst) {
+                channelWorst = delta;
+                at = i;
+            }
+        }
+        // Directional channels are [roughness][mu][eta]; the means drop the mu axis.
+        const bool directional = pair.first->size() == table.r.size();
+        const std::size_t muStride = directional ? kTransmitMuRes : 1;
+        std::cout << "albedo_table: " << name << " residual " << channelWorst << " against " << nodes * 2
+                  << " nodes at roughnessIndex " << at / (muStride * kEtaRes) << " muIndex "
+                  << (directional ? static_cast<long>((at / kEtaRes) % kTransmitMuRes) : -1L) << " etaIndex "
+                  << at % kEtaRes << "\n";
+        worst = std::max(worst, channelWorst);
+    }
+    return worst;
+}
+
 // %.9g is FLT_DECIMAL_DIG digits, which round-trips float32 exactly, so the committed values are the computed ones.
 // It drops the point on a whole number though ("1"), and "1F" is not a literal, so one is restored where needed.
 void writeArray(std::ofstream& out, const char* name, const std::vector<float>& values) {
@@ -522,7 +543,8 @@ void writeArray(std::ofstream& out, const char* name, const std::vector<float>& 
     out << "\n}};\n";
 }
 
-bool writeInc(const std::string& path, const AlbedoTable& table, double residual) {
+bool writeInc(const std::string& path, const AlbedoTable& table, double residual, int transmitNodes,
+              double transmitResidual) {
     std::ofstream out(path);
     if (!out) {
         std::cerr << "albedo_table: cannot write " << path << "\n";
@@ -539,8 +561,8 @@ bool writeInc(const std::string& path, const AlbedoTable& table, double residual
            "// roughness 0 and mu 1 are exact table entries and bsdf.cpp's lookups can interpolate on k/(res-1).\n"
            "// Reflect side (a, b, aavg, bavg) is exact-domain Gauss-Legendre, residual "
         << residual << " against a doubled rule.\n"
-           "// Transmit side (r, t, ravg, tavg) is stratified midpoint VNDF at "
-        << gTransmitSamples << "^2 samples per cell.\n"
+           "// Transmit side (r, t, ravg, tavg) is Gauss-Legendre in the NDF measure at "
+        << transmitNodes << " nodes per panel, residual " << transmitResidual << " against a doubled rule.\n"
            "// kMsReflectDensity/kMsReflectCdf are the reflected multiple-scattering lobe's sampling shape: a\n"
            "// piecewise-linear density over mu, proportional to (1-E(mu))*mu and normalised to 1, with its exact\n"
            "// prefix integrals. bsdf.cpp inverts the first and evaluates it for the matching pdf.\n"
@@ -549,7 +571,8 @@ bool writeInc(const std::string& path, const AlbedoTable& table, double residual
            "// divides by the blended total, so the sampled shape is the raw-deficit interpolation escapeAlbedo\n"
            "// performs and a numerically zero row cannot contribute a unit-mass shape of amplified noise.\n";
     out << "\nconstexpr int kAlbedoRes = " << kAlbedoRes << ";\n"
-        << "constexpr int kTransmitRes = " << kTransmitRes << ";\n"
+        << "constexpr int kTransmitRoughnessRes = " << kTransmitRoughnessRes << ";\n"
+        << "constexpr int kTransmitMuRes = " << kTransmitMuRes << ";\n"
         << "constexpr int kEtaRes = " << kEtaRes << ";\n"
         << "constexpr float kEtaMin = " << etaMin.data() << "F;\n"
         << "constexpr float kEtaMax = " << etaMax.data() << "F;\n";
@@ -577,38 +600,40 @@ int main(int argc, char** argv) {
     int phiNodes = 96;
     int psiNodes = 96;
     int muNodes = 96;
+    int transmitNodes = kTransmitNodes;
     for (int i = 1; i < argc; ++i) {
         const bool hasValue = i + 1 < argc;
         if (std::strcmp(argv[i], "--out") == 0 && hasValue) {
             outPath = argv[++i];
         } else if (std::strcmp(argv[i], "--nodes") == 0 && hasValue) {
             phiNodes = psiNodes = muNodes = std::atoi(argv[++i]);
-        } else if (std::strcmp(argv[i], "--samples") == 0 && hasValue) {
-            gTransmitSamples = std::atoi(argv[++i]);
+        } else if (std::strcmp(argv[i], "--transmit-nodes") == 0 && hasValue) {
+            transmitNodes = std::atoi(argv[++i]);
         } else {
             std::cerr << "albedo_table: unknown or incomplete argument '" << argv[i]
-                      << "'\nusage: albedo_table [--out path.inc] [--nodes N] [--samples N]\n";
+                      << "'\nusage: albedo_table [--out path.inc] [--nodes N] [--transmit-nodes N]\n";
             return EXIT_FAILURE;
         }
     }
-    if (phiNodes < 2 || gTransmitSamples < 2) {
-        std::cerr << "albedo_table: --nodes and --samples must be at least 2\n";
+    if (phiNodes < 2 || transmitNodes < 2) {
+        std::cerr << "albedo_table: --nodes and --transmit-nodes must be at least 2\n";
         return EXIT_FAILURE;
     }
 
     AlbedoTable table;
     buildReflect(table, phiNodes, psiNodes, muNodes);
     const Residual residual = verifyReflect(table, phiNodes, psiNodes, muNodes);
-    buildTransmit(table);
+    buildTransmit(table, transmitNodes);
+    const double transmitResidual = verifyTransmit(table, transmitNodes);
     buildMultipleScatteringShape(table);
     buildTransmitMultipleScatteringShape(table);
-    if (!writeInc(outPath, table, residual.value)) {
+    if (!writeInc(outPath, table, residual.value, transmitNodes, transmitResidual)) {
         return EXIT_FAILURE;
     }
     std::cout << "albedo_table: wrote " << outPath << " (reflect " << kAlbedoRes << "x" << kAlbedoRes
               << " at " << phiNodes << " nodes, residual " << residual.value << " in " << residual.channel
               << " at roughnessIndex " << residual.roughnessIndex << " muIndex " << residual.muIndex
-              << "; transmit " << kTransmitRes
-              << "x" << kTransmitRes << "x" << kEtaRes << " at " << gTransmitSamples << "^2 samples)\n";
+              << "; transmit " << kTransmitRoughnessRes << "x" << kTransmitMuRes << "x" << kEtaRes << " at "
+              << transmitNodes << " nodes, residual " << transmitResidual << ")\n";
     return EXIT_SUCCESS;
 }
