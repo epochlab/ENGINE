@@ -313,7 +313,7 @@ EscapeSplit averageEscapeAlbedo(float roughness, float eta) {
 // --- Sampling shape for the transmitted multiple-scattering lobe, from kMsTransmitDensity/kMsTransmitCdf.
 // The far-hemisphere twin of sampleMsReflect above, one axis wider because the escape it is built from is eta-dependent and the Schlick split that makes the reflect side Fresnel-free cannot factor that out.
 // The density is (1-Escape(mu_i))*cos normalised by the row's own exact integral, and transmitMultiScatter's value is K*pdf/cos, so f*cos/pdf = K for every wi: value, density and sampler read one interpolant (Dupuy & Jakob 2018), and cosine sampling's (1-Escape(mu_i))/(1-EscapeAvg) weight variance (25 at roughness 0.13) is gone.
-// eta is the reciprocal orientation etaT/etaI: a wi on the far side has crossed the interface, so its escape is looked up from inside the far medium.
+// One row per orientation: the reciprocal etaT/etaI for the transmitted share, whose wi has crossed into the far medium, and the forward etaI/etaT for the transmissive reflected share in evaluateSpecularLobe, whose wi has not.
 struct MsTransmitRow {
     std::array<int, 4> base;
     std::array<float, 4> weight;
@@ -458,9 +458,6 @@ float coatAlbedo(const AlbedoSplit& split, float albedoAvg, float f0, float fres
 // Below this the GGX transmission lobe is treated as a delta (PBRT's TrowbridgeReitzDistribution::EffectivelySmooth). kMinAlpha (roughness 0.02) sits inside this region, so smooth glass keeps the exact, noise-free Snell path it has always had rather than becoming a stochastic estimate of the same thing.
 constexpr float kSmoothAlpha = 1e-3F;
 
-// Below this deficit there is no multiple scattering worth returning and the lobe switches off entirely: value (multiScatterShape) and selection probability (computeLobeProbabilities) must use the same test or the mixture allocates mass to a zero lobe.
-constexpr float kMinDeficit = 1e-3F;
-
 // ior == 1 is a delta at every roughness, not a rough interface: refractAbout returns -wo about every microfacet normal, so evaluateTransmissionLobe's half-vector normalize(wo + etaR*wi) normalises the zero vector and every guard below it is a NaN comparison -- measured NaN throughput on 7783 of 7783 transmission draws at roughness 0.1, 6666 of 7783 at roughness 1.0 (the remainder being the msTransmit draws, which do not form that half-vector). PBRT-v4's DielectricBxDF branches its value, pdf and sampler on the same `eta == 1 || EffectivelySmooth()`.
 bool transmissionIsRough(const BsdfParams& params, float alpha) {
     return params.transmissionFactor > 0.0F && alpha >= kSmoothAlpha && params.ior != 1.0F;
@@ -496,7 +493,6 @@ struct LobeProbabilities {
     // Multiple-scattering state for a transmissive interface, which needs its own deficit. A facet either reflects or refracts, chosen by Fresnel, so the escaping fraction is inherently Fresnel-weighted (R_ss + T_ss) and cannot reuse the opaque path's Fresnel-free (1 - E); adding the two Fresnel-free throughputs double-counts the same facets and drives the deficit negative.
     // The two formulations are therefore blended by transmissionFactor rather than unified, so an opaque material keeps exactly the measured behaviour the opaque compensation already has.
     float escapeWo;         // R_ss(mu_o) + T_ss(mu_o), the Fresnel-weighted escaping fraction
-    float escapeAvg;
     MsTransmitRow transmitShape;  // escape-deficit shape at the reciprocal eta (etaT/etaI); scale 0 where no transmitted multiple scattering exists
     float transmitShare;    // of the multiple-scattered energy, the fraction leaving refracted
     float etaSq;            // (etaI/etaT)^2, the radiance compression the transmit lobe must carry
@@ -506,24 +502,7 @@ struct LobeProbabilities {
 
 // kd carries the wo-side (1-F)/(1-Favg) coupling; the matching wi-side (1-F) factor is applied here, so the lobe is reciprocal (A4) while its directional albedo still integrates to (1-F(mu_o)), same total energy as the old one-sided form, correctly distributed.
 // pdf must not be gated on kd: sampleBsdf selects this lobe with probability lobes.diffuse, which computeLobeProbabilities derives deterministically from params and wo, so the pdf side of the MIS mixture must match that selection density whatever value the lobe carries. Selection mass may depend on kd, but only by moving to another strategy of the same mixture (lobes.msReflect); deleting it starves the mixture denominator and inflates throughput.
-// Shared shape of the multiple-scattering lobe, on whichever hemisphere wi lies. Symmetric in wo/wi, and cosine-distributed only where the escape deficit is flat in mu -- both strategies below draw the exact (1-Escape)cos shape instead. eta/deficitAvg are passed in rather than read off lobes because the two callers below need different orientations: a reflected wi stays in wo's medium (eta = etaI/etaT, lobes.escapeAvg), but a transmitted wi has crossed into the far medium and its escape must be looked up in the reciprocal orientation (eta = etaT/etaI, lobes.escapeAvgRecip) -- averageEscapeAlbedo is only a self-normalising cosine mean of escapeAlbedo when both are evaluated at the same eta, so pairing the wrong eta with the wrong average would perturb the total-energy identity below rather than merely mis-shape it.
-// Integrates over one full hemisphere to exactly (1 - escapeWo), since deficitAvg is the cosine-weighted mean of the same escape(mu) looked up here at the same eta, so the reflected share (1 - transmitShare) and the transmitted share transmitShare sum to the deficit across the two.
-// Both shares are delivered over their whole hemisphere, which requires the transmitted one to sit outside evaluateTransmissionLobe's half-vector rejections. It can only live there because lobes.msTransmit gives it a sampling density over that whole hemisphere; without one, energy outside the refraction cone would be unsamplable and bias the estimator rather than merely darken it.
-float multiScatterShape(const BsdfParams& params, float wiZ, float escapeWo, float eta,
-                         float deficitAvg) {
-    // Guarded rather than clamped: every deficit tends to zero together as roughness falls and the ratio
-    // stays finite, but flooring the denominator alone breaks that cancellation and turns a vanishing lobe
-    // into a huge one. computeLobeProbabilities gates selection mass on the identical test, so the mixture
-    // never allocates to a lobe that is identically zero.
-    if (deficitAvg <= kMinDeficit) {
-        return 0.0F;
-    }
-    const float mu = std::abs(wiZ);
-    const float escapeWi = escapeAlbedo(mu, params.roughness, eta).total();
-    return (std::max(1.0F - escapeWo, 0.0F) * std::max(1.0F - escapeWi, 0.0F)) / (kPi * deficitAvg);
-}
-
-// The transmitted share of the multiple-scattering energy, for ANY wi on the far side, free of evaluateTransmissionLobe's half-vector rejections, which describe single scattering only.
+// The transmitted share of the multiple-scattering energy, for ANY wi on the far side, free of evaluateTransmissionLobe's half-vector rejections, which describe single scattering only; lobes.msTransmit's density over the whole far hemisphere is what lets it live there without biasing the estimator.
 // K*pdf/mu with pdf = msTransmitPdf, the density lobes.msTransmit draws: integrates to exactly K = tint*transmitWeight*transmitShare*etaSq*(1-escapeWo) for any table noise, and is non-zero exactly where that strategy has density, so no gate is needed to keep a vanishing deficit finite.
 // mu > 0 strictly: the only caller is evaluateContinuousLobes' wi.z < 0 branch.
 glm::vec3 transmitMultiScatter(const BsdfParams& params, float mu, float msPdf, const LobeProbabilities& lobes) {
@@ -754,15 +733,14 @@ LobeEval evaluateSpecularLobe(const BsdfParams& params, const glm::vec3& wo, con
     const float albedoWi = directionalAlbedo(wi.z, params.roughness).total();
     const glm::vec3 opaqueMs = fms * ((1.0F - lobes.albedoWo) * (1.0F - albedoWi)) /
                                 (kPi * std::max(1.0F - lobes.albedoAvg, 1e-4F));
-    // transmitWeight is exactly zero for every opaque material (transmissionFactor=0, or metallic=1
-    // regardless of transmissionFactor) -- the common case. Skip multiScatterShape's own escape-table
-    // lookup entirely rather than compute it and glm::mix it away at weight 0.
+    // transmitWeight is exactly zero for every opaque material (transmissionFactor=0, or metallic=1 regardless of transmissionFactor) -- the common case. Skip the escape-shape row entirely rather than build it and glm::mix it away at weight 0.
+    // The transmissive reflected share is transmitMultiScatter's near-side twin: (1-transmitShare)*(1-escapeWo)*pdf/mu over the forward-eta row (wi stays in wo's medium), integrating to exactly (1-transmitShare)*(1-escapeWo), so the two shares sum to the deficit with no normaliser of their own.
     const glm::vec3 multiScatter =
         lobes.transmitWeight > 0.0F
             ? glm::mix(opaqueMs,
-                        glm::vec3((1.0F - lobes.transmitShare) *
-                                  multiScatterShape(params, wi.z, lobes.escapeWo, lobes.etaI / lobes.etaT,
-                                                     1.0F - lobes.escapeAvg)),
+                        glm::vec3((1.0F - lobes.transmitShare) * std::max(1.0F - lobes.escapeWo, 0.0F) *
+                                  msTransmitPdf(wi.z, msTransmitRow(params.roughness, lobes.etaI / lobes.etaT)) /
+                                  wi.z),
                         lobes.transmitWeight)
             : opaqueMs;
 
@@ -827,7 +805,7 @@ LobeProbabilities computeLobeProbabilities(const BsdfParams& params, const glm::
     const glm::vec3 fresnelAvg = glm::mix(glm::vec3(dielectricAvg), conductorAvg, params.metallic);
     // Split of the reflection-side non-specular mass between the two strategies that share it, proportional to the energy each carries. Without it the Kulla-Conty reflection lobe borrows the diffuse slot and is drawn with a CLTC shape set by diffuseRoughness, a parameter of the lobe it is not: a conductor carries all of that slot's energy and none of its shape.
     // msEnergy is exact -- evaluateSpecularLobe's opaqueMs integrates over the hemisphere to fms*(1-E(mu_o)), since int (1-E(mu_i)) cos = pi*(1-Eavg). diffuseEnergy drops evaluateDiffuseLobe's wi-side coat factor; selection mass need only be proportional to energy, not equal to it.
-    // No kMinDeficit gate, unlike the transmit split below: opaqueMs has no such switch-off to match, and this ratio already sends the share to zero continuously with the deficit. Gating would strand the mass on the diffuse strategy at exactly the low roughnesses where 1-Eavg is order kMinDeficit.
+    // No deficit gate, as for the transmit split below: this ratio already sends the share to zero continuously with the deficit, and gating would strand the mass on the diffuse strategy at exactly the low roughnesses where 1-Eavg is small.
     const float msReflectEnergy = ((multiScatterTint(fresnelAvg.x, splitAvg.total()) +
                                      multiScatterTint(fresnelAvg.y, splitAvg.total()) +
                                      multiScatterTint(fresnelAvg.z, splitAvg.total())) /
@@ -855,20 +833,18 @@ LobeProbabilities computeLobeProbabilities(const BsdfParams& params, const glm::
     // gate below already skips for every opaque material -- paying for the lookup anyway would be pure
     // waste on the common diffuse+specular case.
     float escape = 0.0F;
-    float escapeAvg = 0.0F;
     MsTransmitRow transmitShape{};
     float transmitShare = 0.0F;
     float msFraction = 0.0F;
     // Index-matched interfaces take the exact boundary rather than the table: the delta branch transmits everything, so no microfacet energy is masked and there is nothing for the compensation to return. The tabulated escape cannot say so -- the eta axis is log-spaced and puts eta 1 exactly halfway between its 0.941 and 1.063 nodes, never on one, reading a deficit of 0.209 at roughness 1 where the truth is 0. Left to interpolate, that deficit reaches evaluateSpecularLobe's (1-transmitShare) term and deposits untinted reflected energy on an interface whose exact Fresnel is identically zero.
     if (params.ior == 1.0F && params.transmissionFactor > 0.0F) {
         escape = 1.0F;
-        escapeAvg = 1.0F;
         transmitShare = 1.0F;
     } else if (params.transmissionFactor > 0.0F) {
         const EscapeSplit escapeWo = escapeAlbedo(wo.z, params.roughness, eta);
         const EscapeSplit escapeMean = averageEscapeAlbedo(params.roughness, eta);
         escape = escapeWo.total();
-        escapeAvg = escapeMean.total();
+        const float escapeAvg = escapeMean.total();
         transmitShape = msTransmitRow(params.roughness, 1.0F / eta);
         const float transmitSsAvg = transmitWeight * escapeMean.transmit;
         transmitShare = transmitSsAvg / std::max(escapeAvg, 1e-4F);
@@ -899,7 +875,6 @@ LobeProbabilities computeLobeProbabilities(const BsdfParams& params, const glm::
              .conductorN = conductor.n,
              .conductorK = conductor.k,
              .escapeWo = escape,
-             .escapeAvg = escapeAvg,
              .transmitShape = transmitShape,
              .transmitShare = transmitShare,
              .etaSq = eta * eta,
