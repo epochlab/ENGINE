@@ -25,7 +25,7 @@ struct FramingOverlayState {
     bool crosshair = true;
 };
 
-// Read-only convergence status the AOV section's path-traced readout displays -- built fresh each frame by main.cpp from PathTraceDriver's live query methods (accumulatedSamples()/lastPassSeconds()), not a snapshot of one completed call: the driver runs continuously in the background, so this reflects "as of this frame", not "as of the last Render click".
+// Read-only convergence status the AOV section's path-traced readout displays -- built fresh each frame by main.cpp from the frame's displayed PathTraceResult (its samples) and the driver's lastPassRecord(), not a snapshot of one completed call: the driver runs continuously in the background, so this reflects "as of this frame", not "as of the last Render click".
 struct PathTracedStatus {
     bool hasResult = false;
     double lastPassSeconds = 0.0;

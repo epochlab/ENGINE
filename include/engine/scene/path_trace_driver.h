@@ -52,15 +52,12 @@ public:
     // Render-thread-only. Bumps the generation counter and replaces the pending request -- does not queue. Returns the new generation, which every PassRecord of this request's accumulation carries.
     std::uint64_t requestTrace(const Request& request);
 
-    // Render-thread-only, call at most once per rendered frame. Null until the first pass of the app's life completes. Cheap (one mutex-guarded shared_ptr copy) -- safe to call every frame, and the strong ref keeps that pass's images alive for as long as the caller holds it, however many newer passes the driver publishes meanwhile.
+    // Render-thread-only, call at most once per rendered frame. Null until the first pass of the app's life completes. Cheap (one mutex-guarded shared_ptr copy) -- safe to call every frame, and the strong ref keeps that pass's images alive for as long as the caller holds it, however many newer passes the driver publishes meanwhile. The result carries its own generation and sample count, the only convergence readout: a count kept beside the pointer would be a second variable a reader could pair with the wrong image.
     [[nodiscard]] std::shared_ptr<const PathTraceResult> latestResult() const;
 
     // Render-thread-only. Parks the driver while nothing can read its output -- a rasterizer-backed AOV is selected, so no pass this thread completes will ever be displayed. Entering suspension also bumps generation_, which cancels the pass already in flight (renderPathTraced polls it per tile) instead of letting it run to completion for no reader.
     // A bare generation_ bump would NOT do this on its own: driverLoop reacts to a changed generation by re-reading pendingRequest_ and restarting accumulation, so bumping alone cancels the pass and then immediately re-runs the same one. The flag is what makes the loop idle rather than restart.
     void setSuspended(bool suspended);
-
-    // How many passes have been accumulated into the currently-published result's generation -- HUD convergence readout.
-    [[nodiscard]] int accumulatedSamples() const { return accumulatedSamples_.load(std::memory_order_relaxed); }
 
     // Render-thread-only. The most recent pass's phase timings and ray counts, including one that was cancelled mid-flight -- generation == 0 until the first pass of the app's life finishes. One POD copy under statsMutex_, cheap enough to call per frame, though the dashboard only asks at its own refresh rate.
     [[nodiscard]] engine::debug::PassRecord lastPassRecord() const;
@@ -89,7 +86,6 @@ private:
     std::atomic<std::uint64_t> generation_{0};
     // Set by setSuspended; polled by driverLoop, which idles instead of dispatching while it is true.
     std::atomic<bool> suspended_{false};
-    std::atomic<int> accumulatedSamples_{0};
 
     // Ray/tile counters for the pass in flight, reset before each dispatch and read after it returns -- driver-thread-owned, reused for the driver's life, so a pass allocates nothing. Declared before thread_, like threadPool_, so it exists before driverLoop starts.
     engine::debug::PassStats passStats_;

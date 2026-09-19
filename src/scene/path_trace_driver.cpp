@@ -44,7 +44,7 @@ void accumulateMean(PathTraceResult& sample, const PathTraceResult& previousMean
 
 // Reduces the published mean's beauty to OverRangeStats on the driver's own pool -- the same walk the render thread used to do serially, on the thread that just wrote these texels and still holds them in cache. Row-chunked with per-chunk private accumulators folded serially afterwards, following buildSubTriangles (rasterizer.cpp): a histogram bin is far too contended for one atomic increment per texel.
 // One chunk per worker rather than buildSubTriangles' four: every texel costs the same, so there is no imbalance for finer granularity to absorb, and each extra chunk is another kOverRangeBinCount-entry array to zero and fold.
-// A separate pass over beauty rather than a fold into accumulateMean's inner loop, which would save the re-read: accumulateMean is skipped on the first pass of every generation (`if (n > 1)` below), which is exactly the interactive case, so fusing would need a conditional duplicate of this code on that path.
+// A separate pass over beauty rather than a fold into accumulateMean's inner loop, which would save the re-read: accumulateMean is skipped on the first pass of every generation (`if (passIndex > 1)` below), which is exactly the interactive case, so fusing would need a conditional duplicate of this code on that path.
 void reduceOverRange(PathTraceResult& pass, std::vector<OverRangeHistogram>& histograms,
                       std::vector<float>& peaks, ThreadPool& threadPool) {
     const engine::gfx::HdrImage& beauty = pass.beauty;
@@ -174,6 +174,7 @@ void PathTraceDriver::driverLoop(std::stop_token stopToken) {
     std::shared_ptr<PathTraceResult> currentMean;  // the pool slot holding the last published mean of the active generation -- read as the previous mean by the next pass, never written again
     std::optional<Request> activeRequest;
     std::uint64_t activeGeneration = 0;  // 0 == no request handled yet; requestTrace's first bump makes generation_ 1
+    int accumulated = 0;  // passes in currentMean; driver-thread-only, readers see it only as the published result's samples
 
     while (!stopToken.stop_requested()) {
         const std::uint64_t requestedGeneration = generation_.load(std::memory_order_relaxed);
@@ -188,7 +189,7 @@ void PathTraceDriver::driverLoop(std::stop_token stopToken) {
                 activeRequest = pendingRequest_;  // guaranteed engaged: requestedGeneration != 0 implies at least one requestTrace() call has completed
             }
             activeGeneration = requestedGeneration;
-            accumulatedSamples_.store(0, std::memory_order_relaxed);
+            accumulated = 0;
         }
 
         // NOLINTBEGIN(bugprone-unchecked-optional-access) -- activeRequest is engaged for every line below, by the
@@ -201,8 +202,7 @@ void PathTraceDriver::driverLoop(std::stop_token stopToken) {
             continue;
         }
 
-        if (activeRequest->maxSamples > 0 &&
-            accumulatedSamples_.load(std::memory_order_relaxed) >= activeRequest->maxSamples) {
+        if (activeRequest->maxSamples > 0 && accumulated >= activeRequest->maxSamples) {
             std::this_thread::sleep_for(kIdlePollInterval);
             continue;
         }
@@ -216,8 +216,8 @@ void PathTraceDriver::driverLoop(std::stop_token stopToken) {
 
         // Two distinct roles, deliberately not one value (see sampler.h). sampleBase is how many samples this image has
         // already accumulated, so the sampler continues its Sobol sequence where the previous pass stopped instead of
-        // re-drawing the same point under a new randomization; passIndex is the same count 1-based, for display only.
-        const int sampleBase = accumulatedSamples_.load(std::memory_order_relaxed);
+        // re-drawing the same point under a new randomization; passIndex is the same count 1-based, this pass's weight 1/passIndex in the mean.
+        const int sampleBase = accumulated;
         const int passIndex = sampleBase + 1;
         const auto passStart = std::chrono::steady_clock::now();
         passStats_.reset();
@@ -249,11 +249,10 @@ void PathTraceDriver::driverLoop(std::stop_token stopToken) {
             continue;  // superseded mid-pass -- discard, next iteration picks up the new request
         }
 
-        const int n = accumulatedSamples_.fetch_add(1, std::memory_order_relaxed) + 1;
-        // n == 1 leaves the pass exactly as rendered: the running mean of one sample is that sample, and it is also the only case with no previous mean of this generation to read.
+        // passIndex == 1 leaves the pass exactly as rendered: the running mean of one sample is that sample, and it is also the only case with no previous mean of this generation to read.
         const auto accumulateStart = std::chrono::steady_clock::now();
-        if (n > 1) {
-            accumulateMean(*pass, *currentMean, n, threadPool_);
+        if (passIndex > 1) {
+            accumulateMean(*pass, *currentMean, passIndex, threadPool_);
         }
         const double accumulateMs = millisecondsSince(accumulateStart);
 
@@ -262,7 +261,9 @@ void PathTraceDriver::driverLoop(std::stop_token stopToken) {
         reduceOverRange(*pass, overRangeHistograms_, overRangePeaks_, threadPool_);
         const double overRangeMs = millisecondsSince(overRangeStart);
         pass->generation = activeGeneration;
+        pass->samples = passIndex;
         currentMean = pass;
+        accumulated = passIndex;
 
         const auto publishStart = std::chrono::steady_clock::now();
         {
@@ -271,7 +272,7 @@ void PathTraceDriver::driverLoop(std::stop_token stopToken) {
         }
         const double publishMs = millisecondsSince(publishStart);
 
-        publishPassRecord(activeGeneration, n, pass->beauty.width, pass->beauty.height, traceMs,
+        publishPassRecord(activeGeneration, passIndex, pass->beauty.width, pass->beauty.height, traceMs,
                            accumulateMs, overRangeMs, publishMs, millisecondsSince(passStart),
                            /*cancelled=*/false);
     }
