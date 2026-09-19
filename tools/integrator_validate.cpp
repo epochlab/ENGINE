@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <iostream>
 #include <limits>
@@ -272,7 +273,7 @@ glm::vec3 centreMean(const engine::gfx::HdrImage& image) {
 engine::scene::PathTraceResult renderPassPerInstance(
     const TestScene& scene, const EnvironmentMap& env, const PathTraceSettings& settings,
     const std::vector<PathTraceSettings>& perInstanceSettings, EmbreeAccel& accel,
-    engine::scene::ThreadPool& pool, bool showSky) {
+    engine::scene::ThreadPool& pool, bool showSky, std::uint32_t scrambleSeed = 7U) {
     const std::atomic<std::uint64_t> generation{1};
     engine::scene::PathTraceResult result =
         engine::scene::makePathTraceResult(kImageSize, kImageSize);
@@ -283,7 +284,7 @@ engine::scene::PathTraceResult renderPassPerInstance(
     engine::debug::PassStats stats;  // required by renderPathTraced; this tool checks radiance, not throughput
     engine::scene::renderPathTraced(makeCamera(), accel, scene.shadingTriangles, scene.instances,
                                      instanceLightIndex, lights, kImageSize, kImageSize, showSky,
-                                     settings, perInstanceSettings, /*scrambleSeed=*/7U, /*sampleBase=*/0,
+                                     settings, perInstanceSettings, scrambleSeed, /*sampleBase=*/0,
                                      /*sampleCount=*/settings.samplesPerPixel, generation,
                                      /*requestedGeneration=*/1U, pool, stats, result);
     return result;
@@ -292,10 +293,11 @@ engine::scene::PathTraceResult renderPassPerInstance(
 // The same pass with every instance on one material, which is what every check but checkPerInstanceMaterials wants.
 engine::scene::PathTraceResult renderPass(const TestScene& scene, const EnvironmentMap& env,
                                            const PathTraceSettings& settings, EmbreeAccel& accel,
-                                           engine::scene::ThreadPool& pool, bool showSky) {
+                                           engine::scene::ThreadPool& pool, bool showSky,
+                                           std::uint32_t scrambleSeed = 7U) {
     return renderPassPerInstance(
         scene, env, settings, std::vector<PathTraceSettings>(scene.instances.size(), settings), accel,
-        pool, showSky);
+        pool, showSky, scrambleSeed);
 }
 
 // Centre-region mean radiance of one pass.
@@ -394,44 +396,60 @@ ENGINE_CHECK(depth_and_russian_roulette_invariance, Slow, Statistical) {
     return;
 }
 
-// A white, non-absorbing dielectric slab in a uniform L0=1 environment is invisible: the camera must read exactly 1.0 through it. Every photon entering the front face leaves somewhere, and the non-symmetric eta^2 radiance compression applied on entering is undone on exiting, so the round trip is lossless.
-// This is the only case in the suite that reaches a transmissive exiting vertex, gating the far-side NEE guard against the miss branch's MIS weight. Weighting a rough transmission sample at 1.0 (correct only for a delta lobe) while NEE also evaluates the transmission lobe toward the same directions double-counts their overlap, reading above 1.0 here. Both bounds matter: the same test catches a transmissive vertex that loses energy instead.
+// A white, non-absorbing dielectric slab in a uniform L0=1 environment is invisible: every photon entering the front face leaves somewhere, and the non-symmetric eta^2 radiance compression applied on entering is undone on exiting.
+// This is the only case in the suite that reaches a transmissive exiting vertex, gating the far-side NEE guard against the miss branch's MIS weight: weighting a rough transmission sample at 1.0 (correct only for a delta lobe) while NEE also evaluates the transmission lobe double-counts their overlap.
+// Held to the BSDF-only walk (fixtures::slabWalkLo) rather than to 1.0, so it measures what the integrator adds and nothing else: the BSDF's own energy closure is bsdf_validate's transmissive_slab_walk, and a table error would otherwise read here as an integrator bias.
+// Both sides are replicated over independent scramble seeds and compared as the difference of two estimators (Welch). The whole image is averaged: the slab is infinite and every view within 3.5 degrees of normal, where the walk's normal-incidence value holds to well inside the band.
+// The centre-4x4, single-seed reading this replaced carried ~3% standard error against a hand-set 0.03 tolerance -- what read as "2.7% over" at roughness 1 was that noise, and the unbiased reading was below 1.
 ENGINE_CHECK(transmissive_slab_energy, Slow, Statistical) {
     // Enough depth for internally reflected paths to converge; truncation only ever darkens.
     constexpr int kSlabBounces = 12;
     constexpr float kThickness = 0.5F;
-    constexpr float kTolerance = 0.03F;
+    constexpr int kWalkPaths = 1 << 16;
     // 0.02 is below bsdf.cpp's smooth-roughness threshold, so it exercises the delta transmission path; the rest take the Walter lobe.
     const std::array<float, 5> roughnesses = {0.02F, 0.05F, 0.4F, 0.7F, 1.0F};
 
+    ctx.plan(static_cast<int>(2 * roughnesses.size()));
     const EnvironmentMap env = makeUniformEnvironment();
     engine::scene::ThreadPool& pool = sharedPool(ctx.threads());
-    bool ok = true;
+    PathTraceSettings settings = makeSettings(kSlabBounces, 999, /*metallic=*/0.0F, /*transmission=*/1.0F);
+    settings.samplesPerPixel = kSamplesPerPixel / tools::stats::kReplicates;
 
-    std::cout << "integrator_validate: white non-absorbing slab, uniform L0=1 (1.0 = invisible)\n";
+    std::cout << "integrator_validate: white non-absorbing slab, uniform L0=1, Embree render vs BSDF-only walk\n";
     for (float roughness : roughnesses) {
+        char label[64];
+        std::snprintf(label, sizeof(label), "slab r=%g", static_cast<double>(roughness));
+        const std::uint64_t rowSeed = ctx.subSeed(label);
         const TestScene scene = makeSlabScene(roughness, glm::vec3(0.04F), kThickness);
         std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
+        ENGINE_EXPECT(ctx, accel.has_value(), "failed to build the Embree slab scene");
         if (!accel.has_value()) {
-            std::cerr << "integrator_validate: FAILED to build Embree slab scene\n";
-            finish(ctx, false, "transmissive_slab_energy failed; see the rows above");
-            return;
+            continue;
         }
-        const float lo = renderCentre(
-            scene, env, makeSettings(kSlabBounces, 999, /*metallic=*/0.0F, /*transmission=*/1.0F),
-            *accel, pool);
-        std::cout << "  roughness " << roughness << "   Lo " << lo << '\n';
-        if (std::fabs(lo - 1.0F) > kTolerance) {
-            std::cerr << "integrator_validate: FAILED slab transparency at roughness=" << roughness
-                      << " -- rendered " << lo
-                      << ", expected 1.0. A white non-absorbing slab must neither add nor remove "
-                         "energy; above 1.0 means NEE and the BSDF-sampled miss are double-counting "
-                         "the transmission lobe, below means a transmissive vertex is losing energy.\n";
-            ok = false;
+        // The shading params the integrator resolves for this material: white, fully transmissive, the settings' ior.
+        const glm::vec3 white(1.0F);
+        const engine::scene::BsdfParams params{white, 0.0F, roughness, glm::vec3(0.04F), white, settings.ior,
+                                                1.0F, 0.0F, engine::scene::eonAlbedoInversion(white, 0.0F), white};
+        tools::stats::Welford render;
+        tools::stats::Welford walk;
+        for (int r = 0; r < tools::stats::kReplicates; ++r) {
+            const auto seed = static_cast<std::uint32_t>(rowSeed + r);
+            const glm::vec3 mean =
+                regionMean(renderPass(scene, env, settings, *accel, pool, true, seed).beauty, 0, 0, kImageSize, kImageSize);
+            render.add(std::max({mean.x, mean.y, mean.z}));
+            // Disjoint seeds keep the two estimators independent, as Welch's band assumes.
+            walk.add(tools::fixtures::slabWalkLo(params, kWalkPaths, seed + tools::stats::kReplicates).mean);
         }
+        const double difference = render.mean() - walk.mean();
+        const tools::stats::Band band = tools::stats::differenceBand(walk, render, ctx.alpha());
+        char detail[320];
+        std::snprintf(detail, sizeof(detail),
+                      "%s: render %.5f, walk %.5f, difference %+.3e vs +/-%.3e -- above means NEE and the BSDF-sampled "
+                      "miss double-count the transmission lobe, below means a transmissive vertex loses energy",
+                      label, render.mean(), walk.mean(), difference, band.halfWidth());
+        std::cout << "  " << detail << '\n';
+        ENGINE_EXPECT(ctx, band.contains(difference), detail);
     }
-    finish(ctx, ok, "transmissive_slab_energy failed; see the rows above");
-    return;
 }
 
 // The curved counterpart of checkTransmissiveSlab, on the same invariant for the same reason: a white, non-absorbing dielectric under a uniform L0=1 environment is invisible WHATEVER ITS SHAPE, since every photon entering leaves again and the eta^2 radiance compression cancels over the round trip. Only the geometry changes, and the geometry is the whole point -- this is the suite's only case where a transmissive vertex sees non-zero curvature, so it is the only one that can see a bug in transmissionOffsetEpsilon or in shadowTerminatorOffset's projection side (see makeSphereScene).

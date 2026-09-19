@@ -4,14 +4,17 @@
 // Same standalone-CLI convention as embree_validate.cpp/furnace_test.cpp: no test framework, non-zero exit on failure.
 
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <complex>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <iostream>
 #include <limits>
 #include <optional>
 #include <random>
+#include <thread>
 #include <vector>
 
 #include <glm/glm.hpp>
@@ -760,6 +763,52 @@ ENGINE_CHECK(transmissive_energy_balance, Slow, Statistical) {
     }
     finish(ctx, ok, "transmissive_energy_balance failed; see the rows above");
     return;
+}
+
+// Round-trip energy closure of a rough dielectric: a white, non-absorbing slab reads exactly 1.0 under a uniform environment, since every photon that enters leaves and the eta^2 compression cancels over the crossing pair.
+// Unlike transmissive_energy_balance, which weighs one vertex at a handful of directions, this integrates the escape table over every direction a transmitted path actually visits, entering and exiting, which is where its interpolation error in mu and eta accumulated: 1.2% / 0.6% / 0.9% dark at roughness 0.4 / 0.7 / 1.0 on the 16^2-sample, 32 x 32 x 16 table this replaced.
+// BSDF sampling alone (fixtures::slabWalkLo), so no integrator term can move it; integrator_validate's transmissive_slab_energy holds the Embree render to this same walk.
+// Replicated over independent scramble seeds, so the band is the run's own Student-t interval about 1.0, not a hand-set tolerance.
+ENGINE_CHECK(transmissive_slab_walk, Slow, Statistical) {
+    // Sized so the band resolves the smallest shortfall the old table left, 0.6% at roughness 0.7, with room to spare.
+    constexpr int kPathsPerReplicate = 1 << 20;
+    const std::array<float, 3> roughnesses = {0.4F, 0.7F, 1.0F};
+
+    ctx.plan(static_cast<int>(2 * roughnesses.size()));
+    std::cout << "bsdf_validate: white rough-glass slab by BSDF sampling alone (1.0 = energy closes)\n";
+    for (float roughness : roughnesses) {
+        char label[64];
+        std::snprintf(label, sizeof(label), "slab walk r=%g", static_cast<double>(roughness));
+        const std::uint64_t rowSeed = ctx.subSeed(label);
+        const BsdfParams params = makeParams(roughness, /*metallic=*/0.0F, /*transmissionFactor=*/1.0F);
+        std::array<tools::fixtures::SlabWalk, tools::stats::kReplicates> replicates{};
+        std::atomic<int> next{0};
+        std::vector<std::thread> workers;
+        for (int w = 0; w < std::min(ctx.threads(), tools::stats::kReplicates); ++w) {
+            workers.emplace_back([&] {
+                for (int r = next++; r < tools::stats::kReplicates; r = next++) {
+                    replicates[static_cast<std::size_t>(r)] =
+                        tools::fixtures::slabWalkLo(params, kPathsPerReplicate, static_cast<std::uint32_t>(rowSeed + r));
+                }
+            });
+        }
+        for (std::thread& worker : workers) {
+            worker.join();
+        }
+        tools::stats::Welford lo;
+        long long truncated = 0;
+        for (const tools::fixtures::SlabWalk& replicate : replicates) {
+            lo.add(replicate.mean);
+            truncated += replicate.truncated;
+        }
+        const double half = tools::stats::studentTTwoSided(ctx.alpha(), tools::stats::kReplicates - 1) * lo.standardError();
+        char detail[256];
+        std::snprintf(detail, sizeof(detail), "%s: Lo %.5f vs 1 +/- %.5f", label, lo.mean(), half);
+        std::cout << "  " << detail << '\n';
+        ENGINE_EXPECT(ctx, std::abs(lo.mean() - 1.0) <= half, detail);
+        std::snprintf(detail, sizeof(detail), "%s: %lld paths reached the depth cap, which would truncate the estimate", label, truncated);
+        ENGINE_EXPECT(ctx, truncated == 0, detail);
+    }
 }
 
 // A white, non-absorbing transmissive dielectric with an explicit baseColor and transmissionTint -- the one configuration this suite never had, makeParams above hardcoding baseColor 1 and every transmissive row leaving the tint white.

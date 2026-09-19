@@ -145,9 +145,9 @@ glm::vec3 sampleGGXVNDF(const glm::vec3& wo, float alpha, glm::vec2 u) {
     return glm::normalize(glm::vec3(alpha * nh.x, alpha * nh.y, std::max(0.0F, nh.z)));
 }
 
-// Kulla-Conty energy tables, baked offline by tools/albedo_table.cpp (Kulla & Conty 2017, "Revisiting Physically Based Shading at Imageworks"). The .inc defines kAlbedoRes/kTransmitRes/kEtaRes/kEtaMin/kEtaMax alongside the arrays, so the grid the lookups below index is the grid the generator wrote and the two cannot drift apart.
+// Kulla-Conty energy tables, baked offline by tools/albedo_table.cpp (Kulla & Conty 2017, "Revisiting Physically Based Shading at Imageworks"). The .inc defines kAlbedoRes/kTransmitRoughnessRes/kTransmitMuRes/kEtaRes/kEtaMin/kEtaMax alongside the arrays, so the grid the lookups below index is the grid the generator wrote and the two cannot drift apart.
 // kAlbedoA/kAlbedoB are the directional albedo of the single-scattering GGX lobe with Fresnel forced to 1, the fraction of energy the height-correlated Smith G2 lets through, so 1-E is exactly what multiple scattering must return. Split by Schlick's form F(c) = f0*(1 - (1-c)^5) + (1-c)^5 so one table serves any f0 (the standard environment-BRDF split): Ess(mu, f0) = f0*a + b, and with f0=1 that collapses to a + b = E, the Fresnel-free albedo the multiple-scattering lobe needs.
-// kEscapeReflect/kEscapeTransmit are the escaping fraction of a dielectric interface, split into the reflected and transmitted shares and indexed [roughnessIndex][muIndex][etaIndex]. They use exact dielectric Fresnel rather than the Schlick split: inside the total-internal-reflection cone exact Fresnel is 1.0 while Schlick reads ~0.1, so no rescale of a Schlick-basis number can stand in for it, and the escape budget would under-count the reflected share by the whole TIR cone. Their third axis is why they stay at kTransmitRes.
+// kEscapeReflect/kEscapeTransmit are the escaping fraction of a dielectric interface, split into the reflected and transmitted shares and indexed [roughnessIndex][muIndex][etaIndex]. They use exact dielectric Fresnel rather than the Schlick split: inside the total-internal-reflection cone exact Fresnel is 1.0 while Schlick reads ~0.1, so no rescale of a Schlick-basis number can stand in for it, and the escape budget would under-count the reflected share by the whole TIR cone. Their third axis is why they keep their own grid, kTransmitRoughnessRes x kTransmitMuRes x kEtaRes.
 // Building this at startup is what used to bound its accuracy: the grid and the quadrature were sized by load latency, not by what the energy tests need. See the generator for the rule and its measured residual.
 #include "albedo_table.inc"
 
@@ -277,17 +277,17 @@ struct EscapeSplit {
 
 // Trilinear over (roughness, mu, eta).
 EscapeSplit escapeAlbedo(float mu, float roughness, float eta) {
-    const float rf = std::clamp(roughness, 0.0F, 1.0F) * (kTransmitRes - 1);
-    const float mf = std::clamp(mu, 0.0F, 1.0F) * (kTransmitRes - 1);
+    const float rf = std::clamp(roughness, 0.0F, 1.0F) * (kTransmitRoughnessRes - 1);
+    const float mf = std::clamp(mu, 0.0F, 1.0F) * (kTransmitMuRes - 1);
     const float ef = etaAxisCoord(eta);
-    const int r0 = std::min(static_cast<int>(rf), kTransmitRes - 2);
-    const int m0 = std::min(static_cast<int>(mf), kTransmitRes - 2);
+    const int r0 = std::min(static_cast<int>(rf), kTransmitRoughnessRes - 2);
+    const int m0 = std::min(static_cast<int>(mf), kTransmitMuRes - 2);
     const int e0 = std::min(static_cast<int>(ef), kEtaRes - 2);
     const float rt = rf - static_cast<float>(r0);
     const float mt = mf - static_cast<float>(m0);
     const float et = ef - static_cast<float>(e0);
     const auto fetch = [&](const auto& channel, int r, int m) {
-        const int base = (((r * kTransmitRes) + m) * kEtaRes) + e0;
+        const int base = (((r * kTransmitMuRes) + m) * kEtaRes) + e0;
         return lerp1(channel[base], channel[base + 1], et);
     };
     const auto bilinear = [&](const auto& channel) {
@@ -298,9 +298,9 @@ EscapeSplit escapeAlbedo(float mu, float roughness, float eta) {
 }
 
 EscapeSplit averageEscapeAlbedo(float roughness, float eta) {
-    const float rf = std::clamp(roughness, 0.0F, 1.0F) * (kTransmitRes - 1);
+    const float rf = std::clamp(roughness, 0.0F, 1.0F) * (kTransmitRoughnessRes - 1);
     const float ef = etaAxisCoord(eta);
-    const int r0 = std::min(static_cast<int>(rf), kTransmitRes - 2);
+    const int r0 = std::min(static_cast<int>(rf), kTransmitRoughnessRes - 2);
     const int e0 = std::min(static_cast<int>(ef), kEtaRes - 2);
     const float rt = rf - static_cast<float>(r0);
     const float et = ef - static_cast<float>(e0);
@@ -333,19 +333,19 @@ float msTransmitBlend(const Table& table, const MsTransmitRow& row, int index) {
 // The table is stored unnormalised, so the blend is divided by its own blended total here rather than each row being normalised at bake time: integration is linear, so a blend of exact prefix integrals is the exact prefix integral of the blended density, and this is the interpolation of raw deficits escapeAlbedo itself performs -- blending four already-normalised rows would not commute with it, and their totals span seven orders across the roughness axis.
 // It is also what makes a numerically dead row harmless: it contributes its own near-zero weight to the blend instead of a unit-mass shape of amplified noise, so no row needs a bake-time abort or a substituted fallback.
 MsTransmitRow msTransmitRow(float roughness, float eta) {
-    const float rf = std::clamp(roughness, 0.0F, 1.0F) * (kTransmitRes - 1);
+    const float rf = std::clamp(roughness, 0.0F, 1.0F) * (kTransmitRoughnessRes - 1);
     const float ef = etaAxisCoord(eta);
-    const int r0 = std::min(static_cast<int>(rf), kTransmitRes - 2);
+    const int r0 = std::min(static_cast<int>(rf), kTransmitRoughnessRes - 2);
     const int e0 = std::min(static_cast<int>(ef), kEtaRes - 2);
     const float rt = rf - static_cast<float>(r0);
     const float et = ef - static_cast<float>(e0);
-    const int base0 = (r0 * kTransmitRes * kEtaRes) + e0;
-    const int base1 = base0 + (kTransmitRes * kEtaRes);
+    const int base0 = (r0 * kTransmitMuRes * kEtaRes) + e0;
+    const int base1 = base0 + (kTransmitMuRes * kEtaRes);
     MsTransmitRow row{{base0, base0 + 1, base1, base1 + 1},
                        {(1.0F - rt) * (1.0F - et), (1.0F - rt) * et, rt * (1.0F - et), rt * et},
                        0.0F};
     // Last prefix integral is the row's total energy deficit. Zero only if every clamped deficit in all four rows is zero, which leaves the lobe no energy to carry, so a zero scale correctly reports a zero density rather than dividing by it.
-    const float total = msTransmitBlend(kMsTransmitCdf, row, kTransmitRes - 1);
+    const float total = msTransmitBlend(kMsTransmitCdf, row, kTransmitMuRes - 1);
     row.scale = total > 0.0F ? 1.0F / total : 0.0F;
     return row;
 }
@@ -360,8 +360,8 @@ float msTransmitCdf(const MsTransmitRow& row, int index) {
 
 // Solid-angle density: the mu density spread over 2*pi of azimuth, mu measured from the far-side normal.
 float msTransmitPdf(float mu, const MsTransmitRow& row) {
-    const float mf = std::clamp(mu, 0.0F, 1.0F) * (kTransmitRes - 1);
-    const int m0 = std::min(static_cast<int>(mf), kTransmitRes - 2);
+    const float mf = std::clamp(mu, 0.0F, 1.0F) * (kTransmitMuRes - 1);
+    const int m0 = std::min(static_cast<int>(mf), kTransmitMuRes - 2);
     const float mt = mf - static_cast<float>(m0);
     return lerp1(msTransmitDensity(row, m0), msTransmitDensity(row, m0 + 1), mt) / (2.0F * kPi);
 }
@@ -369,7 +369,7 @@ float msTransmitPdf(float mu, const MsTransmitRow& row) {
 // Returns the near-hemisphere direction; the caller mirrors z, as the cosine draw it replaces did.
 glm::vec3 sampleMsTransmit(const MsTransmitRow& row, glm::vec2 u) {
     const float mu = invertPiecewiseLinearDensity([&](int i) { return msTransmitDensity(row, i); },
-                                                   [&](int i) { return msTransmitCdf(row, i); }, kTransmitRes, u.x);
+                                                   [&](int i) { return msTransmitCdf(row, i); }, kTransmitMuRes, u.x);
     const float r = std::sqrt(std::max(0.0F, 1.0F - (mu * mu)));
     const float phi = 2.0F * kPi * u.y;
     return {r * std::cos(phi), r * std::sin(phi), mu};
