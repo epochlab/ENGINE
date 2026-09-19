@@ -147,7 +147,7 @@ glm::vec3 sampleGGXVNDF(const glm::vec3& wo, float alpha, glm::vec2 u) {
 
 // Kulla-Conty energy tables, baked offline by tools/albedo_table.cpp (Kulla & Conty 2017, "Revisiting Physically Based Shading at Imageworks"). The .inc defines kAlbedoRes/kTransmitRoughnessRes/kTransmitMuRes/kEtaRes/kEtaMin/kEtaMax alongside the arrays, so the grid the lookups below index is the grid the generator wrote and the two cannot drift apart.
 // kAlbedoA/kAlbedoB are the directional albedo of the single-scattering GGX lobe with Fresnel forced to 1, the fraction of energy the height-correlated Smith G2 lets through, so 1-E is exactly what multiple scattering must return. Split by Schlick's form F(c) = f0*(1 - (1-c)^5) + (1-c)^5 so one table serves any f0 (the standard environment-BRDF split): Ess(mu, f0) = f0*a + b, and with f0=1 that collapses to a + b = E, the Fresnel-free albedo the multiple-scattering lobe needs.
-// kEscapeReflect/kEscapeTransmit are the escaping fraction of a dielectric interface, split into the reflected and transmitted shares and indexed [roughnessIndex][muIndex][etaIndex]. They use exact dielectric Fresnel rather than the Schlick split: inside the total-internal-reflection cone exact Fresnel is 1.0 while Schlick reads ~0.1, so no rescale of a Schlick-basis number can stand in for it, and the escape budget would under-count the reflected share by the whole TIR cone. Their third axis is why they keep their own grid, kTransmitRoughnessRes x kTransmitMuRes x kEtaRes.
+// kEscapeReflect/kEscapeTransmit are the escaping fraction of a dielectric interface, split into the reflected and transmitted shares and indexed [roughnessIndex][muIndex][etaIndex], mu uniform in sqrt(mu). They use exact dielectric Fresnel rather than the Schlick split: inside the total-internal-reflection cone exact Fresnel is 1.0 while Schlick reads ~0.1, so no rescale of a Schlick-basis number can stand in for it, and the escape budget would under-count the reflected share by the whole TIR cone. Their third axis is why they keep their own grid, kTransmitRoughnessRes x kTransmitMuRes x kEtaRes.
 // Building this at startup is what used to bound its accuracy: the grid and the quadrature were sized by load latency, not by what the energy tests need. See the generator for the rule and its measured residual.
 #include "albedo_table.inc"
 
@@ -278,7 +278,8 @@ struct EscapeSplit {
 // Trilinear over (roughness, mu, eta).
 EscapeSplit escapeAlbedo(float mu, float roughness, float eta) {
     const float rf = std::clamp(roughness, 0.0F, 1.0F) * (kTransmitRoughnessRes - 1);
-    const float mf = std::clamp(mu, 0.0F, 1.0F) * (kTransmitMuRes - 1);
+    // The generator's escapeMu axis: nodes uniform in sqrt(mu), dense where E climbs from its grazing limit.
+    const float mf = std::sqrt(std::clamp(mu, 0.0F, 1.0F)) * (kTransmitMuRes - 1);
     const float ef = etaAxisCoord(eta);
     const int r0 = std::min(static_cast<int>(rf), kTransmitRoughnessRes - 2);
     const int m0 = std::min(static_cast<int>(mf), kTransmitMuRes - 2);
@@ -474,6 +475,7 @@ struct LobeProbabilities {
     float specular;
     float diffuse;
     float msReflect;    // multiple-scattering reflection, drawn from kMsReflectDensity over the near hemisphere
+    float msReflectTransmissive;  // a transmissive interface's reflected multiple scattering, drawn from reflectShape
     float transmit;     // single-scatter refraction, VNDF-sampled about a microfacet normal
     float msTransmit;   // multiple-scattering transmission, drawn from kMsTransmitDensity over the far hemisphere
     float etaI;
@@ -496,10 +498,13 @@ struct LobeProbabilities {
     // The two formulations are therefore blended by transmissionFactor rather than unified, so an opaque material keeps exactly the measured behaviour the opaque compensation already has.
     float escapeWo;         // R_ss(mu_o) + T_ss(mu_o), the Fresnel-weighted escaping fraction
     MsTransmitRow transmitShape;  // escape-deficit shape at the reciprocal eta (etaT/etaI); scale 0 where no transmitted multiple scattering exists
+    MsTransmitRow reflectShape;   // the same at the forward eta (etaI/etaT), for the reflected share whose wi stays in wo's medium
     float transmitShare;    // of the multiple-scattered energy, the fraction leaving refracted
     float etaSq;            // (etaI/etaT)^2, the radiance compression the transmit lobe must carry
     // effectiveTransmission*(1-metallic): how much transmission actually happens. Scales both the single-scatter and the multiple-scattering transmit value; the delta branch carries the same factors through transmitPhysicalValue.
     float transmitWeight;
+    // Refraction's value per unit (1-F) in the VNDF strategy's per-facet reflect/refract split, transmitWeight; 0 where that strategy only reflects.
+    float facetTransmit;
 };
 
 // kd carries the wo-side (1-F)/(1-Favg) coupling; the matching wi-side (1-F) factor is applied here, so the lobe is reciprocal (A4) while its directional albedo still integrates to (1-F(mu_o)), same total energy as the old one-sided form, correctly distributed.
@@ -696,10 +701,25 @@ LobeEval evaluateDiffuseLobe(const BsdfParams& params, const glm::vec3& wo, cons
     return {f * diffuseKdAt(params, wi, lobes), pdfEon(wo, wi, params.diffuseRoughness)};
 }
 
+// Channel mean of the Fresnel evaluateSpecularLobe applies at a facet, metallic blend included.
+float facetReflectance(const BsdfParams& params, float cosTheta, float fDielectric, const LobeProbabilities& lobes) {
+    if (params.metallic <= 0.0F) {
+        return fDielectric;
+    }
+    const glm::vec3 conductor = fresnelConductor(cosTheta, lobes.conductorN, lobes.conductorK);
+    return glm::mix(fDielectric, (conductor.x + conductor.y + conductor.z) / 3.0F, params.metallic);
+}
+
+// Probability the VNDF strategy reflects about a facet on a rough transmissive interface: the facet's reflected value over its reflected plus refracted value (Walter et al. 2007 sec. 5.3; PBRT-v4 DielectricBxDF), so both branches weigh G2/G1 alone. Caller gates on facetTransmit > 0, where the denominator is positive.
+float facetReflectProbability(const BsdfParams& params, float cosTheta, float fDielectric, const LobeProbabilities& lobes) {
+    const float reflect = facetReflectance(params, cosTheta, fDielectric, lobes);
+    return reflect / (reflect + ((1.0F - fDielectric) * lobes.facetTransmit));
+}
+
 // Single scatter D*G2*F/(4*ndotV*ndotL) plus the Kulla-Conty multiple-scattering lobe, and the VNDF pdf G1*D*dot(wo,nh)/ndotV (Heitz 2018 eq.3) times its reflection Jacobian 1/(4*dot(wo,nh)), which cancels dot(wo,nh).
 // The pdf covers the single-scattering term only. The reflected multiple-scattering share is (1-E)cos-shaped and has a strategy of its own, lobes.msReflect, mirroring the transmitted share's lobes.msTransmit; evaluateContinuousLobes sums both densities into the mixture.
 // Cosine was the standard practical choice (Kulla & Conty 2017); the zero-variance density here is (1-E(mu_i))cos/(pi*(1-Eavg)), and kMsReflectDensity holds exactly that shape, so lobes.msReflect draws it rather than paying the (1-E(mu_i))/(1-Eavg) weight ratio.
-// The exiting side leaves this share on VNDF alone, since diffuseProb and so msReflect are 0 there: coverage is complete for alpha>0, the shape is not.
+// A transmissive interface's reflected share has the forward-eta escape-deficit shape instead, drawn by lobes.msReflectTransmissive from the same row its value reads.
 LobeEval evaluateSpecularLobe(const BsdfParams& params, const glm::vec3& wo, const glm::vec3& wi,
                                float alpha, const LobeProbabilities& lobes) {
     if (wo.z <= 0.0F || wi.z <= 0.0F) {
@@ -740,17 +760,18 @@ LobeEval evaluateSpecularLobe(const BsdfParams& params, const glm::vec3& wo, con
         lobes.transmitWeight > 0.0F
             ? glm::mix(opaqueMs,
                         glm::vec3((1.0F - lobes.transmitShare) * std::max(1.0F - lobes.escapeWo, 0.0F) *
-                                  msTransmitPdf(wi.z, msTransmitRow(params.roughness, lobes.etaI / lobes.etaT)) /
+                                  msTransmitPdf(wi.z, lobes.reflectShape) /
                                   wi.z),
                         lobes.transmitWeight)
             : opaqueMs;
 
-    return {singleScatter + multiScatter, 0.25F * d * smithG1OverCos(wo.z, alpha)};
+    const float vndfPdf = 0.25F * d * smithG1OverCos(wo.z, alpha);
+    return {singleScatter + multiScatter,
+            lobes.facetTransmit > 0.0F ? vndfPdf * facetReflectProbability(params, woDotNh, fDielectric, lobes) : vndfPdf};
 }
 
-// specular = Fresnel reflectance probability (exact dielectric via ior, Schlick via f0 for conductors, blended by metallic).
-// "Exiting" (transmissive material, sign<0, already inside): no diffuse substrate, transmit takes everything specular didn't; reflect internally or exit, no third option.
-// Everything else (entering, sign>0, or an opaque material's woLocal.z pushed negative by grazing-angle normal mapping) uses the entering split: diffuse/transmit divide the remainder by transmissionFactor (0 for opaque, so transmit vanishes and this reduces to diffuse+specular regardless of which side of the interpolated normal wo landed on).
+// Opaque: specular = Fresnel reflectance probability (exact dielectric via ior, Schlick via f0 for conductors, blended by metallic) times E, the rest diffuse and msReflect, whichever side of the interpolated normal wo landed on.
+// Transmissive: every strategy by its energy at wo. "Exiting" (sign<0, already inside) has no diffuse substrate: reflect internally or exit, no third option.
 // transmitPhysicalValue != transmit: throughput = physicalValue/transmit, so physicalValue must independently carry the same transmissionFactor/metallic factors transmit's probability used, or they cancel out of the throughput and silently erase their effect on energy (caught by tools/bsdf_validate.cpp's furnace test).
 LobeProbabilities computeLobeProbabilities(const BsdfParams& params, const glm::vec3& wo, float sign,
                                             float alpha) {
@@ -770,9 +791,6 @@ LobeProbabilities computeLobeProbabilities(const BsdfParams& params, const glm::
     }
     const AlbedoSplit splitWo = directionalAlbedo(wo.z, params.roughness);
     const AlbedoSplit splitAvg = averageAlbedo(params.roughness);
-    // Scaled by E: the specular lobe has two parts, and only the single-scattering part is drawn by VNDF sampling. The multiple-scattering part is (1-E)cos-shaped and drawn by msReflect below, so its selection mass must move there; otherwise a rough white metal, whose Fresnel pins specularProb to the 0.95 clamp, would sample 69% of its own reflectance only 5% of the time.
-    const float specularProb = std::clamp(
-        glm::mix(fresnelAtNormal, conductorLuma, params.metallic) * splitWo.total(), 0.05F, 0.95F);
     const float transmittance = (1.0F - fresnelAtNormal) * (1.0F - params.metallic);
     // Reciprocal diffuse coupling. The substrate receives what the coat did not reflect, on the way in and on the way out: evaluateDiffuseLobe applies the matching wi-side factor, and the pair is renormalised by 1/(1-coatAlbedoAvg) so the directional albedo integrates back to (1-coatAlbedo(mu_o)).
     // Not exact: coatAlbedoAvg evaluates coatAlbedo at the averaged split rather than averaging coatAlbedo over wi, and the two differ because the Fresnel rescale varies with direction; the white furnace test bounds the residual to under 1%.
@@ -787,24 +805,15 @@ LobeProbabilities computeLobeProbabilities(const BsdfParams& params, const glm::
                                                        coatFresnelRatio(wo.z, etaI, etaT, coatF0),
                                                        dielectricAvg)) /
                                    std::max(1.0F - coatAlbedoAvg, 1e-4F);
-    float diffuseProb = 0.0F;
-    float transmitProb = 0.0F;
     float diffuseKd = 0.0F;
-    float transmitPhysicalValue = 0.0F;
+    float transmitPhysicalValue = transmittance;
     if (!exiting) {
-        diffuseProb = (1.0F - specularProb) * (1.0F - params.transmissionFactor);
-        transmitProb = (1.0F - specularProb) * params.transmissionFactor;
         diffuseKd = diffuseCoupling * (1.0F - params.metallic) * (1.0F - params.transmissionFactor);
         transmitPhysicalValue = transmittance * params.transmissionFactor;
-    } else {
-        transmitProb = 1.0F - specularProb;
-        transmitPhysicalValue = transmittance;
     }
     // Each interface's own cosine mean, matching the Fresnel its single scatter evaluates: the quadrature rule for the conductor's complex IOR, the standard rational fit for the dielectric. conductorAvg is 0 off the metal path, where glm::mix at t=0 returns the dielectric term exactly.
     const glm::vec3 fresnelAvg = glm::mix(glm::vec3(dielectricAvg), conductorAvg, params.metallic);
-    // Split of the reflection-side non-specular mass between the two strategies that share it, proportional to the energy each carries. Without it the Kulla-Conty reflection lobe borrows the diffuse slot and is drawn with a CLTC shape set by diffuseRoughness, a parameter of the lobe it is not: a conductor carries all of that slot's energy and none of its shape.
     // msEnergy is exact -- evaluateSpecularLobe's opaqueMs integrates over the hemisphere to fms*(1-E(mu_o)), since int (1-E(mu_i)) cos = pi*(1-Eavg). diffuseEnergy drops evaluateDiffuseLobe's wi-side coat factor; selection mass need only be proportional to energy, not equal to it.
-    // No deficit gate, as for the transmit split below: this ratio already sends the share to zero continuously with the deficit, and gating would strand the mass on the diffuse strategy at exactly the low roughnesses where 1-Eavg is small.
     const float msReflectEnergy = ((multiScatterTint(fresnelAvg.x, splitAvg.total()) +
                                      multiScatterTint(fresnelAvg.y, splitAvg.total()) +
                                      multiScatterTint(fresnelAvg.z, splitAvg.total())) /
@@ -812,72 +821,99 @@ LobeProbabilities computeLobeProbabilities(const BsdfParams& params, const glm::
                                    std::max(1.0F - splitWo.total(), 0.0F);
     const float diffuseEnergy =
         diffuseKd * (params.diffuseRho.x + params.diffuseRho.y + params.diffuseRho.z) / 3.0F;
-    // All to cosine on underflow, the mirror of msFraction's all-VNDF default below: the cosine strategy is strictly positive over the whole hemisphere at every parameter, so it is the safe recipient of mass whose split cannot be resolved. Zero on the exiting side by construction, where diffuseProb is already 0.
-    const float msReflectProb =
-        diffuseProb *
-        (msReflectEnergy + diffuseEnergy > 1e-6F
-             ? msReflectEnergy / (msReflectEnergy + diffuseEnergy)
-             : 1.0F);
     // R_ss uses the same Schlick-split-with-exact-Fresnel-rescale as the coat; T_ss is the (1-fc) channel scaled by (1-f0), which is Schlick's 1-F factored exactly.
     // transmitWeight, not transmissionFactor: the transmission lobe's own energy is gated by (1-metallic) too (see transmittance above), so a metallic=1 material transmits nothing however its transmissionFactor is set. Using the raw factor here credited the escape budget with transmission that never happens, and the compensation handed the difference back as multiple scattering, measured as Lo=1.43 on a metallic=1, transmission=1 surface.
-    // effectiveTransmission: inside the medium there is no diffuse substrate to withhold anything (a ray must reflect internally or exit), so transmissionFactor gates the entering side only. transmitProb and transmitPhysicalValue above already did this; transmitWeight did not, leaving the exiting side's value and its escape budget disagreeing at 0 < transmissionFactor < 1.
+    // effectiveTransmission: inside the medium there is no diffuse substrate to withhold anything (a ray must reflect internally or exit), so transmissionFactor gates the entering side only. transmitPhysicalValue above already did this; transmitWeight did not, leaving the exiting side's value and its escape budget disagreeing at 0 < transmissionFactor < 1.
     const float eta = etaI / etaT;
     const float effectiveTransmission = exiting ? 1.0F : params.transmissionFactor;
     const float transmitWeight = effectiveTransmission * (1.0F - params.metallic);
-    // R + T, with no transmissionFactor weighting: energy the interface refracts but transmissionFactor withholds from the transmit lobe enters the diffuse substrate instead (that is what diffuseKd's (1-transmissionFactor) does), and escapes from there. Either way it leaves, so the microfacet deficit the compensation must return is the same. Weighting this term by transmitWeight instead over-reported the deficit at partial transmission, measured Lo=2.64 against a bound of 2.25.
-    // Skipped entirely when transmissionFactor==0 (which also covers "not exiting", since exiting
-    // requires transmissionFactor>0 by definition above): escapeAlbedo/averageEscapeAlbedo are trilinear
-    // lookups over a log-spaced eta axis, and every value they'd feed here (transmitShare, msFraction)
-    // only matters to the transmissive multi-scatter path, which evaluateSpecularLobe's transmitWeight
-    // gate below already skips for every opaque material -- paying for the lookup anyway would be pure
-    // waste on the common diffuse+specular case.
-    float escape = 0.0F;
-    MsTransmitRow transmitShape{};
-    float transmitShare = 0.0F;
-    float msFraction = 0.0F;
-    // Index-matched interfaces take the exact boundary rather than the table: the delta branch transmits everything, so no microfacet energy is masked and there is nothing for the compensation to return. The tabulated escape cannot say so -- the eta axis is log-spaced and puts eta 1 exactly halfway between its 0.941 and 1.063 nodes, never on one, reading a deficit of 0.209 at roughness 1 where the truth is 0. Left to interpolate, that deficit reaches evaluateSpecularLobe's (1-transmitShare) term and deposits untinted reflected energy on an interface whose exact Fresnel is identically zero.
-    if (params.ior == 1.0F && params.transmissionFactor > 0.0F) {
-        escape = 1.0F;
-        transmitShare = 1.0F;
-    } else if (params.transmissionFactor > 0.0F) {
+    LobeProbabilities lobes{.specular = 0.0F,
+                            .diffuse = 0.0F,
+                            .msReflect = 0.0F,
+                            .msReflectTransmissive = 0.0F,
+                            .transmit = 0.0F,
+                            .msTransmit = 0.0F,
+                            .etaI = etaI,
+                            .etaT = etaT,
+                            .diffuseKd = diffuseKd,
+                            .transmitPhysicalValue = transmitPhysicalValue,
+                            .albedoWo = splitWo.total(),
+                            .albedoAvg = splitAvg.total(),
+                            .coatF0 = coatF0,
+                            .fresnelAvg = fresnelAvg,
+                            .conductorN = conductor.n,
+                            .conductorK = conductor.k,
+                            .escapeWo = 0.0F,
+                            .transmitShape = {},
+                            .reflectShape = {},
+                            .transmitShare = 0.0F,
+                            .etaSq = eta * eta,
+                            .transmitWeight = transmitWeight,
+                            .facetTransmit = 0.0F};
+
+    if (params.transmissionFactor <= 0.0F) {
+        // Scaled by E: the specular lobe has two parts, and only the single-scattering part is drawn by VNDF sampling. The multiple-scattering part is (1-E)cos-shaped and drawn by msReflect below, so its selection mass must move there; otherwise a rough white metal, whose Fresnel pins specularProb to the 0.95 clamp, would sample 69% of its own reflectance only 5% of the time.
+        const float specularProb = std::clamp(
+            glm::mix(fresnelAtNormal, conductorLuma, params.metallic) * splitWo.total(), 0.05F, 0.95F);
+        const float diffuseProb = 1.0F - specularProb;
+        // Split of the non-specular mass between the two strategies that share it, proportional to the energy each carries. Without it the Kulla-Conty reflection lobe borrows the diffuse slot and is drawn with a CLTC shape set by diffuseRoughness, a parameter of the lobe it is not: a conductor carries all of that slot's energy and none of its shape.
+        // No deficit gate: this ratio already sends the share to zero continuously with the deficit, and gating would strand the mass on the diffuse strategy at exactly the low roughnesses where 1-Eavg is small.
+        // All to cosine on underflow: the cosine strategy is strictly positive over the whole hemisphere at every parameter, so it is the safe recipient of mass whose split cannot be resolved.
+        const float msReflectProb =
+            diffuseProb *
+            (msReflectEnergy + diffuseEnergy > 1e-6F ? msReflectEnergy / (msReflectEnergy + diffuseEnergy) : 1.0F);
+        lobes.specular = specularProb;
+        lobes.diffuse = diffuseProb - msReflectProb;
+        lobes.msReflect = msReflectProb;
+        return lobes;
+    }
+
+    // Transmissive: every strategy's selection mass is proportional to the energy it carries at wo, so f*cos/pdf is as flat across strategies as their shapes allow and no clamp or cap is needed; only a zero-energy strategy gets zero mass, and its value is zero, which is the MIS support condition (Veach 1997 sec. 9.2).
+    // Flux terms, without the eta^2 radiance compression, as PBRT-v4's DielectricBxDF selects R/T: the compression cancels over the round trip, so weighting selection by it would oversample reflection entering and transmission exiting.
+    // Untinted, so the sampled directions are independent of transmissionTint and a tinted estimate is exactly the white one times the tint (transmission_tint, rough_transmission_tint); a dark tint only spends draws on zero-valued paths, variance rather than bias.
+    // Index-matched interfaces take the exact boundary rather than the table: Fresnel is identically 0, the delta branch transmits everything, and the log-spaced eta axis puts eta 1 halfway between its nodes, where the interpolated deficit is not 0.
+    float reflectSs = 0.0F;
+    float transmitSs = 1.0F;
+    if (params.ior == 1.0F) {
+        lobes.escapeWo = 1.0F;
+        lobes.transmitShare = 1.0F;
+    } else {
+        // R + T, with no transmissionFactor weighting: energy the interface refracts but transmissionFactor withholds from the transmit lobe enters the diffuse substrate instead (that is what diffuseKd's (1-transmissionFactor) does), and escapes from there. Either way it leaves, so the microfacet deficit the compensation must return is the same. Weighting this term by transmitWeight instead over-reported the deficit at partial transmission, measured Lo=2.64 against a bound of 2.25.
         const EscapeSplit escapeWo = escapeAlbedo(wo.z, params.roughness, eta);
         const EscapeSplit escapeMean = averageEscapeAlbedo(params.roughness, eta);
-        escape = escapeWo.total();
-        const float escapeAvg = escapeMean.total();
-        transmitShape = msTransmitRow(params.roughness, 1.0F / eta);
-        const float transmitSsAvg = transmitWeight * escapeMean.transmit;
-        transmitShare = transmitSsAvg / std::max(escapeAvg, 1e-4F);
-
-        // Split of the transmit selection mass between the two far-hemisphere strategies, proportional to the energy each carries (transmitWeight cancels from both sides), so the share goes to zero continuously with the deficit and msTransmit's weight K/p_ms stays bounded.
-        // Selected exactly where transmitMultiScatter has value -- msEnergy > 0 on a row with density -- which is the MIS support condition (Veach 1997 sec. 9.2) for that lobe; checkStrategyCoverage asserts it.
-        const float msEnergy = transmitShare * std::max(1.0F - escape, 0.0F);
-        if (transmissionIsRough(params, alpha) && transmitShape.scale > 0.0F && msEnergy > 0.0F) {
-            // Capped so the peaked single-scatter lobe always keeps a quarter of the mass.
-            msFraction = std::min(msEnergy / (msEnergy + escapeWo.transmit), 0.75F);
-        }
+        lobes.escapeWo = escapeWo.total();
+        lobes.transmitShape = msTransmitRow(params.roughness, 1.0F / eta);
+        lobes.reflectShape = msTransmitRow(params.roughness, eta);
+        lobes.transmitShare = transmitWeight * escapeMean.transmit / std::max(escapeMean.total(), 1e-4F);
+        reflectSs = escapeWo.reflect;
+        transmitSs = escapeWo.transmit;
     }
-    const float msTransmitProb = transmitProb * msFraction;
-
-    return {.specular = specularProb,
-             .diffuse = diffuseProb - msReflectProb,
-             .msReflect = msReflectProb,
-             .transmit = transmitProb - msTransmitProb,
-             .msTransmit = msTransmitProb,
-             .etaI = etaI,
-             .etaT = etaT,
-             .diffuseKd = diffuseKd,
-             .transmitPhysicalValue = transmitPhysicalValue,
-             .albedoWo = splitWo.total(),
-             .albedoAvg = splitAvg.total(),
-             .coatF0 = coatF0,
-             .fresnelAvg = fresnelAvg,
-             .conductorN = conductor.n,
-             .conductorK = conductor.k,
-             .escapeWo = escape,
-             .transmitShape = transmitShape,
-             .transmitShare = transmitShare,
-             .etaSq = eta * eta,
-             .transmitWeight = transmitWeight};
+    const float deficit = std::max(1.0F - lobes.escapeWo, 0.0F);
+    const bool rough = transmissionIsRough(params, alpha);
+    // The conductor's single scatter is macro Fresnel times E, as in the opaque split; the dielectric's is the table's R_ss.
+    const float specularEnergy = glm::mix(reflectSs, conductorLuma * splitWo.total(), params.metallic);
+    const float opaqueMsEnergy = (1.0F - transmitWeight) * msReflectEnergy;
+    // A zero-scale row has no density to draw from, and its value reads the same zero.
+    const float msReflectTransmissiveEnergy =
+        lobes.reflectShape.scale > 0.0F ? transmitWeight * (1.0F - lobes.transmitShare) * deficit : 0.0F;
+    // A rough interface's refraction is the VNDF strategy's other branch, chosen per facet, so its energy joins the specular mass; a delta keeps its own.
+    const float transmitEnergy = rough ? transmitWeight * transmitSs : transmitPhysicalValue;
+    // evaluateContinuousLobes drops the far-side multiple scattering of a delta interface, so it has no energy to select for.
+    const float msTransmitEnergy = rough && lobes.transmitShape.scale > 0.0F
+                                       ? transmitWeight * lobes.transmitShare * deficit
+                                       : 0.0F;
+    const float total = specularEnergy + diffuseEnergy + opaqueMsEnergy + msReflectTransmissiveEnergy +
+                        transmitEnergy + msTransmitEnergy;
+    // Zero only where every lobe's value is zero (a fully metallic interface whose conductor Fresnel is 0), leaving sampleBsdf nothing to draw.
+    const float inverseTotal = total > 0.0F ? 1.0F / total : 0.0F;
+    lobes.specular = (rough ? specularEnergy + transmitEnergy : specularEnergy) * inverseTotal;
+    lobes.diffuse = diffuseEnergy * inverseTotal;
+    lobes.msReflect = opaqueMsEnergy * inverseTotal;
+    lobes.msReflectTransmissive = msReflectTransmissiveEnergy * inverseTotal;
+    lobes.transmit = rough ? 0.0F : transmitEnergy * inverseTotal;
+    lobes.msTransmit = msTransmitEnergy * inverseTotal;
+    lobes.facetTransmit = rough ? transmitWeight : 0.0F;
+    return lobes;
 }
 
 // Walter et al. 2007 rough transmission, single scatter only (value eq. 21, half-vector eq. 16, Jacobian eq. 17), in PBRT-v3's radiance-transport form.
@@ -910,8 +946,11 @@ LobeEval evaluateTransmissionLobe(const BsdfParams& params, const glm::vec3& wo,
     const float common = (4.0F * d * smithVisibility(wo.z, -wi.z, alpha) * std::abs(wiDotH) * woDotH) / denom2;
     const float vndfPdf = d * woDotH * smithG1OverCos(wo.z, alpha);
     // transmitWeight, the same factors the delta branch carries via transmitPhysicalValue: (1-metallic), since a conductor transmits nothing however its transmissionFactor is set, and the entering side's transmissionFactor, without which this refracted at full strength on top of a diffuse substrate already scaled by (1-transmissionFactor).
+    // The VNDF strategy refracts about this facet with probability 1 - facetReflectProbability, and never where facetTransmit is 0.
+    const float refractProbability =
+        lobes.facetTransmit > 0.0F ? 1.0F - facetReflectProbability(params, woDotH, fresnel, lobes) : 0.0F;
     return {params.transmissionTint * (1.0F - fresnel) * lobes.transmitWeight * common,
-             vndfPdf * etaR * etaR * std::abs(wiDotH) / denom2};
+             refractProbability * vndfPdf * etaR * etaR * std::abs(wiDotH) / denom2};
 }
 
 BsdfEval evaluateContinuousLobes(const BsdfParams& params, const glm::vec3& wo, const glm::vec3& wi,
@@ -925,13 +964,17 @@ BsdfEval evaluateContinuousLobes(const BsdfParams& params, const glm::vec3& wo, 
         const LobeEval transmission = evaluateTransmissionLobe(params, wo, wi, alpha, lobes);
         const float msPdf = msTransmitPdf(-wi.z, lobes.transmitShape);
         return {glm::vec3(0.0F), glm::vec3(0.0F), transmission.f + transmitMultiScatter(params, -wi.z, msPdf, lobes),
-                (lobes.transmit * transmission.pdf) + (lobes.msTransmit * msPdf)};
+                (lobes.specular * transmission.pdf) + (lobes.msTransmit * msPdf)};
     }
     const LobeEval specular = evaluateSpecularLobe(params, wo, wi, alpha, lobes);
     const LobeEval diffuse = evaluateDiffuseLobe(params, wo, wi, lobes);
-    return {diffuse.f, specular.f, glm::vec3(0.0F),
-            (lobes.specular * specular.pdf) + (lobes.diffuse * diffuse.pdf) +
-                 (lobes.msReflect * msReflectPdf(wi.z, params.roughness))};
+    float pdf = (lobes.specular * specular.pdf) + (lobes.diffuse * diffuse.pdf) +
+                (lobes.msReflect * msReflectPdf(wi.z, params.roughness));
+    // Gated so an opaque material skips the row lookup; the term is 0 there either way.
+    if (lobes.msReflectTransmissive > 0.0F) {
+        pdf += lobes.msReflectTransmissive * msTransmitPdf(wi.z, lobes.reflectShape);
+    }
+    return {diffuse.f, specular.f, glm::vec3(0.0F), pdf};
 }
 
 }  // namespace
@@ -975,70 +1018,71 @@ std::optional<BsdfSample> sampleBsdf(const BsdfParams& params, const glm::vec3& 
 
     const float lobeU = sampler.next1D();
 
-    // Cosine is the innermost fall-through, not a top-of-range test like msTransmit below: it sits interior to the reflection region, so a boundary ulp can only misfile between two strategies that both carry density in the mixture -- variance, never bias.
-    if (lobeU < lobes.specular + lobes.diffuse + lobes.msReflect) {
-        const bool sampledSpecular = lobeU < lobes.specular;
+    // One-sample MIS: whichever strategy drew wi, the throughput divides by the whole mixture's density at it.
+    const auto weigh = [&](const glm::vec3& wi, LobeType type) -> std::optional<BsdfSample> {
+        const BsdfEval eval = evaluateContinuousLobes(params, wo, wi, alpha, lobes);
+        if (eval.pdf <= 1e-8F) {
+            return std::nullopt;
+        }
+        return BsdfSample{glm::vec3(wi.x, wi.y, wi.z * sign), (eval.total() * std::abs(wi.z)) / eval.pdf, type,
+                           eval.pdf};
+    };
+
+    // VNDF single scatter. On a rough transmissive interface it refracts about the sampled facet as well (Walter 2007), split per facet by facetReflectProbability; lobeU/specular is uniform given this strategy, so it decides the split without another sampler dimension.
+    // A facet whose refraction totally internally reflects has Fresnel 1 and so always reflects.
+    if (lobeU < lobes.specular) {
+        const glm::vec3 nh = sampleGGXVNDF(wo, alpha, sampler.next2D());
+        if (lobes.facetTransmit > 0.0F) {
+            const float woDotNh = glm::dot(wo, nh);
+            const float fDielectric = fresnelDielectric(woDotNh, lobes.etaI, lobes.etaT);
+            if (lobeU >= lobes.specular * facetReflectProbability(params, woDotNh, fDielectric, lobes)) {
+                glm::vec3 wi;
+                if (!refractAbout(wo, nh, lobes.etaI / lobes.etaT, wi) || wi.z >= 0.0F) {
+                    return std::nullopt;
+                }
+                return weigh(wi, LobeType::Transmission);
+            }
+        }
+        const glm::vec3 wi = glm::reflect(-wo, nh);
+        if (wi.z <= 0.0F) {
+            return std::nullopt;
+        }
+        return weigh(wi, LobeType::SpecularReflection);
+    }
+
+    // The reflection region's sub-ranges are prefix sums of one expression, so they partition it exactly: a strategy with no mass has an empty range and is never reached.
+    if (lobeU < lobes.specular + lobes.diffuse + lobes.msReflect + lobes.msReflectTransmissive) {
+        const bool sampledDiffuse = lobeU < lobes.specular + lobes.diffuse;
         glm::vec3 wi;
-        if (sampledSpecular) {
-            const glm::vec3 nh = sampleGGXVNDF(wo, alpha, sampler.next2D());
-            wi = glm::reflect(-wo, nh);
-        } else if (lobeU < lobes.specular + lobes.diffuse) {
+        if (sampledDiffuse) {
             wi = sampleEon(wo, params.diffuseRoughness, sampler.next2D());
-        } else {
+        } else if (lobeU < lobes.specular + lobes.diffuse + lobes.msReflect) {
             wi = sampleMsReflect(params.roughness, sampler.next2D());
+        } else {
+            wi = sampleMsTransmit(lobes.reflectShape, sampler.next2D());
         }
         if (wi.z <= 0.0F) {
             return std::nullopt;
         }
-        const BsdfEval eval = evaluateContinuousLobes(params, wo, wi, alpha, lobes);
-        if (eval.pdf <= 1e-8F) {
-            return std::nullopt;
-        }
-        const glm::vec3 throughput = (eval.total() * wi.z) / eval.pdf;
-        // The multiple-scattering branch reports SpecularReflection: path_tracer.cpp buckets transport by strategy, and repeated bounces on a GGX microsurface are specular however broad their exitant distribution is.
-        const bool sampledDiffuse = !sampledSpecular && lobeU < lobes.specular + lobes.diffuse;
-        return BsdfSample{glm::vec3(wi.x, wi.y, wi.z * sign), throughput,
-                           sampledDiffuse ? LobeType::Diffuse : LobeType::SpecularReflection,
-                           eval.pdf};
+        // The multiple-scattering branches report SpecularReflection: path_tracer.cpp buckets transport by strategy, and repeated bounces on a GGX microsurface are specular however broad their exitant distribution is.
+        return weigh(wi, sampledDiffuse ? LobeType::Diffuse : LobeType::SpecularReflection);
     }
 
-    // Top slice of the ladder: the multiple-scattering transmission lobe, drawn from its own tabulated shape over the far hemisphere. It needs a strategy of its own because the refraction VNDF below reaches only directions some microfacet can refract into, while this lobe spans the whole hemisphere.
-    // msTransmit tested first, not inside: the four probabilities below it sum to 1.0 only to float precision, so with no mass here a top-of-range lobeU must fall through to the transmit lobe it always belonged to rather than be rejected.
+    // Top slice of the ladder: the multiple-scattering transmission lobe, drawn from its own tabulated shape over the far hemisphere. It needs a strategy of its own because the refraction VNDF reaches only directions some microfacet can refract into, while this lobe spans the whole hemisphere.
+    // msTransmit tested first, not inside: the five probabilities below it sum to 1.0 only to float precision, so with no mass here a top-of-range lobeU must fall through to the delta transmit lobe rather than be rejected.
     // Draws from lobes.transmitShape, the row transmitMultiScatter's value and msTransmitPdf both read, so the shape drawn is the shape evaluated and divided by.
     if (lobes.msTransmit > 0.0F &&
-        lobeU >= lobes.specular + lobes.diffuse + lobes.msReflect + lobes.transmit) {
+        lobeU >= lobes.specular + lobes.diffuse + lobes.msReflect + lobes.msReflectTransmissive + lobes.transmit) {
         glm::vec3 wi = sampleMsTransmit(lobes.transmitShape, sampler.next2D());
         wi.z = -wi.z;
-        const BsdfEval eval = evaluateContinuousLobes(params, wo, wi, alpha, lobes);
-        if (eval.pdf <= 1e-8F) {
-            return std::nullopt;
-        }
-        const glm::vec3 throughput = (eval.total() * -wi.z) / eval.pdf;
-        return BsdfSample{glm::vec3(wi.x, wi.y, wi.z * sign), throughput, LobeType::Transmission,
-                           eval.pdf};
+        return weigh(wi, LobeType::Transmission);
     }
 
     if (lobes.transmit <= 0.0F) {
         return std::nullopt;
     }
 
-    // Rough transmission (Walter 2007): refract about a VNDF-sampled microfacet normal rather than the macro normal. A microfacet steep enough to totally internally reflect yields no transmission sample.
-    if (transmissionIsRough(params, alpha)) {
-        const glm::vec3 ht = sampleGGXVNDF(wo, alpha, sampler.next2D());
-        glm::vec3 wi;
-        if (!refractAbout(wo, ht, lobes.etaI / lobes.etaT, wi) || wi.z >= 0.0F) {
-            return std::nullopt;
-        }
-        const BsdfEval eval = evaluateContinuousLobes(params, wo, wi, alpha, lobes);
-        if (eval.pdf <= 1e-8F) {
-            return std::nullopt;
-        }
-        const glm::vec3 throughput = (eval.total() * -wi.z) / eval.pdf;
-        return BsdfSample{glm::vec3(wi.x, wi.y, wi.z * sign), throughput, LobeType::Transmission,
-                           eval.pdf};
-    }
-
-    // Smooth specular transmission (delta lobe): Snell's law, TIR already folded into lobes.specular via fresnelDielectric returning 1.0 past the critical angle -- exactly, since both sites now decide it with the same cos2Transmitted predicate rather than two separately-rounded transcriptions.
+    // Smooth specular transmission (delta lobe): Snell's law, TIR already folded into lobes.transmit, whose (1-F) energy is 0 past the critical angle -- exactly, since both sites now decide it with the same cos2Transmitted predicate rather than two separately-rounded transcriptions.
     const float eta = lobes.etaI / lobes.etaT;
     const float cos2ThetaT = cos2Transmitted(wo.z, eta);
     if (cos2ThetaT < 0.0F) {
