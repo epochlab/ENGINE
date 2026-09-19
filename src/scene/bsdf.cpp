@@ -22,17 +22,19 @@ float distributionGGX(const glm::vec3& nh, float alpha) {
     return alpha2 / (kPi * d * d);
 }
 
-float smithLambda(float ndotV, float alpha) {
-    const float ndotV2 = std::max(ndotV * ndotV, 1e-8F);
-    const float tan2 = std::max(0.0F, 1.0F - ndotV2) / ndotV2;
-    return 0.5F * (-1.0F + std::sqrt(1.0F + (alpha * alpha * tan2)));
+// cos*sqrt(1 + alpha^2*tan^2), the GGX Smith Lambda's radical scaled by the cosine: 1 + Lambda(c) = (c + radical)/(2c), and unlike tan it is finite at c = 0.
+float smithRadical(float cosTheta, float alpha) {
+    const float alpha2 = alpha * alpha;
+    return std::sqrt(alpha2 + ((1.0F - alpha2) * cosTheta * cosTheta));
 }
 
-float smithG1(float ndotV, float alpha) { return 1.0F / (1.0F + smithLambda(ndotV, alpha)); }
-
-float smithG2(float ndotV, float ndotL, float alpha) {
-    return 1.0F / (1.0F + smithLambda(ndotV, alpha) + smithLambda(ndotL, alpha));
+// G2/(4*cosO*cosI) for the height-correlated Smith G2 (Heitz 2014; Filament's V_SmithGGXCorrelated): the cosines multiply rather than divide, so it is exact to the silhouette and vanishes only where both cosines do.
+float smithVisibility(float cosO, float cosI, float alpha) {
+    return 0.5F / ((cosI * smithRadical(cosO, alpha)) + (cosO * smithRadical(cosI, alpha)));
 }
+
+// G1(c)/c, the VNDF pdf's projected-area factor, in the same division-free form: 2/alpha at grazing rather than 0/0.
+float smithG1OverCos(float cosTheta, float alpha) { return 2.0F / (cosTheta + smithRadical(cosTheta, alpha)); }
 
 // --- Conductor Fresnel: Gulbrandsen 2014, "Artist Friendly Metallic Fresnel", JCGT 3(4), ported
 // from the paper's Appendix A listing. Replaces Schlick on the metal path, which is monotone in
@@ -144,7 +146,7 @@ glm::vec3 sampleGGXVNDF(const glm::vec3& wo, float alpha, glm::vec2 u) {
 }
 
 // Kulla-Conty energy tables, baked offline by tools/albedo_table.cpp (Kulla & Conty 2017, "Revisiting Physically Based Shading at Imageworks"). The .inc defines kAlbedoRes/kTransmitRes/kEtaRes/kEtaMin/kEtaMax alongside the arrays, so the grid the lookups below index is the grid the generator wrote and the two cannot drift apart.
-// kAlbedoA/kAlbedoB are the directional albedo of the single-scattering GGX lobe with Fresnel forced to 1, the fraction of energy smithG2 lets through, so 1-E is exactly what multiple scattering must return. Split by Schlick's form F(c) = f0*(1 - (1-c)^5) + (1-c)^5 so one table serves any f0 (the standard environment-BRDF split): Ess(mu, f0) = f0*a + b, and with f0=1 that collapses to a + b = E, the Fresnel-free albedo the multiple-scattering lobe needs.
+// kAlbedoA/kAlbedoB are the directional albedo of the single-scattering GGX lobe with Fresnel forced to 1, the fraction of energy the height-correlated Smith G2 lets through, so 1-E is exactly what multiple scattering must return. Split by Schlick's form F(c) = f0*(1 - (1-c)^5) + (1-c)^5 so one table serves any f0 (the standard environment-BRDF split): Ess(mu, f0) = f0*a + b, and with f0=1 that collapses to a + b = E, the Fresnel-free albedo the multiple-scattering lobe needs.
 // kEscapeReflect/kEscapeTransmit are the escaping fraction of a dielectric interface, split into the reflected and transmitted shares and indexed [roughnessIndex][muIndex][etaIndex]. They use exact dielectric Fresnel rather than the Schlick split: inside the total-internal-reflection cone exact Fresnel is 1.0 while Schlick reads ~0.1, so no rescale of a Schlick-basis number can stand in for it, and the escape budget would under-count the reflected share by the whole TIR cone. Their third axis is why they stay at kTransmitRes.
 // Building this at startup is what used to bound its accuracy: the grid and the quadrature were sized by load latency, not by what the energy tests need. See the generator for the rule and its measured residual.
 #include "albedo_table.inc"
@@ -694,7 +696,7 @@ LobeEval evaluateDiffuseLobe(const BsdfParams& params, const glm::vec3& wo, cons
     return {f * diffuseKdAt(params, wi, lobes), pdfEon(wo, wi, params.diffuseRoughness)};
 }
 
-// Single scatter D*G2*F/(4*ndotV*ndotL) plus the Kulla-Conty multiple-scattering lobe, and the VNDF pdf (Heitz 2018 eq.3, Jacobian 1/(4*dot(wo,nh))).
+// Single scatter D*G2*F/(4*ndotV*ndotL) plus the Kulla-Conty multiple-scattering lobe, and the VNDF pdf G1*D*dot(wo,nh)/ndotV (Heitz 2018 eq.3) times its reflection Jacobian 1/(4*dot(wo,nh)), which cancels dot(wo,nh).
 // The pdf covers the single-scattering term only. The reflected multiple-scattering share is (1-E)cos-shaped and has a strategy of its own, lobes.msReflect, mirroring the transmitted share's lobes.msTransmit; evaluateContinuousLobes sums both densities into the mixture.
 // Cosine was the standard practical choice (Kulla & Conty 2017); the zero-variance density here is (1-E(mu_i))cos/(pi*(1-Eavg)), and kMsReflectDensity holds exactly that shape, so lobes.msReflect draws it rather than paying the (1-E(mu_i))/(1-Eavg) weight ratio.
 // The exiting side leaves this share on VNDF alone, since diffuseProb and so msReflect are 0 there: coverage is complete for alpha>0, the shape is not.
@@ -709,7 +711,6 @@ LobeEval evaluateSpecularLobe(const BsdfParams& params, const glm::vec3& wo, con
         return {glm::vec3(0.0F), 0.0F};
     }
     const float d = distributionGGX(nh, alpha);
-    const float g2 = smithG2(wo.z, wi.z, alpha);
     const float fDielectric = fresnelDielectric(woDotNh, lobes.etaI, lobes.etaT);
     // Gated, not mixed away at weight 0: glm::mix is a + t*(b-a), so a non-finite conductor term would
     // survive t=0 as NaN rather than cancel. Skipping the call keeps every dielectric bit-identical and
@@ -719,9 +720,9 @@ LobeEval evaluateSpecularLobe(const BsdfParams& params, const glm::vec3& wo, con
             ? glm::mix(glm::vec3(fDielectric),
                         fresnelConductor(woDotNh, lobes.conductorN, lobes.conductorK), params.metallic)
             : glm::vec3(fDielectric);
-    const glm::vec3 singleScatter = (d * g2 * f) / std::max(4.0F * wo.z * wi.z, 1e-6F);
+    const glm::vec3 singleScatter = d * smithVisibility(wo.z, wi.z, alpha) * f;
 
-    // Kulla & Conty 2017. Integrates to (1-E(mu_o)) at Favg=1 -- the energy smithG2 discarded -- so a
+    // Kulla & Conty 2017. Integrates to (1-E(mu_o)) at Favg=1 -- the energy G2 discarded -- so a
     // white conductor conserves, up to the table's own interpolation and quadrature error (measured
     // under 1% by the white furnace test). Symmetric in wo/wi, so it preserves reciprocity.
     // Reflected share of the multiple-scattering energy. The tint blends to 1 as the interface becomes
@@ -744,9 +745,7 @@ LobeEval evaluateSpecularLobe(const BsdfParams& params, const glm::vec3& wo, con
                         lobes.transmitWeight)
             : opaqueMs;
 
-    const float g1 = smithG1(wo.z, alpha);
-    const float pdf = (g1 * woDotNh * d) / std::max(wo.z, 1e-6F) / (4.0F * woDotNh);
-    return {singleScatter + multiScatter, pdf};
+    return {singleScatter + multiScatter, 0.25F * d * smithG1OverCos(wo.z, alpha)};
 }
 
 // specular = Fresnel reflectance probability (exact dielectric via ior, Schlick via f0 for conductors, blended by metallic).
@@ -906,11 +905,10 @@ LobeEval evaluateTransmissionLobe(const BsdfParams& params, const glm::vec3& wo,
         return {glm::vec3(0.0F), 0.0F};
     }
     const float d = distributionGGX(ht, alpha);
-    const float g2 = smithG2(wo.z, -wi.z, alpha);
     const float fresnel = fresnelDielectric(woDotH, lobes.etaI, lobes.etaT);
-    const float common = (d * g2 * std::abs(wiDotH) * woDotH) / (wo.z * -wi.z * denom2);
-    const float g1 = smithG1(wo.z, alpha);
-    const float vndfPdf = (g1 * woDotH * d) / std::max(wo.z, 1e-6F);
+    // D*G2*|wi.h|*(wo.h)/(wo.z*|wi.z|*denom^2), with G2/(wo.z*|wi.z|) taken as 4*smithVisibility.
+    const float common = (4.0F * d * smithVisibility(wo.z, -wi.z, alpha) * std::abs(wiDotH) * woDotH) / denom2;
+    const float vndfPdf = d * woDotH * smithG1OverCos(wo.z, alpha);
     // transmitWeight, the same factors the delta branch carries via transmitPhysicalValue: (1-metallic), since a conductor transmits nothing however its transmissionFactor is set, and the entering side's transmissionFactor, without which this refracted at full strength on top of a diffuse substrate already scaled by (1-transmissionFactor).
     return {params.transmissionTint * (1.0F - fresnel) * lobes.transmitWeight * common,
              vndfPdf * etaR * etaR * std::abs(wiDotH) / denom2};
