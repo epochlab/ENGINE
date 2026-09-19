@@ -1,7 +1,7 @@
 // Reads the JSON Lines benchmark log (engine/debug/bench_log.h) and states, with a distribution-free confidence interval, whether one build is faster than another.
 // run: Randomized Multiple Interleaved Trials (Abedi & Brecht 2017) -- each round runs A and B back to back in a random order, so slow drift (thermal, background load) cancels in the paired log-ratio.
 // compare/history: unpaired analysis of records already in the log; weaker than run, since drift between the two groups is not controlled.
-// The unit of replication is the process invocation (Kalibera & Jones 2013); each invocation is summarised by its metric's total over the run, which is the cost of the fixed workload an equal config guarantees.
+// The unit of replication is the process invocation (Kalibera & Jones 2013); each invocation is summarised by its column's mean per event, since every column holds one entry per event of its own (frame, upload, pass) and only some event counts are fixed by config: frame count scales with run duration.
 // Same standalone-CLI convention as the other tools: non-zero exit on bad input or a failed child.
 
 #include <fcntl.h>
@@ -150,15 +150,15 @@ std::optional<std::vector<json>> loadLog(const std::string& path) {
     return records;
 }
 
-// The run's total of a samples column, or a scalar rusage field; nullopt if the record carries neither.
-std::optional<double> metricTotal(const json& record, const std::string& metric) {
+// A samples column's mean per event (NaN if empty), or a scalar rusage field; nullopt if the record carries neither.
+std::optional<double> metricValue(const json& record, const std::string& metric) {
     const json& samples = record["samples"];
     if (samples.contains(metric)) {
         double total = 0.0;
         for (const json& v : samples[metric]) {
             total += v.get<double>();
         }
-        return total;
+        return total / static_cast<double>(samples[metric].size());
     }
     if (record["rusage"].contains(metric)) {
         return record["rusage"][metric].get<double>();
@@ -168,7 +168,7 @@ std::optional<double> metricTotal(const json& record, const std::string& metric)
 
 std::optional<std::string> resolveMetric(const std::string& requested, const json& record) {
     if (!requested.empty()) {
-        if (!metricTotal(record, requested)) {
+        if (!metricValue(record, requested)) {
             std::cerr << "bench_compare: metric '" << requested << "' is neither a samples column nor a rusage field\n";
             return std::nullopt;
         }
@@ -195,18 +195,18 @@ std::string shortId(const json& record) {
     return record["build"].value("uuid", std::string()).substr(0, 8) + " " + record["build"].value("git", std::string());
 }
 
-// A log-ratio needs strictly positive totals from every record; the metric is resolved from one representative, and config equality does not constrain the column set, so a build that renamed a column reaches here without it.
-bool positiveTotals(const std::vector<const json*>& group, const std::string& metric) {
+// A log-ratio needs a strictly positive value from every record; the metric is resolved from one representative, and config equality does not constrain the column set, so a build that renamed a column reaches here without it.
+bool positiveValues(const std::vector<const json*>& group, const std::string& metric) {
     for (const json* r : group) {
-        const std::optional<double> total = metricTotal(*r, metric);
-        if (!total) {
+        const std::optional<double> value = metricValue(*r, metric);
+        if (!value) {
             std::cerr << "bench_compare: " << shortId(*r) << " pid " << (*r).value("pid", -1) << " has no metric " << metric
                       << "; the two builds do not record the same columns\n";
             return false;
         }
-        if (!(*total > 0.0)) {
-            std::cerr << "bench_compare: " << shortId(*r) << " pid " << (*r).value("pid", -1) << " has a non-positive " << metric
-                      << " total; no ratio exists\n";
+        if (!(*value > 0.0)) {
+            std::cerr << "bench_compare: " << shortId(*r) << " pid " << (*r).value("pid", -1) << " has a non-positive or empty " << metric
+                      << "; no ratio exists\n";
             return false;
         }
     }
@@ -240,14 +240,14 @@ void printRatio(const char* label, const tools::stats::ShiftEstimate& logShift, 
 }
 
 void printGroup(const char* name, const std::vector<const json*>& group, const std::string& metric) {
-    std::vector<double> totals;
+    std::vector<double> values;
     std::vector<double> preemptions;
     for (const json* r : group) {
-        totals.push_back(*metricTotal(*r, metric));
+        values.push_back(*metricValue(*r, metric));
         preemptions.push_back((*r)["rusage"].value("nivcsw", 0.0));
     }
-    std::printf("  %s %s  n = %zu  median %s total %.6g  median nivcsw %.0f\n", name, shortId(*group.front()).c_str(),
-                group.size(), metric.c_str(), median(totals), median(preemptions));
+    std::printf("  %s %s  n = %zu  median %s %.6g  median nivcsw %.0f\n", name, shortId(*group.front()).c_str(),
+                group.size(), metric.c_str(), median(values), median(preemptions));
 }
 
 // Identical work is what makes a timing ratio mean "faster at the same job"; a differing CRC is reported, not fatal, since a change may legitimately alter output.
@@ -346,12 +346,12 @@ int runCommand(const Options& options) {
         aGroup.push_back(&aRuns[i]);
         bGroup.push_back(&bRuns[i]);
     }
-    if (!positiveTotals(aGroup, *metric) || !positiveTotals(bGroup, *metric)) {
+    if (!positiveValues(aGroup, *metric) || !positiveValues(bGroup, *metric)) {
         return EXIT_FAILURE;
     }
     std::vector<double> logRatios;
     for (std::size_t i = 0; i < aRuns.size(); ++i) {
-        logRatios.push_back(std::log(*metricTotal(bRuns[i], *metric) / *metricTotal(aRuns[i], *metric)));
+        logRatios.push_back(std::log(*metricValue(bRuns[i], *metric) / *metricValue(aRuns[i], *metric)));
     }
     printRatio(("paired " + *metric).c_str(), tools::stats::hodgesLehmannPaired(logRatios, options.alpha),
                options.alpha, options.rounds);
@@ -385,7 +385,7 @@ std::optional<std::vector<const json*>> selectGroup(const std::vector<json>& rec
 std::vector<double> logTotals(const std::vector<const json*>& group, const std::string& metric) {
     std::vector<double> values;
     for (const json* r : group) {
-        values.push_back(std::log(*metricTotal(*r, metric)));
+        values.push_back(std::log(*metricValue(*r, metric)));
     }
     return values;
 }
@@ -403,7 +403,7 @@ int compareCommand(const Options& options, const std::vector<json>& records) {
         return EXIT_FAILURE;
     }
     const std::optional<std::string> metric = resolveMetric(options.metric, *a->front());
-    if (!metric || !positiveTotals(*a, *metric) || !positiveTotals(*b, *metric)) {
+    if (!metric || !positiveValues(*a, *metric) || !positiveValues(*b, *metric)) {
         return EXIT_FAILURE;
     }
     std::printf("bench_compare: unpaired -- drift between the two groups is not controlled; prefer 'run' for a claim\n");
@@ -444,10 +444,10 @@ int historyCommand(const Options& options, const std::vector<json>& records) {
         const auto it = std::find_if(builds.begin(), builds.end(), sameBuild);
         (it == builds.end() ? builds.emplace_back() : *it).push_back(&r);
     }
-    if (!std::all_of(builds.begin(), builds.end(), [&](const std::vector<const json*>& g) { return positiveTotals(g, *metric); })) {
+    if (!std::all_of(builds.begin(), builds.end(), [&](const std::vector<const json*>& g) { return positiveValues(g, *metric); })) {
         return EXIT_FAILURE;
     }
-    std::printf("bench_compare: %s history, metric %s total, config %s (%zu records at other configs excluded)\n",
+    std::printf("bench_compare: %s history, metric %s, config %s (%zu records at other configs excluded)\n",
                 options.tool.c_str(), metric->c_str(), config.dump().c_str(), excluded);
     for (std::size_t i = 0; i < builds.size(); ++i) {
         const std::vector<const json*>& g = builds[i];

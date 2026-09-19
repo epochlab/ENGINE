@@ -10,7 +10,7 @@
 namespace engine::debug {
 
 // Schema version of the JSON Lines benchmark log; bump on any field rename or meaning change so a reader can refuse a record it would misread.
-inline constexpr int kBenchLogSchema = 1;
+inline constexpr int kBenchLogSchema = 2;
 
 // One timing run's tool-specific content. appendBenchRecord adds provenance (build, host) and rusage itself, so no caller can omit them.
 struct BenchRecord {

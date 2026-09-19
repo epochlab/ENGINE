@@ -261,6 +261,7 @@ void PathTraceDriver::driverLoop(std::stop_token stopToken) {
         const auto overRangeStart = std::chrono::steady_clock::now();
         reduceOverRange(*pass, overRangeHistograms_, overRangePeaks_, threadPool_);
         const double overRangeMs = millisecondsSince(overRangeStart);
+        pass->generation = activeGeneration;
         currentMean = pass;
 
         const auto publishStart = std::chrono::steady_clock::now();

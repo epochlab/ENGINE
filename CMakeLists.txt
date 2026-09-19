@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(Engine LANGUAGES CXX)
+project(Engine LANGUAGES CXX OBJCXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -13,6 +13,8 @@ endif()
 find_package(OpenGL REQUIRED)
 find_package(glfw3 3.5 REQUIRED)
 find_package(GLEW REQUIRED)
+# Homebrew's glew config links OpenGL.framework by absolute path into the SDK glew was built with; a foreign SDK there enters the -F search path and shadows this build's own system frameworks as user headers.
+set_property(TARGET GLEW::GLEW PROPERTY INTERFACE_LINK_LIBRARIES OpenGL::GL)
 find_package(glm REQUIRED)
 find_package(Imath REQUIRED)
 find_package(OpenEXR REQUIRED)
@@ -93,6 +95,7 @@ target_compile_options(vendored_no_tidy PRIVATE -w)
 add_executable(engine
     src/main.cpp
     src/platform/window.cpp
+    src/platform/display_link.mm
     src/gfx/gl_debug.cpp
     src/gfx/shader_program.cpp
     src/gfx/texture.cpp
@@ -139,7 +142,9 @@ target_compile_definitions(engine PRIVATE
 target_compile_options(engine PRIVATE -Wall -Wextra -Werror -march=native)
 target_link_libraries(engine PRIVATE
     glfw GLEW::GLEW OpenGL::GL glm::glm
-    OpenEXR::OpenEXR Imath::Imath OpenColorIO::OpenColorIO embree ZLIB::ZLIB)
+    OpenEXR::OpenEXR Imath::Imath OpenColorIO::OpenColorIO embree ZLIB::ZLIB
+    "-framework AppKit" "-framework QuartzCore")
+set_source_files_properties(src/platform/display_link.mm PROPERTIES COMPILE_OPTIONS -fobjc-arc)
 if(CLANG_TIDY_EXE)
     set_target_properties(engine PROPERTIES CXX_CLANG_TIDY "${CLANG_TIDY_COMMAND}")
 endif()

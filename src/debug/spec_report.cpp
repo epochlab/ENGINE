@@ -46,8 +46,8 @@ void printBuild(const BuildInfo& build, const LibraryVersions& libs) {
 
 void printSpec(const EngineSpec& spec, const GpuInfo& gpu) {
     // GL_RENDERER leads the block: on a unified-memory part it names the machine as well as the GPU, which is why no separate CPU brand line follows it. Grouped with the host topology rather than set apart, since between them they are the one answer to "what was this measured on".
-    std::printf("%s   %s   %d Hz   GL_KHR_debug %s   GL_ARB_timer_query %s\n",
-                 gpu.renderer.c_str(), gpu.version.c_str(), gpu.refreshRateHz,
+    std::printf("%s   %s   %.2f Hz   GL_KHR_debug %s   GL_ARB_timer_query %s\n",
+                 gpu.renderer.c_str(), gpu.version.c_str(), spec.refreshHz,
                  spec.khrDebugAvailable ? "yes" : "no", spec.gpuTimerAvailable ? "yes" : "no");
     printHost(queryHostInfo());
     printBuild(buildInfo(), queryLibraryVersions());

@@ -123,6 +123,8 @@ void PerfDashboard::flush() {
 
 void PerfDashboard::accumulate(const DashboardFrame& frame) {
     const FrameStageTimes& stages = frame.stages;
+    sums_.fenceMs += stages.fenceMs;
+    sums_.paceMs += stages.paceMs;
     sums_.pollMs += stages.pollMs;
     sums_.cameraMs += stages.cameraMs;
     sums_.presentMs += stages.presentMs;
@@ -135,7 +137,7 @@ void PerfDashboard::accumulate(const DashboardFrame& frame) {
     sums_.rasterMs += stages.rasterMs;
     sums_.overRangeMs += stages.overRangeMs;
     // Every stage, bursty ones included: this is what must reconcile against the measured frame time, so it cannot exclude the stages that actually cost the most.
-    cpuTotalSum_ += stages.pollMs + stages.cameraMs + stages.rasterMs + stages.presentMs +
+    cpuTotalSum_ += stages.fenceMs + stages.paceMs + stages.pollMs + stages.cameraMs + stages.rasterMs + stages.presentMs +
                      stages.histogramMs + stages.overRangeMs + stages.probeMs + stages.hudMs +
                      stages.swapMs + unbilledDrawMs_;
     unbilledDrawMs_ = 0.0F;  // charged exactly once, to the frame that actually paid it
@@ -232,7 +234,7 @@ void PerfDashboard::draw(const DashboardFrame& frame) {
 
 // Fixed 78-column grid, and it is a grid rather than eyeballed spacing: the left pane is columns 0-42, the divider sits at column 43 on every split row, and the right pane fills 44-77. Rows whose left half carries no numbers (the section headers, the sub-rules, the blank spacer) are padded to the same 43, because one column of drift there is what makes a two-pane table read as two unrelated tables.
 void PerfDashboard::drawFrameHeader(const DashboardFrame& frame) {
-    const double budgetMs = frame.refreshRateHz > 0 ? 1000.0 / frame.refreshRateHz : 0.0;
+    const double budgetMs = 1000.0 / frame.refreshHz;
     append("\x1b[2K== ENGINE PERF ================================================== %5.1f fps ==\n",
             static_cast<double>(frame.frameStats.fps()));
     // Percentiles lead, mean trails: a mean hides the hitch, and the hitch is what a viewer feels. p95 rather than p99 because 120 samples cannot express a 99th percentile -- see FrameStats::percentileMs.
@@ -241,8 +243,9 @@ void PerfDashboard::drawFrameHeader(const DashboardFrame& frame) {
             static_cast<double>(frame.frameStats.percentileMs(0.95F)),
             static_cast<double>(frame.frameStats.maxMs()),
             static_cast<double>(windowMean(frameMsSum_)), FrameStats::kHistoryLength);
-    append("\x1b[2K budget   %6.2f ms @ %3d Hz vsync                        headroom %8.2f ms\n",
-            budgetMs, frame.refreshRateHz, budgetMs - static_cast<double>(cpuTotalMs()));
+    // The vblank wait is the headroom itself, so it is excluded from the work the budget is spent on; the fence wait is GPU time the frame did spend.
+    append("\x1b[2K budget   %6.2f ms @ %6.2f Hz vsync                     headroom %8.2f ms\n",
+            budgetMs, frame.refreshHz, budgetMs - static_cast<double>(cpuTotalMs() - windowMean(sums_.paceMs)));
     append("\x1b[2K------------------------------------------------------------------------------\n");
 }
 
@@ -305,6 +308,10 @@ void PerfDashboard::drawStageRows(const DashboardFrame& frame) {
     barFor(sums_.hudRenderMs);
     append("\x1b[2K  %-15s%8.3f %5.1f %s |\n", "hud render", mean(sums_.hudRenderMs),
             pct(sums_.hudRenderMs), bar.data());
+    barFor(sums_.fenceMs);
+    append("\x1b[2K  %-15s%8.3f %5.1f %s |\n", "gpu wait", mean(sums_.fenceMs), pct(sums_.fenceMs), bar.data());
+    barFor(sums_.paceMs);
+    append("\x1b[2K  %-15s%8.3f %5.1f %s |\n", "vsync wait", mean(sums_.paceMs), pct(sums_.paceMs), bar.data());
 }
 
 void PerfDashboard::drawRayRows(const DashboardFrame& frame) {
@@ -321,7 +328,7 @@ void PerfDashboard::drawRayRows(const DashboardFrame& frame) {
     append("\x1b[2K  %-15s%8.3f %5s %s | RAYS          count  Mray/s     %%\n", "dashboard",
             static_cast<double>(lastDrawMs_), "", kBarBlank);
     formatBar(bar, static_cast<double>(percentOf(windowMean(sums_.swapMs), cpu)) / 100.0);
-    append("\x1b[2K  %-15s%8.3f %5.1f %s |  %-9s%7.3f M %7.2f %5.1f\n", "swap (vsync)",
+    append("\x1b[2K  %-15s%8.3f %5.1f %s |  %-9s%7.3f M %7.2f %5.1f\n", "swap",
             static_cast<double>(windowMean(sums_.swapMs)),
             static_cast<double>(percentOf(windowMean(sums_.swapMs), cpu)), bar.data(), "primary",
             millions(rays.primary), mray(rays.primary), share(rays.primary));
