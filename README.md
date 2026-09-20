@@ -52,7 +52,7 @@ Timing runs append one JSON Lines record each to a local log (§2 Benchmark log)
     -- --scene scenes/cornell.json --out renders/ab.png --passes 32 --width 640 --height 360 --bench-log renders/bench.jsonl
 ```
 
-`engine -bench` also takes `-bench-aovs "Beauty,Sobel,Direct Diffuse,Normal,Beauty"`, which walks that AOV sequence and times each switch into a `stage_wall_ms` column; the first entry is an unmeasured warm-up, so every switch is timed from an already-converged image.
+`engine -bench` also takes `-bench-aovs "Beauty,Sobel,Direct Diffuse,Normal,Beauty"`, which walks that AOV sequence and times each switch into a `stage_wall_ms` column; the first entry is an unmeasured warm-up, so every switch is timed from an already-converged image. Comparability is exact: `config` carries only configured inputs, never a measured one -- the display refresh the run was paced at is a per-frame `refresh_hz` sample, since a measured double cannot satisfy an equality contract.
 
 It prints B/A with a distribution-free confidence interval, and says "not resolved" when that interval contains 1. `bench_compare compare` and `bench_compare history --tool T` read records already in the log (unpaired, so drift is not controlled). `--metric` picks any samples column (its mean per event -- per frame, per upload or per pass, since frame count scales with run duration) or rusage field such as `user_s`.
 
