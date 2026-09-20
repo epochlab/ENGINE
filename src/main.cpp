@@ -195,6 +195,8 @@ struct BenchCapture {
     std::vector<engine::debug::FrameStageTimes> frames;
     std::vector<float> frameMs;
     std::vector<float> presentGpuMs;
+    // Per frame, not in config: it is a MEASUREMENT of the display link's period (renderFrame), so it lands on a different double from run to run, and config's contract is exact equality between comparable records.
+    std::vector<float> refreshHz;
     std::vector<float> uploadMs;  // one entry per display-texture upload, not per frame
     bool complete = false;
 
@@ -207,6 +209,7 @@ struct BenchCapture {
         frames.clear();
         frameMs.clear();
         presentGpuMs.clear();
+        refreshHz.clear();
         uploadMs.clear();
     }
 };
@@ -1265,6 +1268,7 @@ void captureBenchFrame(engine::platform::Window& window, AppResources& app, Benc
     bench.frames.push_back(app.stages);
     bench.frameMs.push_back(frameMs);
     bench.presentGpuMs.push_back(app.postTimer.millisecondsElapsed());
+    bench.refreshHz.push_back(static_cast<float>(app.refreshHz));
     // Only uploads the displayed AOV's own producer issued: a superseded request's in-flight pass can still publish after a restart, and a rasterizer AOV's upload is never the driver's at all.
     const bool ourUpload = !aovNeedsLightTransport(static_cast<engine::debug::AovId>(app.aov)) ||
                            (snapshot != nullptr && snapshot->generation == bench.generation);
@@ -1313,8 +1317,7 @@ nlohmann::json benchConfig(const AppResources& app, const BenchCapture& bench) {
                         {"film_height_mm", app.debugCamera.filmBack().heightMm}}},
             {"env", {{"rotation_deg", app.envRotationDegrees}, {"exposure_stops", app.envExposureStops},
                      {"light", app.envLightEnabled}, {"show_sky", app.showSky}}},
-            {"hud", app.showHud},
-            {"refresh_hz", app.refreshHz}};
+            {"hud", app.showHud}};
     // Only with -bench-aovs, so a single-stage record stays comparable with every one logged before this existed. The whole switch sequence, not just the AOV left selected at exit: it IS the workload, and bench_compare run refuses to pair records whose configs differ.
     if (!schedule.empty()) {
         config["aov_schedule"] = schedule;
@@ -1351,6 +1354,7 @@ nlohmann::json benchSamples(const BenchCapture& bench) {
             {"upload_ms", bench.uploadMs},
             {"present_ms", frameColumn(&Stages::presentMs)},
             {"present_gpu_ms", bench.presentGpuMs},
+            {"refresh_hz", bench.refreshHz},
             {"histogram_ms", frameColumn(&Stages::histogramMs)},
             {"over_range_ms", frameColumn(&Stages::overRangeMs)},
             {"probe_ms", frameColumn(&Stages::probeMs)},
