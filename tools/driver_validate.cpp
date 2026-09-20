@@ -451,12 +451,14 @@ ENGINE_CHECK(new_request_restarts_accumulation, Slow, Exact) {
     ENGINE_EXPECT(ctx, samples == 4, detail);
 }
 
-// Suspension parks the driver while a rasterizer-backed AOV is shown. Entering it bumps the generation (cancelling the
-// in-flight pass), so resuming restarts accumulation under that new generation; asserted here: halts, then resumes.
+// Suspension parks the driver while a rasterizer-backed AOV is shown, and must not cost the accumulation it parks:
+// the generation is also the sampler's scramble seed, so bumping it to cancel the in-flight pass would restart the
+// image. Asserted here: halts, then resumes the SAME generation from where it stopped.
 ENGINE_CHECK(suspension_halts_and_resumes, Slow, Exact) {
-    ctx.plan(2);
+    ctx.plan(3);
     std::unique_ptr<DriverFixture> fixture = makeFixture();
     if (!fixture->valid()) {
+        ENGINE_EXPECT(ctx, false, "scene/driver construction failed");
         ENGINE_EXPECT(ctx, false, "scene/driver construction failed");
         ENGINE_EXPECT(ctx, false, "scene/driver construction failed");
         return;
@@ -466,10 +468,11 @@ ENGINE_CHECK(suspension_halts_and_resumes, Slow, Exact) {
     if (waitForPublished(*fixture->driver, generation, 2) == nullptr) {
         ENGINE_EXPECT(ctx, false, "driver never started accumulating");
         ENGINE_EXPECT(ctx, false, "driver never started accumulating");
+        ENGINE_EXPECT(ctx, false, "driver never started accumulating");
         return;
     }
     fixture->driver->setSuspended(true);
-    // Let any pass already in flight finish and be discarded before sampling what is published.
+    // Let the pass already in flight finish and be accumulated before sampling what is parked.
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
     const std::shared_ptr<const PathTraceResult> parked = fixture->driver->latestResult();
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
@@ -480,8 +483,69 @@ ENGINE_CHECK(suspension_halts_and_resumes, Slow, Exact) {
     ENGINE_EXPECT(ctx, later == parked, haltDetail);
 
     fixture->driver->setSuspended(false);
-    ENGINE_EXPECT(ctx, waitFor([&] { return fixture->driver->latestResult()->generation > parked->generation; }),
-                  "driver did not resume accumulating under a new generation after suspension was lifted");
+    const std::shared_ptr<const PathTraceResult> resumed =
+        waitForPublished(*fixture->driver, generation, parked->samples + 1);
+    ENGINE_EXPECT(ctx, resumed != nullptr,
+                  "driver did not resume accumulating the parked generation after suspension was lifted");
+    // The count continues rather than returning to 1: anything else means the park discarded the mean it was holding.
+    const int samples = resumed != nullptr ? resumed->samples : 0;
+    char resumeDetail[160];
+    std::snprintf(resumeDetail, sizeof(resumeDetail), "resumed at %d samples, which must exceed the %d parked",
+                  samples, parked->samples);
+    ENGINE_EXPECT(ctx, samples > parked->samples, resumeDetail);
+}
+
+// The stronger statement the check above cannot make on its own: a park and resume must leave the published images
+// BIT-IDENTICAL to an uninterrupted run of the same pass count. That is what makes suspension free rather than merely
+// cheap -- the sampler continues the same Sobol sequence under the same scramble seed, so no sample is redrawn and
+// none is skipped, and the running mean resumes on the exact floats it stopped on. A generation bump inside
+// setSuspended would fail this even if the count above happened to line up.
+ENGINE_CHECK(suspension_preserves_the_accumulation_exactly, Slow, Exact) {
+    ctx.plan(1);
+    constexpr int kSamples = 6;
+    std::unique_ptr<DriverFixture> reference = makeFixture();
+    std::unique_ptr<DriverFixture> parked = makeFixture();
+    if (!reference->valid() || !parked->valid()) {
+        ENGINE_EXPECT(ctx, false, "scene/driver construction failed");
+        return;
+    }
+    const std::uint64_t referenceGeneration = reference->driver->requestTrace(makeRequest(kSamples, makeCamera()));
+    const std::shared_ptr<const PathTraceResult> uninterrupted =
+        waitForPublished(*reference->driver, referenceGeneration, kSamples);
+
+    // Identical request on a second driver, parked partway and resumed. Both fixtures build the same scene, and the
+    // generation is 1 on each, so the sampler input is identical and only the interruption differs.
+    const std::uint64_t parkedGeneration = parked->driver->requestTrace(makeRequest(kSamples, makeCamera()));
+    if (waitForPublished(*parked->driver, parkedGeneration, kSamples / 2) == nullptr || uninterrupted == nullptr) {
+        ENGINE_EXPECT(ctx, false, "a driver never reached its cap");
+        return;
+    }
+    parked->driver->setSuspended(true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    parked->driver->setSuspended(false);
+    const std::shared_ptr<const PathTraceResult> continued =
+        waitForPublished(*parked->driver, parkedGeneration, kSamples);
+    if (continued == nullptr) {
+        ENGINE_EXPECT(ctx, false, "parked driver never reached its cap after resuming");
+        return;
+    }
+
+    std::size_t differing = 0;
+    const char* differingLane = "";
+    for (const Lane& lane : kLanes) {
+        const std::vector<float>& a = (uninterrupted.get()->*lane.image).rgba;
+        const std::vector<float>& b = (continued.get()->*lane.image).rgba;
+        for (std::size_t i = 0; i < a.size(); ++i) {
+            if (a[i] != b[i]) {
+                ++differing;
+                differingLane = lane.name;
+            }
+        }
+    }
+    char detail[192];
+    std::snprintf(detail, sizeof(detail), "%zu floats differ from the uninterrupted run (last in %s)", differing,
+                  differing == 0 ? "none" : differingLane);
+    ENGINE_EXPECT(ctx, differing == 0, detail);
 }
 
 // The buffer pool holds four images for up to three simultaneously-pinned results, an arithmetic nothing tested. A

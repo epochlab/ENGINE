@@ -116,11 +116,7 @@ std::uint64_t PathTraceDriver::requestTrace(const Request& request) {
 }
 
 void PathTraceDriver::setSuspended(bool suspended) {
-    // Only the false -> true edge bumps: cancelling once is enough, and bumping on every frame that stays suspended would keep the driver churning through generations it is not running anyway.
-    const bool wasSuspended = suspended_.exchange(suspended, std::memory_order_relaxed);
-    if (suspended && !wasSuspended) {
-        generation_.fetch_add(1, std::memory_order_relaxed);
-    }
+    suspended_.store(suspended, std::memory_order_relaxed);
 }
 
 std::shared_ptr<const PathTraceResult> PathTraceDriver::latestResult() const {
