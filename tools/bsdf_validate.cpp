@@ -2308,4 +2308,74 @@ ENGINE_CHECK(sampling_chi_square, Slow, Statistical) {
     return;
 }
 
+// fresnelAtMicrofacet (bsdf.h) is the path-traced Fresnel AOV's whole estimator, and it makes two claims this pins.
+// (1) At the roughness floor the visible-normal distribution collapses onto the macro normal, so its expectation must
+// return fresnelAtViewAngle -- that is what makes the AOV a strict generalisation of the single macro-normal sample it
+// replaced rather than a different quantity wearing the same name.
+// (2) Above the floor it must NOT return that value at grazing: D_vis spreads the half-vector over a lobe whose width
+// grows with alpha, and F is convex in cos, so the mean over the lobe falls below the macro value exactly where the
+// macro ramp is steepest. A version that ignored roughness -- or sampled the wrong distribution -- would pass (1) and
+// fail (2), which is why both are asserted together.
+ENGINE_CHECK(microfacet_fresnel, Slow, Statistical) {
+    ctx.plan(3);
+    constexpr int kDraws = 200000;
+    constexpr std::uint32_t kSeed = 7919U;
+    // Expectation of F over D_vis at this roughness and view angle, by the same draws the renderer makes.
+    const auto expectation = [](const BsdfParams& params, float ndotV) {
+        const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (ndotV * ndotV))), 0.0F, ndotV);
+        glm::dvec3 sum(0.0);
+        for (int i = 0; i < kDraws; ++i) {
+            engine::scene::Sampler sampler(0, 0, i, kDraws, kSeed);
+            sum += glm::dvec3(engine::scene::fresnelAtMicrofacet(params, wo, sampler.next2D()));
+        }
+        return glm::vec3(sum / static_cast<double>(kDraws));
+    };
+
+    // 0.02 is the roughness kMinAlpha floors alpha at (bsdf.cpp), so this is the smoothest surface the BSDF admits.
+    bool smoothOk = true;
+    float worstSmooth = 0.0F;
+    for (const float ndotV : {0.1F, 0.4F, 0.7F, 1.0F}) {
+        for (const float metallic : {0.0F, 1.0F}) {
+            const BsdfParams params = makeParams(0.02F, metallic, 0.0F);
+            const glm::vec3 mean = expectation(params, ndotV);
+            const glm::vec3 macro = fresnelAtViewAngle(params, ndotV);
+            for (int c = 0; c < 3; ++c) {
+                worstSmooth = std::max(worstSmooth, std::abs(mean[c] - macro[c]));
+            }
+        }
+    }
+    // The residual is the half-vector's O(alpha) tilt at alpha = 4e-4, not sampling noise; 1e-3 is an order above it.
+    smoothOk = worstSmooth < 1e-3F;
+    char smoothDetail[192];
+    std::snprintf(smoothDetail, sizeof(smoothDetail),
+                  "worst |E[F(wo.wh)] - F(n.wo)| at the roughness floor is %.3e, which must be below 1e-3",
+                  static_cast<double>(worstSmooth));
+    ENGINE_EXPECT(ctx, smoothOk, smoothDetail);
+
+    // Grazing, where the macro ramp is steepest and the lobe average therefore departs from it most.
+    constexpr float kGrazing = 0.1F;
+    const BsdfParams rough = makeParams(0.6F, 0.0F, 0.0F);
+    const glm::vec3 roughMean = expectation(rough, kGrazing);
+    const glm::vec3 roughMacro = fresnelAtViewAngle(rough, kGrazing);
+    char flatDetail[192];
+    std::snprintf(flatDetail, sizeof(flatDetail),
+                  "at roughness 0.6, grazing: E[F] = %.4f against a macro F of %.4f, which it must fall below",
+                  static_cast<double>(roughMean.x), static_cast<double>(roughMacro.x));
+    ENGINE_EXPECT(ctx, roughMean.x < roughMacro.x, flatDetail);
+
+    // A coloured conductor: the reason the lane carries RGB rather than the (F, 1-F, 0) packing it replaced. Gulbrandsen
+    // 2014's edgeTint inverts to a per-channel complex IOR, so the expectation is chromatic and a single channel cannot
+    // stand in for it. Grazing again, where the edge tint acts.
+    const BsdfParams tinted = makeColoredMetalParams(0.2F, glm::vec3(0.9F, 0.6F, 0.3F));
+    const glm::vec3 tintedMean = expectation(tinted, kGrazing);
+    const float spread = std::max({tintedMean.x, tintedMean.y, tintedMean.z}) -
+                          std::min({tintedMean.x, tintedMean.y, tintedMean.z});
+    char chromaDetail[192];
+    std::snprintf(chromaDetail, sizeof(chromaDetail),
+                  "edge-tinted conductor spans %.4f across RGB (%.4f, %.4f, %.4f); a greyscale lane would report one",
+                  static_cast<double>(spread), static_cast<double>(tintedMean.x),
+                  static_cast<double>(tintedMean.y), static_cast<double>(tintedMean.z));
+    ENGINE_EXPECT(ctx, spread > 1e-3F, chromaDetail);
+}
+
 ENGINE_CHECK_MAIN("bsdf")
