@@ -426,15 +426,12 @@ void appendBoxEdges(const Camera& camera, const AabbBounds& box, const glm::vec3
 // Resolves and writes every G-buffer field for one covered, z-winning pixel -- same sampling calls tracePath's bounce-0 block makes (gbuffer_shading.h), never a lighting/BSDF evaluation. origU/origV are the perspective-correct barycentric coordinates on the ORIGINAL (unclipped) triangle. wireframe is a screen-space distance-to-edge test against the sub-triangle's original mesh edges (clip-plane and fan edges excluded), sharing nearLineSegmentPx with the box edges -- evaluated only at this already-z-tested pixel, so hidden-line removal is free.
 void shadePixel(RasterGBuffer& result, int x, int y, float viewZ, float origU, float origV,
                  const ShadingTriangle& triangle, const Material& material,
-                 const PathTraceSettings& settings, const glm::vec3& camPos, const RasterSubTriangle& st,
+                 const PathTraceSettings& settings, const RasterSubTriangle& st,
                  const SubPixelGrid& grid) {
     const ShadingVertex shading = interpolateShading(triangle, origU, origV);
     const ShadingFrame frame = buildShadingFrame(shading, material, settings);
     const BsdfParams params =
         resolveBsdfParams(material, shading.uv, shading.colour, settings, std::nullopt);
-    const glm::vec3 woWorld = glm::normalize(camPos - shading.position);
-    const float ndotV = std::max(glm::dot(frame.normal, woWorld), 1e-4F);
-    const float fresnelVal = fresnelAtViewAngle(params, ndotV).x;
 
     const glm::vec2 p(static_cast<float>(x) + 0.5F, static_cast<float>(y) + 0.5F);
     const glm::vec2 p0 = glm::vec2(st.v0.x, st.v0.y) / grid.scale;
@@ -455,7 +452,6 @@ void shadePixel(RasterGBuffer& result, int x, int y, float viewZ, float origU, f
     writeTexel(result.tangent, x, y, frame.tangent);
     writeTexel(result.objectId, x, y, falseColorForId(triangle.instanceIndex));
     writeTexel(result.alpha, x, y, glm::vec3(1.0F));
-    writeTexel(result.fresnel, x, y, glm::vec3(fresnelVal, 1.0F - fresnelVal, 0.0F));
     writeTexel(result.wireframe, x, y, wire ? kWireframeColor : glm::vec3(0.0F));
     writeTexel(result.iorAov, x, y, glm::vec3(settings.ior));
 }
@@ -495,7 +491,7 @@ void depthPassRow(int y, const std::vector<RasterSubTriangle>& subTriangles,
 void shadeRow(RasterGBuffer& result, int y, int width, const std::vector<RasterSubTriangle>& subTriangles,
                const std::vector<ShadingTriangle>& shadingTriangles,
                const std::vector<MeshInstance>& instances,
-               const std::vector<PathTraceSettings>& perInstanceSettings, const glm::vec3& camPos,
+               const std::vector<PathTraceSettings>& perInstanceSettings,
                const SubPixelGrid& grid, const float* zRow, const int* winnerRow) {
     const std::int64_t py = pixelCenter(y, grid);
     for (int x = 0; x < width; ++x) {
@@ -515,7 +511,7 @@ void shadeRow(RasterGBuffer& result, int y, int width, const std::vector<RasterS
         const Material& material = instances[static_cast<std::size_t>(triangle.instanceIndex)].material;
         const PathTraceSettings& instanceSettings =
             perInstanceSettings[static_cast<std::size_t>(triangle.instanceIndex)];
-        shadePixel(result, x, y, viewZ, origU, origV, triangle, material, instanceSettings, camPos, st, grid);
+        shadePixel(result, x, y, viewZ, origU, origV, triangle, material, instanceSettings, st, grid);
     }
 }
 
@@ -541,10 +537,10 @@ void drawBoxEdgesRow(RasterGBuffer& result, int y, const std::vector<RasterLineS
 }
 
 // Every AOV image in one place, so the reallocation and the per-row clear below cannot disagree about which fields exist -- adding an AOV to RasterGBuffer without adding it here leaves it uncleared, which this array's fixed size catches at compile time.
-std::array<engine::gfx::HdrImage*, 14> aovImages(RasterGBuffer& g) {
+std::array<engine::gfx::HdrImage*, 13> aovImages(RasterGBuffer& g) {
     return {&g.iorAov, &g.depth,    &g.worldPos, &g.uv,      &g.normal,
             &g.geomNormal, &g.albedo, &g.metallic, &g.roughness, &g.tangent,
-            &g.objectId, &g.alpha,  &g.fresnel,  &g.wireframe};
+            &g.objectId, &g.alpha,  &g.wireframe};
 }
 
 }  // namespace
@@ -554,7 +550,7 @@ void renderRasterGBuffer(const Camera& camera, const std::vector<ShadingTriangle
                           const std::vector<PathTraceSettings>& perInstanceSettings,
                           const std::vector<AabbBounds>& instanceBounds, int width, int height,
                           ThreadPool& threadPool, RasterGBuffer& result) {
-    const std::array<engine::gfx::HdrImage*, 14> images = aovImages(result);
+    const std::array<engine::gfx::HdrImage*, 13> images = aovImages(result);
     // Reallocated only on a resolution change; every other call reuses the storage and relies on renderRow's clear. makeImage's own zeroing is redundant against that clear but runs once per resize, not once per frame.
     if (result.depth.width != width || result.depth.height != height) {
         for (engine::gfx::HdrImage* image : images) {
@@ -583,10 +579,8 @@ void renderRasterGBuffer(const Camera& camera, const std::vector<ShadingTriangle
     // The depth pass's other output: which sub-triangle owns each pixel, -1 for uncovered. 4 bytes per pixel, sized like the z-buffer because both are written by whichever worker owns the row.
     std::vector<int> winners(pixelCount);
 
-    const glm::vec3 camPos = camera.position();
-
     const auto renderRow = [&](int y) {
-        // Clearing this row of every AOV is what makes the buffers reusable across calls: the worker that is about to overwrite the row zeroes it first, in parallel and while it is already cache-warm, instead of 14 sequential full-image memsets before the dispatch. An uncovered pixel therefore still reads back zero (alpha 0, the miss test every consumer uses) exactly as a freshly allocated image did.
+        // Clearing this row of every AOV is what makes the buffers reusable across calls: the worker that is about to overwrite the row zeroes it first, in parallel and while it is already cache-warm, instead of 13 sequential full-image memsets before the dispatch. An uncovered pixel therefore still reads back zero (alpha 0, the miss test every consumer uses) exactly as a freshly allocated image did.
         const std::size_t rowStart = static_cast<std::size_t>(y) * static_cast<std::size_t>(width);
         for (engine::gfx::HdrImage* image : images) {
             float* row = image->rgba.data() + (rowStart * 4);
@@ -601,7 +595,7 @@ void renderRasterGBuffer(const Camera& camera, const std::vector<ShadingTriangle
         }
 
         depthPassRow(y, subTriangles, rowBuckets, grid, zRow, winnerRow);
-        shadeRow(result, y, width, subTriangles, shadingTriangles, instances, perInstanceSettings, camPos, grid,
+        shadeRow(result, y, width, subTriangles, shadingTriangles, instances, perInstanceSettings, grid,
                  zRow, winnerRow);
         drawBoxEdgesRow(result, y, boxEdges, boxRowBuckets, zRow);
     };

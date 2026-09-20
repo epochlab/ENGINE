@@ -73,8 +73,13 @@ struct BsdfEval {
 };
 
 // Macro-surface Fresnel reflectance at cosTheta = dot(normal, viewDirection): the exact dielectric and exact complex-IOR conductor terms mixed by metallic, which is the same term evaluateSpecularLobe evaluates, in the entering orientation a primary-hit value wants.
-// Sole consumer is the rasterizer's Fresnel G-buffer AOV (rasterizer.cpp). It exists so that AOV shows the Fresnel the renderer actually shades with: it used to be Schlick against f0, which for a metal is a different curve entirely -- Schlick is monotone in cos by construction, so it cannot show the reflectance dip an authored edgeTint produces.
+// It exists so the Fresnel AOV shows the Fresnel the renderer actually shades with: it used to be Schlick against f0, which for a metal is a different curve entirely -- Schlick is monotone in cos by construction, so it cannot show the reflectance dip an authored edgeTint produces. Reached only through fresnelAtMicrofacet below, which supplies the microfacet angle in place of the macro one.
 [[nodiscard]] glm::vec3 fresnelAtViewAngle(const BsdfParams& params, float cosTheta);
+
+// One sample of the Fresnel reflectance the microfacet BSDF actually evaluates at this vertex: a half-vector drawn from the visible normal distribution (Heitz 2018, the same D_vis and the same alpha sampleBsdf draws from) put through fresnelAtViewAngle above at dot(wo, wh) rather than at the macro dot(n, wo). Walter et al. 2007 is what makes that the right angle; Karis 2013's split-sum is the precedent for reporting the expectation of F over D_vis as a term in its own right.
+// The estimator is E[F(wo.wh)] over that distribution, so the CALLER MUST AVERAGE -- the path tracer's Fresnel AOV, its only consumer, accumulates it over samples and passes like every other lane. That is the whole difference from the macro value it replaces: this one is roughness-dependent, converging to a lobe-width-weighted mean that a single macro-normal evaluation cannot express, and it collapses back onto that evaluation as alpha reaches its kMinAlpha floor.
+// u: two independent uniforms, which the caller draws from a stream of its own so this cannot shift the path's sampler dimensions.
+[[nodiscard]] glm::vec3 fresnelAtMicrofacet(const BsdfParams& params, const glm::vec3& woLocal, glm::vec2 u);
 
 // Cosine-weighted hemisphere direction about +z, pdf = cos(theta)/pi. Promoted from bsdf.cpp for path_tracer.cpp's ambient-occlusion lane, the same reason fresnelAtViewAngle above is exported: that pdf cancels the cosine in Miller 1994's AO integral, collapsing the estimator to the mean of the visibility term.
 [[nodiscard]] glm::vec3 sampleCosineHemisphere(glm::vec2 u);

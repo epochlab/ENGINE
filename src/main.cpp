@@ -102,7 +102,7 @@ std::array<float, 100> buildGaborKernel() {
     return kernel;
 }
 
-// True for AOVs needing light-transport data (Beauty, transport-component AOVs, post-filter AOVs reading Beauty) -- false for the 14 primary-hit-only AOVs the rasterizer covers (rasterizer.h). Avoids restarting PathTraceDriver's accumulation for an AOV that will never show it.
+// True for AOVs needing light-transport data (Beauty, transport-component AOVs, post-filter AOVs reading Beauty) -- false for the 13 primary-hit-only AOVs the rasterizer covers (rasterizer.h). Selects which producer runs, and nothing else: it parks the driver while an AOV it does not produce is shown (requestPathTraceIfTriggerChanged) and gates the rasterizer symmetrically. Deliberately NOT part of either producer's trigger key -- keying on it made every switch across the boundary restart a converged accumulation.
 bool aovNeedsLightTransport(engine::debug::AovId aov) {
     using engine::debug::AovId;
     switch (aov) {
@@ -112,6 +112,7 @@ bool aovNeedsLightTransport(engine::debug::AovId aov) {
         case AovId::Sobel:
         case AovId::Gabor:
         case AovId::AO:
+        case AovId::Fresnel:
         case AovId::BounceCount:
         case AovId::Shadow:
         case AovId::DirectDiffuse:
@@ -125,23 +126,28 @@ bool aovNeedsLightTransport(engine::debug::AovId aov) {
     }
 }
 
-// Snapshot of every input renderPathTraced's result actually depends on except the resolution it renders at -- compared frame to frame (see requestPathTraceIfTriggerChanged) to decide whether to hand PathTraceDriver a fresh request. envRotationDegrees defaults to the sentinel -1 (never a real value, since the HUD clamps it to [0,359]) specifically so the very first comparison always mismatches, giving the path-traced view a live result from the first rendered frame with no separate startup-trace call needed. needsLightTransport is folded in (not just checked ad hoc) so switching the AOV dropdown into a light-transport AOV registers as a trigger change even with a static camera -- otherwise Beauty would show a stale result until the next camera move.
-struct PathTraceInputState {
+// Camera and framebuffer geometry: the whole of what renderRasterGBuffer's output depends on (rasterizer.h takes no environment argument), and the leading part of what renderPathTraced's does. Factored out rather than duplicated so the two producers compare the same fields without either being able to drift from the other. fbWidth/fbHeight default to 0, a size no real framebuffer has, so the very first comparison of either producer always mismatches and both render on the first frame with no separate startup call.
+struct ViewInputState {
     glm::vec3 cameraPosition{0.0F};
     float cameraYawDegrees = 0.0F;
     float cameraPitchDegrees = 0.0F;
     float focalLengthMm = 0.0F;
     // The only FilmBack component that actually feeds the render (Camera::verticalFovRadians()) -- widthMm is display-only (HUD text/aspect-ratio readout), so tracking it here would trigger retraces for a change with no visible effect on the image.
     float filmBackHeightMm = 0.0F;
-    int envRotationDegrees = -1;
+    int fbWidth = 0;
+    int fbHeight = 0;
+
+    bool operator==(const ViewInputState&) const = default;
+};
+
+// Snapshot of every input renderPathTraced's result actually depends on except the resolution it renders at -- compared frame to frame (see requestPathTraceIfTriggerChanged) to decide whether to hand PathTraceDriver a fresh request.
+// The selected AOV is deliberately NOT here: one pass writes all of PathTraceResult's images, so which one is displayed cannot change what the driver has to compute. Keying on it restarted a converged accumulation on every AOV switch -- including between two of its own lanes, and including into the four GPU post-filters, which only ever re-read beauty.
+struct PathTraceInputState {
+    ViewInputState view;
+    int envRotationDegrees = 0;
     bool showSky = false;
     bool envLightEnabled = true;
     float envExposureStops = 0.0F;
-    int fbWidth = 0;
-    int fbHeight = 0;
-    bool needsLightTransport = true;
-    // The AOV itself, not just needsLightTransport: switching Normal -> Albedo moves between two rasterizer-backed AOVs, changing neither the camera nor needsLightTransport, and must still re-run the rasterizer now that it no longer runs unconditionally.
-    int aov = -1;
 
     bool operator==(const PathTraceInputState&) const = default;
 };
@@ -152,6 +158,14 @@ struct PathTraceTriggerState {
     float renderScale = 0.0F;  // sentinel, never a real value: profile_config.h bounds it to (0,1]
 
     bool operator==(const PathTraceTriggerState&) const = default;
+};
+
+// The rasterizer's own last-rendered state, compared the same way and at the same scale. Separate from PathTraceTriggerState because the two producers now refresh independently: an environment change must retrace without re-rasterizing a G-buffer that does not depend on it, and selecting a rasterizer AOV whose G-buffer is already current for this view must cost nothing at all.
+struct RasterTriggerState {
+    ViewInputState view;
+    float renderScale = 0.0F;  // same sentinel, same bound
+
+    bool operator==(const RasterTriggerState&) const = default;
 };
 
 // Seconds of no input change before the renderer promotes itself back to full renderScale -- long enough that the momentary gaps between mouse-drag events during an orbit do not each trigger a full-resolution restart, short enough to feel immediate when the camera actually stops.
@@ -166,24 +180,36 @@ int scaledExtent(int framebufferExtent, float scale) {
 }
 
 // Everything the render loop touches every frame, plus the one-time-computed state (cached uniform locations, Embree scene) that must stay alive for the run's duration. A pure aggregate (no user-declared constructors) so initializeApp can return it by value via designated initializers -- each RAII member's own move constructor (already verified elsewhere to correctly transfer GL handles/tracked byte counts) handles the actual transfer.
-// -bench: raw frame and pass columns for one accumulation, appended to the benchmark log at exit. restart() on every dispatched request, so the capture always holds a fixed workload: the last accumulation, which with no input is the settled full-resolution convergence to maxSamples.
+// -bench: raw frame and pass columns appended to the benchmark log at exit.
+// Stage 0 is the warm-up and is never measured: it carries process startup, the interactive-scale throwaway accumulation and the settle promotion, so restart() clears every column while it runs and the capture that survives it is one fixed workload -- the settled full-resolution convergence to maxSamples, exactly what a run with no schedule logs.
+// With -bench-aovs, each later stage is timed from the frame that SELECTS its AOV to the frame that AOV's producer has nothing left to do (stageComplete); the request itself goes out on the next frame, a constant one-frame lead present in every stage of every build and so cancelling in a before/after ratio. Those are the switch costs stage_wall_ms reports, each measured from an already-converged image.
 struct BenchCapture {
     std::string logPath;
     std::vector<std::string> argv;
+    std::vector<int> aovs;  // the -bench-aovs schedule; empty = single-stage, and `stage` then never leaves 0
+    std::size_t stage = 0;  // index into aovs of the AOV currently selected
+    std::chrono::steady_clock::time_point stageStart;
+    std::vector<float> stageWallMs;  // one entry per measured stage, so stages 1..aovs.size()-1
     std::uint64_t generation = 0;  // requestTrace's generation for the accumulation being captured
     std::vector<engine::debug::PassRecord> passes;
     std::vector<engine::debug::FrameStageTimes> frames;
     std::vector<float> frameMs;
     std::vector<float> presentGpuMs;
+    // Per frame, not in config: it is a MEASUREMENT of the display link's period (renderFrame), so it lands on a different double from run to run, and config's contract is exact equality between comparable records.
+    std::vector<float> refreshHz;
     std::vector<float> uploadMs;  // one entry per display-texture upload, not per frame
-    bool finalPassDisplayed = false;
+    bool complete = false;
 
     void restart(std::uint64_t requestGeneration) {
         generation = requestGeneration;
+        if (stage > 0) {
+            return;  // past the warm-up every restart is part of the measured schedule and its columns are kept
+        }
         passes.clear();
         frames.clear();
         frameMs.clear();
         presentGpuMs.clear();
+        refreshHz.clear();
         uploadMs.clear();
     }
 };
@@ -258,21 +284,23 @@ struct AppResources {
     int maxSamples;  // accumulated-pass cap for PathTraceDriver; 0 = unbounded
     std::unique_ptr<engine::scene::PathTraceDriver> pathTraceDriver;
     std::optional<engine::gfx::Texture> pathTraceDisplayTexture;
-    int pathTraceDisplayedAov;  // which AovId pathTraceDisplayTexture currently holds, -1 = none yet
+    // Which image pathTraceDisplayTexture currently holds -- the image, not the AovId that selected it, so every AOV reading the same buffer shares one upload: Beauty and the four GPU post-filters over it (presentFrame) all pass &PathTraceResult::beauty. An interior pointer into pathTraceDisplayedOwner below, which is what keeps it valid and ABA-free.
+    const engine::gfx::HdrImage* pathTraceDisplayedImage;  // nullptr = nothing uploaded yet
     // Max raw Depth value seen in the last rebuilt pathTraceDisplayTexture -- see ensurePathTraceDisplayTexture; only meaningful/updated when aov==Depth.
     float pathTraceDisplayedDepthMax;
     std::uint64_t pathTraceDisplayedGeneration;  // which RasterGBuffer generation the texture holds; 0 when it was built from a PathTraceResult instead
     // Strong ref (kept alive, not just an identity pointer) to whichever published object -- PathTraceResult or RasterGBuffer -- pathTraceDisplayTexture currently reflects; see ensurePathTraceDisplayTexture.
     std::shared_ptr<const void> pathTraceDisplayedOwner;
     PathTraceTriggerState lastPathTraceTrigger;  // sentinel-initialized, see its own doc comment
+    RasterTriggerState lastRasterTrigger;        // the same, for the rasterizer's independent refresh
     // Render resolution as a fraction of the framebuffer: renderScale once settled, interactiveRenderScale while any input is changing (profile_config.h). lastInputChange is the timer the promotion between them is measured against.
     float renderScale;
     float interactiveRenderScale;
     std::chrono::steady_clock::time_point lastInputChange;
 
-    // Synchronous per-frame CPU rasterizer for the 14 primary-hit-only G-buffer AOVs (rasterizer.h) -- their only producer, decoupled from PathTraceDriver's async convergence loop. unique_ptr for the same reason as pathTraceDriver: ThreadPool's copy/move are deleted (owns worker threads), so a by-value member would break AppResources's movability.
+    // Synchronous per-frame CPU rasterizer for the 13 primary-hit-only G-buffer AOVs (rasterizer.h) -- their only producer, decoupled from PathTraceDriver's async convergence loop. unique_ptr for the same reason as pathTraceDriver: ThreadPool's copy/move are deleted (owns worker threads), so a by-value member would break AppResources's movability.
     std::unique_ptr<engine::scene::ThreadPool> rasterThreadPool;
-    // Allocated once and rendered into in place (rasterizer.h), never republished -- its `generation` field, not its address, is what tells one render from the next. Refreshed synchronously in requestPathTraceIfTriggerChanged whenever a rasterizer-backed AOV is selected and an input changed; generation stays 0 while only light-transport AOVs are ever shown, because then it never runs at all.
+    // Allocated once and rendered into in place (rasterizer.h), never republished -- its `generation` field, not its address, is what tells one render from the next. Refreshed synchronously in requestPathTraceIfTriggerChanged whenever a rasterizer-backed AOV is selected and lastRasterTrigger shows this view has not been rasterized yet; generation stays 0 while only light-transport AOVs are ever shown, because then it never runs at all.
     std::shared_ptr<engine::scene::RasterGBuffer> rasterGBuffer;
     // Scene file's basename, for the dashboard's one-line SCENE row -- the full path is in the spec block, and the row has no space for it.
     std::string sceneName;
@@ -578,11 +606,12 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         // Constructed in main() right after initializeApp() returns -- see path_trace_driver.h's constructor precondition (its reference members must bind to sceneAccel/environmentMap/stumpModel at their final, permanent address, which this designated-initializer expression, still local-variable-based and one AppResources move away from that address, cannot yet guarantee).
         .pathTraceDriver = nullptr,
         .pathTraceDisplayTexture = std::nullopt,
-        .pathTraceDisplayedAov = -1,
+        .pathTraceDisplayedImage = nullptr,
         .pathTraceDisplayedDepthMax = 0.0F,
         .pathTraceDisplayedGeneration = 0,
         .pathTraceDisplayedOwner = nullptr,
         .lastPathTraceTrigger = PathTraceTriggerState{},
+        .lastRasterTrigger = RasterTriggerState{},
         .renderScale = profileConfig.render.renderScale,
         .interactiveRenderScale = profileConfig.render.interactiveRenderScale,
         .lastInputChange = std::chrono::steady_clock::time_point{},
@@ -737,16 +766,16 @@ void resolveOrbitPick(engine::platform::Window& window, AppResources& app,
 struct PathTracedAovSource {
     const engine::gfx::HdrImage* image = nullptr;
     std::shared_ptr<const void> owner;
-    // RasterGBuffer's render counter for the 14 rasterizer-backed AOVs, 0 for the path-traced ones. The rasterizer's buffer is now reused in place, so its address is constant and `owner` alone can no longer tell one render from the next; a PathTraceResult is still a fresh object per pass and needs no counter.
+    // RasterGBuffer's render counter for the 13 rasterizer-backed AOVs, 0 for the path-traced ones. The rasterizer's buffer is now reused in place, so its address is constant and `owner` alone can no longer tell one render from the next; a PathTraceResult is still a fresh object per pass and needs no counter.
     std::uint64_t generation = 0;
 };
 
-// Returns a default (null image) if the specific source an AOV needs hasn't published yet -- callers show black instead. The 14 primary-hit-only AOVs read rasterGBuffer (refreshed synchronously whenever one of them is selected, requestPathTraceIfTriggerChanged); Beauty and the light-transport AOVs read the driver's asynchronously published PathTraceResult. Extended as RasterGBuffer/PathTraceResult grow more buffers.
+// Returns a default (null image) if the specific source an AOV needs hasn't published yet -- callers show black instead. The 13 primary-hit-only AOVs read rasterGBuffer (refreshed synchronously when one of them is selected and this view has not been rasterized yet, requestPathTraceIfTriggerChanged); Beauty and the light-transport AOVs read the driver's asynchronously published PathTraceResult. Extended as RasterGBuffer/PathTraceResult grow more buffers.
 PathTracedAovSource selectPathTracedImage(
     const std::shared_ptr<const engine::scene::PathTraceResult>& snapshot,
     const std::shared_ptr<engine::scene::RasterGBuffer>& rasterGBuffer,
     engine::debug::AovId aov) {
-    // One construction site for all 14 rasterizer-backed AOVs, so the generation stamp cannot be omitted at one of them. The buffer is allocated for the process's life now, so a null check no longer distinguishes "no render yet" -- generation 0 does.
+    // One construction site for all 13 rasterizer-backed AOVs, so the generation stamp cannot be omitted at one of them. The buffer is allocated for the process's life now, so a null check no longer distinguishes "no render yet" -- generation 0 does.
     const auto fromRaster = [&rasterGBuffer](const engine::gfx::HdrImage& image) {
         return rasterGBuffer->generation == 0
                    ? PathTracedAovSource{}
@@ -785,7 +814,7 @@ PathTracedAovSource selectPathTracedImage(
         case engine::debug::AovId::Alpha:
             return fromRaster(rasterGBuffer->alpha);
         case engine::debug::AovId::Fresnel:
-            return fromRaster(rasterGBuffer->fresnel);
+            return snapshot ? fromSnapshot(snapshot->fresnel) : PathTracedAovSource{};
         case engine::debug::AovId::AO:
             return snapshot ? fromSnapshot(snapshot->ao) : PathTracedAovSource{};
         case engine::debug::AovId::Shadow:
@@ -862,12 +891,12 @@ engine::debug::PixelProbeSample samplePixelProbe(
 // Re-uploads pathTraceDisplayTexture only when the selected AOV or the published object that owns the image actually changed: re-sending 33MB over PCIe every frame just to redisplay texels the GPU already holds would violate this codebase's no-work-per-frame-without-a-reason convention.
 // The upload itself no longer destroys and recreates the texture object (Texture::upload).
 // The driver publishes a fresh result object every completed pass, though, so while it's actively converging this does rebuild the texture up to once per rendered frame; that per-frame cap (not a lower one) is deliberate, it is what makes newly-accumulated samples visible at all.
-// Channel view is deliberately absent from that key: it is a shader uniform now, so isolating a channel changes nothing about the texels and must not force a rebuild.
+// Channel view is deliberately absent from that key: it is a shader uniform now, so isolating a channel changes nothing about the texels and must not force a rebuild. The selected AOV is absent for the same reason -- what the GPU must hold is the image, and the four post-filter AOVs are shader passes over Beauty's own texels (presentFrame), so cycling through them re-uploads nothing.
 // owner: a strong ref to whichever published object actually owns `image` (see PathTracedAovSource), comparing shared_ptr identity, not a raw pointer, since a raw pointer to a previous frame's already-freed result could in principle have its address reused by a later allocation (ABA); holding a real shared_ptr in app.pathTraceDisplayedOwner rules that out.
 // For Depth specifically, also rescans `image` for its own max value into app.pathTraceDisplayedDepthMax on every rebuild: presentFrame uses that as an auto-ranging display-exposure bound instead of Camera::farClip(), since farClip is a conservative ray tMax bound, not a proxy for the actual visible scene's depth extent.
 void ensurePathTraceDisplayTexture(AppResources& app, const std::shared_ptr<const void>& owner,
                                     const engine::gfx::HdrImage& image, std::uint64_t generation) {
-    if (app.pathTraceDisplayTexture.has_value() && app.pathTraceDisplayedAov == app.aov &&
+    if (app.pathTraceDisplayTexture.has_value() && app.pathTraceDisplayedImage == &image &&
         app.pathTraceDisplayedOwner == owner && app.pathTraceDisplayedGeneration == generation) {
         return;
     }
@@ -904,7 +933,7 @@ void ensurePathTraceDisplayTexture(AppResources& app, const std::shared_ptr<cons
             app.pathTraceDisplayTexture = engine::gfx::Texture::createFromFloatPixels(
                 mapped.width, mapped.height, mapped.rgba.data());
         }
-        app.pathTraceDisplayedAov = app.aov;
+        app.pathTraceDisplayedImage = &image;
         app.pathTraceDisplayedOwner = owner;
         app.pathTraceDisplayedGeneration = generation;
         return;
@@ -916,7 +945,7 @@ void ensurePathTraceDisplayTexture(AppResources& app, const std::shared_ptr<cons
         app.pathTraceDisplayTexture =
             engine::gfx::Texture::createFromFloatPixels(image.width, image.height, image.rgba.data());
     }
-    app.pathTraceDisplayedAov = app.aov;
+    app.pathTraceDisplayedImage = &image;
     app.pathTraceDisplayedOwner = owner;
     app.pathTraceDisplayedGeneration = generation;
 }
@@ -1015,23 +1044,22 @@ std::uint64_t requestPathTrace(AppResources& app, const engine::scene::Camera& c
 
 // Called once per rendered frame. Re-traces on any input that would actually change the image, not a fixed timer, so the path-traced view stays live without retracing every frame the camera happens to sit still.
 // Because DebugCameraController's fly/orbit controls update every frame a key/mouse-drag is held, a fresh (progressive-accumulation-reset) request fires on almost every frame during camera interaction; accepted, since async execution (PathTraceDriver) keeps that from blocking the UI, it just converges more slowly while the camera moves, matching how every interactive path tracer (Cycles' viewport, Brigade) behaves.
-// Only actually fires while the selected AOV needs light transport (aovNeedsLightTransport): restarting full Embree+BSDF accumulation every frame for an AOV nobody can see (Wireframe, Depth, ...) would just burn CPU competing with the rasterizer's own thread pool for no visible benefit; any accumulation already in flight from before the switch still finishes on its own.
-// Both the path trace and the rasterization run at renderScale/interactiveRenderScale of the framebuffer rather than at the framebuffer itself (profile_config.h), dropping to the interactive scale on any input change and promoting back kInteractiveSettleSeconds after the last one.
-// The promotion needs no separate code path: it changes the trigger, and a changed trigger is already what dispatches.
+// Each producer is refreshed on its own inputs, independently: the path tracer on camera/environment/resolution, the rasterizer on camera/resolution alone (rasterizer.h takes no environment argument). Neither is keyed on the selected AOV, because one call of either writes every image it owns -- so switching AOV changes what is displayed, never what has to be computed.
+// Both run at renderScale/interactiveRenderScale of the framebuffer rather than at the framebuffer itself (profile_config.h), dropping to the interactive scale on any input change and promoting back kInteractiveSettleSeconds after the last one. The promotion needs no separate code path: it changes the trigger, and a changed trigger is already what dispatches.
 // The display blit upscales for free: glViewport targets the framebuffer and the display texture samples GL_LINEAR, so nothing downstream is aware of the resolution the image arrived at.
-// Also refreshes app.rasterGBuffer synchronously on the same trigger, on the calling (render) thread; unlike the path-traced request, this blocks briefly rather than handing off to a background driver, since the point of the rasterizer is a same-frame update for its 14 AOVs (rasterizer.h).
-// Gated on one of those AOVs being selected, symmetrically with the path-trace request: it is not cheap (a full-screen shade, measured at ~150ms per call at 2048x1152).
-// The three things that once justified running it unconditionally no longer need it: orbit-pick now casts its own ray, the pixel probe only reaches these buffers for an AOV that is displaying them, and an AOV switch is itself a trigger change, so switching into a rasterizer AOV rasterizes on that same frame.
+// The rasterizer runs synchronously on the calling (render) thread, unlike the path-traced request, since the point of it is a same-frame update for its AOVs (rasterizer.h); it is not cheap (a full-screen shade, measured at ~150ms per call at 2048x1152), so it stays gated on one of its own AOVs being selected. Together with the lazy comparison below, that means selecting a rasterizer AOV whose G-buffer is already current for this view costs nothing at all.
 void requestPathTraceIfTriggerChanged(AppResources& app, const engine::scene::Camera& camera,
                                        int fbWidth, int fbHeight,
                                        std::chrono::steady_clock::time_point now) {
-    const bool needsLightTransport = aovNeedsLightTransport(static_cast<engine::debug::AovId>(app.aov));
-    const PathTraceInputState input{
-        camera.position(),       app.debugCamera.yawDegrees(), app.debugCamera.pitchDegrees(),
-        app.debugCamera.focalLengthMm(), app.debugCamera.filmBack().heightMm,
-        app.envRotationDegrees, app.showSky, app.envLightEnabled, app.envExposureStops,
-        fbWidth,                 fbHeight,                     needsLightTransport,
-        app.aov};
+    const ViewInputState view{camera.position(),
+                               app.debugCamera.yawDegrees(),
+                               app.debugCamera.pitchDegrees(),
+                               app.debugCamera.focalLengthMm(),
+                               app.debugCamera.filmBack().heightMm,
+                               fbWidth,
+                               fbHeight};
+    const PathTraceInputState input{view, app.envRotationDegrees, app.showSky, app.envLightEnabled,
+                                     app.envExposureStops};
 
     // Interaction is a change in anything the image depends on other than the resolution it renders at -- compared against the inputs alone, so the scale promotion below cannot re-arm the timer that produced it.
     if (input != app.lastPathTraceTrigger.input) {
@@ -1039,23 +1067,28 @@ void requestPathTraceIfTriggerChanged(AppResources& app, const engine::scene::Ca
     }
     const bool settled =
         std::chrono::duration<double>(now - app.lastInputChange).count() >= kInteractiveSettleSeconds;
-    const PathTraceTriggerState current{input, settled ? app.renderScale : app.interactiveRenderScale};
-    if (current == app.lastPathTraceTrigger) {
-        return;
-    }
+    const float renderScale = settled ? app.renderScale : app.interactiveRenderScale;
+    const int renderWidth = scaledExtent(fbWidth, renderScale);
+    const int renderHeight = scaledExtent(fbHeight, renderScale);
+    const bool needsLightTransport = aovNeedsLightTransport(static_cast<engine::debug::AovId>(app.aov));
 
-    const int renderWidth = scaledExtent(fbWidth, current.renderScale);
-    const int renderHeight = scaledExtent(fbHeight, current.renderScale);
-    // Park the driver whenever the selected AOV is one it does not produce. Without this it keeps accumulating passes of an image no longer on screen, on every core, for as long as a rasterizer AOV stays selected -- competing with the rasterizer the render thread is running synchronously right here.
+    // Park the driver whenever the selected AOV is one it does not produce. Without this it keeps accumulating passes of an image no longer on screen, on every core, for as long as a rasterizer AOV stays selected -- competing with the rasterizer the render thread is running synchronously right here. Non-destructive (path_trace_driver.h), so the accumulation it parks is still there to continue on the way back.
     app.pathTraceDriver->setSuspended(!needsLightTransport);
-    if (needsLightTransport) {
+
+    const PathTraceTriggerState pathTrace{input, renderScale};
+    if (pathTrace != app.lastPathTraceTrigger) {
         const std::uint64_t generation = requestPathTrace(app, camera, renderWidth, renderHeight);
         if (app.bench) {
             app.bench->restart(generation);
         }
+        app.lastPathTraceTrigger = pathTrace;
     }
-    // The complement of needsLightTransport is exactly the rasterizer's 14 AOVs: aovNeedsLightTransport covers 13 of AovId::Count's 27 and selectPathTracedImage routes the other 14 here, so the two sets partition the enum and no AOV needs neither producer. On Beauty -- the default -- the rasterizer now does not run at all, where before it rasterized the full framebuffer on the render thread every frame of camera interaction to produce 14 images nobody was looking at.
-    if (!needsLightTransport && renderWidth > 0 && renderHeight > 0) {
+
+    const RasterTriggerState raster{view, renderScale};
+    if (needsLightTransport || raster == app.lastRasterTrigger || renderWidth <= 0 || renderHeight <= 0) {
+        return;
+    }
+    {
         const engine::debug::ScopedCpuTimer rasterTimer(app.stages.rasterMs);
         engine::scene::renderRasterGBuffer(camera, app.stumpModel.shadingTriangles,
                                             app.stumpModel.instances, app.perInstanceSettings,
@@ -1063,7 +1096,7 @@ void requestPathTraceIfTriggerChanged(AppResources& app, const engine::scene::Ca
                                             renderWidth, renderHeight, *app.rasterThreadPool,
                                             *app.rasterGBuffer);
     }
-    app.lastPathTraceTrigger = current;
+    app.lastRasterTrigger = raster;
 }
 
 // Fraction of texels that would clip at the display encode, plus the peak such value as a multiple of display range -- e.g. "3.2%, peak 47.8x". Read from the pre-display-transform beauty rather than the composited framebuffer Histogram reads, since B1's colorimetric-only display transform means anything above 1.0 clips with no tone-mapped rolloff to cushion it, and the on-screen histogram alone cannot distinguish "just barely over" from "wildly over" -- both pin bin 255 identically.
@@ -1211,31 +1244,64 @@ void updateDashboard(AppResources& app,
     app.dashboard.update(frame);
 }
 
-// Appends this frame's stage times and any newly finished pass of the captured accumulation, and closes the window once the final pass has been displayed. `pass` was read before this frame's snapshot: the driver publishes a pass's record after its result, so a final record there means this frame presented the final image.
+// True once the selected AOV's producer has nothing left to do for it. A rasterizer AOV is finished as soon as a G-buffer exists: the rasterizer runs synchronously on the frame the AOV is selected, so there is no convergence to wait for. A light-transport AOV is finished when the final PassRecord of the captured accumulation has been appended -- read off the column rather than the snapshot because the driver publishes a result BEFORE its record, so requiring the record guarantees both that the displayed image is final and that its record is in `passes`, which is what finishBench's contiguity check needs.
+bool stageComplete(const AppResources& app, const BenchCapture& bench) {
+    if (!aovNeedsLightTransport(static_cast<engine::debug::AovId>(app.aov))) {
+        return app.rasterGBuffer->generation != 0;
+    }
+    return !bench.passes.empty() && bench.passes.back().generation == bench.generation &&
+           bench.passes.back().passIndex == app.maxSamples;
+}
+
+// Appends this frame's stage times and any newly finished pass of the captured accumulation, then advances the -bench-aovs schedule, closing the window once its last stage finishes. `pass` was read before this frame's snapshot: the driver publishes a pass's record after its result, so a final record there means this frame presented the final image.
 void captureBenchFrame(engine::platform::Window& window, AppResources& app, BenchCapture& bench,
                        const engine::debug::PassRecord& pass,
-                       const std::shared_ptr<const engine::scene::PathTraceResult>& snapshot, float frameMs) {
+                       const std::shared_ptr<const engine::scene::PathTraceResult>& snapshot, float frameMs,
+                       std::chrono::steady_clock::time_point now) {
     const bool ours = pass.generation == bench.generation && !pass.cancelled;
-    if (ours && (bench.passes.empty() || bench.passes.back().passIndex != pass.passIndex)) {
+    // Keyed on the generation too, not the index alone: consecutive generations both number their passes from 1, so an index-only comparison would drop the first pass of every restart after one that was cancelled at the same index.
+    const bool unseen = bench.passes.empty() || bench.passes.back().generation != pass.generation ||
+                        bench.passes.back().passIndex != pass.passIndex;
+    if (ours && unseen) {
         bench.passes.push_back(pass);
     }
     bench.frames.push_back(app.stages);
     bench.frameMs.push_back(frameMs);
     bench.presentGpuMs.push_back(app.postTimer.millisecondsElapsed());
-    // Only uploads of this accumulation: the superseded request's in-flight pass can still publish after restart.
-    if (app.stages.uploaded && snapshot->generation == bench.generation) {
+    bench.refreshHz.push_back(static_cast<float>(app.refreshHz));
+    // Only uploads the displayed AOV's own producer issued: a superseded request's in-flight pass can still publish after a restart, and a rasterizer AOV's upload is never the driver's at all.
+    const bool ourUpload = !aovNeedsLightTransport(static_cast<engine::debug::AovId>(app.aov)) ||
+                           (snapshot != nullptr && snapshot->generation == bench.generation);
+    if (app.stages.uploaded && ourUpload) {
         bench.uploadMs.push_back(app.stages.uploadMs);
     }
-    if (ours && pass.passIndex == app.maxSamples) {
-        bench.finalPassDisplayed = true;
-        window.setShouldClose(true);
+
+    if (!stageComplete(app, bench)) {
+        return;
     }
+    if (bench.stage > 0) {
+        bench.stageWallMs.push_back(std::chrono::duration<float, std::milli>(now - bench.stageStart).count());
+    }
+    // An empty schedule leaves stage at 0 and ends here, which is the single-stage capture unchanged.
+    if (bench.stage + 1 >= bench.aovs.size()) {
+        bench.complete = true;
+        window.setShouldClose(true);
+        return;
+    }
+    bench.stageStart = now;
+    ++bench.stage;
+    app.aov = bench.aovs[bench.stage];
 }
 
 // Everything the captured workload's cost depends on; two engine records are comparable iff these are equal.
 nlohmann::json benchConfig(const AppResources& app, const BenchCapture& bench) {
     const engine::scene::Camera camera = app.debugCamera.snapshot();
-    return {{"scene", app.sceneName},
+    std::vector<std::string> schedule;
+    schedule.reserve(bench.aovs.size());
+    for (const int aov : bench.aovs) {
+        schedule.emplace_back(engine::debug::kAovNames[aov]);
+    }
+    nlohmann::json config = {{"scene", app.sceneName},
             {"width", bench.passes.back().width},
             {"height", bench.passes.back().height},
             {"max_samples", app.maxSamples},
@@ -1251,8 +1317,12 @@ nlohmann::json benchConfig(const AppResources& app, const BenchCapture& bench) {
                         {"film_height_mm", app.debugCamera.filmBack().heightMm}}},
             {"env", {{"rotation_deg", app.envRotationDegrees}, {"exposure_stops", app.envExposureStops},
                      {"light", app.envLightEnabled}, {"show_sky", app.showSky}}},
-            {"hud", app.showHud},
-            {"refresh_hz", app.refreshHz}};
+            {"hud", app.showHud}};
+    // Only with -bench-aovs, so a single-stage record stays comparable with every one logged before this existed. The whole switch sequence, not just the AOV left selected at exit: it IS the workload, and bench_compare run refuses to pair records whose configs differ.
+    if (!schedule.empty()) {
+        config["aov_schedule"] = schedule;
+    }
+    return config;
 }
 
 // Raw columns, one entry per event of their own: per captured frame for render-thread stages, per upload for upload_ms, per pass for driver phases.
@@ -1275,7 +1345,7 @@ nlohmann::json benchSamples(const BenchCapture& bench) {
     };
     using Stages = engine::debug::FrameStageTimes;
     using Pass = engine::debug::PassRecord;
-    return {{"frame_ms", bench.frameMs},
+    nlohmann::json samples = {{"frame_ms", bench.frameMs},
             {"fence_ms", frameColumn(&Stages::fenceMs)},
             {"pace_ms", frameColumn(&Stages::paceMs)},
             {"poll_ms", frameColumn(&Stages::pollMs)},
@@ -1284,6 +1354,7 @@ nlohmann::json benchSamples(const BenchCapture& bench) {
             {"upload_ms", bench.uploadMs},
             {"present_ms", frameColumn(&Stages::presentMs)},
             {"present_gpu_ms", bench.presentGpuMs},
+            {"refresh_hz", bench.refreshHz},
             {"histogram_ms", frameColumn(&Stages::histogramMs)},
             {"over_range_ms", frameColumn(&Stages::overRangeMs)},
             {"probe_ms", frameColumn(&Stages::probeMs)},
@@ -1295,18 +1366,29 @@ nlohmann::json benchSamples(const BenchCapture& bench) {
             {"pass_over_range_ms", passColumn(&Pass::overRangeMs)},
             {"pass_publish_ms", passColumn(&Pass::publishMs)},
             {"pass_ms", passColumn(&Pass::passMs)}};
+    // Absent without -bench-aovs, so a single-stage record keeps exactly the columns it has always had.
+    if (!bench.stageWallMs.empty()) {
+        samples["stage_wall_ms"] = bench.stageWallMs;
+    }
+    return samples;
 }
 
 // Writes the captured accumulation as one benchmark-log record. Refuses an incomplete capture -- closed early, or a pass whose record was overwritten before a frame read it -- rather than logging a workload that differs from its config.
 bool finishBench(const AppResources& app, const BenchCapture& bench) {
-    if (!bench.finalPassDisplayed) {
-        std::cerr << "engine: -bench closed before the accumulation reached maxSamples; nothing logged\n";
+    if (!bench.complete) {
+        std::cerr << "engine: -bench closed before the schedule finished; nothing logged\n";
         return false;
     }
-    for (std::size_t i = 0; i < bench.passes.size(); ++i) {
-        if (bench.passes[i].passIndex != static_cast<int>(i) + 1) {
-            std::cerr << "engine: -bench captured " << bench.passes.size() << " of " << app.maxSamples
-                      << " pass records (two passes finished within one frame); nothing logged\n";
+    // Contiguous from 1 within each generation rather than across the whole column: a schedule spans several accumulations, and each restart numbers its own passes from 1. A gap still means a PassRecord was overwritten before a frame read it, so the capture would not describe its config.
+    std::uint64_t generation = 0;
+    int expected = 0;
+    for (const engine::debug::PassRecord& pass : bench.passes) {
+        if (pass.generation != generation) {
+            generation = pass.generation;
+            expected = 0;
+        }
+        if (pass.passIndex != ++expected) {
+            std::cerr << "engine: -bench missed a pass record of generation " << generation << " (two passes finished within one frame); nothing logged\n";
             return false;
         }
     }
@@ -1402,7 +1484,7 @@ void renderFrame(engine::platform::Window& window, engine::platform::DisplayLink
         updateDashboard(app, pathTraceSnapshot, dtSeconds * 1000.0F, winWidth, winHeight);
     }
     if (app.bench) {
-        captureBenchFrame(window, app, *app.bench, benchPass, pathTraceSnapshot, dtSeconds * 1000.0F);
+        captureBenchFrame(window, app, *app.bench, benchPass, pathTraceSnapshot, dtSeconds * 1000.0F, frameNow);
     }
 }
 
@@ -1412,7 +1494,35 @@ struct Options {
     bool stats = false;
     // -bench PATH: run one accumulation to profile.json's maxSamples, append it to this benchmark log (bench_log.h), exit.
     std::string benchLogPath;
+    // -bench-aovs A,B,C: AovId sequence the run walks, one stage per entry. Empty = today's single-stage capture.
+    std::vector<int> benchAovs;
 };
+
+// Resolves a comma-separated AOV list against kAovNames, so -bench-aovs and the HUD dropdown name the same 27 AOVs identically. Nullopt on an unknown name, which parseOptions surfaces rather than defaulting around.
+std::optional<std::vector<int>> parseAovList(const char* list) {
+    std::vector<int> aovs;
+    const std::string text(list);
+    for (std::size_t begin = 0; begin <= text.size();) {
+        const std::size_t comma = text.find(',', begin);
+        const std::string name = text.substr(begin, comma - begin);
+        const auto* match = std::find_if(std::begin(engine::debug::kAovNames), std::end(engine::debug::kAovNames),
+                                          [&name](const char* candidate) { return name == candidate; });
+        if (match == std::end(engine::debug::kAovNames)) {
+            std::cerr << "engine: -bench-aovs has no AOV named '" << name << "'; valid names are";
+            for (const char* candidate : engine::debug::kAovNames) {
+                std::cerr << " '" << candidate << "'";
+            }
+            std::cerr << '\n';
+            return std::nullopt;
+        }
+        aovs.push_back(static_cast<int>(match - std::begin(engine::debug::kAovNames)));
+        if (comma == std::string::npos) {
+            break;
+        }
+        begin = comma + 1;
+    }
+    return aovs;
+}
 
 // Returns nullopt on an unrecognized flag or a missing value -- argv is a system
 // boundary, so a bad value is surfaced rather than defaulted around.
@@ -1433,9 +1543,19 @@ std::optional<Options> parseOptions(int argc, char** argv) {
                 return std::nullopt;
             }
             options.benchLogPath = argv[++i];
+        } else if (std::strcmp(argv[i], "-bench-aovs") == 0) {
+            if (i + 1 >= argc) {
+                std::cerr << "engine: -bench-aovs expects a value\n";
+                return std::nullopt;
+            }
+            std::optional<std::vector<int>> aovs = parseAovList(argv[++i]);
+            if (!aovs) {
+                return std::nullopt;
+            }
+            options.benchAovs = std::move(*aovs);
         } else {
             std::cerr << "engine: unknown flag " << argv[i]
-                       << "\n  usage: engine [-scene path/to/scene.json] [-stats] [-bench log.jsonl]\n";
+                       << "\n  usage: engine [-scene path/to/scene.json] [-stats] [-bench log.jsonl] [-bench-aovs Beauty,Normal,...]\n";
             return std::nullopt;
         }
     }
@@ -1468,11 +1588,16 @@ int main(int argc, char** argv) {
         if (!sceneConfig || !profileConfig) {
             std::cerr << "main: scene/profile config load failed, aborting startup\n";
             exitCode = EXIT_FAILURE;
+        } else if (options->benchLogPath.empty() && !options->benchAovs.empty()) {
+            std::cerr << "main: -bench-aovs is the schedule -bench walks; it does nothing on its own\n";
+            exitCode = EXIT_FAILURE;
         } else if (!options->benchLogPath.empty() &&
                    (profileConfig->pathTracer.maxSamples <= 0 ||
-                    !aovNeedsLightTransport(static_cast<engine::debug::AovId>(profileConfig->render.defaultAov)))) {
-            // An unbounded accumulation never ends, and a rasterizer AOV parks the driver, so neither is a benchmark workload.
-            std::cerr << "main: -bench needs profile.json maxSamples > 0 and a path-traced defaultAOV\n";
+                    !aovNeedsLightTransport(static_cast<engine::debug::AovId>(
+                        options->benchAovs.empty() ? profileConfig->render.defaultAov
+                                                   : options->benchAovs.front())))) {
+            // An unbounded accumulation never ends, and a rasterizer AOV parks the driver, so neither is a benchmark workload. The first stage is the warm-up every later one is measured from, so it is the one that has to converge.
+            std::cerr << "main: -bench needs profile.json maxSamples > 0 and a path-traced first AOV\n";
             exitCode = EXIT_FAILURE;
         } else {
             // Window construction creates the GL 4.1 core/fwd-compat context and makes it current; fatal failure inside it exits the process directly (see window.cpp) since nothing recoverable exists yet.
@@ -1511,6 +1636,10 @@ int main(int argc, char** argv) {
                         app->bench.emplace();
                         app->bench->logPath = options->benchLogPath;
                         app->bench->argv.assign(argv, argv + argc);
+                        app->bench->aovs = options->benchAovs;
+                        if (!app->bench->aovs.empty()) {
+                            app->aov = app->bench->aovs.front();
+                        }
                     }
 
                     while (!window.shouldClose()) {
