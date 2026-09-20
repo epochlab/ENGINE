@@ -167,9 +167,6 @@ bool checkPose(const char* poseName, const Camera& camera, const EmbreeAccel& ac
             const ShadingFrame frame = buildShadingFrame(shading, material, settings);
             const BsdfParams params =
                 resolveBsdfParams(material, shading.uv, shading.colour, settings, std::nullopt);
-            const glm::vec3 woWorld = -ray.dir;
-            const float ndotV = std::max(glm::dot(frame.normal, woWorld), 1e-4F);
-            const float fresnelVal = fresnelAtViewAngle(params, ndotV).x;
             const float depth = glm::dot(shading.position - camPos, camForward);
 
             const std::vector<FieldCheck> fields{
@@ -183,7 +180,6 @@ bool checkPose(const char* poseName, const Camera& camera, const EmbreeAccel& ac
                 {"roughness", texelAt(raster.roughness, x, y), glm::vec3(params.roughness), kUnitEpsilon},
                 {"tangent", texelAt(raster.tangent, x, y), frame.tangent, kUnitEpsilon},
                 {"objectId", texelAt(raster.objectId, x, y), falseColorForId(triangle.instanceIndex), kUnitEpsilon},
-                {"fresnel", texelAt(raster.fresnel, x, y), glm::vec3(fresnelVal, 1.0F - fresnelVal, 0.0F), kUnitEpsilon},
                 {"iorAov", texelAt(raster.iorAov, x, y), glm::vec3(settings.ior), kUnitEpsilon},
             };
             valueMismatches += checkFields(fields, x, y, poseName);

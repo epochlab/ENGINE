@@ -194,7 +194,7 @@ struct Lane {
     engine::gfx::HdrImage PathTraceResult::*image;
     const char* name;
 };
-constexpr std::array<Lane, 9> kLanes{{{&PathTraceResult::beauty, "beauty"},
+constexpr std::array<Lane, 10> kLanes{{{&PathTraceResult::beauty, "beauty"},
                                       {&PathTraceResult::bounceHeatmap, "bounceHeatmap"},
                                       {&PathTraceResult::ao, "ao"},
                                       {&PathTraceResult::shadow, "shadow"},
@@ -202,7 +202,8 @@ constexpr std::array<Lane, 9> kLanes{{{&PathTraceResult::beauty, "beauty"},
                                       {&PathTraceResult::indirectDiffuse, "indirectDiffuse"},
                                       {&PathTraceResult::directSpecular, "directSpecular"},
                                       {&PathTraceResult::indirectSpecular, "indirectSpecular"},
-                                      {&PathTraceResult::refraction, "refraction"}}};
+                                      {&PathTraceResult::refraction, "refraction"},
+                                      {&PathTraceResult::fresnel, "fresnel"}}};
 
 // Per float of every lane: the batch mean rounded once to float, and the bound on the driver's distance from it. Per
 // lane: whether any float changed between passes, without which the lane cannot expose an accumulation defect.
@@ -267,7 +268,7 @@ OracleMean oracleBatchMean(DriverFixture& fixture, const Camera& camera, int pas
 
 // --- Checks ------------------------------------------------------------------------------------------------------
 
-// The core accumulation property, on all nine images. The driver publishes a RUNNING mean (Welford 1962; West 1979),
+// The core accumulation property, on all ten images. The driver publishes a RUNNING mean (Welford 1962; West 1979),
 // m_k = m_{k-1} + (x_k - m_{k-1})/k, a different rounding sequence from the batch mean sum(x)/n, so the two differ by a
 // deterministic forward error with no probability in it. Its float32 step, FMA-contracted or not, is
 // m^_k = fl(m^_{k-1} + fl(fl(x_k - m^_{k-1}) * fl(1/k))), and in Higham's theta/gamma calculus (Accuracy and Stability

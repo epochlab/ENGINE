@@ -102,7 +102,7 @@ std::array<float, 100> buildGaborKernel() {
     return kernel;
 }
 
-// True for AOVs needing light-transport data (Beauty, transport-component AOVs, post-filter AOVs reading Beauty) -- false for the 14 primary-hit-only AOVs the rasterizer covers (rasterizer.h). Selects which producer runs, and nothing else: it parks the driver while an AOV it does not produce is shown (requestPathTraceIfTriggerChanged) and gates the rasterizer symmetrically. Deliberately NOT part of either producer's trigger key -- keying on it made every switch across the boundary restart a converged accumulation.
+// True for AOVs needing light-transport data (Beauty, transport-component AOVs, post-filter AOVs reading Beauty) -- false for the 13 primary-hit-only AOVs the rasterizer covers (rasterizer.h). Selects which producer runs, and nothing else: it parks the driver while an AOV it does not produce is shown (requestPathTraceIfTriggerChanged) and gates the rasterizer symmetrically. Deliberately NOT part of either producer's trigger key -- keying on it made every switch across the boundary restart a converged accumulation.
 bool aovNeedsLightTransport(engine::debug::AovId aov) {
     using engine::debug::AovId;
     switch (aov) {
@@ -112,6 +112,7 @@ bool aovNeedsLightTransport(engine::debug::AovId aov) {
         case AovId::Sobel:
         case AovId::Gabor:
         case AovId::AO:
+        case AovId::Fresnel:
         case AovId::BounceCount:
         case AovId::Shadow:
         case AovId::DirectDiffuse:
@@ -294,7 +295,7 @@ struct AppResources {
     float interactiveRenderScale;
     std::chrono::steady_clock::time_point lastInputChange;
 
-    // Synchronous per-frame CPU rasterizer for the 14 primary-hit-only G-buffer AOVs (rasterizer.h) -- their only producer, decoupled from PathTraceDriver's async convergence loop. unique_ptr for the same reason as pathTraceDriver: ThreadPool's copy/move are deleted (owns worker threads), so a by-value member would break AppResources's movability.
+    // Synchronous per-frame CPU rasterizer for the 13 primary-hit-only G-buffer AOVs (rasterizer.h) -- their only producer, decoupled from PathTraceDriver's async convergence loop. unique_ptr for the same reason as pathTraceDriver: ThreadPool's copy/move are deleted (owns worker threads), so a by-value member would break AppResources's movability.
     std::unique_ptr<engine::scene::ThreadPool> rasterThreadPool;
     // Allocated once and rendered into in place (rasterizer.h), never republished -- its `generation` field, not its address, is what tells one render from the next. Refreshed synchronously in requestPathTraceIfTriggerChanged whenever a rasterizer-backed AOV is selected and lastRasterTrigger shows this view has not been rasterized yet; generation stays 0 while only light-transport AOVs are ever shown, because then it never runs at all.
     std::shared_ptr<engine::scene::RasterGBuffer> rasterGBuffer;
@@ -762,16 +763,16 @@ void resolveOrbitPick(engine::platform::Window& window, AppResources& app,
 struct PathTracedAovSource {
     const engine::gfx::HdrImage* image = nullptr;
     std::shared_ptr<const void> owner;
-    // RasterGBuffer's render counter for the 14 rasterizer-backed AOVs, 0 for the path-traced ones. The rasterizer's buffer is now reused in place, so its address is constant and `owner` alone can no longer tell one render from the next; a PathTraceResult is still a fresh object per pass and needs no counter.
+    // RasterGBuffer's render counter for the 13 rasterizer-backed AOVs, 0 for the path-traced ones. The rasterizer's buffer is now reused in place, so its address is constant and `owner` alone can no longer tell one render from the next; a PathTraceResult is still a fresh object per pass and needs no counter.
     std::uint64_t generation = 0;
 };
 
-// Returns a default (null image) if the specific source an AOV needs hasn't published yet -- callers show black instead. The 14 primary-hit-only AOVs read rasterGBuffer (refreshed synchronously when one of them is selected and this view has not been rasterized yet, requestPathTraceIfTriggerChanged); Beauty and the light-transport AOVs read the driver's asynchronously published PathTraceResult. Extended as RasterGBuffer/PathTraceResult grow more buffers.
+// Returns a default (null image) if the specific source an AOV needs hasn't published yet -- callers show black instead. The 13 primary-hit-only AOVs read rasterGBuffer (refreshed synchronously when one of them is selected and this view has not been rasterized yet, requestPathTraceIfTriggerChanged); Beauty and the light-transport AOVs read the driver's asynchronously published PathTraceResult. Extended as RasterGBuffer/PathTraceResult grow more buffers.
 PathTracedAovSource selectPathTracedImage(
     const std::shared_ptr<const engine::scene::PathTraceResult>& snapshot,
     const std::shared_ptr<engine::scene::RasterGBuffer>& rasterGBuffer,
     engine::debug::AovId aov) {
-    // One construction site for all 14 rasterizer-backed AOVs, so the generation stamp cannot be omitted at one of them. The buffer is allocated for the process's life now, so a null check no longer distinguishes "no render yet" -- generation 0 does.
+    // One construction site for all 13 rasterizer-backed AOVs, so the generation stamp cannot be omitted at one of them. The buffer is allocated for the process's life now, so a null check no longer distinguishes "no render yet" -- generation 0 does.
     const auto fromRaster = [&rasterGBuffer](const engine::gfx::HdrImage& image) {
         return rasterGBuffer->generation == 0
                    ? PathTracedAovSource{}
@@ -810,7 +811,7 @@ PathTracedAovSource selectPathTracedImage(
         case engine::debug::AovId::Alpha:
             return fromRaster(rasterGBuffer->alpha);
         case engine::debug::AovId::Fresnel:
-            return fromRaster(rasterGBuffer->fresnel);
+            return snapshot ? fromSnapshot(snapshot->fresnel) : PathTracedAovSource{};
         case engine::debug::AovId::AO:
             return snapshot ? fromSnapshot(snapshot->ao) : PathTracedAovSource{};
         case engine::debug::AovId::Shadow:

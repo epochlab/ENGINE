@@ -18,16 +18,17 @@ constexpr std::chrono::milliseconds kIdlePollInterval{5};
 void accumulateMean(PathTraceResult& sample, const PathTraceResult& previousMean, int n,
                      ThreadPool& threadPool) {
     // Index-aligned with `sources` below, and every PathTraceResult image must appear: unlike rasterizer.cpp's aovImages() there is no compile-time guard here, so a missing entry silently publishes that image's last pass instead of the running mean.
-    const std::array<engine::gfx::HdrImage*, 9> destinations{
+    const std::array<engine::gfx::HdrImage*, 10> destinations{
         &sample.beauty,          &sample.bounceHeatmap,    &sample.ao,
         &sample.shadow,          &sample.directDiffuse,    &sample.indirectDiffuse,
-        &sample.directSpecular,  &sample.indirectSpecular, &sample.refraction};
-    const std::array<const engine::gfx::HdrImage*, 9> sources{
+        &sample.directSpecular,  &sample.indirectSpecular, &sample.refraction,
+        &sample.fresnel};
+    const std::array<const engine::gfx::HdrImage*, 10> sources{
         &previousMean.beauty,          &previousMean.bounceHeatmap,
         &previousMean.ao,              &previousMean.shadow,
         &previousMean.directDiffuse,   &previousMean.indirectDiffuse,
         &previousMean.directSpecular,  &previousMean.indirectSpecular,
-        &previousMean.refraction};
+        &previousMean.refraction,      &previousMean.fresnel};
     const float invN = 1.0F / static_cast<float>(n);
     const auto rowFloats = static_cast<std::size_t>(sample.beauty.width) * 4;
     threadPool.parallelFor(sample.beauty.height, [&](int y) {
