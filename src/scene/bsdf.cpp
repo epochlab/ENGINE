@@ -13,6 +13,9 @@ namespace {
 constexpr float kPi = 3.14159265F;
 constexpr float kMinAlpha = 0.02F * 0.02F;  // roughness floor, avoids a degenerate GGX delta lobe
 
+// Perceptual roughness to GGX alpha, in one place: evaluateBsdfSplit, sampleBsdf and fresnelAtMicrofacet must agree, or the Fresnel AOV reports a term the lobe never evaluated.
+float alphaForRoughness(float roughness) { return std::max(roughness * roughness, kMinAlpha); }
+
 // Trowbridge-Reitz/GGX D in the cancellation-free form (Filament 4.4.2, Google 2018): the textbook denominator ndotH^2*(alpha^2-1)+1 subtracts two near-equal numbers wherever the half-vector is near the normal, which at low roughness is the entire lobe -- measured 20% of D lost at the peak at alpha=4e-4, and 3.3e-4 at alpha=1e-2.
 // nh is in the local shading frame (N = +z), so nh.x^2 + nh.y^2 IS sin^2(theta_h): every term of the sum is then non-negative and the peak value 1/(pi*alpha^2) is exact.
 // The denominator needs no floor: d = alpha^2*cos^2 + sin^2 is minimised at alpha^2, and callers enforce alpha >= kMinAlpha, so kPi*d*d >= 8e-14 -- twenty-four orders above float32 underflow. The floor that used to stand here engaged for every roughness below 0.0867 and suppressed D by 124340x at 0.02 and 81.5x at 0.05.
@@ -991,12 +994,20 @@ glm::vec3 fresnelAtViewAngle(const BsdfParams& params, float cosTheta) {
                      params.metallic);
 }
 
+glm::vec3 fresnelAtMicrofacet(const BsdfParams& params, const glm::vec3& woLocal, glm::vec2 u) {
+    // sampleGGXVNDF's +z-hemisphere precondition, met the way evaluateBsdfSplit and sampleBsdf meet it. Only dot(wo, wh) is read, and reflecting the frame leaves it unchanged, so the flip needs no undoing.
+    const glm::vec3 wo(woLocal.x, woLocal.y, std::abs(woLocal.z));
+    const glm::vec3 wh = sampleGGXVNDF(wo, alphaForRoughness(params.roughness), u);
+    // Clamped, not raw: fresnelDielectric swaps etaI/etaT below zero, so a negative dot would silently report the exiting-side term instead of the entering one fresnelAtViewAngle documents.
+    return fresnelAtViewAngle(params, std::max(glm::dot(wo, wh), 0.0F));
+}
+
 BsdfEval evaluateBsdfSplit(const BsdfParams& params, const glm::vec3& woLocal,
                             const glm::vec3& wiLocal) {
     const float sign = woLocal.z >= 0.0F ? 1.0F : -1.0F;
     const glm::vec3 wo(woLocal.x, woLocal.y, woLocal.z * sign);
     const glm::vec3 wi(wiLocal.x, wiLocal.y, wiLocal.z * sign);
-    const float alpha = std::max(params.roughness * params.roughness, kMinAlpha);
+    const float alpha = alphaForRoughness(params.roughness);
     const LobeProbabilities lobes = computeLobeProbabilities(params, wo, sign, alpha);
     return evaluateContinuousLobes(params, wo, wi, alpha, lobes);
 }
@@ -1013,7 +1024,7 @@ std::optional<BsdfSample> sampleBsdf(const BsdfParams& params, const glm::vec3& 
                                       Sampler& sampler) {
     const float sign = woLocal.z >= 0.0F ? 1.0F : -1.0F;
     const glm::vec3 wo(woLocal.x, woLocal.y, woLocal.z * sign);
-    const float alpha = std::max(params.roughness * params.roughness, kMinAlpha);
+    const float alpha = alphaForRoughness(params.roughness);
     const LobeProbabilities lobes = computeLobeProbabilities(params, wo, sign, alpha);
 
     const float lobeU = sampler.next1D();

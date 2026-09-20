@@ -52,6 +52,8 @@ Timing runs append one JSON Lines record each to a local log (§2 Benchmark log)
     -- --scene scenes/cornell.json --out renders/ab.png --passes 32 --width 640 --height 360 --bench-log renders/bench.jsonl
 ```
 
+`engine -bench` also takes `-bench-aovs "Beauty,Sobel,Direct Diffuse,Normal,Beauty"`, which walks that AOV sequence and times each switch into a `stage_wall_ms` column; the first entry is an unmeasured warm-up, so every switch is timed from an already-converged image. Comparability is exact: `config` carries only configured inputs, never a measured one -- the display refresh the run was paced at is a per-frame `refresh_hz` sample, since a measured double cannot satisfy an equality contract.
+
 It prints B/A with a distribution-free confidence interval, and says "not resolved" when that interval contains 1. `bench_compare compare` and `bench_compare history --tool T` read records already in the log (unpaired, so drift is not controlled). `--metric` picks any samples column (its mean per event -- per frame, per upload or per pass, since frame count scales with run duration) or rusage field such as `user_s`.
 
 ## 1. Pipeline
@@ -154,7 +156,7 @@ Add a new material by dropping a JSON file in `assets/materials/` and pointing `
 
 The four Direct/Indirect Diffuse/Specular buckets key on the **sampling strategy** a bounce drew from (`LobeType`, `path_tracer.cpp`), not on the surface's material class. A rough surface's Kulla-Conty multiple-scattering energy is therefore Specular in both senses that matter -- it is repeated scattering on the GGX microsurface, and since it has its own `(1-E)cos` strategy (`msReflect`, `bsdf.cpp`) it is drawn as such. A conductor contributes to the Diffuse buckets not at all, having no diffuse lobe.
 
-Every AOV below is computed by the path tracer each pass, except: the 14 primary-hit-only AOVs (Alpha, Depth, WorldPos, UV, Normal, GeomNormal, Albedo, Metallic, Roughness, Tangent, ObjectID, Fresnel, IOR, Wireframe), which come from the synchronous CPU rasterizer (§1, §2) instead, refreshed every frame; and HSV/Luminance/Sobel/Gabor, GPU post-filters of the Beauty image (shared `PostProcessPass`, re-run every displayed frame over the completed texture -- not cached across frames, see §5 roadmap Parked).
+Every AOV below is computed by the path tracer each pass, except: the 13 primary-hit-only AOVs (Alpha, Depth, WorldPos, UV, Normal, GeomNormal, Albedo, Metallic, Roughness, Tangent, ObjectID, IOR, Wireframe), which come from the synchronous CPU rasterizer (§1, §2) instead, refreshed whenever the view they were rasterized for changes; and HSV/Luminance/Sobel/Gabor, GPU post-filters of the Beauty image (shared `PostProcessPass`, re-run every displayed frame over the completed texture -- not cached across frames, see §5 roadmap Parked).
 
 ### Utility
 
@@ -188,7 +190,7 @@ Every AOV below is computed by the path tracer each pass, except: the 14 primary
 
 | AOV | Mechanism |
 |---|---|
-| Fresnel | `mix(exact dielectric Fresnel, exact complex-IOR conductor Fresnel, metallic)` at the primary hit's view angle — the same term shading evaluates (`fresnelAtViewAngle`, `bsdf.h`), against the macro normal rather than a microfacet half-vector; debugs grazing-angle reflectance in isolation, including the conductor dip an authored `edgeTint` produces |
+| Fresnel | Expected Fresnel reflectance over the **visible microfacet normal distribution**, `E[F(wo.wh)]` for `wh ~ D_vis(wo)` — one VNDF draw per sample (Heitz 2018, the same `D_vis` and `alpha` `sampleBsdf` draws from) through `mix(exact dielectric Fresnel, exact complex-IOR conductor Fresnel, metallic)` (`fresnelAtMicrofacet`, `bsdf.h`), progressive like every other path-traced lane. This is the angle the microfacet BSDF actually evaluates Fresnel at (Walter et al. 2007), so it is roughness-dependent where a macro-normal value cannot be: at `n.wo = 0.05` on an `ior` 1.5 dielectric it reads 0.7521 at the roughness floor, 0.4406 at roughness 0.3 and 0.1692 at 0.6, against a macro-normal 0.7521 throughout. Full RGB — a conductor's Fresnel is chromatic by construction (`edgeTint` inverts to a per-channel complex IOR), which the rasterizer's `(F, 1-F, 0)` packing discarded. Collapses onto the macro-normal value to 4 decimals as `alpha` reaches its `kMinAlpha` floor, so it is a strict generalisation of the AOV it replaces, not a different quantity |
 | IOR | Per-instance dielectric IOR (`settings.ior`), -1 on a miss — isolates the raw refractive-index input driving Fresnel/transmission |
 | BounceCount | Mean path termination depth across samples, per pixel — debugs Russian roulette/termination behaviour |
 
@@ -234,13 +236,6 @@ Validation infrastructure needed for large/complex changes that have no closed-f
 - **Band calibration tool**: derived bands are verified by mutation (each converted band detects a smaller error than the one it replaced), but not yet by a standing false-rejection-rate measurement over many seeds.
 - **Histogram coverage**: `debug/histogram.cpp` is FBO/PBO-bound with no CPU-reachable binning function, so it has no validator. Needs the bin arithmetic extracted first.
 
-### Wave 4: Relax `aovNeedsLightTransport` gating (one enabler, two consumers)
-
-Unblocks the path-traced Fresnel AOV and AOV-switch restarts (the last one measured via the benchmark log, §2); the contact sheet is a third, parked.
-
-- **Reduce AOV-switch restarts** (measured via the benchmark log, §2): `aovNeedsLightTransport` (`main.cpp:100-120`) plus the trigger-state comparison (`main.cpp:942-958`) force a full progressive-accumulation restart on every AOV switch that changes producer (rasterizer vs. path tracer), and even between two light-transport AOVs, since there's no mechanism to add a new accumulator bucket onto an already-converged mean today -- full restart or nothing. Measure before committing to the added bookkeeping: `engine -bench` captures one fixed convergence today; this item adds a scripted AOV-switch schedule to that mode and compares time-to-converge with `bench_compare run`.
-- **Path-traced Fresnel AOV** (Wave 4 consumer): today's `Fresnel` AOV (`aov.h:29`) is rasterizer-only -- a single primary-hit sample against the macro normal (§4), not progressive. A path-traced version needs a new accumulator lane in `PathTraceResult` (`path_tracer.h:48-64`) and the same gating relaxation as the item above: `aovNeedsLightTransport` (`main.cpp:100-120`) keeps the rasterizer and path tracer mutually exclusive per frame, so neither can freshen a buffer the other owns.
-
 ### Wave 5: Performance, each item justified by the benchmark log (§2)
 
 - **Blue-noise sample matrix beyond d = 1**: the dither mask (`bluenoise_mask.cpp`) is a scalar void-and-cluster array, so a pixel's d-dimensional toroidal shift is one value replicated along the diagonal of the d-torus. Relative shifts between pixels therefore lie on a line rather than filling the torus. Georgiev & Fajardo's Sec. 3 anneals a true d-vector-per-element matrix against their energy function; adopting it changes only the baked table and its lookup, not the sampler.
@@ -281,7 +276,7 @@ Every validator runs on a shared harness (`tools/check.h`): each check is regist
 
 ### Parked (low value, or needs a use-case first)
 
-- **Contact sheet export (grid of every AOV)** (Wave 4 consumer): tile thumbnails of all 27 `AovId` (`aov.h:7-40`) at once, vs. the HUD's single `ImGui::Combo` (`hud_overlay.cpp:336`) feeding one `pathTraceDisplayTexture` blit (`presentFrame`, `main.cpp:739`). Blocked on the rasterizer/path-tracer mutual exclusion: `aovNeedsLightTransport` (`main.cpp:93-108`) splits the 27 into 13 light-transport / 14 rasterizer AOVs, only one side fresh per frame -- needs that gating relaxed, not just N reads of one cached buffer.
+- **Contact sheet export (grid of every AOV)**: tile thumbnails of all 27 `AovId` (`aov.h`) at once, vs. the HUD's single `ImGui::Combo` (`hud_overlay.cpp`) feeding one `pathTraceDisplayTexture` blit (`presentFrame`, `main.cpp`). Wave 4 removed the restart cost of switching between them but not the mutual exclusion itself: `aovNeedsLightTransport` (`main.cpp`) still parks the driver while a rasterizer AOV is shown and gates the rasterizer while a light-transport one is, so only one side is fresh per frame. A contact sheet needs both producers running in the same frame -- the one Wave 4 consumer that genuinely requires that, and the reason the park was kept rather than removed.
 - **Render-mode selector**: Single Sample / Progressive. Today the path tracer dispatches fixed 96x96 tiles and the rasterizer rows, both via `ThreadPool`; neither adapts to residual noise, and the mode isn't selectable, define in profile.json.
 - **Adaptive per-pixel sample budget**: variance-driven, builds on tiling above; `samplesPerPixel` (`profile.json`) is one fixed global today, no per-pixel allocation.
 - **Texture minification filtering (MIP-mapping)**: point/bilinear only today (`sampleBilinear`, `hdr_image.h:22`); grazing/distant surfaces alias. No mip chain exists; needs ray differentials to pick a level per ray.

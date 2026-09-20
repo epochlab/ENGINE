@@ -65,6 +65,7 @@ PathTracedLane pathTracedLane(engine::debug::AovId aov) {
         case AovId::DirectSpecular:   return &Result::directSpecular;
         case AovId::IndirectSpecular: return &Result::indirectSpecular;
         case AovId::Refraction:       return &Result::refraction;
+        case AovId::Fresnel:          return &Result::fresnel;
         default:                      return nullptr;
     }
 }

@@ -22,6 +22,8 @@ constexpr float kRayEpsilon = 1e-4F;
 
 // Offsets the AO sampler's seed from the path sampler's so the two streams are independent and the eight pre-existing images stay bit-identical. 2^32/phi, the standard decorrelating odd constant (Knuth; boost::hash_combine); any fixed offset would do, since hashSeed's SplitMix64 avalanche is what actually separates the streams.
 constexpr std::uint32_t kAoSeedOffset = 0x9E3779B9U;
+// The same for the Fresnel AOV's stream: frac(sqrt 2)*2^32, kAoSeedOffset's sibling. Distinct, non-zero and odd is the whole requirement.
+constexpr std::uint32_t kFresnelSeedOffset = 0x6A09E667U;
 
 // pbrt's ShadowEpsilon convention (Pharr/Jakob/Humphreys Sec 6.8.6): a relative back-off on a finite
 // shadow ray's own tMax, needed now that a light can be real geometry sitting in the BVH -- an
@@ -70,8 +72,8 @@ float transmissionOffsetEpsilon(const ShadingTriangle& tri) {
 constexpr float kFilterRadius = 1.5F;
 constexpr int kFilterExtent = 1;  // how many pixels either side of a sample its splat can reach: a sample sits at most 1.0 past its own pixel's far centre, so a destination two pixels away is at least kFilterRadius off and weighs exactly zero
 constexpr int kFilterTableSize = 64;
-// Per-tile accumulator lanes: beauty.rgb, termination bounce, shadow, the five transport buckets' rgb, then ambient occlusion -- the scalars take one lane each and are broadcast to RGB at write-out, matching writeTexel's convention. AO is appended rather than placed beside shadow so no existing lane index moves.
-constexpr int kSampleLanes = 21;
+// Per-tile accumulator lanes: beauty.rgb, termination bounce, shadow, the five transport buckets' rgb, ambient occlusion, then the microfacet Fresnel's rgb -- the scalars take one lane each and are broadcast to RGB at write-out, matching writeTexel's convention. Each new lane is appended rather than placed beside its relatives so no existing lane index moves.
+constexpr int kSampleLanes = 24;
 constexpr int kTileLanes = kSampleLanes + 1;  // plus the per-pixel filter weight the lanes above are normalised by
 
 // Sampled at |x| = i/(kFilterTableSize-1) * kFilterRadius and read back by truncating lookup, the same table trick PBRT uses: the filter is smooth over 1.5px, and this replaces three cos() per tap on the renderer's hottest inner loop.
@@ -107,6 +109,7 @@ struct TraceResult {
     int terminationBounce;  // bounce index the path stopped at (== maxBounces + 1 if depth-capped)
     float shadow;           // 1.0 = shadowed/occluded, 0.0 = lit or no primary hit at all (background)
     float ao;               // 1.0 = unoccluded, 0.0 = occluded within aoMaxDistance -- inverted relative to shadow above, see PathTraceResult
+    glm::vec3 fresnel{0.0F};  // one VNDF draw's Fresnel at the primary hit (bsdf.h's fresnelAtMicrofacet); 0 where there is no BSDF vertex at bounce 0
 
     // Transport-component breakdown -- see PathTraceResult's doc comment for the bucketing rule.
     glm::vec3 directDiffuse{0.0F};
@@ -125,7 +128,7 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
                        const std::vector<int>& instanceLightIndex, const LightSet& lights,
                        bool showSky, const PathTraceSettings& settings,
                        const std::vector<PathTraceSettings>& perInstanceSettings,
-                       Sampler& sampler, glm::vec2 aoSample,
+                       Sampler& sampler, glm::vec2 aoSample, glm::vec2 fresnelSample,
                        engine::debug::RayCounts& __restrict rays) {
     glm::vec3 radiance(0.0F);
     glm::vec3 throughput(1.0F);
@@ -165,6 +168,7 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
     };
     float gShadow = 0.0F;  // default: no surface hit at all -- not "shadowed", just background
     float gAo = 1.0F;      // default: background is fully unoccluded, matching the polarity in PathTraceResult
+    glm::vec3 gFresnel(0.0F);  // default: no BSDF vertex at bounce 0 -- the camera ray missed, or hit an emitter, which breaks out before the block below
 
     // MIS state for the *previous* bounce's BSDF sample (the one that produced `ray`) -- used to reweight this bounce's miss contribution against NEE's light-sampling pdf, so a direction reachable by both strategies isn't double-counted. Meaningless at bounce==0 (ray is the primary/camera ray, not a BSDF sample -- its miss is a pure camera-visibility event, not part of the two-strategy light-transport estimator NEE/MIS balances).
     float lastBsdfPdf = 0.0F;
@@ -282,8 +286,12 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
         // True flat per-triangle plane normal -- used below for the normal-map light-leak rejection and for offsetting shadow/continuation ray origins off the surface, both of which need the actual geometry rather than the interpolated or normal-mapped shading normal.
         const glm::vec3 geoNormal = geometricNormalOf(triangle);
 
+        const glm::vec3 woLocal = frame.toLocal(woWorld);
+
         if (bounce == 0) {
             gShadow = 1.0F;  // assume shadowed once we know there's a real surface; the NEE check below may clear this
+            // The Fresnel the microfacet lobe evaluates at this vertex, one VNDF draw per sample (bsdf.h). Its own stream, for the same reason AO has one -- see the draw sites in renderPathTraced. No ray, no BVH query: the half-vector is drawn analytically from the distribution sampleBsdf would draw it from.
+            gFresnel = fresnelAtMicrofacet(params, woLocal, fresnelSample);
             // Cosine-weighted obscurance (Zhukov et al. 1998; Iones et al. 2003), the distance-weighted generalisation of AO (Miller 1994; Landis 2002): W = (1/pi) * int rho(t(w)) cos(theta) dw, and sampling at pdf = cos/pi cancels both factors, so a single ray IS an unbiased one-sample estimate. The driver's pass accumulation does the averaging, which is why there is no ray-count setting here.
             // Negating the sampled direction maps the hemisphere about the shading normal onto the one about its opposite -- the cosine density is symmetric, so this is exact -- and points a back-facing primary hit's ray outward instead of into the surface it sits on.
             const bool frontSide = glm::dot(geoNormal, woWorld) > 0.0F;
@@ -306,7 +314,6 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
             }
         }
 
-        const glm::vec3 woLocal = frame.toLocal(woWorld);
         // A failed sample must NOT skip the NEE block below: NEE and the continuing ray are independent estimators of independent directions, sharing only this vertex's params/frame, so the failure of one says nothing about the other. sampleBsdf returns nullopt on a below-horizon VNDF reflection, an underflowed mixture pdf, or a transmission lobe with no mass (bsdf.cpp) -- none of which say anything about the BSDF's value toward the light. The terminating break is therefore deferred to after NEE, matching the geometric-consistency rejection further down, which already breaks there.
         const std::optional<BsdfSample> sample = sampleBsdf(params, woLocal, sampler);
 
@@ -440,18 +447,18 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
     }
 
     return {radiance,           bounce,               gShadow,             gAo,
-            directDiffuseAccum, indirectDiffuseAccum, directSpecularAccum,
-            indirectSpecularAccum, refractionAccum};
+            gFresnel,           directDiffuseAccum,   indirectDiffuseAccum,
+            directSpecularAccum, indirectSpecularAccum, refractionAccum};
 }
 
 }  // namespace
 
 PathTraceResult makePathTraceResult(int width, int height) {
-    // 9 images (beauty/bounceHeatmap/ao/shadow + 5 transport-component AOVs) -- see PathTraceResult's declaration order in path_tracer.h, which this positional init must match. The trailing overRange field is deliberately left to its own initialiser: it is a reduction of beauty, not an allocation.
+    // 10 images (beauty/bounceHeatmap/ao/shadow + 5 transport-component AOVs + fresnel) -- see PathTraceResult's declaration order in path_tracer.h, which this positional init must match. The trailing overRange field is deliberately left to its own initialiser: it is a reduction of beauty, not an allocation.
     return {makeImage(width, height), makeImage(width, height), makeImage(width, height),
             makeImage(width, height), makeImage(width, height), makeImage(width, height),
             makeImage(width, height), makeImage(width, height), makeImage(width, height),
-            OverRangeStats{}};
+            makeImage(width, height), OverRangeStats{}};
 }
 
 void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
@@ -504,14 +511,16 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                     // HdrImage row 0 is the top (EXR/glTF convention); NDC +Y is up -- flip.
                     const float ndcY = 1.0F - ((filmY / static_cast<float>(height)) * 2.0F);
                     const Ray primary = camera.primaryRay(basis, ndcX, ndcY);
-                    // AO draws from its own stream, not `sampler`: taking two dimensions from the path's sampler would shift every later dimension and move all eight pre-existing images. Passing the drawn pair rather than the sampler makes it provable that AO consumes exactly two dimensions and cannot drift. Seeding stays a pure function of (x, y, sampleIndex, seed), which is what the halo determinism above rests on.
+                    // AO and the Fresnel AOV each draw from a stream of their own, not `sampler`: taking dimensions from the path's sampler would shift every later dimension and move every pre-existing image. Passing the drawn pair rather than the sampler makes it provable that AO consumes exactly two dimensions and cannot drift. Seeding stays a pure function of (x, y, sampleIndex, seed), which is what the halo determinism above rests on.
                     // The offset goes on the SCRAMBLE SEED, never the sample index: a shifted index would have AO walk the same Sobol points as the path a few steps along, correlating the two streams, whereas an offset seed gives AO an independently scrambled copy of the same well-stratified sequence.
                     Sampler aoSampler(x, y, sampleIndex, sampleCount, scrambleSeed ^ kAoSeedOffset);
                     const glm::vec2 aoSample = aoSampler.next2D();
+                    Sampler fresnelSampler(x, y, sampleIndex, sampleCount, scrambleSeed ^ kFresnelSeedOffset);
+                    const glm::vec2 fresnelSample = fresnelSampler.next2D();
                     const TraceResult trace =
                         tracePath(primary, accel, shadingTriangles, instances, instanceLightIndex,
                                   lights, showSky, settings, perInstanceSettings, sampler,
-                                  aoSample, tileRays);
+                                  aoSample, fresnelSample, tileRays);
                     const std::array<float, kSampleLanes> values{
                         trace.radiance.x,          trace.radiance.y,
                         trace.radiance.z,          static_cast<float>(trace.terminationBounce),
@@ -523,7 +532,8 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                         trace.indirectSpecular.x,  trace.indirectSpecular.y,
                         trace.indirectSpecular.z,  trace.refraction.x,
                         trace.refraction.y,        trace.refraction.z,
-                        trace.ao};
+                        trace.ao,                  trace.fresnel.x,
+                        trace.fresnel.y,           trace.fresnel.z};
 
                     // Clipped to this tile: the taps falling outside it belong to a neighbouring tile, which traces this same sample itself rather than receiving it.
                     const int splatX0 = std::max(tileX0, static_cast<int>(std::ceil(filmX - 0.5F - kFilterRadius)));
@@ -572,6 +582,7 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                 writeTexel(out.indirectSpecular, x, y, glm::vec3(lanes[14], lanes[15], lanes[16]) * invWeight);
                 writeTexel(out.refraction, x, y, glm::vec3(lanes[17], lanes[18], lanes[19]) * invWeight);
                 writeTexel(out.ao, x, y, glm::vec3(lanes[20] * invWeight));
+                writeTexel(out.fresnel, x, y, glm::vec3(lanes[21], lanes[22], lanes[23]) * invWeight);
             }
         }
 
