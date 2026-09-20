@@ -166,20 +166,29 @@ int scaledExtent(int framebufferExtent, float scale) {
 }
 
 // Everything the render loop touches every frame, plus the one-time-computed state (cached uniform locations, Embree scene) that must stay alive for the run's duration. A pure aggregate (no user-declared constructors) so initializeApp can return it by value via designated initializers -- each RAII member's own move constructor (already verified elsewhere to correctly transfer GL handles/tracked byte counts) handles the actual transfer.
-// -bench: raw frame and pass columns for one accumulation, appended to the benchmark log at exit. restart() on every dispatched request, so the capture always holds a fixed workload: the last accumulation, which with no input is the settled full-resolution convergence to maxSamples.
+// -bench: raw frame and pass columns appended to the benchmark log at exit.
+// Stage 0 is the warm-up and is never measured: it carries process startup, the interactive-scale throwaway accumulation and the settle promotion, so restart() clears every column while it runs and the capture that survives it is one fixed workload -- the settled full-resolution convergence to maxSamples, exactly what a run with no schedule logs.
+// With -bench-aovs, each later stage is timed from the frame that SELECTS its AOV to the frame that AOV's producer has nothing left to do (stageComplete); the request itself goes out on the next frame, a constant one-frame lead present in every stage of every build and so cancelling in a before/after ratio. Those are the switch costs stage_wall_ms reports, each measured from an already-converged image.
 struct BenchCapture {
     std::string logPath;
     std::vector<std::string> argv;
+    std::vector<int> aovs;  // the -bench-aovs schedule; empty = single-stage, and `stage` then never leaves 0
+    std::size_t stage = 0;  // index into aovs of the AOV currently selected
+    std::chrono::steady_clock::time_point stageStart;
+    std::vector<float> stageWallMs;  // one entry per measured stage, so stages 1..aovs.size()-1
     std::uint64_t generation = 0;  // requestTrace's generation for the accumulation being captured
     std::vector<engine::debug::PassRecord> passes;
     std::vector<engine::debug::FrameStageTimes> frames;
     std::vector<float> frameMs;
     std::vector<float> presentGpuMs;
     std::vector<float> uploadMs;  // one entry per display-texture upload, not per frame
-    bool finalPassDisplayed = false;
+    bool complete = false;
 
     void restart(std::uint64_t requestGeneration) {
         generation = requestGeneration;
+        if (stage > 0) {
+            return;  // past the warm-up every restart is part of the measured schedule and its columns are kept
+        }
         passes.clear();
         frames.clear();
         frameMs.clear();
@@ -1211,31 +1220,63 @@ void updateDashboard(AppResources& app,
     app.dashboard.update(frame);
 }
 
-// Appends this frame's stage times and any newly finished pass of the captured accumulation, and closes the window once the final pass has been displayed. `pass` was read before this frame's snapshot: the driver publishes a pass's record after its result, so a final record there means this frame presented the final image.
+// True once the selected AOV's producer has nothing left to do for it. A rasterizer AOV is finished as soon as a G-buffer exists: the rasterizer runs synchronously on the frame the AOV is selected, so there is no convergence to wait for. A light-transport AOV is finished when the final PassRecord of the captured accumulation has been appended -- read off the column rather than the snapshot because the driver publishes a result BEFORE its record, so requiring the record guarantees both that the displayed image is final and that its record is in `passes`, which is what finishBench's contiguity check needs.
+bool stageComplete(const AppResources& app, const BenchCapture& bench) {
+    if (!aovNeedsLightTransport(static_cast<engine::debug::AovId>(app.aov))) {
+        return app.rasterGBuffer->generation != 0;
+    }
+    return !bench.passes.empty() && bench.passes.back().generation == bench.generation &&
+           bench.passes.back().passIndex == app.maxSamples;
+}
+
+// Appends this frame's stage times and any newly finished pass of the captured accumulation, then advances the -bench-aovs schedule, closing the window once its last stage finishes. `pass` was read before this frame's snapshot: the driver publishes a pass's record after its result, so a final record there means this frame presented the final image.
 void captureBenchFrame(engine::platform::Window& window, AppResources& app, BenchCapture& bench,
                        const engine::debug::PassRecord& pass,
-                       const std::shared_ptr<const engine::scene::PathTraceResult>& snapshot, float frameMs) {
+                       const std::shared_ptr<const engine::scene::PathTraceResult>& snapshot, float frameMs,
+                       std::chrono::steady_clock::time_point now) {
     const bool ours = pass.generation == bench.generation && !pass.cancelled;
-    if (ours && (bench.passes.empty() || bench.passes.back().passIndex != pass.passIndex)) {
+    // Keyed on the generation too, not the index alone: consecutive generations both number their passes from 1, so an index-only comparison would drop the first pass of every restart after one that was cancelled at the same index.
+    const bool unseen = bench.passes.empty() || bench.passes.back().generation != pass.generation ||
+                        bench.passes.back().passIndex != pass.passIndex;
+    if (ours && unseen) {
         bench.passes.push_back(pass);
     }
     bench.frames.push_back(app.stages);
     bench.frameMs.push_back(frameMs);
     bench.presentGpuMs.push_back(app.postTimer.millisecondsElapsed());
-    // Only uploads of this accumulation: the superseded request's in-flight pass can still publish after restart.
-    if (app.stages.uploaded && snapshot->generation == bench.generation) {
+    // Only uploads the displayed AOV's own producer issued: a superseded request's in-flight pass can still publish after a restart, and a rasterizer AOV's upload is never the driver's at all.
+    const bool ourUpload = !aovNeedsLightTransport(static_cast<engine::debug::AovId>(app.aov)) ||
+                           (snapshot != nullptr && snapshot->generation == bench.generation);
+    if (app.stages.uploaded && ourUpload) {
         bench.uploadMs.push_back(app.stages.uploadMs);
     }
-    if (ours && pass.passIndex == app.maxSamples) {
-        bench.finalPassDisplayed = true;
-        window.setShouldClose(true);
+
+    if (!stageComplete(app, bench)) {
+        return;
     }
+    if (bench.stage > 0) {
+        bench.stageWallMs.push_back(std::chrono::duration<float, std::milli>(now - bench.stageStart).count());
+    }
+    // An empty schedule leaves stage at 0 and ends here, which is the single-stage capture unchanged.
+    if (bench.stage + 1 >= bench.aovs.size()) {
+        bench.complete = true;
+        window.setShouldClose(true);
+        return;
+    }
+    bench.stageStart = now;
+    ++bench.stage;
+    app.aov = bench.aovs[bench.stage];
 }
 
 // Everything the captured workload's cost depends on; two engine records are comparable iff these are equal.
 nlohmann::json benchConfig(const AppResources& app, const BenchCapture& bench) {
     const engine::scene::Camera camera = app.debugCamera.snapshot();
-    return {{"scene", app.sceneName},
+    std::vector<std::string> schedule;
+    schedule.reserve(bench.aovs.size());
+    for (const int aov : bench.aovs) {
+        schedule.emplace_back(engine::debug::kAovNames[aov]);
+    }
+    nlohmann::json config = {{"scene", app.sceneName},
             {"width", bench.passes.back().width},
             {"height", bench.passes.back().height},
             {"max_samples", app.maxSamples},
@@ -1253,6 +1294,11 @@ nlohmann::json benchConfig(const AppResources& app, const BenchCapture& bench) {
                      {"light", app.envLightEnabled}, {"show_sky", app.showSky}}},
             {"hud", app.showHud},
             {"refresh_hz", app.refreshHz}};
+    // Only with -bench-aovs, so a single-stage record stays comparable with every one logged before this existed. The whole switch sequence, not just the AOV left selected at exit: it IS the workload, and bench_compare run refuses to pair records whose configs differ.
+    if (!schedule.empty()) {
+        config["aov_schedule"] = schedule;
+    }
+    return config;
 }
 
 // Raw columns, one entry per event of their own: per captured frame for render-thread stages, per upload for upload_ms, per pass for driver phases.
@@ -1275,7 +1321,7 @@ nlohmann::json benchSamples(const BenchCapture& bench) {
     };
     using Stages = engine::debug::FrameStageTimes;
     using Pass = engine::debug::PassRecord;
-    return {{"frame_ms", bench.frameMs},
+    nlohmann::json samples = {{"frame_ms", bench.frameMs},
             {"fence_ms", frameColumn(&Stages::fenceMs)},
             {"pace_ms", frameColumn(&Stages::paceMs)},
             {"poll_ms", frameColumn(&Stages::pollMs)},
@@ -1295,18 +1341,29 @@ nlohmann::json benchSamples(const BenchCapture& bench) {
             {"pass_over_range_ms", passColumn(&Pass::overRangeMs)},
             {"pass_publish_ms", passColumn(&Pass::publishMs)},
             {"pass_ms", passColumn(&Pass::passMs)}};
+    // Absent without -bench-aovs, so a single-stage record keeps exactly the columns it has always had.
+    if (!bench.stageWallMs.empty()) {
+        samples["stage_wall_ms"] = bench.stageWallMs;
+    }
+    return samples;
 }
 
 // Writes the captured accumulation as one benchmark-log record. Refuses an incomplete capture -- closed early, or a pass whose record was overwritten before a frame read it -- rather than logging a workload that differs from its config.
 bool finishBench(const AppResources& app, const BenchCapture& bench) {
-    if (!bench.finalPassDisplayed) {
-        std::cerr << "engine: -bench closed before the accumulation reached maxSamples; nothing logged\n";
+    if (!bench.complete) {
+        std::cerr << "engine: -bench closed before the schedule finished; nothing logged\n";
         return false;
     }
-    for (std::size_t i = 0; i < bench.passes.size(); ++i) {
-        if (bench.passes[i].passIndex != static_cast<int>(i) + 1) {
-            std::cerr << "engine: -bench captured " << bench.passes.size() << " of " << app.maxSamples
-                      << " pass records (two passes finished within one frame); nothing logged\n";
+    // Contiguous from 1 within each generation rather than across the whole column: a schedule spans several accumulations, and each restart numbers its own passes from 1. A gap still means a PassRecord was overwritten before a frame read it, so the capture would not describe its config.
+    std::uint64_t generation = 0;
+    int expected = 0;
+    for (const engine::debug::PassRecord& pass : bench.passes) {
+        if (pass.generation != generation) {
+            generation = pass.generation;
+            expected = 0;
+        }
+        if (pass.passIndex != ++expected) {
+            std::cerr << "engine: -bench missed a pass record of generation " << generation << " (two passes finished within one frame); nothing logged\n";
             return false;
         }
     }
@@ -1402,7 +1459,7 @@ void renderFrame(engine::platform::Window& window, engine::platform::DisplayLink
         updateDashboard(app, pathTraceSnapshot, dtSeconds * 1000.0F, winWidth, winHeight);
     }
     if (app.bench) {
-        captureBenchFrame(window, app, *app.bench, benchPass, pathTraceSnapshot, dtSeconds * 1000.0F);
+        captureBenchFrame(window, app, *app.bench, benchPass, pathTraceSnapshot, dtSeconds * 1000.0F, frameNow);
     }
 }
 
@@ -1412,7 +1469,35 @@ struct Options {
     bool stats = false;
     // -bench PATH: run one accumulation to profile.json's maxSamples, append it to this benchmark log (bench_log.h), exit.
     std::string benchLogPath;
+    // -bench-aovs A,B,C: AovId sequence the run walks, one stage per entry. Empty = today's single-stage capture.
+    std::vector<int> benchAovs;
 };
+
+// Resolves a comma-separated AOV list against kAovNames, so -bench-aovs and the HUD dropdown name the same 27 AOVs identically. Nullopt on an unknown name, which parseOptions surfaces rather than defaulting around.
+std::optional<std::vector<int>> parseAovList(const char* list) {
+    std::vector<int> aovs;
+    const std::string text(list);
+    for (std::size_t begin = 0; begin <= text.size();) {
+        const std::size_t comma = text.find(',', begin);
+        const std::string name = text.substr(begin, comma - begin);
+        const auto* match = std::find_if(std::begin(engine::debug::kAovNames), std::end(engine::debug::kAovNames),
+                                          [&name](const char* candidate) { return name == candidate; });
+        if (match == std::end(engine::debug::kAovNames)) {
+            std::cerr << "engine: -bench-aovs has no AOV named '" << name << "'; valid names are";
+            for (const char* candidate : engine::debug::kAovNames) {
+                std::cerr << " '" << candidate << "'";
+            }
+            std::cerr << '\n';
+            return std::nullopt;
+        }
+        aovs.push_back(static_cast<int>(match - std::begin(engine::debug::kAovNames)));
+        if (comma == std::string::npos) {
+            break;
+        }
+        begin = comma + 1;
+    }
+    return aovs;
+}
 
 // Returns nullopt on an unrecognized flag or a missing value -- argv is a system
 // boundary, so a bad value is surfaced rather than defaulted around.
@@ -1433,9 +1518,19 @@ std::optional<Options> parseOptions(int argc, char** argv) {
                 return std::nullopt;
             }
             options.benchLogPath = argv[++i];
+        } else if (std::strcmp(argv[i], "-bench-aovs") == 0) {
+            if (i + 1 >= argc) {
+                std::cerr << "engine: -bench-aovs expects a value\n";
+                return std::nullopt;
+            }
+            std::optional<std::vector<int>> aovs = parseAovList(argv[++i]);
+            if (!aovs) {
+                return std::nullopt;
+            }
+            options.benchAovs = std::move(*aovs);
         } else {
             std::cerr << "engine: unknown flag " << argv[i]
-                       << "\n  usage: engine [-scene path/to/scene.json] [-stats] [-bench log.jsonl]\n";
+                       << "\n  usage: engine [-scene path/to/scene.json] [-stats] [-bench log.jsonl] [-bench-aovs Beauty,Normal,...]\n";
             return std::nullopt;
         }
     }
@@ -1468,11 +1563,16 @@ int main(int argc, char** argv) {
         if (!sceneConfig || !profileConfig) {
             std::cerr << "main: scene/profile config load failed, aborting startup\n";
             exitCode = EXIT_FAILURE;
+        } else if (options->benchLogPath.empty() && !options->benchAovs.empty()) {
+            std::cerr << "main: -bench-aovs is the schedule -bench walks; it does nothing on its own\n";
+            exitCode = EXIT_FAILURE;
         } else if (!options->benchLogPath.empty() &&
                    (profileConfig->pathTracer.maxSamples <= 0 ||
-                    !aovNeedsLightTransport(static_cast<engine::debug::AovId>(profileConfig->render.defaultAov)))) {
-            // An unbounded accumulation never ends, and a rasterizer AOV parks the driver, so neither is a benchmark workload.
-            std::cerr << "main: -bench needs profile.json maxSamples > 0 and a path-traced defaultAOV\n";
+                    !aovNeedsLightTransport(static_cast<engine::debug::AovId>(
+                        options->benchAovs.empty() ? profileConfig->render.defaultAov
+                                                   : options->benchAovs.front())))) {
+            // An unbounded accumulation never ends, and a rasterizer AOV parks the driver, so neither is a benchmark workload. The first stage is the warm-up every later one is measured from, so it is the one that has to converge.
+            std::cerr << "main: -bench needs profile.json maxSamples > 0 and a path-traced first AOV\n";
             exitCode = EXIT_FAILURE;
         } else {
             // Window construction creates the GL 4.1 core/fwd-compat context and makes it current; fatal failure inside it exits the process directly (see window.cpp) since nothing recoverable exists yet.
@@ -1511,6 +1611,10 @@ int main(int argc, char** argv) {
                         app->bench.emplace();
                         app->bench->logPath = options->benchLogPath;
                         app->bench->argv.assign(argv, argv + argc);
+                        app->bench->aovs = options->benchAovs;
+                        if (!app->bench->aovs.empty()) {
+                            app->aov = app->bench->aovs.front();
+                        }
                     }
 
                     while (!window.shouldClose()) {
