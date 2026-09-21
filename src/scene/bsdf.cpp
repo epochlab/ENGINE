@@ -148,8 +148,8 @@ glm::vec3 sampleGGXVNDF(const glm::vec3& wo, float alpha, glm::vec2 u) {
     return glm::normalize(glm::vec3(alpha * nh.x, alpha * nh.y, std::max(0.0F, nh.z)));
 }
 
-// Kulla-Conty energy tables, baked offline by tools/albedo_table.cpp (Kulla & Conty 2017, "Revisiting Physically Based Shading at Imageworks"). The .inc defines kAlbedoRes/kTransmitRoughnessRes/kTransmitMuRes/kEtaRes/kEtaMin/kEtaMax alongside the arrays, so the grid the lookups below index is the grid the generator wrote and the two cannot drift apart.
-// kAlbedoA/kAlbedoB are the directional albedo of the single-scattering GGX lobe with Fresnel forced to 1, the fraction of energy the height-correlated Smith G2 lets through, so 1-E is exactly what multiple scattering must return. Split by Schlick's form F(c) = f0*(1 - (1-c)^5) + (1-c)^5 so one table serves any f0 (the standard environment-BRDF split): Ess(mu, f0) = f0*a + b, and with f0=1 that collapses to a + b = E, the Fresnel-free albedo the multiple-scattering lobe needs.
+// Kulla-Conty energy tables, baked offline by tools/albedo_table.cpp (Kulla & Conty 2017, "Revisiting Physically Based Shading at Imageworks"). The .inc defines kAlbedoRoughnessRes/kAlbedoMuRes/kMsReflectMuRes/kTransmitRoughnessRes/kTransmitMuRes/kEtaRes/kEtaMin/kEtaMax alongside the arrays, so the grid the lookups below index is the grid the generator wrote and the two cannot drift apart.
+// kAlbedoA/kAlbedoB are the directional albedo of the single-scattering GGX lobe with Fresnel forced to 1, the fraction of energy the height-correlated Smith G2 lets through, so 1-E is exactly what multiple scattering must return. Split by Schlick's form F(c) = f0*(1 - (1-c)^5) + (1-c)^5 so one table serves any f0 (the standard environment-BRDF split): Ess(mu, f0) = f0*a + b, and with f0=1 that collapses to a + b = E, the Fresnel-free albedo the multiple-scattering lobe needs. Indexed [roughnessIndex][muIndex], mu uniform in sqrt(mu) like the escape tables below.
 // kEscapeReflect/kEscapeTransmit are the escaping fraction of a dielectric interface, split into the reflected and transmitted shares and indexed [roughnessIndex][muIndex][etaIndex], mu uniform in sqrt(mu). They use exact dielectric Fresnel rather than the Schlick split: inside the total-internal-reflection cone exact Fresnel is 1.0 while Schlick reads ~0.1, so no rescale of a Schlick-basis number can stand in for it, and the escape budget would under-count the reflected share by the whole TIR cone. Their third axis is why they keep their own grid, kTransmitRoughnessRes x kTransmitMuRes x kEtaRes.
 // Building this at startup is what used to bound its accuracy: the grid and the quadrature were sized by load latency, not by what the energy tests need. See the generator for the rule and its measured residual.
 #include "albedo_table.inc"
@@ -178,16 +178,16 @@ struct AlbedoSplit {
     [[nodiscard]] float at(float f0) const { return (f0 * a) + b; }
 };
 
-// Bilinear lookup. E climbs steeply as mu->0 (0.31 at mu=1, 0.99 at the first grid column, alpha=1), so the first mu bin carries the largest interpolation error -- measured 7.1e-3 there against 3.2e-5 for mu >= 0.3 -- harmless since every integral consuming E weights grazing by cos(theta).
+// Bilinear lookup. E climbs from 1 at grazing to its plateau over mu ~ alpha (0.31 at mu=1, alpha=1), a layer a uniform mu axis spans with under one cell at low roughness -- which is why the generator's mu axis is uniform in sqrt(mu) and this indexes it by sqrt(mu), as escapeAlbedo below already did. checkAlbedoTableInterpolation measures what is left, per axis.
 AlbedoSplit directionalAlbedo(float mu, float roughness) {
-    const float rf = std::clamp(roughness, 0.0F, 1.0F) * (kAlbedoRes - 1);
-    const float mf = std::clamp(mu, 0.0F, 1.0F) * (kAlbedoRes - 1);
-    const int r0 = std::min(static_cast<int>(rf), kAlbedoRes - 2);
-    const int m0 = std::min(static_cast<int>(mf), kAlbedoRes - 2);
+    const float rf = std::clamp(roughness, 0.0F, 1.0F) * (kAlbedoRoughnessRes - 1);
+    const float mf = std::sqrt(std::clamp(mu, 0.0F, 1.0F)) * (kAlbedoMuRes - 1);
+    const int r0 = std::min(static_cast<int>(rf), kAlbedoRoughnessRes - 2);
+    const int m0 = std::min(static_cast<int>(mf), kAlbedoMuRes - 2);
     const float rt = rf - static_cast<float>(r0);
     const float mt = mf - static_cast<float>(m0);
-    const int i0 = (r0 * kAlbedoRes) + m0;
-    const int i1 = ((r0 + 1) * kAlbedoRes) + m0;
+    const int i0 = (r0 * kAlbedoMuRes) + m0;
+    const int i1 = ((r0 + 1) * kAlbedoMuRes) + m0;
     return {lerp1(lerp1(kAlbedoA[i0], kAlbedoA[i0 + 1], mt),
                    lerp1(kAlbedoA[i1], kAlbedoA[i1 + 1], mt), rt),
              lerp1(lerp1(kAlbedoB[i0], kAlbedoB[i0 + 1], mt),
@@ -195,8 +195,8 @@ AlbedoSplit directionalAlbedo(float mu, float roughness) {
 }
 
 AlbedoSplit averageAlbedo(float roughness) {
-    const float rf = std::clamp(roughness, 0.0F, 1.0F) * (kAlbedoRes - 1);
-    const int r0 = std::min(static_cast<int>(rf), kAlbedoRes - 2);
+    const float rf = std::clamp(roughness, 0.0F, 1.0F) * (kAlbedoRoughnessRes - 1);
+    const int r0 = std::min(static_cast<int>(rf), kAlbedoRoughnessRes - 2);
     const float rt = rf - static_cast<float>(r0);
     return {lerp1(kAlbedoAvgA[r0], kAlbedoAvgA[r0 + 1], rt),
              lerp1(kAlbedoAvgB[r0], kAlbedoAvgB[r0 + 1], rt)};
@@ -212,25 +212,27 @@ struct MsReflectRow {
 };
 
 MsReflectRow msReflectRow(float roughness) {
-    const float rf = std::clamp(roughness, 0.0F, 1.0F) * (kAlbedoRes - 1);
-    const int r0 = std::min(static_cast<int>(rf), kAlbedoRes - 2);
-    return {r0 * kAlbedoRes, rf - static_cast<float>(r0)};
+    const float rf = std::clamp(roughness, 0.0F, 1.0F) * (kAlbedoRoughnessRes - 1);
+    const int r0 = std::min(static_cast<int>(rf), kAlbedoRoughnessRes - 2);
+    return {r0 * kMsReflectMuRes, rf - static_cast<float>(r0)};
 }
 
 float msReflectDensity(const MsReflectRow& row, int index) {
-    return lerp1(kMsReflectDensity[row.base + index], kMsReflectDensity[row.base + kAlbedoRes + index],
-                  row.blend);
+    return lerp1(kMsReflectDensity[row.base + index],
+                  kMsReflectDensity[row.base + kMsReflectMuRes + index], row.blend);
 }
 
 float msReflectCdf(const MsReflectRow& row, int index) {
-    return lerp1(kMsReflectCdf[row.base + index], kMsReflectCdf[row.base + kAlbedoRes + index], row.blend);
+    return lerp1(kMsReflectCdf[row.base + index], kMsReflectCdf[row.base + kMsReflectMuRes + index],
+                  row.blend);
 }
 
 // Solid-angle density: the mu density spread over 2*pi of azimuth. Reduces to the cosine form mu/pi wherever the stored shape is 2*mu, which is what it becomes as the energy deficit goes flat.
+// Uniform in mu, NOT sqrt(mu): this reads the sampling shape, whose grid stays uniform so the inversion below keeps one step width. The albedo table's warp does not reach it -- the generator already applied that warp when it built each node from E.
 float msReflectPdf(float mu, float roughness) {
     const MsReflectRow row = msReflectRow(roughness);
-    const float mf = std::clamp(mu, 0.0F, 1.0F) * (kAlbedoRes - 1);
-    const int m0 = std::min(static_cast<int>(mf), kAlbedoRes - 2);
+    const float mf = std::clamp(mu, 0.0F, 1.0F) * (kMsReflectMuRes - 1);
+    const int m0 = std::min(static_cast<int>(mf), kMsReflectMuRes - 2);
     const float mt = mf - static_cast<float>(m0);
     return lerp1(msReflectDensity(row, m0), msReflectDensity(row, m0 + 1), mt) / (2.0F * kPi);
 }
@@ -258,7 +260,8 @@ float invertPiecewiseLinearDensity(Density density, Cdf cdf, int resolution, flo
 glm::vec3 sampleMsReflect(float roughness, glm::vec2 u) {
     const MsReflectRow row = msReflectRow(roughness);
     const float mu = invertPiecewiseLinearDensity([&](int i) { return msReflectDensity(row, i); },
-                                                   [&](int i) { return msReflectCdf(row, i); }, kAlbedoRes, u.x);
+                                                   [&](int i) { return msReflectCdf(row, i); },
+                                                   kMsReflectMuRes, u.x);
     const float r = std::sqrt(std::max(0.0F, 1.0F - (mu * mu)));
     const float phi = 2.0F * kPi * u.y;
     return {r * std::cos(phi), r * std::sin(phi), mu};
@@ -422,11 +425,15 @@ glm::vec2 averageAlbedoSplit(float roughness) {
 }
 
 // The grid the two lookups above index, described rather than transcribed -- see the header. Both axes are edge-aligned, so index 0 and index res-1 are exact endpoints and a fractional index lands where the lookups interpolate.
-glm::ivec2 albedoGridRes() { return {kAlbedoRes, kAlbedoRes}; }
+glm::ivec2 albedoGridRes() { return {kAlbedoRoughnessRes, kAlbedoMuRes}; }
 
-float albedoGridRoughness(float index) { return index / static_cast<float>(kAlbedoRes - 1); }
+float albedoGridRoughness(float index) { return index / static_cast<float>(kAlbedoRoughnessRes - 1); }
 
-float albedoGridMu(float index) { return index / static_cast<float>(kAlbedoRes - 1); }
+// Inverts directionalAlbedo's sqrt(mu) index, so an instrument placing a sample at a fractional index lands where that lookup interpolates rather than where a linear axis would put it.
+float albedoGridMu(float index) {
+    const float t = index / static_cast<float>(kAlbedoMuRes - 1);
+    return t * t;
+}
 
 // The conductor interface, over the same fresnelConductorChannel its single scatter evaluates. Karis' mean is exact for Schlick and therefore the mean of a DIFFERENT function once the single scatter is complex-IOR; worse, its error changes sign with edgeTint, which f0 alone cannot express.
 glm::vec3 conductorFresnelAvg(const glm::vec3& n, const glm::vec3& k) {
