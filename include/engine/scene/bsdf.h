@@ -89,6 +89,17 @@ struct BsdfEval {
 [[nodiscard]] glm::vec3 conductorFresnelAvg(const glm::vec3& n, const glm::vec3& k);
 [[nodiscard]] float dielectricFresnelAvg(float ior);
 
+// Reflect-side Kulla-Conty albedo lookups: the Schlick-split directional albedo E(mu, roughness) as (a, b) with E = a+b, and its cosine-weighted mean Eavg(roughness). Exported for tools/bsdf_validate.cpp's checkAlbedoTableInterpolation under the same rule as the average-Fresnel pair above -- the table's quadrature residual is printed by its generator on every bake, but its INTERPOLATION error has no other instrument, and no energy test in the suite resolves better than the two-sided white furnace's 2%.
+// These are the lookups, not the table: what the check measures is src/scene/albedo_table.inc read through the axis warps and the bilinear blend bsdf.cpp actually performs.
+[[nodiscard]] glm::vec2 directionalAlbedoSplit(float mu, float roughness);
+[[nodiscard]] glm::vec2 averageAlbedoSplit(float roughness);
+
+// The grid those two index: its two resolutions, and each axis' node position at a possibly fractional index, so an instrument can place samples exactly ON nodes and exactly BETWEEN them without transcribing the grid. Transcribing it is what went stale in checkWhiteFurnaceTwoSided's off-grid rows the last time the table changed resolution, and a sample that drifts onto a node measures nothing.
+// Both axes are edge-aligned and linear in the index today, so the two position accessors return the same thing; they are separate because they describe separate axes, and an axis whose spacing changes has to be able to say so here without the other one moving.
+[[nodiscard]] glm::ivec2 albedoGridRes();
+[[nodiscard]] float albedoGridRoughness(float index);
+[[nodiscard]] float albedoGridMu(float index);
+
 // EON's Appendix A albedo inversion: the rho whose EON directional albedo at normal incidence equals albedo, under uniform illumination. The identity at r=0 and at albedo=1. Every BsdfParams::diffuseRho comes from here -- see that field, and bsdf.cpp for the derivation and the numerical form.
 [[nodiscard]] glm::vec3 eonAlbedoInversion(const glm::vec3& albedo, float r);
 

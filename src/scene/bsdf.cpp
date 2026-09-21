@@ -409,6 +409,25 @@ float dielectricFresnelAvg(float ior) {
     return sum;
 }
 
+// The two reflect-side albedo lookups have external linkage for the same reason and under the same rule as the average-Fresnel pair above: tools/bsdf_validate.cpp's checkAlbedoTableInterpolation is the only instrument that can see the interpolation error of src/scene/albedo_table.inc, which is the table's second error source beside the quadrature residual the generator prints. It compares these against its own independent Simpson reference, so what it measures is the committed table plus the arithmetic below and nothing else.
+// glm::vec2 rather than the internal AlbedoSplit: the split is a shading-side concept and the check already works in the (a, b) pair its reference returns.
+glm::vec2 directionalAlbedoSplit(float mu, float roughness) {
+    const AlbedoSplit split = directionalAlbedo(mu, roughness);
+    return {split.a, split.b};
+}
+
+glm::vec2 averageAlbedoSplit(float roughness) {
+    const AlbedoSplit split = averageAlbedo(roughness);
+    return {split.a, split.b};
+}
+
+// The grid the two lookups above index, described rather than transcribed -- see the header. Both axes are edge-aligned, so index 0 and index res-1 are exact endpoints and a fractional index lands where the lookups interpolate.
+glm::ivec2 albedoGridRes() { return {kAlbedoRes, kAlbedoRes}; }
+
+float albedoGridRoughness(float index) { return index / static_cast<float>(kAlbedoRes - 1); }
+
+float albedoGridMu(float index) { return index / static_cast<float>(kAlbedoRes - 1); }
+
 // The conductor interface, over the same fresnelConductorChannel its single scatter evaluates. Karis' mean is exact for Schlick and therefore the mean of a DIFFERENT function once the single scatter is complex-IOR; worse, its error changes sign with edgeTint, which f0 alone cannot express.
 glm::vec3 conductorFresnelAvg(const glm::vec3& n, const glm::vec3& k) {
     glm::vec3 sum(0.0F);

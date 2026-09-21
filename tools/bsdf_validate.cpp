@@ -15,6 +15,7 @@
 #include <optional>
 #include <random>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 #include <glm/glm.hpp>
@@ -1062,27 +1063,85 @@ ENGINE_CHECK(average_fresnel, Fast, Exact) {
 
 // --- Independent reference for the reflect-side albedo table, and with it the instrument for coatAlbedo's fresnelAvg VALUE.
 // Nothing in this suite could read that table before. checkWhiteFurnaceTwoSided bounds it only to 2%, 500x looser than what follows needs, and the table was a private startup build until it moved offline into src/scene/albedo_table.inc (tools/albedo_table.cpp). Rebuilt here by composite Simpson rather than the generator's Gauss-Legendre, in double, so this is a check ON the committed .inc and not the .inc restated -- the same deliberate-duplication rule referenceEon and referenceConductorIor already follow.
-// Domain and measure are the generator's, and they are why a fixed rule can do this at all. With tan(theta_h) = alpha*tan(psi) (Walter et al. 2007 eq. 35) GGX NDF sampling flattens the peak into D(h)cos(h) dw = sin(psi)cos(psi) dpsi dphi / pi, and in that frame both cosines are single harmonics: wo.h = R cos(theta_h - d) and wi.z = R cos(2 theta_h - d), with R = hypot(sin tv cos phi, cos tv) and d = atan2(sin tv cos phi, cos tv). The horizon clip wi.z > 0 is then exactly theta_h < (d + pi/2)/2, so no sample is discarded, the integrand is smooth, and Simpson's O(h^4) applies where a VNDF estimator would be stuck at first order across the discontinuity.
+// Domain and measure are the generator's, and they are why a fixed rule can do this at all. With tan(theta_h) = alpha*tan(psi) (Walter et al. 2007 eq. 35) GGX NDF sampling flattens the peak into D(h)cos(h) dw = sin(psi)cos(psi) dpsi dphi / pi, and in that frame both cosines are single harmonics: wo.h = R cos(theta_h - d) and wi.z = R cos(2 theta_h - d), with R = hypot(sin tv cos phi, cos tv) and d = atan2(sin tv cos phi, cos tv). The horizon clip wi.z > 0 is then exactly theta_h < (d + pi/2)/2, so no sample is discarded and nothing invalid is ever evaluated, where a VNDF estimator would be stuck at first order across the discontinuity it keeps inside its domain.
 // The phi split at pi/2 is not cosmetic: d sweeps its entire -pi/2..pi/2 range within |cos phi| < mu, a boundary layer that narrows with mu, and as a panel endpoint it is resolved rather than straddled.
+// The INNER rule is Gauss-Legendre, not Simpson, and that is a measured requirement rather than a preference. The psi substitution that flattens the NDF peak compresses the other end: wi.z falls from O(1) to 0 over an O(1) span of theta_h, which the substitution maps to a span of psi narrower by ~alpha*mu, so at mu = 1/127 the whole horizon layer is ~1e-3 wide against a 96-panel width of 1.6e-2. Any composite rule of fixed panel width straddles it -- measured convergence order ~1.2, with the ENTIRE error of a 96-panel Simpson sitting in its last panel pair. Gauss-Legendre puts its outermost node O(1/n^2) from the endpoint, which is inside the layer, so it resolves what no affordable refinement of a uniform mesh does: at that cell Simpson 96 is 5.2e-3 and 3072 panels still leaves 3.6e-5, against 1.5e-7 here. There is no closed-form breakpoint to split at instead -- the natural candidate, wi.z = mu, lands at an eighth of the layer's width.
+// What that costs is a sharper statement of the deliberate-duplication rule, so state it rather than let it erode: this now shares a quadrature FAMILY with the generator and no longer catches an error in the family itself. It remains an independent transcription of the integrand, the domain and the measure, written here from the derivation and never included or linked from src/ or tools/albedo_table.cpp, which is where a transcription error would be; and it runs at twice the generator's node count, so the two are not the same arithmetic. checkAlbedoTableInterpolation's control row prints their disagreement on every run rather than assuming it away.
 double referenceSmithLambda(double ndotV, double alpha) {
     const double ndotV2 = std::max(ndotV * ndotV, 1e-8);
     const double tan2 = std::max(0.0, 1.0 - ndotV2) / ndotV2;
     return 0.5 * (-1.0 + std::sqrt(1.0 + (alpha * alpha * tan2)));
 }
 
+constexpr double kPiDouble = 3.14159265358979324;
+
+// Gauss-Legendre nodes and weights mapped to [0,1], by Newton iteration on P_n through Bonnet's recurrence (Press et al., Numerical Recipes 3rd ed., sec. 4.6.1). Weights sum to 1, so the node array doubles as the [0,1] average.
+// Built once per node count: the rule is a constant, and 192 Newton solves per call would cost more than the integral it serves.
+struct GaussLegendreRule {
+    std::vector<double> node;
+    std::vector<double> weight;
+};
+
+template <int N>
+const GaussLegendreRule& gaussLegendreRule() {
+    static const GaussLegendreRule rule = [] {
+        GaussLegendreRule built{std::vector<double>(N), std::vector<double>(N)};
+        for (int i = 0; i < N; ++i) {
+            double x = std::cos(kPiDouble * (i + 0.75) / (N + 0.5));
+            double derivative = 0.0;
+            for (int iteration = 0; iteration < 100; ++iteration) {
+                double p0 = 1.0;
+                double p1 = 0.0;
+                for (int k = 0; k < N; ++k) {
+                    const double p2 = p1;
+                    p1 = p0;
+                    p0 = ((((2.0 * k) + 1.0) * x * p1) - (k * p2)) / (k + 1.0);
+                }
+                derivative = N * ((x * p0) - p1) / ((x * x) - 1.0);
+                const double step = p0 / derivative;
+                x -= step;
+                if (std::abs(step) <= 1e-16) {
+                    break;
+                }
+            }
+            built.node[static_cast<std::size_t>(i)] = 0.5 * (1.0 - x);
+            built.weight[static_cast<std::size_t>(i)] = 1.0 / ((1.0 - (x * x)) * derivative * derivative);
+        }
+        return built;
+    }();
+    return rule;
+}
+
+// Gauss-Legendre over [lower, upper], on any value type with + and scalar *, matching simpson's shape.
+template <int N, typename F>
+auto gaussLegendre(double lower, double upper, F f) -> decltype(f(lower)) {
+    const GaussLegendreRule& rule = gaussLegendreRule<N>();
+    decltype(f(lower)) sum = f(lower) * 0.0;
+    for (std::size_t i = 0; i < rule.node.size(); ++i) {
+        sum = sum + (rule.weight[i] * f(lower + ((upper - lower) * rule.node[i])));
+    }
+    return (upper - lower) * sum;
+}
+
 // Composite Simpson over [lower, upper] with an even panel count, on any value type with + and scalar *.
+
+// bsdf.cpp's roughness floor, mirrored so every reference below evaluates the alpha the lobe actually ships at rather than an unclamped one the shading never sees. One copy, because two oracles that disagree about the floor disagree about which function they are measuring.
+double alphaAt(double roughness) {
+    constexpr double kMinAlpha = 0.02 * 0.02;
+    return std::max(roughness * roughness, kMinAlpha);
+}
 
 // Schlick-split directional albedo: .x is the a channel, .y the b, so Ess(f0) = f0*a + b and a + b = E.
 glm::dvec2 referenceDirectionalAlbedo(double mu, double alpha) {
-    constexpr double kPiDouble = 3.14159265358979324;
-    constexpr int kPanels = 96;   // even, for Simpson; doubling it moves no digit the tolerances below can see
+    constexpr int kPanels = 96;     // phi, even for Simpson; doubling it moves no digit this file resolves
+    constexpr int kPsiNodes = 192;  // psi, twice the generator's, so the control row compares two rules and not one
     const double sinTv = std::sqrt(std::max(0.0, 1.0 - (mu * mu)));
     const auto azimuth = [&](double phi) {
         const double horizontal = sinTv * std::cos(phi);
         const double radius = std::sqrt((horizontal * horizontal) + (mu * mu));
         const double delta = std::atan2(horizontal, mu);
         const double psiMax = std::atan(std::tan(0.5 * (delta + (0.5 * kPiDouble))) / alpha);
-        return simpson(0.0, psiMax, kPanels, [&](double psi) {
+        return gaussLegendre<kPsiNodes>(0.0, psiMax, [&](double psi) {
             const double thetaH = std::atan(alpha * std::tan(psi));
             const double woDotH = radius * std::cos(thetaH - delta);
             const double wiZ = radius * std::cos((2.0 * thetaH) - delta);
@@ -1106,6 +1165,185 @@ glm::dvec2 referenceAverageAlbedo(double alpha) {
     });
 }
 
+
+// --- The instrument for src/scene/albedo_table.inc's INTERPOLATION error, the table's second error source.
+// The generator prints the first on every bake: verifyReflect rebuilds at doubled node count and reports the quadrature's own residual, 3.0e-5. But the shipped grid is then read bilinearly, and that error is a separate quantity no code produced -- it reached the tree as comments on tools/albedo_table.cpp and bsdf.cpp carrying numbers from an ad-hoc measurement nothing reproduces. Re-measuring them here showed both misattributed: the recorded "7.1e-3 first bin" is really 4.4e-2, and the "3.2e-5 away from it" is the ROUGHNESS axis, not the mu axis, which is ~1e-5 there.
+// Nothing else in the suite resolves it. checkWhiteFurnaceTwoSided bounds it to 2%, 600x too loose, and pays for that bound with Monte Carlo noise that no node count removes; checkCoatFresnelAvg deliberately reads the table's values through a reference that does not interpolate, to keep the two errors separate, and in any case the whole table is only ~2e-5 of its 1.2e-4 residual.
+// Four measurements, each reported separately, because they are four different levers and a single worst would hide which one moved: the axes are measured one at a time by holding the other on exact nodes, and the first mu cell is split out from the rest of its axis because a grazing boundary layer and smooth curvature are not the same failure.
+// Each is dense along the axis it measures and spread along the other, which is what the error's own shape asks for: the roughness error is a smooth single-signed hump, so it needs every cell on that axis and only a spread of mu; the mu error varies sharply toward grazing and needs the converse. The first-cell sweep is dense in roughness instead, because its peak sits at one particular low roughness where the layer is narrower than the cell.
+// Reference is this file's own referenceDirectionalAlbedo/referenceAverageAlbedo -- an independent double-precision transcription, measured to 1.5e-7 at the worst grazing cell -- so what is measured is the committed .inc read through bsdf.cpp's own axis arithmetic, and nothing is compared against itself. The control row below is what keeps that claim honest.
+// Asserted on the worst of the two Schlick channels rather than on E = a+b, which is strictly stronger and is what every caller needs: coatAlbedo reads split.at(f0) = f0*a + b at whatever f0 the material authors, and two channel errors that cancel in the sum need not cancel there.
+struct InterpolationError {
+    double worst;
+    double roughness;
+    double mu;
+};
+
+void recordWorst(InterpolationError& error, double delta, double roughness, double mu) {
+    if (delta > error.worst) {
+        error = {delta, roughness, mu};
+    }
+}
+
+// Worst over both Schlick channels of the shipped lookup against the reference, at one (mu, roughness).
+double directionalAlbedoError(double mu, double roughness) {
+    const glm::vec2 shipped = engine::scene::directionalAlbedoSplit(static_cast<float>(mu),
+                                                                     static_cast<float>(roughness));
+    const glm::dvec2 exact = referenceDirectionalAlbedo(mu, alphaAt(roughness));
+    return std::max(std::abs(static_cast<double>(shipped.x) - exact.x),
+                     std::abs(static_cast<double>(shipped.y) - exact.y));
+}
+
+// Evenly spread node indices over [first, last], endpoints included: the "held on exact nodes" coordinate of each
+// measurement, where that axis contributes no interpolation error of its own and the other one is isolated.
+// The mu axis is swept from node 1, not 0: mu = 0 is the degenerate view direction with wo in the surface plane,
+// where referenceDirectionalAlbedo's 1/mu form does not exist at all and every integral consuming E weights it to
+// exactly zero. The generator says the same thing from the other side by nudging its own mu = 0 column off it.
+std::vector<int> spreadNodes(int first, int last, int count) {
+    std::vector<int> nodes(static_cast<std::size_t>(count));
+    for (int k = 0; k < count; ++k) {
+        nodes[static_cast<std::size_t>(k)] = first + ((k * (last - first)) / (count - 1));
+    }
+    return nodes;
+}
+
+// Row-parallel over the swept axis: rows share no accumulator and are combined in index order, so the reported
+// worst is identical to the serial one and this check stays Exact rather than becoming schedule-dependent.
+template <typename Row>
+void parallelRows(int rows, int threads, Row row) {
+    std::atomic<int> next{0};
+    std::vector<std::thread> workers;
+    for (int w = 0; w < std::min(threads, rows); ++w) {
+        workers.emplace_back([&] {
+            for (int i = next++; i < rows; i = next++) {
+                row(i);
+            }
+        });
+    }
+    for (std::thread& worker : workers) {
+        worker.join();
+    }
+}
+
+ENGINE_CHECK(albedo_table_interpolation, Slow, Exact) {
+    // Each bound is the measured worst plus headroom, in the convention checkAverageFresnel already uses: thin
+    // enough that a regeneration losing accuracy on any one axis trips that axis' own row rather than passing
+    // under a combined figure. They are bounds on the COMMITTED table, so they move when it is rebaked.
+    constexpr double kControlTolerance = 5e-5;
+    constexpr double kRoughnessAxisTolerance = 2e-3;
+    constexpr double kMuAxisTolerance = 1.2e-2;
+    constexpr double kFirstMuCellTolerance = 7e-2;
+    constexpr double kAverageAlbedoTolerance = 3.2e-5;
+    // Fractions across the first mu cell. Its error is not a midpoint maximum like a smooth cell's: the layer sits
+    // against the mu = 0 edge, so where inside the cell the worst falls depends on how the layer's width compares
+    // to the cell's, and the sweep says so rather than assuming.
+    const std::array<double, 4> firstCellFractions = {0.2, 0.4, 0.6, 0.8};
+    constexpr int kSpread = 16;
+
+    const glm::ivec2 res = engine::scene::albedoGridRes();
+    const std::vector<int> muNodes = spreadNodes(1, res.y - 1, kSpread);
+    const std::vector<int> roughnessNodes = spreadNodes(0, res.x - 1, kSpread);
+
+    // Control, and it is listed first because every row below is only as trustworthy as this one: both axes on
+    // exact nodes, so the lookup returns a stored value verbatim and no interpolation happens at all. What is left
+    // is the disagreement between this file's Simpson reference and the generator's Gauss-Legendre, whose own
+    // residual verifyReflect prints at 3.0e-5 against a doubled rule. If this row is not small, the instrument is
+    // the limit and the four measurements are measuring it rather than the table.
+    std::vector<InterpolationError> controlRows(static_cast<std::size_t>(res.x));
+    parallelRows(res.x, ctx.threads(), [&](int ri) {
+        const double roughness = engine::scene::albedoGridRoughness(static_cast<float>(ri));
+        InterpolationError row{0.0, roughness, 0.0};
+        for (int mi : muNodes) {
+            const double mu = engine::scene::albedoGridMu(static_cast<float>(mi));
+            recordWorst(row, directionalAlbedoError(mu, roughness), roughness, mu);
+        }
+        controlRows[static_cast<std::size_t>(ri)] = row;
+    });
+
+    // Roughness axis: every cell midpoint on that axis, held on exact mu nodes.
+    std::vector<InterpolationError> roughnessRows(static_cast<std::size_t>(res.x - 1));
+    parallelRows(res.x - 1, ctx.threads(), [&](int ri) {
+        const double roughness = engine::scene::albedoGridRoughness(static_cast<float>(ri) + 0.5F);
+        InterpolationError row{0.0, roughness, 0.0};
+        for (int mi : muNodes) {
+            const double mu = engine::scene::albedoGridMu(static_cast<float>(mi));
+            recordWorst(row, directionalAlbedoError(mu, roughness), roughness, mu);
+        }
+        roughnessRows[static_cast<std::size_t>(ri)] = row;
+    });
+
+    // mu axis: every cell midpoint on that axis EXCEPT the first, held on exact roughness nodes. The first cell is
+    // measured on its own below -- folding it in here would let one grazing boundary layer set the whole axis' bound.
+    std::vector<InterpolationError> muRows(roughnessNodes.size());
+    parallelRows(static_cast<int>(roughnessNodes.size()), ctx.threads(), [&](int k) {
+        const int ri = roughnessNodes[static_cast<std::size_t>(k)];
+        const double roughness = engine::scene::albedoGridRoughness(static_cast<float>(ri));
+        InterpolationError row{0.0, roughness, 0.0};
+        for (int mi = 1; mi + 1 < res.y; ++mi) {
+            const double mu = engine::scene::albedoGridMu(static_cast<float>(mi) + 0.5F);
+            recordWorst(row, directionalAlbedoError(mu, roughness), roughness, mu);
+        }
+        muRows[static_cast<std::size_t>(k)] = row;
+    });
+
+    // First mu cell: dense in roughness, on exact nodes there, so what is left is the cell alone.
+    std::vector<InterpolationError> firstCellRows(static_cast<std::size_t>(res.x));
+    parallelRows(res.x, ctx.threads(), [&](int ri) {
+        const double roughness = engine::scene::albedoGridRoughness(static_cast<float>(ri));
+        InterpolationError row{0.0, roughness, 0.0};
+        for (double fraction : firstCellFractions) {
+            const double mu = engine::scene::albedoGridMu(static_cast<float>(fraction));
+            recordWorst(row, directionalAlbedoError(mu, roughness), roughness, mu);
+        }
+        firstCellRows[static_cast<std::size_t>(ri)] = row;
+    });
+
+    // Eavg's own 1-D lerp, which reaches coatAlbedoAvg and through it the 1/(1-coatAlbedoAvg) denominator of the
+    // whole diffuse coupling -- a different route into the shade than the directional lookups, so its own number.
+    std::vector<InterpolationError> averageRows(static_cast<std::size_t>(res.x - 1));
+    parallelRows(res.x - 1, ctx.threads(), [&](int ri) {
+        const double roughness = engine::scene::albedoGridRoughness(static_cast<float>(ri) + 0.5F);
+        const glm::vec2 shipped = engine::scene::averageAlbedoSplit(static_cast<float>(roughness));
+        const glm::dvec2 exact = referenceAverageAlbedo(alphaAt(roughness));
+        const double delta = std::max(std::abs(static_cast<double>(shipped.x) - exact.x),
+                                       std::abs(static_cast<double>(shipped.y) - exact.y));
+        averageRows[static_cast<std::size_t>(ri)] = {delta, roughness, -1.0};
+    });
+
+    const auto reduce = [](const std::vector<InterpolationError>& rows) {
+        InterpolationError worst{0.0, 0.0, 0.0};
+        for (const InterpolationError& row : rows) {
+            recordWorst(worst, row.worst, row.roughness, row.mu);
+        }
+        return worst;
+    };
+
+    const std::array<std::tuple<const char*, InterpolationError, double>, 5> measurements = {{
+        {"control: both axes on nodes    ", reduce(controlRows), kControlTolerance},
+        {"roughness axis, mu on nodes    ", reduce(roughnessRows), kRoughnessAxisTolerance},
+        {"mu axis cells 1..n, r on nodes ", reduce(muRows), kMuAxisTolerance},
+        {"first mu cell, r on nodes      ", reduce(firstCellRows), kFirstMuCellTolerance},
+        {"Eavg lerp, 1-D in roughness    ", reduce(averageRows), kAverageAlbedoTolerance},
+    }};
+
+    bool ok = true;
+    std::cout << "bsdf_validate: albedo table interpolation error vs independent quadrature, worst Schlick channel\n";
+    std::cout << "  measurement                                 worst        at roughness   mu\n";
+    for (const auto& [name, worst, tolerance] : measurements) {
+        std::cout << "  " << name << "   " << worst.worst << "   " << worst.roughness << "   "
+                  << worst.mu << '\n';
+        if (!(worst.worst <= tolerance)) {
+            std::cerr << "bsdf_validate: FAILED albedo table interpolation on the " << name
+                       << " -- worst " << worst.worst << " at roughness " << worst.roughness << " mu "
+                       << worst.mu << " exceeds " << tolerance
+                       << ". The committed src/scene/albedo_table.inc lost accuracy on this axis.\n";
+            ok = false;
+        }
+    }
+    finish(ctx, ok, "albedo_table_interpolation failed; see the rows above");
+    return;
+}
+
 // bsdf.cpp's coatAlbedo in double, with fresnelAvg left free: the whole point is to recover the value the call sites pass.
 double referenceCoatAlbedo(const glm::dvec2& split, double albedoAvg, double f0, double fresnelRatio,
                             double fresnelAvg) {
@@ -1121,8 +1359,7 @@ struct CoatAlbedos {
 };
 
 CoatAlbedos coatAlbedos(double roughness, const std::array<double, 3>& cosines) {
-    constexpr double kMinAlpha = 0.02 * 0.02;   // bsdf.cpp's roughness floor, mirrored so the reference uses the alpha the lobe used
-    const double alpha = std::max(roughness * roughness, kMinAlpha);
+    const double alpha = alphaAt(roughness);
     return {referenceAverageAlbedo(alpha),
              {referenceDirectionalAlbedo(cosines[0], alpha),
               referenceDirectionalAlbedo(cosines[1], alpha),
@@ -1607,7 +1844,6 @@ ENGINE_CHECK(conductor_fresnel, Fast, Exact) {
 // The specular lobe's closed form at the mirrored pair, in double: nh is exactly +z there, so sin(theta_h) is 0 and the GGX denominator collapses to alpha^2, giving D = 1/(pi*alpha^2) without evaluating the shipped D at all.
 // G2 is Smith height-correlated with both lambdas at the same cosine, the quantity bsdf.cpp's smithVisibility evaluates in its division-free form.
 double specularGeometry(double alpha, double cosine) {
-    constexpr double kPiDouble = 3.14159265358979324;
     const double alpha2 = alpha * alpha;
     const double d = 1.0 / (kPiDouble * alpha2);
     const double tan2 = (1.0 - (cosine * cosine)) / (cosine * cosine);
@@ -2258,7 +2494,6 @@ struct ChiSquareCase {
 };
 
 ENGINE_CHECK(sampling_chi_square, Slow, Statistical) {
-    constexpr double kPiDouble = 3.14159265358979324;
     constexpr int kCosBins = 16;
     constexpr int kPhiBins = 8;
     constexpr int kPanels = 256;            // even, for Simpson, per axis per bin; measured, not guessed: the peaked refraction lobe at roughness 0.2 is mis-integrated badly enough to report p=1e-78 on correct code at 48 panels and to still fail at 64, passes from 96, and the p-value stops moving past this
