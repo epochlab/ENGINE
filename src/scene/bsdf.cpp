@@ -490,6 +490,10 @@ struct LobeProbabilities {
     float albedoWo;         // E(mu_o, roughness), Fresnel-free
     float albedoAvg;        // Eavg(roughness)
     float coatF0;           // dielectric f0 implied by ior, for the diffuse coupling
+    // The coat's own cosine-mean Fresnel, dielectricFresnelAvg(ior). Separate from fresnelAvg below, which is the
+    // metallic-blended mean the specular lobe needs and is wrong for the coat at any metallic > 0; hoisted so the
+    // mean is evaluated once per evaluation rather than again on every wi in diffuseKdAt.
+    float coatFresnelAvg;
     glm::vec3 fresnelAvg;
     // Complex IOR inverted from (f0, edgeTint) once per evaluation rather than once per lobe call.
     // Set to the index-matched (1, 0) when metallic==0, where no consumer reads them: evaluateSpecularLobe
@@ -521,12 +525,13 @@ glm::vec3 transmitMultiScatter(const BsdfParams& params, float mu, float msPdf, 
 }
 
 // The full reciprocal coupling factor at wi: the wo-side half is precomputed into lobes.diffuseKd, the
-// wi-side half is the same (1 - coatAlbedo) evaluated here.
+// wi-side half is the same (1 - coatAlbedo) evaluated here. The cosine mean is lobes.coatFresnelAvg, the same float
+// computeLobeProbabilities already produced from the same params.ior -- bit-identical to recomputing it here.
 float diffuseKdAt(const BsdfParams& params, const glm::vec3& wi, const LobeProbabilities& lobes) {
     const AlbedoSplit splitWi = directionalAlbedo(wi.z, params.roughness);
     const float coat = coatAlbedo(splitWi, lobes.albedoAvg, lobes.coatF0,
                                    coatFresnelRatio(wi.z, lobes.etaI, lobes.etaT, lobes.coatF0),
-                                   dielectricFresnelAvg(params.ior));
+                                   lobes.coatFresnelAvg);
     return std::max(lobes.diffuseKd, 0.0F) * (1.0F - coat);
 }
 
@@ -843,6 +848,7 @@ LobeProbabilities computeLobeProbabilities(const BsdfParams& params, const glm::
                             .albedoWo = splitWo.total(),
                             .albedoAvg = splitAvg.total(),
                             .coatF0 = coatF0,
+                            .coatFresnelAvg = dielectricAvg,
                             .fresnelAvg = fresnelAvg,
                             .conductorN = conductor.n,
                             .conductorK = conductor.k,
