@@ -244,8 +244,8 @@ void PerfDashboard::drawFrameHeader(const DashboardFrame& frame) {
             static_cast<double>(frame.frameStats.maxMs()),
             static_cast<double>(windowMean(frameMsSum_)), FrameStats::kHistoryLength);
     // The vblank wait is the headroom itself, so it is excluded from the work the budget is spent on; the fence wait is GPU time the frame did spend.
-    append("\x1b[2K budget   %6.2f ms @ %6.2f Hz vsync                     headroom %8.2f ms\n",
-            budgetMs, frame.refreshHz, budgetMs - static_cast<double>(cpuTotalMs() - windowMean(sums_.paceMs)));
+    append("\x1b[2K budget   %6.2f ms @ %6.2f Hz %-8s                  headroom %8.2f ms\n",
+            budgetMs, frame.refreshHz, frame.vsync ? "vsync" : "uncapped", budgetMs - static_cast<double>(cpuTotalMs() - windowMean(sums_.paceMs)));
     append("\x1b[2K------------------------------------------------------------------------------\n");
 }
 

@@ -270,6 +270,7 @@ struct AppResources {
     bool invert;   // 1.0 - colour, applied to the final display-referred image -- the 'I' debug toggle
     bool statsEnabled;  // -stats: the live terminal dashboard. The instrumentation behind it always runs; this only gates the drawing.
     bool showHud;  // 'H' toggle; gates HudOverlay::draw only -- beginFrame/render stay unconditional so ImGui's frame pairing is never broken
+    bool vsync;  // profile.json: pace each frame to the vblank, or run uncapped
     // Chromatic aberration strength (0 = off), radial UV offset passed to OcioDisplayTransform::setAberration -- HUD slider only.
     float aberrationStrength;
     // The rasterizer runs only on a trigger change into one of its AOVs, so its cost is not a per-frame stage: kept across frames and reported as a last-actual-cost plus duty cycle rather than averaged away.
@@ -282,6 +283,7 @@ struct AppResources {
     // World-space AABB per instance, parallel-indexed with stumpModel.instances. Static geometry, so computed once at startup and read every rasterizer call for the Wireframe AOV's per-object box edges (rasterizer.h).
     std::vector<engine::scene::AabbBounds> instanceBounds;
     int maxSamples;  // accumulated-pass cap for PathTraceDriver; 0 = unbounded
+    engine::gfx::TexelFormat displayTextureFormat;  // pathTraceDisplayTexture's storage format (profile.json textureBitDepth)
     std::unique_ptr<engine::scene::PathTraceDriver> pathTraceDriver;
     std::optional<engine::gfx::Texture> pathTraceDisplayTexture;
     // Which image pathTraceDisplayTexture currently holds -- the image, not the AovId that selected it, so every AOV reading the same buffer shares one upload: Beauty and the four GPU post-filters over it (presentFrame) all pass &PathTraceResult::beauty. An interior pointer into pathTraceDisplayedOwner below, which is what keeps it valid and ABA-free.
@@ -597,12 +599,14 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         .invert = false,
         .statsEnabled = statsEnabled,
         .showHud = true,
+        .vsync = profileConfig.render.vsync,
         .aberrationStrength = 0.0F,
         .lastRasterMs = 0.0F,
         .pathTraceSettings = basePathTraceSettings,
         .perInstanceSettings = std::move(*perInstanceSettings),
         .instanceBounds = std::move(instanceBounds),
         .maxSamples = profileConfig.pathTracer.maxSamples,
+        .displayTextureFormat = profileConfig.render.displayTextureFormat,
         // Constructed in main() right after initializeApp() returns -- see path_trace_driver.h's constructor precondition (its reference members must bind to sceneAccel/environmentMap/stumpModel at their final, permanent address, which this designated-initializer expression, still local-variable-based and one AppResources move away from that address, cannot yet guarantee).
         .pathTraceDriver = nullptr,
         .pathTraceDisplayTexture = std::nullopt,
@@ -931,7 +935,7 @@ void ensurePathTraceDisplayTexture(AppResources& app, const std::shared_ptr<cons
             app.pathTraceDisplayTexture->upload(mapped.width, mapped.height, mapped.rgba.data());
         } else {
             app.pathTraceDisplayTexture = engine::gfx::Texture::createFromFloatPixels(
-                mapped.width, mapped.height, mapped.rgba.data());
+                mapped.width, mapped.height, mapped.rgba.data(), app.displayTextureFormat);
         }
         app.pathTraceDisplayedImage = &image;
         app.pathTraceDisplayedOwner = owner;
@@ -943,7 +947,8 @@ void ensurePathTraceDisplayTexture(AppResources& app, const std::shared_ptr<cons
         app.pathTraceDisplayTexture->upload(image.width, image.height, image.rgba.data());
     } else {
         app.pathTraceDisplayTexture =
-            engine::gfx::Texture::createFromFloatPixels(image.width, image.height, image.rgba.data());
+            engine::gfx::Texture::createFromFloatPixels(image.width, image.height, image.rgba.data(),
+                                                         app.displayTextureFormat);
     }
     app.pathTraceDisplayedImage = &image;
     app.pathTraceDisplayedOwner = owner;
@@ -1157,6 +1162,7 @@ void updateHud(AppResources& app, const engine::platform::Window& window,
         pathTracedStatus,
         app.overRangeFraction,
         app.overRangePeakMultiple,
+        app.vsync,
     };
     // Round-tripped through locals so the HUD's sliders can bind plain float&s, same as aov -- DebugCameraController is the authoritative owner, read before draw() and written back after.
     float focalLengthMm = app.debugCamera.focalLengthMm();
@@ -1240,6 +1246,7 @@ void updateDashboard(AppResources& app,
         app.lastPathTraceTrigger.renderScale,
         interactive,
         app.refreshHz,
+        app.vsync,
     };
     app.dashboard.update(frame);
 }
@@ -1317,7 +1324,9 @@ nlohmann::json benchConfig(const AppResources& app, const BenchCapture& bench) {
                         {"film_height_mm", app.debugCamera.filmBack().heightMm}}},
             {"env", {{"rotation_deg", app.envRotationDegrees}, {"exposure_stops", app.envExposureStops},
                      {"light", app.envLightEnabled}, {"show_sky", app.showSky}}},
-            {"hud", app.showHud}};
+            {"hud", app.showHud},
+            {"vsync", app.vsync},
+            {"display_texture_format", engine::gfx::texelFormatName(app.displayTextureFormat)}};
     // Only with -bench-aovs, so a single-stage record stays comparable with every one logged before this existed. The whole switch sequence, not just the AOV left selected at exit: it IS the workload, and bench_compare run refuses to pair records whose configs differ.
     if (!schedule.empty()) {
         config["aov_schedule"] = schedule;
@@ -1422,9 +1431,11 @@ void renderFrame(engine::platform::Window& window, engine::platform::DisplayLink
     // Every stage zeroed first: a stage that does not run this frame must read 0, or the dashboard reports the last time it did run as if it were still happening.
     app.stages = {};
     {
-        // Before the poll, so input is sampled right after the vblank this frame will be latched against.
+        // Before the poll, so input is sampled right after the vblank this frame will be latched against. Timed either way, so an uncapped frame logs its pace as 0 rather than as absent.
         const engine::debug::ScopedCpuTimer paceTimer(app.stages.paceMs);
-        displayLink.waitForNextVblank();
+        if (app.vsync) {
+            displayLink.waitForNextVblank();
+        }
     }
     {
         // After the vblank wait, which the GPU drains the previous frame during, so this is non-zero only for a GPU-bound frame.

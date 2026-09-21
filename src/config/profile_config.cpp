@@ -25,6 +25,17 @@ std::optional<engine::gfx::OcioDisplayTransform::Lut> parseLut(const std::string
     return std::nullopt;
 }
 
+std::optional<engine::gfx::TexelFormat> parseTexelFormat(int bitDepth) {
+    using TexelFormat = engine::gfx::TexelFormat;
+    if (bitDepth == 16) {
+        return TexelFormat::RGBA16F;
+    }
+    if (bitDepth == 32) {
+        return TexelFormat::RGBA32F;
+    }
+    return std::nullopt;
+}
+
 }  // namespace
 
 std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
@@ -53,6 +64,16 @@ std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
             return std::nullopt;
         }
 
+        // Integer-typed first: get<int>() would silently truncate 16.5 to 16.
+        const nlohmann::json& textureBitDepth = render.at("textureBitDepth");
+        const std::optional<engine::gfx::TexelFormat> displayTextureFormat =
+            textureBitDepth.is_number_integer() ? parseTexelFormat(textureBitDepth.get<int>()) : std::nullopt;
+        if (!displayTextureFormat.has_value()) {
+            std::cerr << "loadProfileConfig: " << path << " has a textureBitDepth " << textureBitDepth.dump()
+                       << ", expected 16 or 32\n";
+            return std::nullopt;
+        }
+
         const int windowWidth = window.at("width").get<int>();
         const int windowHeight = window.at("height").get<int>();
         const glm::vec3 position = camera.at("position").get<glm::vec3>();
@@ -70,6 +91,7 @@ std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
         const float renderScale = render.at("renderScale").get<float>();
         const float interactiveRenderScale = render.at("interactiveRenderScale").get<float>();
         const int defaultAov = render.at("defaultAOV").get<int>();
+        const bool vsync = render.at("vsync").get<bool>();
         const int samplesPerPixel = pathTracer.at("samplesPerPixel").get<int>();
         const int maxBounces = pathTracer.at("maxBounces").get<int>();
         const int russianRouletteStartBounce = pathTracer.at("russianRouletteStartBounce").get<int>();
@@ -121,6 +143,8 @@ std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
                 interactiveRenderScale,
                 defaultAov,
                 *defaultLut,
+                vsync,
+                *displayTextureFormat,
             },
             PathTracerConfig{
                 samplesPerPixel,
