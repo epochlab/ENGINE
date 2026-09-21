@@ -339,7 +339,7 @@ ENGINE_CHECK(furnace_energy_bound, Slow, Statistical) {
 // TWO-SIDED white furnace: a white, non-absorbing surface under uniform L0=1 radiance must return exactly 1.0 (every photon it receives leaves again); checkFurnace above only ever asserts Lo<=bound, so it cannot see energy loss, this BSDF's actual failure mode.
 // Restricted to cases where 1.0 is analytically correct: white base color, no transmission, entering side. A colored conductor (f0=0.5) legitimately absorbs with no closed-form expectation, so it stays upper-bound-only in checkFurnace.
 // Single-scatter GGX loses the energy the Smith G2 masks away (Heitz, Hanika, d'Eon, Dachsbacher 2016): a white conductor at roughness 1.0 measured 0.307, under a third of the light received. Kulla-Conty multiple-scattering compensation plus the directional-albedo diffuse coupling (bsdf.cpp) return it, making 1.0 a correctness target, not a regression baseline: both bounds share the same tolerance and a shortfall is a bug.
-// Half the rows sit deliberately off the albedo table's grid; there the measured value is E_true + (1 - E_interpolated), so these rows test the table's bilinear error directly. They are the only bound on it: checkCoatFresnelAvg's quadrature reference reads the table's VALUES, not its interpolation, and deliberately sweeps on-grid to keep the two errors separate.
+// Half the rows sit deliberately off the albedo table's grid; there the measured value is E_true + (1 - E_interpolated), so these rows exercise the table's bilinear error. They are no longer the only bound on it -- checkAlbedoTableInterpolation measures it directly, per axis, three orders finer than the 2% a Monte Carlo band can reach -- but they are the only one that exercises it through the shipped transport rather than through a lookup called in isolation, which is a different thing to be sure of.
 struct WhiteFurnaceCase {
     float roughness;
     float ndotV;
@@ -358,13 +358,15 @@ ENGINE_CHECK(white_furnace_two_sided, Slow, Statistical) {
         {0.50F, 0.4F, false},
         {1.00F, 1.0F, false},
         {1.00F, 0.4F, false},
-        // Off-grid: table rows/columns land on k/127, so these are placed mid-cell on both axes. They moved with the table's resolution -- at the old k/31 they were 0.37/0.63/0.82 and 0.565/0.31, and 0.37 and 0.63 land almost exactly ON the 128-row grid, which would have left the comment above true of only one axis.
-        {0.3661F, 0.563F, true},
-        {0.3661F, 0.311F, true},
-        {0.6339F, 0.563F, true},
-        {0.6339F, 0.311F, true},
-        {0.8228F, 0.563F, true},
-        {0.8228F, 0.311F, true},
+        // Off-grid, and re-placed with the table's grid for the third time -- at k/31 they were 0.37/0.63/0.82 and 0.565/0.31, at k/127 they were 0.3661/0.6339/0.8228 and 0.563/0.311. Roughness rows now land on k/255 and the mu axis is uniform in sqrt(mu), so a mu that was mid-cell on the old linear axis is not mid-cell on this one: these are mid-cell on BOTH axes as the lookups actually index them, which is what the comment above needs to stay true.
+        // Each value is the exact float landing on index k+0.5 of the axis that indexes it: roughness (k+0.5)/255, mu ((k+0.5)/255)^2, so the lookup's own blend weight is 0.5 on both.
+        // Nothing derives them from albedoGridRes() on purpose. A row that recomputed its own worst case from the grid would follow the grid wherever it went and could never be seen to go stale, which is the failure this list has now survived twice by being written down.
+        {0.3666667F, 0.5464398F, true},
+        {0.3666667F, 0.2949981F, true},
+        {0.6333333F, 0.5464398F, true},
+        {0.6333333F, 0.2949981F, true},
+        {0.8215686F, 0.5464398F, true},
+        {0.8215686F, 0.2949981F, true},
     }};
 
     bool ok = true;
@@ -1067,10 +1069,12 @@ ENGINE_CHECK(average_fresnel, Fast, Exact) {
 // The phi split at pi/2 is not cosmetic: d sweeps its entire -pi/2..pi/2 range within |cos phi| < mu, a boundary layer that narrows with mu, and as a panel endpoint it is resolved rather than straddled.
 // The INNER rule is Gauss-Legendre, not Simpson, and that is a measured requirement rather than a preference. The psi substitution that flattens the NDF peak compresses the other end: wi.z falls from O(1) to 0 over an O(1) span of theta_h, which the substitution maps to a span of psi narrower by ~alpha*mu, so at mu = 1/127 the whole horizon layer is ~1e-3 wide against a 96-panel width of 1.6e-2. Any composite rule of fixed panel width straddles it -- measured convergence order ~1.2, with the ENTIRE error of a 96-panel Simpson sitting in its last panel pair. Gauss-Legendre puts its outermost node O(1/n^2) from the endpoint, which is inside the layer, so it resolves what no affordable refinement of a uniform mesh does: at that cell Simpson 96 is 5.2e-3 and 3072 panels still leaves 3.6e-5, against 1.5e-7 here. There is no closed-form breakpoint to split at instead -- the natural candidate, wi.z = mu, lands at an eighth of the layer's width.
 // What that costs is a sharper statement of the deliberate-duplication rule, so state it rather than let it erode: this now shares a quadrature FAMILY with the generator and no longer catches an error in the family itself. It remains an independent transcription of the integrand, the domain and the measure, written here from the derivation and never included or linked from src/ or tools/albedo_table.cpp, which is where a transcription error would be; and it runs at twice the generator's node count, so the two are not the same arithmetic. checkAlbedoTableInterpolation's control row prints their disagreement on every run rather than assuming it away.
-double referenceSmithLambda(double ndotV, double alpha) {
-    const double ndotV2 = std::max(ndotV * ndotV, 1e-8);
-    const double tan2 = std::max(0.0, 1.0 - ndotV2) / ndotV2;
-    return 0.5 * (-1.0 + std::sqrt(1.0 + (alpha * alpha * tan2)));
+// Height-correlated Smith G2 divided by cosO, 2 cosI / (cosI s(cosO) + cosO s(cosI)) with s(c) = sqrt(alpha^2 + (1-alpha^2) c^2). Algebraically the Lambda form it replaced, since 1 + Lambda(cosO) + Lambda(cosI) = (cosI s(cosO) + cosO s(cosI)) / (2 cosO cosI), but written so no cosine is ever divided by.
+// That matters to this reference twice over. The Lambda form carries a max(cos^2, 1e-8) clamp that bites on the incident cosine near the horizon; and the albedo it builds is an integral proportional to mu, so recovering E by dividing the result by mu amplifies the rule's relative error by 1/mu -- unusable once the table's warped mu axis reaches 6.2e-5, and catastrophic at the 2.5e-6 the first cell is sampled at. Folding the 1/mu into this closed form removes both, and makes E(0) = 1 directly evaluable rather than a limit.
+double referenceSmithG2OverCosO(double cosO, double cosI, double alpha) {
+    const double alpha2 = alpha * alpha;
+    const auto radical = [&](double c) { return std::sqrt(alpha2 + ((1.0 - alpha2) * c * c)); };
+    return 2.0 * cosI / ((cosI * radical(cosO)) + (cosO * radical(cosI)));
 }
 
 constexpr double kPiDouble = 3.14159265358979324;
@@ -1145,24 +1149,22 @@ glm::dvec2 referenceDirectionalAlbedo(double mu, double alpha) {
             const double thetaH = std::atan(alpha * std::tan(psi));
             const double woDotH = radius * std::cos(thetaH - delta);
             const double wiZ = radius * std::cos((2.0 * thetaH) - delta);
-            const double g2 =
-                1.0 / (1.0 + referenceSmithLambda(mu, alpha) + referenceSmithLambda(wiZ, alpha));
-            const double weight = (woDotH / std::cos(thetaH)) * g2 * std::sin(psi) * std::cos(psi);
+            const double weight = (woDotH / std::cos(thetaH)) *
+                                   referenceSmithG2OverCosO(mu, wiZ, alpha) * std::sin(psi) * std::cos(psi);
             const double fc = std::pow(std::clamp(1.0 - woDotH, 0.0, 1.0), 5.0);
             return glm::dvec2(weight * (1.0 - fc), weight * fc);
         });
     };
     const glm::dvec2 half = simpson(0.0, 0.5 * kPiDouble, kPanels, azimuth) +
                              simpson(0.5 * kPiDouble, kPiDouble, kPanels, azimuth);
-    return (2.0 / (kPiDouble * mu)) * half;
+    return (2.0 / kPiDouble) * half;
 }
 
-// Cosine-weighted mean, 2*int_0^1 E(mu)*mu dmu. The mu=0 endpoint contributes exactly 0 (E is bounded, the mu weight kills it), which is also what keeps the 1/mu in the directional form from being evaluated there.
+// Cosine-weighted mean, 2*int_0^1 E(mu)*mu dmu. The mu=0 endpoint contributes exactly 0 because the mu weight kills a bounded E; the directional form is evaluable there now that it no longer divides by mu, so no guard stands in for that.
 glm::dvec2 referenceAverageAlbedo(double alpha) {
     constexpr int kPanels = 64;
-    return 2.0 * simpson(0.0, 1.0, kPanels, [&](double mu) {
-        return mu <= 0.0 ? glm::dvec2(0.0) : referenceDirectionalAlbedo(mu, alpha) * mu;
-    });
+    return 2.0 * simpson(0.0, 1.0, kPanels,
+                          [&](double mu) { return referenceDirectionalAlbedo(mu, alpha) * mu; });
 }
 
 
@@ -1170,6 +1172,7 @@ glm::dvec2 referenceAverageAlbedo(double alpha) {
 // The generator prints the first on every bake: verifyReflect rebuilds at doubled node count and reports the quadrature's own residual, 3.0e-5. But the shipped grid is then read bilinearly, and that error is a separate quantity no code produced -- it reached the tree as comments on tools/albedo_table.cpp and bsdf.cpp carrying numbers from an ad-hoc measurement nothing reproduces. Re-measuring them here showed both misattributed: the recorded "7.1e-3 first bin" is really 4.4e-2, and the "3.2e-5 away from it" is the ROUGHNESS axis, not the mu axis, which is ~1e-5 there.
 // Nothing else in the suite resolves it. checkWhiteFurnaceTwoSided bounds it to 2%, 600x too loose, and pays for that bound with Monte Carlo noise that no node count removes; checkCoatFresnelAvg deliberately reads the table's values through a reference that does not interpolate, to keep the two errors separate, and in any case the whole table is only ~2e-5 of its 1.2e-4 residual.
 // Four measurements, each reported separately, because they are four different levers and a single worst would hide which one moved: the axes are measured one at a time by holding the other on exact nodes, and the first mu cell is split out from the rest of its axis because a grazing boundary layer and smooth curvature are not the same failure.
+// Every bound below is the measured worst plus ~1.7x, the convention checkAverageFresnel already uses, so each axis trips on its own row rather than under a combined figure. Where the worsts now sit is itself the result: all three directional ones are on the lowest-alpha rows (roughness <= 0.022, at the kMinAlpha floor or just off it) at mu <= 4.4e-3, where the lobe is a near-mirror and the layer is narrower than a cell however the axis is warped. That region is sub-degree grazing on a mirror and every integral consuming E weights it by cos; what a shading path at ordinary angles sees is the control row's 3.0e-5, which is the stored values' own quadrature residual and not an interpolation error at all.
 // Each is dense along the axis it measures and spread along the other, which is what the error's own shape asks for: the roughness error is a smooth single-signed hump, so it needs every cell on that axis and only a spread of mu; the mu error varies sharply toward grazing and needs the converse. The first-cell sweep is dense in roughness instead, because its peak sits at one particular low roughness where the layer is narrower than the cell.
 // Reference is this file's own referenceDirectionalAlbedo/referenceAverageAlbedo -- an independent double-precision transcription, measured to 1.5e-7 at the worst grazing cell -- so what is measured is the committed .inc read through bsdf.cpp's own axis arithmetic, and nothing is compared against itself. The control row below is what keeps that claim honest.
 // Asserted on the worst of the two Schlick channels rather than on E = a+b, which is strictly stronger and is what every caller needs: coatAlbedo reads split.at(f0) = f0*a + b at whatever f0 the material authors, and two channel errors that cancel in the sum need not cancel there.
@@ -1196,9 +1199,9 @@ double directionalAlbedoError(double mu, double roughness) {
 
 // Evenly spread node indices over [first, last], endpoints included: the "held on exact nodes" coordinate of each
 // measurement, where that axis contributes no interpolation error of its own and the other one is isolated.
-// The mu axis is swept from node 1, not 0: mu = 0 is the degenerate view direction with wo in the surface plane,
-// where referenceDirectionalAlbedo's 1/mu form does not exist at all and every integral consuming E weights it to
-// exactly zero. The generator says the same thing from the other side by nudging its own mu = 0 column off it.
+// The mu axis is swept from node 0, which the warp made a real node at mu = 0 exactly: E(0, alpha) = 1 is an analytic
+// identity, the generator asserts it on every row, and the reference evaluates it directly now that neither side
+// divides by mu. It is the sharpest column in the table rather than the one that has to be skipped.
 std::vector<int> spreadNodes(int first, int last, int count) {
     std::vector<int> nodes(static_cast<std::size_t>(count));
     for (int k = 0; k < count; ++k) {
@@ -1230,10 +1233,10 @@ ENGINE_CHECK(albedo_table_interpolation, Slow, Exact) {
     // enough that a regeneration losing accuracy on any one axis trips that axis' own row rather than passing
     // under a combined figure. They are bounds on the COMMITTED table, so they move when it is rebaked.
     constexpr double kControlTolerance = 5e-5;
-    constexpr double kRoughnessAxisTolerance = 2e-3;
-    constexpr double kMuAxisTolerance = 1.2e-2;
-    constexpr double kFirstMuCellTolerance = 7e-2;
-    constexpr double kAverageAlbedoTolerance = 3.2e-5;
+    constexpr double kRoughnessAxisTolerance = 1e-3;
+    constexpr double kMuAxisTolerance = 3.7e-3;
+    constexpr double kFirstMuCellTolerance = 3.1e-3;
+    constexpr double kAverageAlbedoTolerance = 8e-6;
     // Fractions across the first mu cell. Its error is not a midpoint maximum like a smooth cell's: the layer sits
     // against the mu = 0 edge, so where inside the cell the worst falls depends on how the layer's width compares
     // to the cell's, and the sweep says so rather than assuming.
@@ -1241,7 +1244,7 @@ ENGINE_CHECK(albedo_table_interpolation, Slow, Exact) {
     constexpr int kSpread = 16;
 
     const glm::ivec2 res = engine::scene::albedoGridRes();
-    const std::vector<int> muNodes = spreadNodes(1, res.y - 1, kSpread);
+    const std::vector<int> muNodes = spreadNodes(0, res.y - 1, kSpread);
     const std::vector<int> roughnessNodes = spreadNodes(0, res.x - 1, kSpread);
 
     // Control, and it is listed first because every row below is only as trustworthy as this one: both axes on
@@ -1409,13 +1412,14 @@ double referenceCoupling(const CoatGeometry& geometry, double fresnelAvg) {
 // The instrument for coatAlbedo's fresnelAvg VALUE at working ior, which checkIndexMatchedCoat says outright it cannot supply: it pins the argument's COLLAPSE at index match, where every table coefficient is multiplied by an exact zero, and notes that any g(ior) with g(1)=0 passes it -- notably 2*dielectricFresnelAvg(ior). This is the other half.
 // Method: the diffuse channel is exactly evaluateEon times the coat coupling, so dividing it by this file's own referenceEon -- the one checkIndexMatchedCoat already pins to 1e-6 relative -- leaves the coupling alone, with no accessor into the albedo table needed. referenceCoupling models that coupling with fresnelAvg free, and the sweep inverts it, so what is reported is the F_avg the shipped code actually used rather than a pass/fail on a difference.
 // Deliberately NOT measured as diffuse(ior)/diffuse(ior=1), which is the tempting form since checkIndexMatchedCoat proves the denominator is exactly evaluateEon: that identity holds only for a fresnelAvg that collapses at index match, so the very revert this must catch (Karis' mean returns 1/21 at ior=1) would corrupt the denominator too and the recovered number would stop meaning what it says. Measured that way the Karis revert reads 0.0435 rather than its actual 0.0857 -- still a failure, but a failure reported as the wrong cause.
-// Truth is 2*int F(mu)*mu dmu by the same cosineAverageFresnel checkAverageFresnel uses, ~1e-13 accurate, so the tolerance is not set by the reference. Nor is it any longer set by dielectricFresnelAvg, whose own error at these iors is 3.3e-6 to 2.2e-5 since it became a quadrature rule over the same fresnelDielectric the coat reflects by. What the tolerance now spends is the albedo table and this inversion: measured worst 1.2e-4 at ior 3.0, and 7.0e-5 at ior 1.5, so 2e-4 is ~1.7x headroom on the worst row.
-// That inverts what this check is FOR. It was the instrument for F_avg; it is now an instrument for src/scene/albedo_table.inc, and a regeneration of that table that loses accuracy trips here first. F_avg enters coatAlbedo only through multiScatterTint(F, Eavg)*(1-E(mu)), whose derivative in F is ~0.054, so an error e in E recovers as e/0.054 in F_avg -- at the old 32x32 startup table's ~1.5e-3 that is 0.028, 140x this tolerance, which is why this check could not exist before the bake moved offline.
-// Worth recording that the same derivation predicted ~1.2e-3 for the offline bake's 3e-5 quadrature plus 3.2e-5 bilinear, and the realised residual is 1.2e-4, 10x better. The e/0.054 route is the multiple-scattering path alone; the dC/dF column shows the recovery's actual conditioning is ~0.81-0.91, because coatAlbedoAvg's fresnelAvg/karisAvg rescale sits in the 1/(1-coatAlbedoAvg) denominator and carries most of the signal. The prediction was pessimistic by the ratio of those two routes, not wrong in kind.
+// Truth is 2*int F(mu)*mu dmu by the same cosineAverageFresnel checkAverageFresnel uses, ~1e-13 accurate, so the tolerance is not set by the reference. Nor is it set by dielectricFresnelAvg, whose own error at these iors is 3.3e-6 to 2.2e-5 since it became a quadrature rule over the same fresnelDielectric the coat reflects by. What it spends is the albedo table and this inversion: measured worst 3.5e-5 at ior 1.33, so 6e-5 is ~1.7x headroom on the worst row.
+// That worst was 1.2e-4 before two separate corrections, and the split between them is worth keeping because it is not what the earlier accounting assumed. Roughly half was this file's OWN reference: referenceDirectionalAlbedo's psi rule could not resolve the horizon layer and was wrong by 5.2e-3 at mu = 1/127, which leaked into the coupling model at the mu = 0.4 rows every worst row sits on -- 1.2e-4 to 5.1e-5 on that fix alone, with the table untouched. The rest was the table, which then went 5.1e-5 to 3.5e-5 on the sqrt(mu) mu axis and the 256-row roughness axis. So the residual the old comment could not account for was an instrument error, not a model one.
+// That inverts what this check is FOR. It was the instrument for F_avg; it is now an instrument for src/scene/albedo_table.inc, and a regeneration of that table that loses accuracy trips here first -- though checkAlbedoTableInterpolation now reads the table directly and per axis, so this one is no longer the ONLY thing that would notice, and it sees the table only where its own sweep looks. F_avg enters coatAlbedo only through multiScatterTint(F, Eavg)*(1-E(mu)), whose derivative in F is ~0.054, so an error e in E recovers as e/0.054 in F_avg -- at the old 32x32 startup table's ~1.5e-3 that is 0.028, 140x this tolerance, which is why this check could not exist before the bake moved offline.
+// Worth recording that the same derivation predicted ~1.2e-3 for the offline bake's 3e-5 quadrature plus its bilinear error, and the realised residual was 1.2e-4, 10x better. The e/0.054 route is the multiple-scattering path alone; the dC/dF column shows the recovery's actual conditioning is ~0.81-0.91, because coatAlbedoAvg's fresnelAvg/karisAvg rescale sits in the 1/(1-coatAlbedoAvg) denominator and carries most of the signal. The prediction was pessimistic by the ratio of those two routes, not wrong in kind.
 // The ior range is now the full one, 1.1 to 3.0. It was 1.5 to 1.8 because the rational fit was not uniformly better than the Karis mean a revert would install -- it crossed over near ior 1.42 -- so below that the separation was a coin toss, and above 2.0 the fit failed its own bound. Neither constraint survives a rule that is within 2.3e-5 at every swept ior, and 4.5e-5 across the whole continuous range.
 // All three candidates re-measured by mutation, which is the only way this claim means anything, and each fails at every ior in the sweep. Reverting to schlickFresnelAvg(coatF0) recovers 0.0856466 against that function's own 0.0857143 -- the instrument still names it, to 7e-5 -- and fails by 31x at ior 1.5, 123x at 1.1, and 3.5x at its weakest (ior 2.5, where Karis happens to cross truth). Substituting 2*dielectricFresnelAvg fails by 126x to 1381x. Reverting to the rational fit this replaced, which this check used to PASS at 0.0035, fails by 12x at ior 1.5 and 30x at 1.1. Unmutated, the recovery lands 7.0e-5 from dielectricFresnelAvg's own value at ior 1.5.
 ENGINE_CHECK(coat_fresnel_average, Slow, Exact) {
-    constexpr double kTolerance = 2e-4;
+    constexpr double kTolerance = 6e-5;
     // Residual of the recovered root, not an accuracy claim: it catches a coupling the model cannot reproduce at ANY fresnelAvg (a lost 1/(1-coatAvg), a dropped wi-side factor), which an in-range root would otherwise launder into a plausible number.
     constexpr double kResidualTolerance = 1e-6;
     const std::array<double, 9> iors = {1.1, 1.33, 1.5, 1.5168, 1.55, 1.8, 2.0, 2.5, 3.0};

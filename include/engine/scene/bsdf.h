@@ -95,7 +95,7 @@ struct BsdfEval {
 [[nodiscard]] glm::vec2 averageAlbedoSplit(float roughness);
 
 // The grid those two index: its two resolutions, and each axis' node position at a possibly fractional index, so an instrument can place samples exactly ON nodes and exactly BETWEEN them without transcribing the grid. Transcribing it is what went stale in checkWhiteFurnaceTwoSided's off-grid rows the last time the table changed resolution, and a sample that drifts onto a node measures nothing.
-// Both axes are edge-aligned and linear in the index today, so the two position accessors return the same thing; they are separate because they describe separate axes, and an axis whose spacing changes has to be able to say so here without the other one moving.
+// Both axes are edge-aligned, so index 0 and index res-1 are exact endpoints, but they are NOT both linear in the index: the mu axis is uniform in sqrt(mu), and albedoGridMu inverts that warp. Reading it rather than assuming k/(res-1) is the whole point of the accessor.
 [[nodiscard]] glm::ivec2 albedoGridRes();
 [[nodiscard]] float albedoGridRoughness(float index);
 [[nodiscard]] float albedoGridMu(float index);
