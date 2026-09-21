@@ -192,6 +192,17 @@ target_include_directories(albedo_table PRIVATE include)
 target_compile_options(albedo_table PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(albedo_table PRIVATE glm::glm)
 
+# Measured conductor (lambda, n, k) to the reflectivity/edgeTint a material JSON carries (tools/metal_fit.h). Shared as one object library by the metal_fit authoring CLI and colour_validate's drift check, so both run the same codegen; no -march=native/IPO, for albedo_table's reproducibility reason.
+add_library(metal_fit_core OBJECT tools/metal_fit.cpp src/scene/cie.cpp)
+target_include_directories(metal_fit_core PUBLIC include tools)
+target_compile_options(metal_fit_core PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(metal_fit_core PRIVATE glm::glm)
+
+add_executable(metal_fit tools/metal_fit_main.cpp $<TARGET_OBJECTS:metal_fit_core>)
+target_include_directories(metal_fit PRIVATE include tools)
+target_compile_options(metal_fit PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(metal_fit PRIVATE glm::glm)
+
 # Headless correctness checks (Phase 4): no test framework exists yet, so these follow test_pattern/downsample's standalone-CLI convention (non-zero exit on failure).
 # -march=native/IPO mirror the engine target's flags so these tools validate the exact codegen that ships, not a differently-optimized build of the same math.
 # Shared validator harness (tools/check.h, tools/stats.h). Deliberately depends on nothing but glm: the light
@@ -317,6 +328,18 @@ if(IPO_SUPPORTED)
     set_target_properties(display_validate PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
 endif()
 
+# CIE 1931 module and the measured-metal fit, checked end to end against the Fresnel the renderer shades chrome.json with.
+add_executable(colour_validate tools/colour_validate.cpp src/scene/bsdf.cpp src/scene/sampler.cpp
+               src/config/scene_config.cpp $<TARGET_OBJECTS:metal_fit_core> $<TARGET_OBJECTS:engine_check>)
+target_include_directories(colour_validate PRIVATE include tools ${JSON_DIR})
+target_compile_definitions(colour_validate PRIVATE ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets"
+                           TOOLS_DATA_DIR="${CMAKE_SOURCE_DIR}/tools/data")
+target_compile_options(colour_validate PRIVATE -Wall -Wextra -Werror -march=native)
+target_link_libraries(colour_validate PRIVATE glm::glm)
+if(IPO_SUPPORTED)
+    set_target_properties(colour_validate PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
+endif()
+
 # Headless before/after comparison renders (tools/render_beauty.cpp). Not a correctness gate and deliberately absent from the add_test loop below: its output is a picture for a human to look at, and a full-scene render is far slower than any validator. Needs OCIO (the display transform, evaluated on the CPU) and zlib (PNG encode) on top of the usual render dependencies.
 add_executable(render_beauty tools/render_beauty.cpp src/debug/power_spectrum.cpp src/scene/path_tracer.cpp
                src/scene/gbuffer_shading.cpp src/scene/embree_accel.cpp src/scene/ray_types.cpp
@@ -401,4 +424,5 @@ engine_discover_checks(bsdf_validate)
 engine_discover_checks(driver_validate)
 engine_discover_checks(io_validate)
 engine_discover_checks(display_validate)
+engine_discover_checks(colour_validate)
 
