@@ -595,9 +595,10 @@ glm::vec3 referenceEon(const glm::vec3& rho, float r, const glm::vec3& wi, const
     return result;
 }
 
-// The instrument for coatAlbedo's fresnelAvg ARGUMENT, which nothing else in this suite can see. checkAverageFresnel pins dielectricFresnelAvg the function; reverting the three call sites (bsdf.cpp:538, :805, :808) to Karis' schlickFresnelAvg(coatF0) leaves all six validators green while moving 1882 of the 1886 channels cornell changed, because clay.json's ior 1.55 is every wall, the floor and the ceiling.
+// The instrument for coatAlbedo's fresnelAvg ARGUMENT, which nothing else in this suite can see. checkAverageFresnel pins dielectricFresnelAvg the function; reverting the call sites (bsdf.cpp:545, :821, :825, all fed by the one dielectricFresnelAvg at :818) to Karis' schlickFresnelAvg(coatF0) leaves all six validators green while moving 1882 of the 1886 channels cornell changed, because clay.json's ior 1.55 is every wall, the floor and the ceiling.
 // ior=1 is the only point where the ARGUMENT's collapse is resolvable without reading the albedo table at all: there its coefficients are multiplied by exact zeros and drop out of the expression entirely, so this check needs no reference for E and asserts at tolerance zero. checkCoatFresnelAvg covers the argument's value at ior>1, which needs that reference and could not exist until the table moved offline and got accurate enough to carry it.
-// The collapse is exact in float32, term by term: dielectricF0(1)=+0, dielectricFresnelAvg(1)=(1-1)/5.08638=+0 so multiScatterTint(0,E)=+0, fresnelDielectric(mu,1,1)=+0 so coatFresnelRatio=+0, hence coatAlbedo=+0, diffuseCoupling=(1-0)/(1-0)=1, diffuseKdAt=1, and .diffuse is evaluateEon multiplied by exactly 1.0F. evaluateEon reads only diffuseRho/diffuseRoughness/wi/wo, and alpha reaches .specular alone, so params.roughness has no other route into the diffuse channel: an index-matched interface is optically absent, and its roughness cannot be observable.
+// The collapse is exact in float32, term by term: dielectricF0(1)=+0; dielectricFresnelAvg(1)=+0 because every node of its quadrature rule evaluates fresnelDielectric at etaI==etaT, where etaI/etaT is exactly 1, cos2Transmitted returns mu*mu, sqrt(mu*mu) is exactly mu and both polarisations are an exact (c-c)/(c+c), so multiScatterTint(0,E)=+0; fresnelDielectric(mu,1,1)=+0 for the same reason, one level down, so coatFresnelRatio=+0; hence coatAlbedo=+0, diffuseCoupling=(1-0)/(1-0)=1, diffuseKdAt=1, and .diffuse is evaluateEon multiplied by exactly 1.0F. evaluateEon reads only diffuseRho/diffuseRoughness/wi/wo, and alpha reaches .specular alone, so params.roughness has no other route into the diffuse channel: an index-matched interface is optically absent, and its roughness cannot be observable.
+// The mean and the ratio now collapse for one reason rather than two: both are fresnelDielectric at an index-matched interface, so the zero this asserts is structural in the function the single scatter itself evaluates, and cannot be lost to a refit of the mean.
 // Hence tolerance exactly zero, from x*1.0F == x -- an algebraic guarantee, not a measured run. The Karis revert breaks it by a measured 7.8e-4 relative, worst at roughness 0.92 / mu_o = mu_i = 1, about 8000 ULP at the diffuse value's magnitude.
 // Two facts that set the sweep, both against instinct. The deviation peaks at NORMAL incidence, not grazing: coat = msTint*(1-E(mu)) and E rises toward grazing at high roughness (0.31 at mu=1, ~0.99 at the first grid column), so a grazing-first sweep is much weaker. And it changes sign below mu~0.3 at roughness 1, so only |delta|==0 is a safe predicate; any signed bound breaks.
 // The sweep reaches mu 1e-5 deliberately, and the four rows below 2.44e-4 are the regression test for the cos^2 Snell form: the old 1 - r^2*(1 - mu*mu) transcription rounded 1.0F-mu*mu to exactly 1.0F there, reported total internal reflection at an interface that has no critical angle, and returned fresnelDielectric(mu,1,1) = 1.0F instead of +0, which breaks every term of the collapse above. cos2Transmitted collapses to mu*mu at r == 1, so the sliver is now exact rather than excluded. Do NOT extend the sweep to ior>1 -- the identity is exact only at index match.
@@ -966,7 +967,7 @@ double referenceConductorFresnel(double r, double g, double cosTheta) {
     return referenceConductorFresnelAt(referenceConductorIor(r, g), cosTheta);
 }
 
-// Exact unpolarized dielectric Fresnel, entering orientation, in double -- the reference dielectricFresnelAvg's rational fit is measured against below.
+// Exact unpolarized dielectric Fresnel, entering orientation, in double -- the reference dielectricFresnelAvg's quadrature rule is measured against below.
 double referenceDielectricFresnel(double cosTheta, double ior) {
     const double c = std::clamp(cosTheta, 0.0, 1.0);
     const double sinT2 = (1.0 - (c * c)) / (ior * ior);
@@ -998,13 +999,17 @@ double cosineAverageFresnel(Fresnel fresnel) {
 // Conductor tolerance is the fit's measured bound (max 4.0e-4 over the full clamped domain, worst near r=0.48) plus headroom. Karis' Schlick mean fails it by 216x at r=0.255 g=1, which is the point: reverting bsdf.cpp to schlickFresnelAvg must fail this test, and must NOT fail at g=1 r=1 where the old suite did all its conductor energy checking.
 ENGINE_CHECK(average_fresnel, Fast, Exact) {
     constexpr double kConductorTolerance = 5e-4;
-    // dielectricFresnelAvg's own long-standing claim, now asserted rather than only written down. Loose next to the conductor rule because it is a two-constant rational fit, not a fitted quadrature. Headroom is thin and deliberately not widened: measured worst is 0.00597 at ior 3.0 and 0.00588 at ior 1.1, ~9% under the bound, so any refit or tolerance change trips this rather than passing silently.
-    constexpr double kDielectricTolerance = 0.0065;
+    // The working band: everything any material actually authors. Measured worst 5.5e-5 at ior 1.0575 over a 0.0025-step scan of [1.05, 3.0], so this is ~1.8x headroom, matching the conductor's 5e-4 over a measured 4.0e-4. Deliberately thin, so a refit or a tolerance change trips this rather than passing silently -- the two-constant rational fit this replaced misses it by 60x.
+    constexpr double kDielectricTolerance = 1e-4;
+    // The near-index-match band, stated separately rather than absorbed into the one above, which it would loosen 8x over a region no material occupies. As ior -> 1 the reflectance becomes a boundary layer -- F(0) = 1 for every ior > 1, collapsing over a width ~sqrt(ior-1) -- and three fixed nodes cannot resolve it. Measured worst 5.9e-4 at ior 1.0057, where truth is itself 1.8e-3; it reaches coatAlbedo scaled by ~0.054, so under 3e-5 on the coupling.
+    constexpr double kNearIndexMatchTolerance = 8e-4;
+    constexpr double kNearIndexMatchIor = 1.05;
     const std::array<double, 12> reflectivities = {1e-4, 0.01, 0.1,  0.25, 0.4,  0.48,
                                                     0.555, 0.7, 0.85, 0.95, 0.99, 1.0};
     const std::array<double, 8> edgeTints = {0.0, 0.1, 0.25, 0.5, 0.6, 0.75, 0.9, 1.0};
-    // dielectricFresnelAvg's stated range, plus ior=1 where an index-matched interface reflects nothing and the fit must return exactly 0 -- the collapse Karis' mean of coatF0 does not have (it returns 1/21 there).
-    const std::array<double, 7> iors = {1.0, 1.1, 1.33, 1.5, 2.0, 2.5, 3.0};
+    // Both regimes, and the two iors that ship (glass.json 1.5168, clay.json 1.55). ior=1 is where an index-matched interface reflects nothing and the rule must return exactly 0 -- structurally here, since every node evaluates fresnelDielectric at etaI==etaT; it is the collapse Karis' mean of coatF0 does not have (it returns 1/21 there).
+    const std::array<double, 14> iors = {1.0,  1.005, 1.02, 1.05,   1.1,  1.2, 1.33, 1.5,
+                                          1.5168, 1.55,  1.8,  2.0, 2.5, 3.0};
 
     bool ok = true;
     std::cout << "bsdf_validate: average Fresnel vs quadrature (F_avg = 2*int F(mu)*mu dmu)\n";
@@ -1038,14 +1043,16 @@ ENGINE_CHECK(average_fresnel, Fast, Exact) {
     for (double ior : iors) {
         const double truth =
             cosineAverageFresnel([&](double mu) { return referenceDielectricFresnel(mu, ior); });
-        const double fit = engine::scene::dielectricFresnelAvg(static_cast<float>(ior));
-        const double error = std::abs(fit - truth);
-        std::cout << "    ior " << ior << "   fit " << fit << "   truth " << truth << "   error "
-                  << error << '\n';
-        if (!(error <= kDielectricTolerance)) {
-            std::cerr << "bsdf_validate: FAILED dielectric F_avg at ior=" << ior << " fit=" << fit
+        const double rule = engine::scene::dielectricFresnelAvg(static_cast<float>(ior));
+        const double error = std::abs(rule - truth);
+        const double tolerance =
+            ior < kNearIndexMatchIor ? kNearIndexMatchTolerance : kDielectricTolerance;
+        std::cout << "    ior " << ior << "   rule " << rule << "   truth " << truth << "   error "
+                  << error << "   tolerance " << tolerance << '\n';
+        if (!(error <= tolerance)) {
+            std::cerr << "bsdf_validate: FAILED dielectric F_avg at ior=" << ior << " rule=" << rule
                       << " vs quadrature " << truth << " (error " << error << ", tolerance "
-                      << kDielectricTolerance << ")\n";
+                      << tolerance << ")\n";
             ok = false;
         }
     }
@@ -1107,6 +1114,21 @@ double referenceCoatAlbedo(const glm::dvec2& split, double albedoAvg, double f0,
     return (((f0 * split.x) + split.y) * fresnelRatio) + (tint * (1.0 - (split.x + split.y)));
 }
 
+// The albedo-table reference is this check's whole cost -- referenceDirectionalAlbedo is a 96x96 Simpson and referenceAverageAlbedo a 64-panel Simpson over it -- and it depends only on roughness and mu, never on ior. Evaluated once per (roughness, mu) rather than once per row, which is the same arithmetic on the same inputs and so leaves every number below unchanged.
+struct CoatAlbedos {
+    glm::dvec2 splitAvg;
+    std::array<glm::dvec2, 3> split;   // parallel to the check's cosines
+};
+
+CoatAlbedos coatAlbedos(double roughness, const std::array<double, 3>& cosines) {
+    constexpr double kMinAlpha = 0.02 * 0.02;   // bsdf.cpp's roughness floor, mirrored so the reference uses the alpha the lobe used
+    const double alpha = std::max(roughness * roughness, kMinAlpha);
+    return {referenceAverageAlbedo(alpha),
+             {referenceDirectionalAlbedo(cosines[0], alpha),
+              referenceDirectionalAlbedo(cosines[1], alpha),
+              referenceDirectionalAlbedo(cosines[2], alpha)}};
+}
+
 // Everything the coupling model needs that does not depend on the free fresnelAvg, so the bisection below re-runs no quadrature.
 struct CoatGeometry {
     glm::dvec2 splitWo;
@@ -1118,17 +1140,16 @@ struct CoatGeometry {
     double ratioWi;
 };
 
-CoatGeometry coatGeometry(double ior, double roughness, double muO, double muI) {
-    constexpr double kMinAlpha = 0.02 * 0.02;   // bsdf.cpp's roughness floor, mirrored so the reference uses the alpha the lobe used
-    const double alpha = std::max(roughness * roughness, kMinAlpha);
+CoatGeometry coatGeometry(double ior, const CoatAlbedos& albedos, int indexO, int indexI, double muO,
+                           double muI) {
     const double r = (ior - 1.0) / (ior + 1.0);
     const double f0 = r * r;
     const auto schlick = [&](double mu) {
         return f0 + ((1.0 - f0) * std::pow(std::clamp(1.0 - mu, 0.0, 1.0), 5.0));
     };
-    return {referenceDirectionalAlbedo(muO, alpha),
-             referenceDirectionalAlbedo(muI, alpha),
-             referenceAverageAlbedo(alpha),
+    return {albedos.split[indexO],
+             albedos.split[indexI],
+             albedos.splitAvg,
              f0,
              f0 + ((1.0 - f0) / 21.0),
              referenceDielectricFresnel(muO, ior) / std::max(schlick(muO), 1e-6),
@@ -1151,25 +1172,32 @@ double referenceCoupling(const CoatGeometry& geometry, double fresnelAvg) {
 // The instrument for coatAlbedo's fresnelAvg VALUE at working ior, which checkIndexMatchedCoat says outright it cannot supply: it pins the argument's COLLAPSE at index match, where every table coefficient is multiplied by an exact zero, and notes that any g(ior) with g(1)=0 passes it -- notably 2*dielectricFresnelAvg(ior). This is the other half.
 // Method: the diffuse channel is exactly evaluateEon times the coat coupling, so dividing it by this file's own referenceEon -- the one checkIndexMatchedCoat already pins to 1e-6 relative -- leaves the coupling alone, with no accessor into the albedo table needed. referenceCoupling models that coupling with fresnelAvg free, and the sweep inverts it, so what is reported is the F_avg the shipped code actually used rather than a pass/fail on a difference.
 // Deliberately NOT measured as diffuse(ior)/diffuse(ior=1), which is the tempting form since checkIndexMatchedCoat proves the denominator is exactly evaluateEon: that identity holds only for a fresnelAvg that collapses at index match, so the very revert this must catch (Karis' mean returns 1/21 at ior=1) would corrupt the denominator too and the recovered number would stop meaning what it says. Measured that way the Karis revert reads 0.0435 rather than its actual 0.0857 -- still a failure, but a failure reported as the wrong cause.
-// Truth is 2*int F(mu)*mu dmu by the same cosineAverageFresnel checkAverageFresnel uses, ~1e-13 accurate, so the tolerance is not set by the reference. It is set by dielectricFresnelAvg's own rational-fit error, measured against that quadrature at 0.00228 (ior 1.5), 0.00201 (1.5168), 0.00149 (1.55) and 0.00184 (1.8) -- 0.0035 leaves 35% headroom at the worst of those without admitting the alternatives.
-// Which is the whole difficulty, and why the ior range is what it is. Karis' schlickFresnelAvg(coatF0), the candidate a revert would install, is not uniformly worse: it misses truth by 0.00269 at ior 1.3 where the fit misses by 0.00544, crosses over near ior 1.42, and only then diverges. Starting at 1.5 is what makes the separation real rather than a coin toss; stopping at 1.8 is because the fit's own error climbs back to 0.00369 by ior 2.0 and would fail its own bound.
-// Both candidates measured by mutation, which is the only way this claim means anything. Reverting all three sites to schlickFresnelAvg(coatF0) recovers 0.0856466 against that function's own 0.0857143 -- the instrument names it, to 7e-5 -- and fails by 1.8x at ior 1.5 rising to 2.5x at 1.8. Substituting 2*dielectricFresnelAvg recovers 0.179022 against its 0.178996 and fails by 25x to 39x. Unmutated, the recovery lands 6.6e-5 from dielectricFresnelAvg's own value, so what the tolerance is actually spending is the fit's error and not the instrument's.
-// The albedo table is the other reason this could not exist before: F_avg enters coatAlbedo only through multiScatterTint(F, Eavg)*(1-E(mu)), whose derivative in F is ~0.054 here, so an error e in E recovers as e/0.054 in F_avg. At the old 32x32 startup table's ~1.5e-3 that is 0.028, eight times the tolerance below; at the offline bake's measured 3e-5 quadrature plus 3.2e-5 bilinear it is ~1.2e-3, a third of it.
+// Truth is 2*int F(mu)*mu dmu by the same cosineAverageFresnel checkAverageFresnel uses, ~1e-13 accurate, so the tolerance is not set by the reference. Nor is it any longer set by dielectricFresnelAvg, whose own error at these iors is 3.3e-6 to 2.2e-5 since it became a quadrature rule over the same fresnelDielectric the coat reflects by. What the tolerance now spends is the albedo table and this inversion: measured worst 1.2e-4 at ior 3.0, and 7.0e-5 at ior 1.5, so 2e-4 is ~1.7x headroom on the worst row.
+// That inverts what this check is FOR. It was the instrument for F_avg; it is now an instrument for src/scene/albedo_table.inc, and a regeneration of that table that loses accuracy trips here first. F_avg enters coatAlbedo only through multiScatterTint(F, Eavg)*(1-E(mu)), whose derivative in F is ~0.054, so an error e in E recovers as e/0.054 in F_avg -- at the old 32x32 startup table's ~1.5e-3 that is 0.028, 140x this tolerance, which is why this check could not exist before the bake moved offline.
+// Worth recording that the same derivation predicted ~1.2e-3 for the offline bake's 3e-5 quadrature plus 3.2e-5 bilinear, and the realised residual is 1.2e-4, 10x better. The e/0.054 route is the multiple-scattering path alone; the dC/dF column shows the recovery's actual conditioning is ~0.81-0.91, because coatAlbedoAvg's fresnelAvg/karisAvg rescale sits in the 1/(1-coatAlbedoAvg) denominator and carries most of the signal. The prediction was pessimistic by the ratio of those two routes, not wrong in kind.
+// The ior range is now the full one, 1.1 to 3.0. It was 1.5 to 1.8 because the rational fit was not uniformly better than the Karis mean a revert would install -- it crossed over near ior 1.42 -- so below that the separation was a coin toss, and above 2.0 the fit failed its own bound. Neither constraint survives a rule that is within 2.3e-5 at every swept ior, and 4.5e-5 across the whole continuous range.
+// All three candidates re-measured by mutation, which is the only way this claim means anything, and each fails at every ior in the sweep. Reverting to schlickFresnelAvg(coatF0) recovers 0.0856466 against that function's own 0.0857143 -- the instrument still names it, to 7e-5 -- and fails by 31x at ior 1.5, 123x at 1.1, and 3.5x at its weakest (ior 2.5, where Karis happens to cross truth). Substituting 2*dielectricFresnelAvg fails by 126x to 1381x. Reverting to the rational fit this replaced, which this check used to PASS at 0.0035, fails by 12x at ior 1.5 and 30x at 1.1. Unmutated, the recovery lands 7.0e-5 from dielectricFresnelAvg's own value at ior 1.5.
 ENGINE_CHECK(coat_fresnel_average, Slow, Exact) {
-    constexpr double kTolerance = 0.0035;
+    constexpr double kTolerance = 2e-4;
     // Residual of the recovered root, not an accuracy claim: it catches a coupling the model cannot reproduce at ANY fresnelAvg (a lost 1/(1-coatAvg), a dropped wi-side factor), which an in-range root would otherwise launder into a plausible number.
     constexpr double kResidualTolerance = 1e-6;
-    const std::array<double, 4> iors = {1.5, 1.5168, 1.55, 1.8};
+    const std::array<double, 9> iors = {1.1, 1.33, 1.5, 1.5168, 1.55, 1.8, 2.0, 2.5, 3.0};
     // Roughness 0 is excluded: 1-E is ~0 there, so F_avg reaches nothing and is not observable at all. Nothing here is aligned to the table's grid, so the shipped side interpolates and this reference does not -- that difference is inside the tolerance and is measured by the worst-error column rather than designed away.
     const std::array<double, 4> roughnesses = {0.25, 0.5, 0.75, 1.0};
     const std::array<double, 3> cosines = {0.4, 0.7, 1.0};
     const glm::vec3 albedo(0.8F, 0.3F, 0.1F);
     constexpr float kDiffuseRoughness = 0.5F;
 
+    // Hoisted out of the ior loop as well as the row loop: the albedo reference does not depend on ior, so the whole sweep costs four referenceAverageAlbedo and twelve referenceDirectionalAlbedo evaluations however many iors are swept.
+    std::array<CoatAlbedos, roughnesses.size()> albedosByRoughness{};
+    for (size_t r = 0; r < roughnesses.size(); ++r) {
+        albedosByRoughness[r] = coatAlbedos(roughnesses[r], cosines);
+    }
+
     bool ok = true;
     int rowsChecked = 0;
     std::cout << "bsdf_validate: coat F_avg recovered from the diffuse coupling vs exact quadrature\n";
-    std::cout << "  ior      truth      worst recovered   |err|      at roughness/mu_o/mu_i\n";
+    std::cout << "  ior      truth      worst recovered   |err|      dC/dF    at roughness/mu_o/mu_i\n";
     for (double ior : iors) {
         const double truth =
             cosineAverageFresnel([&](double mu) { return referenceDielectricFresnel(mu, ior); });
@@ -1178,9 +1206,13 @@ ENGINE_CHECK(coat_fresnel_average, Slow, Exact) {
         double worstRoughness = 0.0;
         double worstMuO = 0.0;
         double worstMuI = 0.0;
-        for (double roughness : roughnesses) {
-            for (double muO : cosines) {
-                for (double muI : cosines) {
+        double worstSlope = 0.0;
+        for (size_t r = 0; r < roughnesses.size(); ++r) {
+            const double roughness = roughnesses[r];
+            for (size_t o = 0; o < cosines.size(); ++o) {
+                const double muO = cosines[o];
+                for (size_t i = 0; i < cosines.size(); ++i) {
+                    const double muI = cosines[i];
                     const float sinO = std::sqrt(std::max(0.0F, 1.0F - static_cast<float>(muO * muO)));
                     const float sinI = std::sqrt(std::max(0.0F, 1.0F - static_cast<float>(muI * muI)));
                     const glm::vec3 wo(sinO, 0.0F, static_cast<float>(muO));
@@ -1196,11 +1228,29 @@ ENGINE_CHECK(coat_fresnel_average, Slow, Exact) {
                     const double measured =
                         static_cast<double>(maxChannel(diffuse)) / maxChannel(bare);
 
-                    // Bisection on a bracket wide enough for every candidate a revert could install, 2*dielectricFresnelAvg included; an out-of-bracket measurement is itself a failure, caught by the residual below.
-                    // Monotone increasing, which is not the obvious direction: raising F_avg raises coatAlbedo everywhere, but it raises coatAlbedoAvg fastest through the F_avg/schlickFresnelAvg(coatF0) rescale, and that sits in the 1/(1-coatAlbedoAvg) denominator. Measured slope here is +0.74 per unit F_avg, so the recovered value is far better conditioned than the multiple-scattering path alone would make it.
-                    const CoatGeometry geometry = coatGeometry(ior, roughness, muO, muI);
+                    // The bracket is the model's own monotone branch, not a fixed interval. referenceCoupling is unimodal in fresnelAvg rather than monotone: raising fresnelAvg raises coatAlbedoAvg fastest through the fresnelAvg/schlickFresnelAvg(coatF0) rescale, and once that drives coatAlbedoAvg past its own turning point the 1/(1-coatAlbedoAvg) denominator sends the coupling back down. The turning point lies INSIDE the fixed [0, 0.6] bracket this used to bisect, at every ior swept -- measured 0.104 at ior 1.1 rising to 0.419 at 3.0, always at roughness 1 and normal incidence -- so a measurement whose root sat on the rising branch could still be answered with the bracket's ceiling, which is what widening the sweep to ior 1.1 exposed.
+                    // Located by ternary search, which is what unimodality buys and is exact to (2/3)^60 of the interval. Bisection then runs on [0, argmax], where the inversion is well posed, and a measurement with no root there is reported by the residual below. All three mutations named above stay inside the branch at every row and so fail on value, not on form: the residual fires on none of them.
+                    // Monotone increasing, which is not the obvious direction: raising F_avg raises coatAlbedo everywhere, but it raises coatAlbedoAvg fastest through the F_avg/schlickFresnelAvg(coatF0) rescale, and that sits in the 1/(1-coatAlbedoAvg) denominator. The dC/dF column below reports that slope per ior rather than remembering it: it is what converts a coupling error into the recovered F_avg error, so a row is only as trustworthy as its own conditioning, and the low-ior rows are the ones where the multiple-scattering route's own 2*F*Eavg contribution has faded.
+                    const CoatGeometry geometry = coatGeometry(ior, albedosByRoughness[r],
+                                                                static_cast<int>(o),
+                                                                static_cast<int>(i), muO, muI);
+                    constexpr double kBracketCeiling = 0.6;   // wide enough to contain every candidate a revert could install, before the monotone branch is cut out of it
+                    double peakLow = 0.0;
+                    double peakHigh = kBracketCeiling;
+                    for (int step = 0; step < 60; ++step) {
+                        const double third = (peakHigh - peakLow) / 3.0;
+                        const double lowerThird = peakLow + third;
+                        const double upperThird = peakHigh - third;
+                        if (referenceCoupling(geometry, lowerThird) <
+                            referenceCoupling(geometry, upperThird)) {
+                            peakLow = lowerThird;   // the peak is right of lowerThird
+                        } else {
+                            peakHigh = upperThird;
+                        }
+                    }
+                    const double peak = 0.5 * (peakLow + peakHigh);
                     double low = 0.0;
-                    double high = 0.6;
+                    double high = peak;
                     for (int step = 0; step < 60; ++step) {
                         const double middle = 0.5 * (low + high);
                         (referenceCoupling(geometry, middle) < measured ? low : high) = middle;
@@ -1208,6 +1258,11 @@ ENGINE_CHECK(coat_fresnel_average, Slow, Exact) {
                     const double recovered = 0.5 * (low + high);
                     const double residual = std::abs(referenceCoupling(geometry, recovered) - measured);
                     const double error = std::abs(recovered - truth);
+                    // Central difference, wide enough to stay clear of the bisection's own 0.6*2^-60 resolution and narrow enough that the coupling is linear across it.
+                    constexpr double kSlopeStep = 1e-4;
+                    const double slope = (referenceCoupling(geometry, recovered + kSlopeStep) -
+                                           referenceCoupling(geometry, recovered - kSlopeStep)) /
+                                          (2.0 * kSlopeStep);
                     ++rowsChecked;
                     if (error > worstError) {
                         worstError = error;
@@ -1215,13 +1270,14 @@ ENGINE_CHECK(coat_fresnel_average, Slow, Exact) {
                         worstRoughness = roughness;
                         worstMuO = muO;
                         worstMuI = muI;
+                        worstSlope = slope;
                     }
                     if (!(residual <= kResidualTolerance)) {
                         std::cerr << "bsdf_validate: FAILED coat F_avg inversion at ior=" << ior
                                    << " roughness=" << roughness << " mu_o=" << muO << " mu_i=" << muI
                                    << " -- measured coupling " << measured
-                                   << " is not reproduced at any fresnelAvg in [0, 0.6] (closest "
-                                   << recovered << ", residual " << residual
+                                   << " is not reproduced at any fresnelAvg on the model's monotone branch [0, "
+                                   << peak << "] (closest " << recovered << ", residual " << residual
                                    << "). The coat's form, not its F_avg, has changed.\n";
                         ok = false;
                     }
@@ -1237,7 +1293,8 @@ ENGINE_CHECK(coat_fresnel_average, Slow, Exact) {
             }
         }
         std::cout << "    " << ior << "   " << truth << "   " << worstRecovered << "   " << worstError
-                   << "   " << worstRoughness << " / " << worstMuO << " / " << worstMuI << '\n';
+                   << "   " << worstSlope << "   " << worstRoughness << " / " << worstMuO << " / "
+                   << worstMuI << '\n';
     }
     // Anti-vacuity, checkIndexMatchedCoat's device: a sweep that asserted nothing would print clean too.
     if (rowsChecked == 0) {
