@@ -169,7 +169,7 @@ constexpr int kR2Shift = 32 - std::countr_zero(static_cast<unsigned>(kMaskSize))
 // the image, IS low-frequency error -- measured at 199x white noise in the lowest octave, the opposite of the intent.
 // Translating instead makes the components mutually decorrelated (a blue-noise mask's autocorrelation is near-delta, so
 // two different lags are effectively independent) while each component stays exactly the same blue-noise field in screen
-// space. That is a cheap stand-in for the paper's Sec. 3 annealed d-vector matrix, which remains the principled upgrade.
+// space. The paper's Sec. 3 d = 2 vector matrix was measured as the alternative and not adopted: its energy leaves each component 0.23x white in the low band against the mask's 5e-5x, and render error did not improve.
 // Channels are numbered as hashSeed's `extra` already is -- each dimension set owns 2*set and 2*set+1 -- so a 1D draw
 // and either half of a 2D draw can never land on the same translation.
 // The tile wraps by masking rather than by modulo: kMaskSize is a power of two, so this is also correct for the negative
