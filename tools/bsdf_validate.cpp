@@ -1107,6 +1107,21 @@ double referenceCoatAlbedo(const glm::dvec2& split, double albedoAvg, double f0,
     return (((f0 * split.x) + split.y) * fresnelRatio) + (tint * (1.0 - (split.x + split.y)));
 }
 
+// The albedo-table reference is this check's whole cost -- referenceDirectionalAlbedo is a 96x96 Simpson and referenceAverageAlbedo a 64-panel Simpson over it -- and it depends only on roughness and mu, never on ior. Evaluated once per (roughness, mu) rather than once per row, which is the same arithmetic on the same inputs and so leaves every number below unchanged.
+struct CoatAlbedos {
+    glm::dvec2 splitAvg;
+    std::array<glm::dvec2, 3> split;   // parallel to the check's cosines
+};
+
+CoatAlbedos coatAlbedos(double roughness, const std::array<double, 3>& cosines) {
+    constexpr double kMinAlpha = 0.02 * 0.02;   // bsdf.cpp's roughness floor, mirrored so the reference uses the alpha the lobe used
+    const double alpha = std::max(roughness * roughness, kMinAlpha);
+    return {referenceAverageAlbedo(alpha),
+             {referenceDirectionalAlbedo(cosines[0], alpha),
+              referenceDirectionalAlbedo(cosines[1], alpha),
+              referenceDirectionalAlbedo(cosines[2], alpha)}};
+}
+
 // Everything the coupling model needs that does not depend on the free fresnelAvg, so the bisection below re-runs no quadrature.
 struct CoatGeometry {
     glm::dvec2 splitWo;
@@ -1118,17 +1133,16 @@ struct CoatGeometry {
     double ratioWi;
 };
 
-CoatGeometry coatGeometry(double ior, double roughness, double muO, double muI) {
-    constexpr double kMinAlpha = 0.02 * 0.02;   // bsdf.cpp's roughness floor, mirrored so the reference uses the alpha the lobe used
-    const double alpha = std::max(roughness * roughness, kMinAlpha);
+CoatGeometry coatGeometry(double ior, const CoatAlbedos& albedos, int indexO, int indexI, double muO,
+                           double muI) {
     const double r = (ior - 1.0) / (ior + 1.0);
     const double f0 = r * r;
     const auto schlick = [&](double mu) {
         return f0 + ((1.0 - f0) * std::pow(std::clamp(1.0 - mu, 0.0, 1.0), 5.0));
     };
-    return {referenceDirectionalAlbedo(muO, alpha),
-             referenceDirectionalAlbedo(muI, alpha),
-             referenceAverageAlbedo(alpha),
+    return {albedos.split[indexO],
+             albedos.split[indexI],
+             albedos.splitAvg,
              f0,
              f0 + ((1.0 - f0) / 21.0),
              referenceDielectricFresnel(muO, ior) / std::max(schlick(muO), 1e-6),
@@ -1166,6 +1180,12 @@ ENGINE_CHECK(coat_fresnel_average, Slow, Exact) {
     const glm::vec3 albedo(0.8F, 0.3F, 0.1F);
     constexpr float kDiffuseRoughness = 0.5F;
 
+    // Hoisted out of the ior loop as well as the row loop: the albedo reference does not depend on ior, so the whole sweep costs four referenceAverageAlbedo and twelve referenceDirectionalAlbedo evaluations however many iors are swept.
+    std::array<CoatAlbedos, roughnesses.size()> albedosByRoughness{};
+    for (size_t r = 0; r < roughnesses.size(); ++r) {
+        albedosByRoughness[r] = coatAlbedos(roughnesses[r], cosines);
+    }
+
     bool ok = true;
     int rowsChecked = 0;
     std::cout << "bsdf_validate: coat F_avg recovered from the diffuse coupling vs exact quadrature\n";
@@ -1178,9 +1198,12 @@ ENGINE_CHECK(coat_fresnel_average, Slow, Exact) {
         double worstRoughness = 0.0;
         double worstMuO = 0.0;
         double worstMuI = 0.0;
-        for (double roughness : roughnesses) {
-            for (double muO : cosines) {
-                for (double muI : cosines) {
+        for (size_t r = 0; r < roughnesses.size(); ++r) {
+            const double roughness = roughnesses[r];
+            for (size_t o = 0; o < cosines.size(); ++o) {
+                const double muO = cosines[o];
+                for (size_t i = 0; i < cosines.size(); ++i) {
+                    const double muI = cosines[i];
                     const float sinO = std::sqrt(std::max(0.0F, 1.0F - static_cast<float>(muO * muO)));
                     const float sinI = std::sqrt(std::max(0.0F, 1.0F - static_cast<float>(muI * muI)));
                     const glm::vec3 wo(sinO, 0.0F, static_cast<float>(muO));
@@ -1198,7 +1221,9 @@ ENGINE_CHECK(coat_fresnel_average, Slow, Exact) {
 
                     // Bisection on a bracket wide enough for every candidate a revert could install, 2*dielectricFresnelAvg included; an out-of-bracket measurement is itself a failure, caught by the residual below.
                     // Monotone increasing, which is not the obvious direction: raising F_avg raises coatAlbedo everywhere, but it raises coatAlbedoAvg fastest through the F_avg/schlickFresnelAvg(coatF0) rescale, and that sits in the 1/(1-coatAlbedoAvg) denominator. Measured slope here is +0.74 per unit F_avg, so the recovered value is far better conditioned than the multiple-scattering path alone would make it.
-                    const CoatGeometry geometry = coatGeometry(ior, roughness, muO, muI);
+                    const CoatGeometry geometry = coatGeometry(ior, albedosByRoughness[r],
+                                                                static_cast<int>(o),
+                                                                static_cast<int>(i), muO, muI);
                     double low = 0.0;
                     double high = 0.6;
                     for (int step = 0; step < 60; ++step) {
