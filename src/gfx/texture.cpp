@@ -1,6 +1,8 @@
 #include "engine/gfx/texture.h"
 
 #include <cstddef>
+#include <cstdint>
+#include <cstdlib>
 #include <utility>
 
 #include <GL/glew.h>
@@ -10,7 +12,42 @@
 
 namespace engine::gfx {
 
-Texture::Texture(unsigned int id) : id_(id) {}
+namespace {
+
+GLint glInternalFormat(TexelFormat format) {
+    switch (format) {
+        case TexelFormat::RGBA16F:
+            return GL_RGBA16F;
+        case TexelFormat::RGBA32F:
+            return GL_RGBA32F;
+    }
+    std::abort();
+}
+
+// 4 channels x component size: binary16 is 2 bytes, binary32 is sizeof(float).
+std::size_t bytesPerTexel(TexelFormat format) {
+    switch (format) {
+        case TexelFormat::RGBA16F:
+            return 4 * sizeof(std::uint16_t);
+        case TexelFormat::RGBA32F:
+            return 4 * sizeof(float);
+    }
+    std::abort();
+}
+
+}  // namespace
+
+const char* texelFormatName(TexelFormat format) {
+    switch (format) {
+        case TexelFormat::RGBA16F:
+            return "RGBA16F";
+        case TexelFormat::RGBA32F:
+            return "RGBA32F";
+    }
+    std::abort();
+}
+
+Texture::Texture(unsigned int id, TexelFormat format) : id_(id), format_(format) {}
 
 Texture::~Texture() {
     if (id_ != 0) {
@@ -21,6 +58,7 @@ Texture::~Texture() {
 
 Texture::Texture(Texture&& other) noexcept
     : id_(std::exchange(other.id_, 0)),
+      format_(other.format_),
       width_(std::exchange(other.width_, 0)),
       height_(std::exchange(other.height_, 0)),
       byteSize_(std::exchange(other.byteSize_, 0)) {}
@@ -32,6 +70,7 @@ Texture& Texture::operator=(Texture&& other) noexcept {
             glDeleteTextures(1, &id_);
         }
         id_ = std::exchange(other.id_, 0);
+        format_ = other.format_;
         width_ = std::exchange(other.width_, 0);
         height_ = std::exchange(other.height_, 0);
         byteSize_ = std::exchange(other.byteSize_, 0);
@@ -39,7 +78,7 @@ Texture& Texture::operator=(Texture&& other) noexcept {
     return *this;
 }
 
-Texture Texture::createFromFloatPixels(int width, int height, const float* rgba) {
+Texture Texture::createFromFloatPixels(int width, int height, const float* rgba, TexelFormat format) {
     unsigned int id = 0;
     GL_CALL(glGenTextures(1, &id));
     GL_CALL(glBindTexture(GL_TEXTURE_2D, id));
@@ -50,7 +89,7 @@ Texture Texture::createFromFloatPixels(int width, int height, const float* rgba)
     GL_CALL(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR));
     GL_CALL(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR));
 
-    Texture texture(id);
+    Texture texture(id, format);
     texture.upload(width, height, rgba);
     GL_CALL(glBindTexture(GL_TEXTURE_2D, 0));
     return texture;
@@ -65,12 +104,12 @@ void Texture::upload(int width, int height, const float* rgba) {
         return;
     }
     GL_CALL(glBindTexture(GL_TEXTURE_2D, id_));
-    GL_CALL(glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, rgba));
+    GL_CALL(glTexImage2D(GL_TEXTURE_2D, 0, glInternalFormat(format_), width, height, 0, GL_RGBA, GL_FLOAT, rgba));
     width_ = width;
     height_ = height;
     engine::debug::trackGpuFree(byteSize_);
-    // RGBA16F = 4 channels * 2 bytes/channel. No mip chain, so no ~1/3 addition -- the HUD's GPU memory readout drops by that much for this texture, reporting what is actually allocated.
-    byteSize_ = static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 8;
+    // No mip chain, so no ~1/3 addition -- the HUD's GPU memory readout reports what is actually allocated.
+    byteSize_ = static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * bytesPerTexel(format_);
     engine::debug::trackGpuAlloc(byteSize_);
 }
 

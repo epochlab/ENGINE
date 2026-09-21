@@ -18,12 +18,14 @@
 #include <vector>
 
 #include <glm/glm.hpp>
+#include <nlohmann/json.hpp>
 
 #include "check.h"
 #include "engine/config/profile_config.h"
 #include "engine/config/scene_config.h"
 #include "engine/debug/bench_log.h"
 #include "engine/gfx/hdr_image.h"
+#include "engine/gfx/texture.h"
 
 namespace {
 
@@ -234,6 +236,57 @@ ENGINE_CHECK(profile_config_rejects_malformed_input, Fast, Exact) {
     std::filesystem::remove(missing);
     ENGINE_EXPECT(ctx, !engine::config::loadProfileConfig(missing.string()).has_value(),
                   "loadProfileConfig accepted a path that does not exist");
+}
+
+// render.vsync and render.textureBitDepth, each varied alone on the shipped profile: every accepted value must map to its own setting, every other value must be refused rather than coerced (16.5 would otherwise truncate to 16).
+ENGINE_CHECK(profile_config_render_display_settings, Fast, Exact) {
+    using engine::gfx::TexelFormat;
+    struct Case {
+        const char* name;
+        const char* key;
+        nlohmann::json value;  // null = key removed
+        std::optional<TexelFormat> format;  // expected on accept; nullopt = must be rejected
+        bool vsync;
+    };
+    const std::vector<Case> cases = {
+        {"textureBitDepth 16", "textureBitDepth", 16, TexelFormat::RGBA16F, true},
+        {"textureBitDepth 32", "textureBitDepth", 32, TexelFormat::RGBA32F, true},
+        {"vsync false", "vsync", false, TexelFormat::RGBA16F, false},
+        {"textureBitDepth 8", "textureBitDepth", 8, std::nullopt, true},
+        {"textureBitDepth 24", "textureBitDepth", 24, std::nullopt, true},
+        {"textureBitDepth 16.5", "textureBitDepth", 16.5, std::nullopt, true},
+        {"textureBitDepth \"16\"", "textureBitDepth", "16", std::nullopt, true},
+        {"textureBitDepth missing", "textureBitDepth", nullptr, std::nullopt, true},
+        {"vsync 1", "vsync", 1, std::nullopt, true},
+        {"vsync \"true\"", "vsync", "true", std::nullopt, true},
+        {"vsync missing", "vsync", nullptr, std::nullopt, true},
+    };
+
+    ctx.plan(static_cast<int>(cases.size()));
+    std::ifstream shippedFile(std::filesystem::path(ASSET_ROOT_DIR) / "config" / "profile.json");
+    const nlohmann::json shipped = nlohmann::json::parse(shippedFile);
+    for (const Case& testCase : cases) {
+        nlohmann::json edited = shipped;
+        if (testCase.value.is_null()) {
+            edited["render"].erase(testCase.key);
+        } else {
+            edited["render"][testCase.key] = testCase.value;
+        }
+        const std::filesystem::path path = writeJson("engine_io_profile_render.json", edited.dump());
+        const std::optional<engine::config::ProfileConfig> loaded = engine::config::loadProfileConfig(path.string());
+        std::filesystem::remove(path);
+        char detail[224];
+        if (testCase.format.has_value()) {
+            std::snprintf(detail, sizeof(detail), "loadProfileConfig rejected or mis-mapped %s", testCase.name);
+            ENGINE_EXPECT(ctx,
+                          loaded.has_value() && loaded->render.displayTextureFormat == *testCase.format &&
+                              loaded->render.vsync == testCase.vsync,
+                          detail);
+        } else {
+            std::snprintf(detail, sizeof(detail), "loadProfileConfig accepted %s", testCase.name);
+            ENGINE_EXPECT(ctx, !loaded.has_value(), detail);
+        }
+    }
 }
 
 // The film-back catalogue's own contract: every preset's dimensions feed Camera::verticalFovRadians() as a

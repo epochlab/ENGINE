@@ -292,7 +292,7 @@ void drawFrameSection(const HudFrameData& frame) {
                       ImVec2(ImGui::GetContentRegionAvail().x, 40.0F));
     ImGui::Text("min %.2f  max %.2f ms", frame.frameStats.minMs(), frame.frameStats.maxMs());
     ImGui::Text("GPU  post %.2f ms", frame.postMs);
-    ImGui::Text("Cap  vsync");
+    ImGui::Text("Cap  %s", frame.vsync ? "vsync" : "off");
     ImGui::Text("LUT  %s", frame.lutName);
     if (frame.pathTraced.hasResult) {
         if (frame.pathTraced.maxSamples > 0) {
