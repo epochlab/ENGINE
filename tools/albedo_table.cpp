@@ -43,9 +43,16 @@ constexpr double kPi = 3.14159265358979323846;
 // actually ships at r, which is alpha = max(r*r, kMinAlpha), not of an unclamped alpha the shading never evaluates.
 constexpr float kMinAlpha = 0.02F * 0.02F;
 
-// Reflect side. 128 rather than the 32 that fit in a startup budget: the bilinear error of the stored grid is a second
-// error source beside the quadrature's, and at 32 it is the same order (~1e-3 near grazing, where E climbs steeply).
-constexpr int kAlbedoRes = 128;
+// Reflect side, three resolutions rather than one square grid, each sized by what checkAlbedoTableInterpolation measures on that axis (tools/bsdf_validate.cpp). The bilinear read of the stored grid is a second error source beside the quadrature's, and it is the one that dominates: at 128x128 uniform it was 4.2e-2 in the first mu cell against a 3.0e-5 quadrature residual.
+// Roughness 256: that axis' error is a smooth single-signed hump, not a boundary layer, so only resolution touches it. At 128 it measured 1.1e-3, and it enters every shade as a bias rather than as noise a render averages out. Quartering it puts the axis under the quadrature's own residual, which is the stopping criterion -- past that the stored values are the limit and further rows buy nothing.
+// mu 256, uniform in sqrt(mu) (reflectMu). The warp is what the grazing layer needs: a uniform mu axis puts that whole layer inside one cell for roughness below ~0.1, where the error saturates at the layer's full amplitude (measured 4.2e-2), and the layer's width is ~alpha in mu and so ~sqrt(alpha) in the warped axis, which is what lets one fixed warp serve every roughness row rather than an alpha-dependent one.
+// The doubling is what the warp COSTS, measured rather than assumed. A warp moves cells, it does not add them: cell width in mu becomes 2 sqrt(mu)/(res-1), so at mu = 0.4 the cells are 1.27x a uniform axis' and the error there rose with them. At 128 that turned checkCoatFresnelAvg's worst row from 5.1e-5 into 8.7e-5 -- a regression on the very instrument this table is read by, whose worst rows all sit at mu 0.4. 256 buys the working band back at 0.63x the original uniform width and quarters the grazing layer at the same time.
+// An alpha-dependent warp was measured and rejected instead of assumed: Smith G1 as the axis coordinate resolves each row's own layer exactly, but at alpha 0.25 it compresses mu in [0.3, 1] into 12% of the axis, for 5.3e-4 against a uniform axis' 1.2e-5 in exactly the band that matters -- two extra sqrt in a hot lookup to buy a 40x regression where E is not flat.
+constexpr int kAlbedoRoughnessRes = 256;
+constexpr int kAlbedoMuRes = 256;
+
+// The reflected multiple-scattering lobe's sampling grid, uniform in mu and deliberately its own constant rather than kAlbedoMuRes: bsdf.cpp's piecewise-linear inversion depends on one step width, so this axis cannot carry the albedo table's warp, and a later change to that warp's resolution must not silently resize a sampling density. The transmit side already keeps its msTransmit shape uniform for the same reason.
+constexpr int kMsReflectMuRes = 128;
 
 // Transmit side, sized by the energy closure it buys: linear interpolation in mu (the steep grazing rise) and in eta (curvature through the TIR onset) sets the per-vertex error once the quadrature is converged.
 // Measured on a white ior-1.5 interface: 32 mu nodes lose 2% at mu 0.02, and 32 eta nodes lose 9e-4 midway between eta nodes against 1e-4 on them; 64 x 64 closes to within 3e-4. Roughness keeps 32 nodes, where node and midpoint already agree to that level.
@@ -59,23 +66,13 @@ constexpr double kEtaMax = 2.5;
 // Gauss-Legendre nodes per panel on the transmit side, in phi and in each psi panel; verifyTransmit reports the table's residual against a doubled rule on every bake.
 constexpr int kTransmitNodes = 48;
 
-double smithLambda(double ndotV, double alpha) {
-    const double ndotV2 = std::max(ndotV * ndotV, 1e-8);
-    const double tan2 = std::max(0.0, 1.0 - ndotV2) / ndotV2;
-    return 0.5 * (-1.0 + std::sqrt(1.0 + (alpha * alpha * tan2)));
-}
-
-// Reflect side only, where the grid starts at mu = 1e-3 and this agrees with the radical form below to 1e-16: re-associating it would move the committed opaque table by float rounding for nothing.
-double smithG2(double ndotV, double ndotL, double alpha) {
-    return 1.0 / (1.0 + smithLambda(ndotV, alpha) + smithLambda(ndotL, alpha));
-}
-
 double smithRadical(double cosTheta, double alpha) {
     const double alpha2 = alpha * alpha;
     return std::sqrt(alpha2 + ((1.0 - alpha2) * cosTheta * cosTheta));
 }
 
 // Height-correlated G2 divided by cosO, 2 cosI/(cosI s(cosO) + cosO s(cosI)) (bsdf.cpp's smithVisibility times 4 cosI): no cosine divides, so it holds to cosO = 0, where it is 2/alpha.
+// Both sides use it, and the reflect side now MUST. The lambda form it replaced there carries a max(cos^2, 1e-8) clamp, which was harmless while the reflect grid started at mu = 1e-3 (cos^2 = 1e-6, clear of it) and is not once reflectMu's node 1 is mu = 6.2e-5: the clamp would silently substitute a different cosine on the grazing rows with no diagnostic at all. It also supplies the exact grazing limit the warp's node 0 needs, which a form that divides by cosO cannot.
 double smithG2OverCosO(double cosO, double cosI, double alpha) {
     return 2.0 * cosI / ((cosI * smithRadical(cosO, alpha)) + (cosO * smithRadical(cosI, alpha)));
 }
@@ -169,7 +166,7 @@ Split reflectAlbedo(double mu, double alpha, const GaussLegendre& phiRule, const
                 const double woDotH = radius * std::cos(thetaH - delta);
                 const double wiZ = radius * std::cos((2.0 * thetaH) - delta);
                 const double weight = phiRule.weight[p] * psiRule.weight[s] * psiMax *
-                                       (woDotH / std::cos(thetaH)) * smithG2(mu, wiZ, alpha) *
+                                       (woDotH / std::cos(thetaH)) * smithG2OverCosO(mu, wiZ, alpha) *
                                        std::sin(psi) * std::cos(psi);
                 const double fc = std::pow(std::clamp(1.0 - woDotH, 0.0, 1.0), 5.0);
                 a += weight * (1.0 - fc);
@@ -177,7 +174,12 @@ Split reflectAlbedo(double mu, double alpha, const GaussLegendre& phiRule, const
             }
         }
     }
-    return {a / mu, b / mu};
+    // The 1/mu that used to divide out here is inside smithG2OverCosO, which is what lets mu = 0 be a real node.
+    // It is never 0/0 there, by two separate arguments. On the first phi panel delta is +pi/2, so wiZ vanishes only at
+    // psiMax, which Gauss-Legendre's strictly interior nodes never reach. On the second delta is -pi/2 and psiMax is
+    // exactly 0, so every node sits at psi = 0 and the weight carries psiMax and sin(psi) as exact zero factors -- the
+    // panel contributes nothing, which is correct: no facet reflects a grazing wo above the horizon on that side.
+    return {a, b};
 }
 
 // --- Transmit side: Gauss-Legendre in the reflect side's NDF measure, panelled at the interface's own boundaries.
@@ -295,7 +297,7 @@ void parallelRows(int rows, Row row) {
 // --- Table assembly.
 
 struct AlbedoTable {
-    std::vector<float> a;  // [roughnessIndex][muIndex], kAlbedoRes^2
+    std::vector<float> a;  // [roughnessIndex][muIndex], kAlbedoRoughnessRes * kAlbedoMuRes
     std::vector<float> b;
     std::vector<float> aavg;  // cosine-weighted means, 2*integral(.(mu)*mu dmu)
     std::vector<float> bavg;
@@ -309,10 +311,11 @@ struct AlbedoTable {
     std::vector<float> msTransmitCdf;
 };
 
-// mu = 0 is a degenerate view direction (wo lies in the surface plane); nudge off it, as the runtime lookup's own
-// clamp does. Only the mu = 0 grid column is affected and nothing samples it at full weight.
-double gridMu(int index, int resolution) {
-    return std::max(static_cast<double>(index) / static_cast<double>(resolution - 1), 1e-3);
+// The reflect table's mu axis, uniform in sqrt(mu) as the escape tables' escapeMu already is, and for the same reason one axis down: E climbs from its grazing limit over mu ~ alpha, a layer a uniform grid spans with well under one cell at low roughness. bsdf.cpp's directionalAlbedo indexes it by sqrt(mu) to match.
+// Node 0 is mu = 0 itself, not a nudge off it: E(0, alpha) = 1 exactly for every alpha, and smithG2OverCosO holds to that limit, so the column that used to be the table's worst is now its sharpest. buildReflect asserts the identity on every row.
+double reflectMu(int index) {
+    const double t = static_cast<double>(index) / static_cast<double>(kAlbedoMuRes - 1);
+    return t * t;
 }
 
 // The escape tables' mu axis, uniform in sqrt(mu): E climbs from its grazing limit over mu ~ alpha (G1 ~ 2mu/alpha below it), which a uniform mu grid spans with under two cells at roughness 0.15, so nodes crowd toward grazing as sqrt spacing puts them. bsdf.cpp's escapeAlbedo indexes by sqrt(mu) to match.
@@ -334,18 +337,29 @@ void buildReflect(AlbedoTable& table, int phiNodes, int psiNodes, int muNodes) {
     const GaussLegendre phiRule = gaussLegendre(phiNodes);
     const GaussLegendre psiRule = gaussLegendre(psiNodes);
     const GaussLegendre muRule = gaussLegendre(muNodes);
-    table.a.assign(static_cast<std::size_t>(kAlbedoRes) * kAlbedoRes, 0.0F);
-    table.b.assign(static_cast<std::size_t>(kAlbedoRes) * kAlbedoRes, 0.0F);
-    table.aavg.assign(kAlbedoRes, 0.0F);
-    table.bavg.assign(kAlbedoRes, 0.0F);
+    table.a.assign(static_cast<std::size_t>(kAlbedoRoughnessRes) * kAlbedoMuRes, 0.0F);
+    table.b.assign(static_cast<std::size_t>(kAlbedoRoughnessRes) * kAlbedoMuRes, 0.0F);
+    table.aavg.assign(kAlbedoRoughnessRes, 0.0F);
+    table.bavg.assign(kAlbedoRoughnessRes, 0.0F);
     // One roughness row per worker. Rows share no accumulator and each writes only its own slice, so the result is
     // identical to the serial order -- the determinism the committed artifact needs survives the threading.
-    parallelRows(kAlbedoRes, [&](int ri) {
-        const double alpha = gridAlpha(ri, kAlbedoRes);
-        for (int mi = 0; mi < kAlbedoRes; ++mi) {
-            const Split split = reflectAlbedo(gridMu(mi, kAlbedoRes), alpha, phiRule, psiRule);
-            table.a[static_cast<std::size_t>((ri * kAlbedoRes) + mi)] = static_cast<float>(split.a);
-            table.b[static_cast<std::size_t>((ri * kAlbedoRes) + mi)] = static_cast<float>(split.b);
+    parallelRows(kAlbedoRoughnessRes, [&](int ri) {
+        const double alpha = gridAlpha(ri, kAlbedoRoughnessRes);
+        for (int mi = 0; mi < kAlbedoMuRes; ++mi) {
+            const Split split = reflectAlbedo(reflectMu(mi), alpha, phiRule, psiRule);
+            table.a[static_cast<std::size_t>((ri * kAlbedoMuRes) + mi)] = static_cast<float>(split.a);
+            table.b[static_cast<std::size_t>((ri * kAlbedoMuRes) + mi)] = static_cast<float>(split.b);
+        }
+        // E(0, alpha) = 1 exactly, for every alpha: at mu = 0 the integrand collapses to 2 cos(phi) sin^2(psi), whose
+        // normalised integral over the domain is 1 -- a grazing surface loses no energy to masking. An analytic
+        // identity on the axis' new endpoint, so it costs nothing and is sharp. A bake-time abort rather than a
+        // shading-time guard: a row that misses it means the quadrature is wrong at the limit the warp exists to reach.
+        const double grazing = static_cast<double>(table.a[static_cast<std::size_t>(ri * kAlbedoMuRes)]) +
+                                static_cast<double>(table.b[static_cast<std::size_t>(ri * kAlbedoMuRes)]);
+        if (!(std::abs(grazing - 1.0) < 1e-6)) {
+            std::cerr << "albedo_table: roughness row " << ri << " has E(mu=0) = " << grazing
+                      << ", not 1 -- the reflect quadrature does not reach its own grazing limit\n";
+            std::exit(EXIT_FAILURE);
         }
         double aMean = 0.0;
         double bMean = 0.0;
@@ -399,6 +413,20 @@ void buildTransmit(AlbedoTable& table, int nodes) {
     });
 }
 
+// Reflect-side E at a uniform-mu density node, read through the sqrt(mu) axis exactly as bsdf.cpp's directionalAlbedo
+// reads it at that roughness row, float arithmetic included. The escape side's escapeAtUniformMu is the same operation
+// one axis wider; they stay separate because their strides, resolutions and channel pairs all differ.
+float reflectAtUniformMu(const AlbedoTable& table, int ri, int mi) {
+    const float mf = std::sqrt(static_cast<float>(mi) / static_cast<float>(kMsReflectMuRes - 1)) * (kAlbedoMuRes - 1);
+    const int m0 = std::min(static_cast<int>(mf), kAlbedoMuRes - 2);
+    const float mt = mf - static_cast<float>(m0);
+    const auto at = [&](int m) {
+        const auto index = static_cast<std::size_t>((ri * kAlbedoMuRes) + m);
+        return table.a[index] + table.b[index];
+    };
+    return at(m0) + (mt * (at(m0 + 1) - at(m0)));
+}
+
 // --- Sampling shape for the reflected multiple-scattering lobe (README section 5.1's exact (1-E)cos sampler).
 // That lobe's value is fms*(1-E(mu_o))*(1-E(mu_i))/(pi*(1-Eavg)), so its own zero-variance density is
 // (1-E(mu_i))*cos / (pi*(1-Eavg)), and cosine sampling pays the ratio (1-E(mu_i))/(1-Eavg) as weight variance.
@@ -411,21 +439,21 @@ void buildTransmit(AlbedoTable& table, int nodes) {
 // then disagree about. With the density stored, bsdf.cpp inverts it exactly (one quadratic per segment) and evaluates
 // the same interpolant for its pdf, so the pair is consistent by construction at any resolution and the remaining
 // approximation is only how closely the interpolant tracks (1-E)*mu -- variance, never bias.
-// Same mu grid as the albedo table, so the shape is built from the E values the shading actually reads, with no
-// second interpolation between them.
+// Uniform in mu, unlike the albedo table's sqrt(mu) axis, so bsdf.cpp's piecewise-linear inversion keeps one step
+// width; each node reads E through that warp exactly as the shading does, so the shape is still built from the values
+// the shading actually sees. The transmit twin below is the same arrangement one axis wider.
 void buildMultipleScatteringShape(AlbedoTable& table) {
-    const double step = 1.0 / (kAlbedoRes - 1);
-    table.msDensity.assign(static_cast<std::size_t>(kAlbedoRes) * kAlbedoRes, 0.0F);
-    table.msCdf.assign(static_cast<std::size_t>(kAlbedoRes) * kAlbedoRes, 0.0F);
-    for (int ri = 0; ri < kAlbedoRes; ++ri) {
-        std::vector<double> raw(kAlbedoRes);
-        for (int mi = 0; mi < kAlbedoRes; ++mi) {
-            const auto index = static_cast<std::size_t>((ri * kAlbedoRes) + mi);
-            const double deficit = 1.0 - (table.a[index] + table.b[index]);
+    const double step = 1.0 / (kMsReflectMuRes - 1);
+    table.msDensity.assign(static_cast<std::size_t>(kAlbedoRoughnessRes) * kMsReflectMuRes, 0.0F);
+    table.msCdf.assign(static_cast<std::size_t>(kAlbedoRoughnessRes) * kMsReflectMuRes, 0.0F);
+    for (int ri = 0; ri < kAlbedoRoughnessRes; ++ri) {
+        std::vector<double> raw(kMsReflectMuRes);
+        for (int mi = 0; mi < kMsReflectMuRes; ++mi) {
+            const double deficit = 1.0 - static_cast<double>(reflectAtUniformMu(table, ri, mi));
             raw[static_cast<std::size_t>(mi)] = deficit * mi * step;
         }
         double norm = 0.0;
-        for (int mi = 0; mi + 1 < kAlbedoRes; ++mi) {
+        for (int mi = 0; mi + 1 < kMsReflectMuRes; ++mi) {
             norm += 0.5 * (raw[static_cast<std::size_t>(mi)] + raw[static_cast<std::size_t>(mi) + 1]) * step;
         }
         // 1-E is strictly positive at every roughness the table reaches (measured minimum 1.4e-7, at roughness 0), so this is a bake-time assertion and not a shading-time guard: a non-positive row would mean the albedo table itself is wrong, and silently substituting cosine would hide that.
@@ -435,14 +463,14 @@ void buildMultipleScatteringShape(AlbedoTable& table) {
             std::exit(EXIT_FAILURE);
         }
         double cdf = 0.0;
-        for (int mi = 0; mi < kAlbedoRes; ++mi) {
-            const auto index = static_cast<std::size_t>((ri * kAlbedoRes) + mi);
+        for (int mi = 0; mi < kMsReflectMuRes; ++mi) {
+            const auto index = static_cast<std::size_t>((ri * kMsReflectMuRes) + mi);
             const double density = raw[static_cast<std::size_t>(mi)] / norm;
             if (mi > 0) {
                 cdf += 0.5 * (table.msDensity[index - 1] + density) * step;
             }
             table.msDensity[index] = static_cast<float>(density);
-            table.msCdf[index] = static_cast<float>(mi == kAlbedoRes - 1 ? 1.0 : cdf);
+            table.msCdf[index] = static_cast<float>(mi == kMsReflectMuRes - 1 ? 1.0 : cdf);
         }
     }
 }
@@ -514,9 +542,9 @@ Residual verifyReflect(const AlbedoTable& table, int phiNodes, int psiNodes, int
             const double delta = std::abs(static_cast<double>((*shipped)[i]) -
                                            static_cast<double>((*exact)[i]));
             if (delta > channelWorst.value) {
-                const int stride = shipped->size() == table.aavg.size() ? 1 : kAlbedoRes;
+                const int stride = shipped->size() == table.aavg.size() ? 1 : kAlbedoMuRes;
                 channelWorst = {delta, name, static_cast<int>(i) / stride,
-                                 stride == 1 ? -1 : static_cast<int>(i) % kAlbedoRes};
+                                 stride == 1 ? -1 : static_cast<int>(i) % kAlbedoMuRes};
             }
         }
         std::cout << "albedo_table: " << name << " residual " << channelWorst.value
@@ -589,15 +617,17 @@ bool writeInc(const std::string& path, const AlbedoTable& table, double residual
     out << "// Generated by tools/albedo_table.cpp -- do not edit. Regenerate with:\n"
            "//   ./build/albedo_table --out src/scene/albedo_table.inc\n"
            "// Kulla-Conty energy tables, indexed by perceptual roughness rather than alpha: E is far better\n"
-           "// distributed in sqrt(alpha), and it is what callers already hold. Both grids are edge-aligned, so\n"
+           "// distributed in sqrt(alpha), and it is what callers already hold. Every grid is edge-aligned, so\n"
            "// roughness 0 and mu 1 are exact table entries and bsdf.cpp's lookups can interpolate on k/(res-1).\n"
+           "// BOTH mu axes are uniform in sqrt(mu), mu = (k/(res-1))^2, so nodes crowd where E climbs from its\n"
+           "// grazing limit over mu ~ alpha; bsdf.cpp indexes each of them by sqrt(mu). The reflect side's node\n"
+           "// 0 is mu = 0 itself, where E = 1 exactly for every alpha and the bake asserts that identity. The\n"
+           "// two multiple-scattering shapes below stay uniform in mu, where their piecewise-linear inversion\n"
+           "// has one step width.\n"
            "// Reflect side (a, b, aavg, bavg) is exact-domain Gauss-Legendre, residual "
         << residual << " against a doubled rule.\n"
            "// Transmit side (r, t, ravg, tavg) is Gauss-Legendre in the NDF measure at "
         << transmitNodes << " nodes per panel, residual " << transmitResidual << " against a doubled rule.\n"
-           "// Its mu axis is uniform in sqrt(mu), mu = (k/(res-1))^2, so nodes crowd where E climbs from its\n"
-           "// grazing limit over mu ~ alpha; bsdf.cpp's escapeAlbedo indexes it by sqrt(mu). The msTransmit\n"
-           "// shape below stays uniform in mu, where its piecewise-linear inversion has one step width.\n"
            "// kMsReflectDensity/kMsReflectCdf are the reflected multiple-scattering lobe's sampling shape: a\n"
            "// piecewise-linear density over mu, proportional to (1-E(mu))*mu and normalised to 1, with its exact\n"
            "// prefix integrals. bsdf.cpp inverts the first and evaluates it for the matching pdf.\n"
@@ -605,7 +635,9 @@ bool writeInc(const std::string& path, const AlbedoTable& table, double residual
            "// table's eta axis and stored UNNORMALISED: bsdf.cpp blends four rows over (roughness, eta) and\n"
            "// divides by the blended total, so the sampled shape is the raw-deficit interpolation escapeAlbedo\n"
            "// performs and a numerically zero row cannot contribute a unit-mass shape of amplified noise.\n";
-    out << "\nconstexpr int kAlbedoRes = " << kAlbedoRes << ";\n"
+    out << "\nconstexpr int kAlbedoRoughnessRes = " << kAlbedoRoughnessRes << ";\n"
+        << "constexpr int kAlbedoMuRes = " << kAlbedoMuRes << ";\n"
+        << "constexpr int kMsReflectMuRes = " << kMsReflectMuRes << ";\n"
         << "constexpr int kTransmitRoughnessRes = " << kTransmitRoughnessRes << ";\n"
         << "constexpr int kTransmitMuRes = " << kTransmitMuRes << ";\n"
         << "constexpr int kEtaRes = " << kEtaRes << ";\n"
@@ -665,7 +697,7 @@ int main(int argc, char** argv) {
     if (!writeInc(outPath, table, residual.value, transmitNodes, transmitResidual)) {
         return EXIT_FAILURE;
     }
-    std::cout << "albedo_table: wrote " << outPath << " (reflect " << kAlbedoRes << "x" << kAlbedoRes
+    std::cout << "albedo_table: wrote " << outPath << " (reflect " << kAlbedoRoughnessRes << "x" << kAlbedoMuRes
               << " at " << phiNodes << " nodes, residual " << residual.value << " in " << residual.channel
               << " at roughnessIndex " << residual.roughnessIndex << " muIndex " << residual.muIndex
               << "; transmit " << kTransmitRoughnessRes << "x" << kTransmitMuRes << "x" << kEtaRes << " at "
