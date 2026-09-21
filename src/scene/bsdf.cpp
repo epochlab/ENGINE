@@ -389,16 +389,27 @@ glm::vec3 sampleCosineHemisphere(glm::vec2 u) {
 }
 
 // The two average-Fresnel terms have external linkage: bsdf.h declares them for tools/bsdf_validate.cpp's checkAverageFresnel, the only instrument in the suite that can see an error in either (see the header comment). Everything around them stays internal.
-// Cosine-weighted average Fresnel, the normalisation both the multiple-scattering tint and the reciprocal diffuse coupling need. The dielectric one is the standard rational fit, accurate to 0.0065 absolute over ior in [1.1, 3.0] against exact quadrature (measured, and asserted by checkAverageFresnel); it enters as the 1/(1-Favg) normalisation, a 0.25% effect at ior 1.5, and as the coat's own multiple-scattering attenuation in coatAlbedo.
-float dielectricFresnelAvg(float ior) { return (ior - 1.0F) / ((4.08567F + (1.00071F * ior))); }
-
-// Cosine-weighted average of the exact conductor Fresnel, as a 3-node quadrature rule sum(w_i*F(mu_i)) over the same fresnelConductorChannel the single scatter evaluates, so the average and the term it compensates describe one interface. Karis' mean is exact for Schlick and therefore the mean of a DIFFERENT function once the single scatter is complex-IOR; worse, its error changes sign with edgeTint, which f0 alone cannot express.
+// Cosine-weighted average Fresnel, 2*int_0^1 F(mu)*mu dmu -- the normalisation both the multiple-scattering tint and the reciprocal diffuse coupling need. One 3-node quadrature rule sum(w_i*F(mu_i)) serves both interfaces, each evaluated over the same Fresnel its own single scatter evaluates, so an average and the term it compensates always describe one interface.
 // Nodes and weights fitted by equality-constrained least squares against 128-point Gauss-Legendre over the whole clamped Gulbrandsen domain (r in [1e-4, 0.9999] x g in [0, 1]): max absolute error 4.0e-4, RMS 1.2e-4, measured in float32 through the shipped inversion. Karis is 216x worse there (max 0.086, at r=0.255 g=1).
 // A rational fit over (r, g) was measured and rejected: at r=0.99 the inverted n collapses from 39.8 to 0.005 across the last tenth of g, a boundary layer no low-order form in that chart holds -- 49 terms reached only 9e-3. Sampling the function's own values sidesteps the chart, and (n, k) is what F_avg actually depends on.
-// Weights sum to 1 (to 1e-9 in float32), so the rule is near-exact wherever F is constant in mu -- the r->1 mirror checkWhiteFurnaceTwoSided runs on, where it lands within 4e-8 -- and is bounded by F itself, so it cannot leave [0, 1] by more than that residual. multiScatterTint's 1/(1-Favg) survives the overshoot regardless: its f*f*a numerator goes to zero on the same approach.
+// Weights sum to exactly 1.0F in float32, so each rule is near-exact wherever its F is constant in mu -- the r->1 mirror checkWhiteFurnaceTwoSided runs on, where the conductor lands within 4e-8 -- and is a convex combination of F values, so it cannot leave [0, 1] at all. multiScatterTint's 1/(1-Favg) survives the endpoint regardless: its f*f*a numerator goes to zero on the same approach.
 constexpr float kFresnelAvgNodes[3] = {0.105319802F, 0.382154433F, 0.796427281F};
 constexpr float kFresnelAvgWeights[3] = {0.038972482F, 0.280518736F, 0.680508783F};
 
+// The dielectric interface, over the same fresnelDielectric coatFresnelRatio and the specular lobe evaluate. The nodes were fitted on the conductor family alone and carried here unrefitted: measured worst 5.5e-5 over ior in [1.05, 3.0] (at 1.0575) and 4.5e-5 over [1.1, 3.0], against 6.5e-3 for the two-constant rational fit this replaces (at 1.17) and 2.5e-2 for Karis' Schlick mean (at 1.1). At the iors that ship it is 4.8e-6 (1.5), 4.1e-6 (1.5168), 3.3e-6 (1.55) and 6.0e-6 (1.8).
+// Uniformity is the point, not just the magnitude: the rational fit was worse than the Schlick mean it replaced below ior ~1.42, which is why checkCoatFresnelAvg could only sweep 1.5-1.8. The rule beats both everywhere except two windows -- ior <= 1.0046 (below), and a 4.4e-4-wide sliver at 1.6518 where the fit's own error crosses zero and any fit is momentarily exact, the rule still being within 3.0e-6 there.
+// Exactly +0 at ior 1, structurally rather than by an algebraic accident of a numerator: etaI/etaT is exactly 1, so cos2Transmitted returns mu*mu, sqrt(mu*mu) is exactly mu, and both polarisations are an exact (c-c)/(c+c). checkIndexMatchedCoat requires that zero at tolerance exactly 0, and it now comes from the same function the single scatter calls, collapsing for the same reason.
+// Known limitation, bounded and measured: as ior -> 1 the reflectance becomes a boundary layer -- F(0) = 1 for every ior > 1, collapsing over a width ~sqrt(ior-1) -- which three fixed nodes cannot resolve. Worst 5.9e-4 at ior 1.0057, where truth is itself 1.8e-3. It reaches coatAlbedo scaled by d(coatAlbedo)/dF_avg ~ 0.054, so ~3.2e-5 on the coupling, and no shipped material is in that band. checkAverageFresnel asserts it as its own named band rather than widening the working one.
+// The exact closed form of the integral (d'Eon & Irving 2011) was rejected. It would re-derive the interface in a second place, which is the desynchronisation fresnel_dielectric.h exists to prevent, one level up; its accuracy is unobservable, since the only instrument that can read F_avg is itself table-limited at ~1e-4; and its log((ior-1)/(ior+1)) and 1/(ior^4-1) terms cancel catastrophically in exactly the ior -> 1 band above, trading a measured 5.9e-4 for an unmeasured one plus a Taylor branch and a special case to recover the zero this gets for free.
+float dielectricFresnelAvg(float ior) {
+    float sum = 0.0F;
+    for (int i = 0; i < 3; ++i) {
+        sum += kFresnelAvgWeights[i] * fresnelDielectric(kFresnelAvgNodes[i], 1.0F, ior);
+    }
+    return sum;
+}
+
+// The conductor interface, over the same fresnelConductorChannel its single scatter evaluates. Karis' mean is exact for Schlick and therefore the mean of a DIFFERENT function once the single scatter is complex-IOR; worse, its error changes sign with edgeTint, which f0 alone cannot express.
 glm::vec3 conductorFresnelAvg(const glm::vec3& n, const glm::vec3& k) {
     glm::vec3 sum(0.0F);
     for (int i = 0; i < 3; ++i) {
@@ -454,7 +465,7 @@ float coatFresnelRatio(float cosTheta, float etaI, float etaT, float f0) {
 // Total directional albedo of the dielectric coat: single scatter plus its own multiple-scattering lobe. This, not the macro-facet Fresnel F(mu_o), is what the coat actually reflects: at roughness 1 and mu 0.4 the two differ by 4x (0.030 vs 0.129), and coupling the diffuse substrate to F(mu_o) hands that difference to neither lobe, measured as a 10% energy loss before this was used.
 // fresnelRatio rescales the single-scatter term by exact-dielectric / Schlick Fresnel at this direction. The table is built on Schlick's basis (so one table serves any f0) but the specular lobe evaluates exact fresnelDielectric, and Schlick under-predicts it at grazing, leaving the substrate too much energy and creating ~1.4% at smooth grazing angles.
 // The rescale makes the two agree exactly in the smooth limit, where the coat albedo is the Fresnel term, and approximately as roughness widens the lobe away from the macro angle. It also collapses correctly at ior=1, where exact Fresnel is identically zero but Schlick's (1-c)^5 tail is not.
-// fresnelAvg is the coat's own cosine mean, dielectricFresnelAvg(ior), for the same reason fresnelRatio rescales the single scatter: the coat reflects by exact fresnelDielectric, so Karis' Schlick mean of coatF0 describes the wrong function here too (-0.0061 against -0.0023 at ior 1.5) and, unlike the exact mean, does not collapse to 0 at ior=1 where the interface reflects nothing.
+// fresnelAvg is the coat's own cosine mean, dielectricFresnelAvg(ior), for the same reason fresnelRatio rescales the single scatter: the coat reflects by exact fresnelDielectric, so Karis' Schlick mean of coatF0 describes the wrong function here too (-0.0061 against -4.8e-6 at ior 1.5) and, unlike the quadrature rule over that same Fresnel, does not collapse to 0 at ior=1 where the interface reflects nothing.
 float coatAlbedo(const AlbedoSplit& split, float albedoAvg, float f0, float fresnelRatio,
                   float fresnelAvg) {
     return (split.at(f0) * fresnelRatio) +
@@ -490,6 +501,10 @@ struct LobeProbabilities {
     float albedoWo;         // E(mu_o, roughness), Fresnel-free
     float albedoAvg;        // Eavg(roughness)
     float coatF0;           // dielectric f0 implied by ior, for the diffuse coupling
+    // The coat's own cosine-mean Fresnel, dielectricFresnelAvg(ior). Separate from fresnelAvg below, which is the
+    // metallic-blended mean the specular lobe needs and is wrong for the coat at any metallic > 0; hoisted so the
+    // mean is evaluated once per evaluation rather than again on every wi in diffuseKdAt.
+    float coatFresnelAvg;
     glm::vec3 fresnelAvg;
     // Complex IOR inverted from (f0, edgeTint) once per evaluation rather than once per lobe call.
     // Set to the index-matched (1, 0) when metallic==0, where no consumer reads them: evaluateSpecularLobe
@@ -521,12 +536,13 @@ glm::vec3 transmitMultiScatter(const BsdfParams& params, float mu, float msPdf, 
 }
 
 // The full reciprocal coupling factor at wi: the wo-side half is precomputed into lobes.diffuseKd, the
-// wi-side half is the same (1 - coatAlbedo) evaluated here.
+// wi-side half is the same (1 - coatAlbedo) evaluated here. The cosine mean is lobes.coatFresnelAvg, the same float
+// computeLobeProbabilities already produced from the same params.ior -- bit-identical to recomputing it here.
 float diffuseKdAt(const BsdfParams& params, const glm::vec3& wi, const LobeProbabilities& lobes) {
     const AlbedoSplit splitWi = directionalAlbedo(wi.z, params.roughness);
     const float coat = coatAlbedo(splitWi, lobes.albedoAvg, lobes.coatF0,
                                    coatFresnelRatio(wi.z, lobes.etaI, lobes.etaT, lobes.coatF0),
-                                   dielectricFresnelAvg(params.ior));
+                                   lobes.coatFresnelAvg);
     return std::max(lobes.diffuseKd, 0.0F) * (1.0F - coat);
 }
 
@@ -814,7 +830,7 @@ LobeProbabilities computeLobeProbabilities(const BsdfParams& params, const glm::
         diffuseKd = diffuseCoupling * (1.0F - params.metallic) * (1.0F - params.transmissionFactor);
         transmitPhysicalValue = transmittance * params.transmissionFactor;
     }
-    // Each interface's own cosine mean, matching the Fresnel its single scatter evaluates: the quadrature rule for the conductor's complex IOR, the standard rational fit for the dielectric. conductorAvg is 0 off the metal path, where glm::mix at t=0 returns the dielectric term exactly.
+    // Each interface's own cosine mean, matching the Fresnel its single scatter evaluates: one 3-node quadrature rule, over the conductor's complex IOR and over the dielectric's respectively. conductorAvg is 0 off the metal path, where glm::mix at t=0 returns the dielectric term exactly.
     const glm::vec3 fresnelAvg = glm::mix(glm::vec3(dielectricAvg), conductorAvg, params.metallic);
     // msEnergy is exact -- evaluateSpecularLobe's opaqueMs integrates over the hemisphere to fms*(1-E(mu_o)), since int (1-E(mu_i)) cos = pi*(1-Eavg). diffuseEnergy drops evaluateDiffuseLobe's wi-side coat factor; selection mass need only be proportional to energy, not equal to it.
     const float msReflectEnergy = ((multiScatterTint(fresnelAvg.x, splitAvg.total()) +
@@ -843,6 +859,7 @@ LobeProbabilities computeLobeProbabilities(const BsdfParams& params, const glm::
                             .albedoWo = splitWo.total(),
                             .albedoAvg = splitAvg.total(),
                             .coatF0 = coatF0,
+                            .coatFresnelAvg = dielectricAvg,
                             .fresnelAvg = fresnelAvg,
                             .conductorN = conductor.n,
                             .conductorK = conductor.k,
