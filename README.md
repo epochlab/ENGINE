@@ -234,6 +234,11 @@ Validation infrastructure needed for large/complex changes that have no closed-f
   - Not urgent for shipped content: `glass.json` is roughness 0.02, below `kSmoothAlpha` (`bsdf.cpp:465`), so it takes the delta branch and no shipped material shows this. It gates authoring rough glass. Recorded here because this blind spot is why the Cornell glass sphere's dark grazing band had to be measured before it could be called correct optics -- refractive deviation past 60 degrees against a Fresnel term still under 0.35, on a disc flat to 1.0000 inside 90%.
 - **Band calibration tool**: derived bands are verified by mutation (each converted band detects a smaller error than the one it replaced), but not yet by a standing false-rejection-rate measurement over many seeds.
 - **Histogram coverage**: `debug/histogram.cpp` is FBO/PBO-bound with no CPU-reachable binning function, so it has no validator. Needs the bin arithmetic extracted first.
+- **Display-texture staging has no validator**: `uploadDisplayTexture`/`ensurePathTraceDisplayTexture` (`main.cpp`) are the only path between a published `HdrImage` and what the screen shows, and nothing asserts anything about them. Same shape as Histogram coverage above -- GL-bound, so the testable logic has to be extracted first -- but the target is not the conversion: asserting the staged texels equal `static_cast<Half>` of the source is tautological, since that is literally the loop. What is untested is the surrounding contract, which is real logic with real failure modes:
+  - the cache key (image pointer, owner `shared_ptr` identity, `RasterGBuffer::generation`) must rebuild on a new pass and must NOT rebuild on a channel-view or AOV change that reuses the same texels;
+  - `displayStaging` and `displayColormap` must be re-sized correctly across a render-resolution switch (`renderScale` vs `interactiveRenderScale`), where a stale size would upload a short or mismatched buffer;
+  - the BounceCount branch must Turbo-map into that reused scratch without carrying the previous resolution's texels.
+  Extracting the staging/sizing step from the GL call would make all three CPU-reachable and exact.
 
 ### Wave 5: Performance, each item justified by the benchmark log (§2)
 
