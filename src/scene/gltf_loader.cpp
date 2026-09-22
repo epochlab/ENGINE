@@ -64,21 +64,23 @@ std::optional<int> extrasTextureIndex(const char* extrasJson, const std::string&
     return value;
 }
 
-std::optional<engine::gfx::ImageTexture> loadTexture(const cgltf_texture* texture, const std::string& dir,
-                                                      engine::gfx::ScalarType textureType) {
+template <int N>
+std::optional<engine::gfx::ImageTexture<N>> loadTexture(const cgltf_texture* texture, const std::string& dir,
+                                                        engine::gfx::ScalarType textureType) {
     if (texture == nullptr || texture->image == nullptr || texture->image->uri == nullptr) {
         return std::nullopt;
     }
-    return engine::gfx::loadImageTexture(dir + "/" + texture->image->uri, textureType);
+    return engine::gfx::loadImageTexture<N>(dir + "/" + texture->image->uri, textureType);
 }
 
-std::optional<engine::gfx::ImageTexture> loadTextureByIndex(const cgltf_data* data, std::optional<int> index,
-                                                             const std::string& dir, engine::gfx::ScalarType textureType) {
+template <int N>
+std::optional<engine::gfx::ImageTexture<N>> loadTextureByIndex(const cgltf_data* data, std::optional<int> index,
+                                                                const std::string& dir, engine::gfx::ScalarType textureType) {
     if (!index.has_value() || *index < 0 ||
         static_cast<cgltf_size>(*index) >= data->textures_count) {
         return std::nullopt;
     }
-    return loadTexture(&data->textures[static_cast<cgltf_size>(*index)], dir, textureType);
+    return loadTexture<N>(&data->textures[static_cast<cgltf_size>(*index)], dir, textureType);
 }
 
 glm::mat4 localNodeTransform(const cgltf_node* node) {
@@ -217,21 +219,23 @@ std::optional<std::vector<unsigned int>> readIndices(const cgltf_accessor* indic
 // DOES reference a texture but fails to resolve/decode it (bad path, corrupt file) is a real
 // error and must still propagate as nullopt, not silently default -- distinguishing these two
 // nullopt-producing cases is exactly what loadTexture/loadTextureByIndex can't do alone.
-std::optional<engine::gfx::ImageTexture> resolveTexture(const cgltf_texture* texture, const std::string& dir,
-                                                         engine::gfx::ScalarType textureType, engine::gfx::ImageTexture fallback) {
+template <int N>
+std::optional<engine::gfx::ImageTexture<N>> resolveTexture(const cgltf_texture* texture, const std::string& dir,
+                                                           engine::gfx::ScalarType textureType, engine::gfx::ImageTexture<N> fallback) {
     if (texture == nullptr) {
         return fallback;
     }
-    return loadTexture(texture, dir, textureType);
+    return loadTexture<N>(texture, dir, textureType);
 }
 
-std::optional<engine::gfx::ImageTexture> resolveTextureByIndex(const cgltf_data* data, std::optional<int> index,
-                                                                 const std::string& dir, engine::gfx::ScalarType textureType,
-                                                                 engine::gfx::ImageTexture fallback) {
+template <int N>
+std::optional<engine::gfx::ImageTexture<N>> resolveTextureByIndex(const cgltf_data* data, std::optional<int> index,
+                                                                   const std::string& dir, engine::gfx::ScalarType textureType,
+                                                                   engine::gfx::ImageTexture<N> fallback) {
     if (!index.has_value()) {
         return fallback;
     }
-    return loadTextureByIndex(data, index, dir, textureType);
+    return loadTextureByIndex<N>(data, index, dir, textureType);
 }
 
 std::optional<Material> loadMaterialTextures(const cgltf_data* data, const cgltf_material& mat,
@@ -240,14 +244,13 @@ std::optional<Material> loadMaterialTextures(const cgltf_data* data, const cgltf
     auto baseColor = resolveTexture(mat.pbr_metallic_roughness.base_color_texture.texture, dir, textureType,
                                      defaults.baseColorTexture);
     auto normal = resolveTexture(mat.normal_texture.texture, dir, textureType, defaults.normalTexture);
-    auto ao = resolveTexture(mat.occlusion_texture.texture, dir, textureType, defaults.aoTexture);
     auto roughness = resolveTextureByIndex(
         data, extrasTextureIndex(mat.extras.data, "roughnessTexture"), dir, textureType, defaults.roughnessTexture);
     auto specular = resolveTextureByIndex(
         data, extrasTextureIndex(mat.extras.data, "specularTexture"), dir, textureType, defaults.specularTexture);
     auto bump = resolveTextureByIndex(data, extrasTextureIndex(mat.extras.data, "bumpTexture"), dir, textureType,
                                        defaults.bumpTexture);
-    if (!baseColor || !normal || !ao || !roughness || !specular || !bump) {
+    if (!baseColor || !normal || !roughness || !specular || !bump) {
         std::cerr << "loadGltf: material '" << (mat.name != nullptr ? mat.name : "<unnamed>")
                    << "' references a texture that failed to load\n";
         return std::nullopt;
@@ -255,7 +258,7 @@ std::optional<Material> loadMaterialTextures(const cgltf_data* data, const cgltf
 
     return Material{
         std::move(*baseColor), std::move(*normal), std::move(*bump),
-        std::move(*roughness), std::move(*specular), std::move(*ao),
+        std::move(*roughness), std::move(*specular),
     };
 }
 

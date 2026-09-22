@@ -45,47 +45,55 @@ inline constexpr ScalarType kScalarType = ScalarType::Float32;
 template <>
 inline constexpr ScalarType kScalarType<Half> = ScalarType::Float16;
 
+// EXR channel names in storage order. The first N are what an N-channel image reads; a 4th is only ever reached by loadExr's full-RGBA path.
+inline constexpr std::array<const char*, 4> kChannelNames{"R", "G", "B", "A"};
+
 template <typename T>
 struct ExrPixels {
     int width;
     int height;
-    std::vector<T> rgba;
+    std::vector<T> data;
 };
 
-std::size_t texelIndex(int x, int y, int width) {
-    return ((static_cast<std::size_t>(y) * static_cast<std::size_t>(width)) + static_cast<std::size_t>(x)) * 4;
+std::size_t texelIndex(int x, int y, int width, int channels) {
+    return ((static_cast<std::size_t>(y) * static_cast<std::size_t>(width)) + static_cast<std::size_t>(x)) *
+           static_cast<std::size_t>(channels);
 }
 
 // Calls f with the stored texel vector through a two-way branch on the variant's fixed index, so f inlines; std::visit dispatches through libc++'s function-pointer table (__fmatrix), an indirect call per sample.
-template <typename F>
-glm::vec4 withTexels(const ImageTexture& image, F&& f) {
+template <int N, typename F>
+glm::vec<N, float, glm::defaultp> withTexels(const ImageTexture<N>& image, F&& f) {
     if (const auto* half = std::get_if<std::vector<Half>>(&image.texels)) {
         return f(*half);
     }
     return f(*std::get_if<std::vector<float>>(&image.texels));
 }
 
-template <typename T>
-glm::vec4 widenTexel(const std::vector<T>& rgba, std::size_t idx) {
-    return {static_cast<float>(rgba[idx + 0]), static_cast<float>(rgba[idx + 1]), static_cast<float>(rgba[idx + 2]),
-            static_cast<float>(rgba[idx + 3])};
+template <int N, typename T>
+glm::vec<N, float, glm::defaultp> widenTexel(const std::vector<T>& data, std::size_t idx) {
+    glm::vec<N, float, glm::defaultp> out;
+    for (int c = 0; c < N; ++c) {
+        out[c] = static_cast<float>(data[idx + static_cast<std::size_t>(c)]);
+    }
+    return out;
 }
 
-// Reads path's R/G/B/A as interleaved T (missing alpha = 1). nullopt, reported, on I/O failure or a non-finite texel -- callers like EnvironmentMap build importance-sampling CDFs from these values with no further validation.
-template <typename T>
-std::optional<ExrPixels<T>> readExrRgba(const std::string& path) {
+// Reads the first N of path's R/G/B/A as interleaved T. nullopt, reported, on I/O failure or a non-finite texel -- callers like EnvironmentMap build importance-sampling CDFs from these values with no further validation.
+// A channel the source omits reads back as 0, except loadExr's alpha, which reads 1 -- the fill RgbaInputFile documented, and the one this loader previously relied on.
+template <typename T, int N>
+std::optional<ExrPixels<T>> readExrChannels(const std::string& path) {
     try {
         Imf::InputFile file(path.c_str());
         const Imath::Box2i& dw = file.header().dataWindow();
         if (dw.isEmpty()) {
-            std::cerr << "readExrRgba: empty data window in " << path << '\n';
+            std::cerr << "readExrChannels: empty data window in " << path << '\n';
             return std::nullopt;
         }
 
         // Primaries, not transfer: "linear" says nothing about which gamut the numbers are linear IN. Absence is left as the documented Rec.709 assumption; a present-but-different attribute is a real defect in the source asset (systematically wrong saturation/hue) but the image data itself is still usable, so this warns rather than rejecting the load the way the non-finite check below does.
         if (Imf::hasChromaticities(file.header()) &&
             chromaticitiesMismatchRec709(Imf::chromaticities(file.header()))) {
-            std::cerr << "readExrRgba: " << path
+            std::cerr << "readExrChannels: " << path
                       << " declares non-Rec.709 chromaticities -- colours will be systematically wrong "
                          "under this engine's Rec.709 assumption\n";
         }
@@ -94,33 +102,32 @@ std::optional<ExrPixels<T>> readExrRgba(const std::string& path) {
         const int height = dw.max.y - dw.min.y + 1;
 
         ExrPixels<T> image{width, height, {}};
-        image.rgba.assign(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4, T(0));
-        // Missing-alpha source defaults to 1.0, matching RgbaInputFile's documented fill this loader previously relied on.
-        for (std::size_t i = 3; i < image.rgba.size(); i += 4) {
-            image.rgba[i] = T(1);
+        image.data.assign(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * N, T(0));
+        if constexpr (N == 4) {
+            for (std::size_t i = 3; i < image.data.size(); i += 4) {
+                image.data[i] = T(1);
+            }
         }
 
-        // Interleaved RGBA read straight into T: OpenEXR converts each source channel to kExrPixelType<T>, so a Float16 read turns a source at or above binary16's overflow threshold into Inf, caught by the finiteness check below rather than reaching EnvironmentMap's CDFs. base offset by dw.min handles a non-zero data-window origin, same idiom RgbaInputFile used internally.
-        char* base = reinterpret_cast<char*>(image.rgba.data()) -
+        // Interleaved read straight into T: OpenEXR converts each source channel to kExrPixelType<T>, so a Float16 read turns a source at or above binary16's overflow threshold into Inf, caught by the finiteness check below rather than reaching EnvironmentMap's CDFs. base offset by dw.min handles a non-zero data-window origin, same idiom RgbaInputFile used internally.
+        char* base = reinterpret_cast<char*>(image.data.data()) -
                      ((static_cast<std::size_t>(dw.min.x) + (static_cast<std::size_t>(dw.min.y) * width)) *
-                      4 * sizeof(T));
-        const std::size_t xStride = 4 * sizeof(T);
+                      N * sizeof(T));
+        const std::size_t xStride = N * sizeof(T);
         const std::size_t yStride = xStride * static_cast<std::size_t>(width);
         Imf::FrameBuffer frameBuffer;
-        const std::array<std::pair<const char*, int>, 4> planes{
-            {{"R", 0}, {"G", 1}, {"B", 2}, {"A", 3}}};
-        for (const auto& [name, offset] : planes) {
-            if (file.header().channels().findChannel(name) != nullptr) {
-                frameBuffer.insert(name, Imf::Slice(kExrPixelType<T>, base + (offset * sizeof(T)),
-                                                     xStride, yStride));
+        for (int c = 0; c < N; ++c) {
+            if (file.header().channels().findChannel(kChannelNames[c]) != nullptr) {
+                frameBuffer.insert(kChannelNames[c], Imf::Slice(kExrPixelType<T>, base + (c * sizeof(T)),
+                                                                 xStride, yStride));
             }
         }
         file.setFrameBuffer(frameBuffer);
         file.readPixels(dw.min.y, dw.max.y);
 
-        for (const T texel : image.rgba) {
+        for (const T texel : image.data) {
             if (!std::isfinite(static_cast<float>(texel))) {
-                std::cerr << "readExrRgba: non-finite texel in " << path << " read as " << scalarTypeName(kScalarType<T>)
+                std::cerr << "readExrChannels: non-finite texel in " << path << " read as " << scalarTypeName(kScalarType<T>)
                           << " (source Inf/NaN";
                 if constexpr (std::is_same_v<T, Half>) {
                     std::cerr << ", or a finite value above binary16's max " << kHalfMax;
@@ -131,7 +138,7 @@ std::optional<ExrPixels<T>> readExrRgba(const std::string& path) {
         }
         return image;
     } catch (const std::exception& e) {
-        std::cerr << "readExrRgba: failed to load " << path << ": " << e.what() << '\n';
+        std::cerr << "readExrChannels: failed to load " << path << ": " << e.what() << '\n';
         return std::nullopt;
     }
 }
@@ -139,20 +146,21 @@ std::optional<ExrPixels<T>> readExrRgba(const std::string& path) {
 }  // namespace
 
 std::optional<HdrImage> loadExr(const std::string& path) {
-    std::optional<ExrPixels<float>> pixels = readExrRgba<float>(path);
+    std::optional<ExrPixels<float>> pixels = readExrChannels<float, 4>(path);
     if (!pixels) {
         return std::nullopt;
     }
-    return HdrImage{pixels->width, pixels->height, std::move(pixels->rgba)};
+    return HdrImage{pixels->width, pixels->height, std::move(pixels->data)};
 }
 
-std::optional<ImageTexture> loadImageTexture(const std::string& path, ScalarType type) {
-    const auto load = [&path]<typename T>() -> std::optional<ImageTexture> {
-        std::optional<ExrPixels<T>> pixels = readExrRgba<T>(path);
+template <int N>
+std::optional<ImageTexture<N>> loadImageTexture(const std::string& path, ScalarType type) {
+    const auto load = [&path]<typename T>() -> std::optional<ImageTexture<N>> {
+        std::optional<ExrPixels<T>> pixels = readExrChannels<T, N>(path);
         if (!pixels) {
             return std::nullopt;
         }
-        return ImageTexture{pixels->width, pixels->height, std::move(pixels->rgba)};
+        return ImageTexture<N>{pixels->width, pixels->height, std::move(pixels->data)};
     };
     switch (type) {
         case ScalarType::Float16:
@@ -163,15 +171,16 @@ std::optional<ImageTexture> loadImageTexture(const std::string& path, ScalarType
     return std::nullopt;
 }
 
-glm::vec4 ImageTexture::texel(int x, int y) const {
-    const std::size_t idx = texelIndex(x, y, width);
-    return withTexels(*this, [idx](const auto& rgba) { return widenTexel(rgba, idx); });
+template <int N>
+glm::vec<N, float, glm::defaultp> ImageTexture<N>::texel(int x, int y) const {
+    const std::size_t idx = texelIndex(x, y, width, N);
+    return withTexels(*this, [idx](const auto& data) { return widenTexel<N>(data, idx); });
 }
 
 bool writeExr(const std::string& path, const HdrImage& image) {
     try {
         Imf::Header header(image.width, image.height);
-        for (const char* channel : {"R", "G", "B", "A"}) {
+        for (const char* channel : kChannelNames) {
             header.channels().insert(channel, Imf::Channel(Imf::FLOAT));
         }
 
@@ -182,9 +191,8 @@ bool writeExr(const std::string& path, const HdrImage& image) {
         auto* base = const_cast<float*>(image.rgba.data());
         const std::size_t xStride = sizeof(float) * 4;
         const std::size_t yStride = xStride * static_cast<std::size_t>(image.width);
-        const std::array<const char*, 4> names = {"R", "G", "B", "A"};
-        for (std::size_t c = 0; c < names.size(); ++c) {
-            frameBuffer.insert(names[c],
+        for (std::size_t c = 0; c < kChannelNames.size(); ++c) {
+            frameBuffer.insert(kChannelNames[c],
                                 Imf::Slice(Imf::FLOAT, reinterpret_cast<char*>(base + c), xStride, yStride));
         }
 
@@ -198,7 +206,8 @@ bool writeExr(const std::string& path, const HdrImage& image) {
     }
 }
 
-glm::vec4 sampleBilinear(const ImageTexture& image, glm::vec2 uv) {
+template <int N>
+glm::vec<N, float, glm::defaultp> sampleBilinear(const ImageTexture<N>& image, glm::vec2 uv) {
     // Texel-center convention, matching GL_LINEAR.
     const float fx = (uv.x * static_cast<float>(image.width)) - 0.5F;
     const float fy = (uv.y * static_cast<float>(image.height)) - 0.5F;
@@ -211,12 +220,20 @@ glm::vec4 sampleBilinear(const ImageTexture& image, glm::vec2 uv) {
     const int wy0 = wrapPixel(y0, image.height);
     const int wy1 = wrapPixel(y0 + 1, image.height);
 
-    return withTexels(image, [&](const auto& rgba) {
-        const auto texel = [&](int x, int y) { return widenTexel(rgba, texelIndex(x, y, image.width)); };
-        const glm::vec4 top = glm::mix(texel(wx0, wy0), texel(wx1, wy0), tx);
-        const glm::vec4 bottom = glm::mix(texel(wx0, wy1), texel(wx1, wy1), tx);
+    return withTexels(image, [&](const auto& data) {
+        const auto texel = [&](int x, int y) { return widenTexel<N>(data, texelIndex(x, y, image.width, N)); };
+        const auto top = glm::mix(texel(wx0, wy0), texel(wx1, wy0), tx);
+        const auto bottom = glm::mix(texel(wx0, wy1), texel(wx1, wy1), tx);
         return glm::mix(top, bottom, ty);
     });
 }
+
+// The two channel counts the engine's material slots and environment map resolve to (material.h, environment_map.h): scalar maps (roughness, bump) and colour/direction maps (base colour, normal, specular, HDRI). Explicit so the definitions above stay out of the header.
+template struct ImageTexture<1>;
+template struct ImageTexture<3>;
+template std::optional<ImageTexture<1>> loadImageTexture<1>(const std::string&, ScalarType);
+template std::optional<ImageTexture<3>> loadImageTexture<3>(const std::string&, ScalarType);
+template glm::vec<1, float, glm::defaultp> sampleBilinear<1>(const ImageTexture<1>&, glm::vec2);
+template glm::vec<3, float, glm::defaultp> sampleBilinear<3>(const ImageTexture<3>&, glm::vec2);
 
 }  // namespace engine::gfx

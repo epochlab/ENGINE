@@ -462,7 +462,7 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
 
     std::optional<RequiredShaders> shaders = loadShaders();
     // Decoded once here (not via a texture-upload helper): the path tracer is the only consumer, sampling this CPU ImageTexture directly, with no GPU upload step in between.
-    std::optional<engine::gfx::ImageTexture> environmentImage = engine::gfx::loadImageTexture(
+    std::optional<engine::gfx::ImageTexture<3>> environmentImage = engine::gfx::loadImageTexture<3>(
         std::string(ASSET_ROOT_DIR) + "/" + sceneConfig.environment.hdriPath, profileConfig.render.textureType);
     std::optional<engine::config::MaterialConfig> materialConfig = engine::config::loadMaterialConfig(
         std::string(ASSET_ROOT_DIR) + "/" + sceneConfig.materialPath);

@@ -508,7 +508,7 @@ int main(int argc, char** argv) {
     }
     const std::optional<engine::config::MaterialConfig> materialConfig =
         engine::config::loadMaterialConfig(assetRoot + "/" + sceneConfig->materialPath);
-    std::optional<engine::gfx::ImageTexture> environmentImage = engine::gfx::loadImageTexture(
+    std::optional<engine::gfx::ImageTexture<3>> environmentImage = engine::gfx::loadImageTexture<3>(
         assetRoot + "/" + sceneConfig->environment.hdriPath, profileConfig->render.textureType);
     if (!materialConfig || !environmentImage) {
         return EXIT_FAILURE;
