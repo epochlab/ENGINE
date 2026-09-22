@@ -17,8 +17,8 @@ glm::vec3 rotateAboutY(const glm::vec3& v, float angleRadians) {
 }
 
 // Same Rec.709 weights as edge_filter.frag's sampleLuminance.
-float luminanceOf(const engine::gfx::ImageTexture& image, int x, int y) {
-    const glm::vec4 texel = image.texel(x, y);
+float luminanceOf(const engine::gfx::ImageTexture<3>& image, int x, int y) {
+    const glm::vec3 texel = image.texel(x, y);
     return (0.2126F * texel.r) + (0.7152F * texel.g) + (0.0722F * texel.b);
 }
 
@@ -34,7 +34,7 @@ struct EquirectTexel {
     float sinTheta;
 };
 
-EquirectTexel equirectTexelOf(const engine::gfx::ImageTexture& image, const glm::vec3& direction,
+EquirectTexel equirectTexelOf(const engine::gfx::ImageTexture<3>& image, const glm::vec3& direction,
                                float envRotationRadians) {
     const glm::vec3 rotated = rotateAboutY(direction, -envRotationRadians);
     const float theta = std::acos(glm::clamp(rotated.y, -1.0F, 1.0F));
@@ -58,7 +58,7 @@ CdfSample invertCdf(const float* cdf, int count, float u) {
 
 }  // namespace
 
-EnvironmentMap::EnvironmentMap(engine::gfx::ImageTexture image) : image_(std::move(image)) {
+EnvironmentMap::EnvironmentMap(engine::gfx::ImageTexture<3> image) : image_(std::move(image)) {
     const int width = image_.width;
     const int height = image_.height;
     marginalCdf_.assign(static_cast<std::size_t>(height) + 1, 0.0F);
@@ -110,7 +110,7 @@ glm::vec3 EnvironmentMap::sampleDirection(const glm::vec3& direction,
     const float theta = std::acos(glm::clamp(rotated.y, -1.0F, 1.0F));
     const float phi = std::atan2(rotated.x, rotated.z);
     const glm::vec2 uv((phi / (2.0F * glm::pi<float>())) + 0.5F, theta / glm::pi<float>());
-    return glm::vec3(engine::gfx::sampleBilinear(image_, uv));
+    return engine::gfx::sampleBilinear(image_, uv);
 }
 
 EnvironmentMap::EnvSample EnvironmentMap::importanceSampleDirection(glm::vec2 u,

@@ -313,6 +313,7 @@ ENGINE_CHECK(profile_config_render_display_settings, Fast, Exact) {
 }
 
 // loadImageTexture's typed read: binary16-exact data loads bit-identically at both types, arbitrary data at Float16 equals the IEEE round-to-nearest-even cast (IEEE 754-2008 4.3.1) that OpenEXR's float-to-half conversion must perform, and a finite source above kHalfMax overflows and is rejected at Float16 only.
+// Read at both channel counts the engine instantiates: a 3-channel read of an RGBA probe must return R/G/B, and a 1-channel read of the same file must return R alone, since the scalar maps (roughness, bump) take that path.
 ENGINE_CHECK(image_texture_half_load, Fast, Exact) {
     using engine::gfx::ScalarType;
     const auto writeProbe = [](const char* name, const std::vector<float>& values) {
@@ -323,27 +324,38 @@ ENGINE_CHECK(image_texture_half_load, Fast, Exact) {
         const std::filesystem::path path = scratchPath(name);
         return engine::gfx::writeExr(path.string(), image) ? std::optional(path) : std::nullopt;
     };
-    const auto sameTexels = [](const engine::gfx::ImageTexture& a, const std::vector<float>& expected) {
+    const auto sameTexels = []<int N>(const engine::gfx::ImageTexture<N>& a, const std::vector<float>& expected) {
         for (int x = 0; x < a.width; ++x) {
-            const glm::vec4 texel = a.texel(x, 0);
-            if (texel.r != expected[static_cast<std::size_t>(x)] || texel.b != expected[static_cast<std::size_t>(x)]) {
-                return false;
+            const glm::vec<N, float, glm::defaultp> texel = a.texel(x, 0);
+            for (int c = 0; c < N; ++c) {
+                if (texel[c] != expected[static_cast<std::size_t>(x)]) {
+                    return false;
+                }
             }
         }
         return true;
     };
-    ctx.plan(5);
+    ctx.plan(6);
 
     // Exact in binary16: small integers, dyadic fractions, the largest finite value, the smallest normal.
     const std::vector<float> exact = {0.0F, 1.0F, 1.5F, 0.25F, 2048.0F, -3.0F, engine::gfx::kHalfMax, 1.0F / 16384.0F};
     const std::optional<std::filesystem::path> exactPath = writeProbe("engine_io_half_exact.exr", exact);
-    const std::optional<engine::gfx::ImageTexture> exact16 =
-        exactPath ? engine::gfx::loadImageTexture(exactPath->string(), ScalarType::Float16) : std::nullopt;
-    const std::optional<engine::gfx::ImageTexture> exact32 =
-        exactPath ? engine::gfx::loadImageTexture(exactPath->string(), ScalarType::Float32) : std::nullopt;
+    const std::optional<engine::gfx::ImageTexture<3>> exact16 =
+        exactPath ? engine::gfx::loadImageTexture<3>(exactPath->string(), ScalarType::Float16) : std::nullopt;
+    const std::optional<engine::gfx::ImageTexture<3>> exact32 =
+        exactPath ? engine::gfx::loadImageTexture<3>(exactPath->string(), ScalarType::Float32) : std::nullopt;
     ENGINE_EXPECT(ctx, exact16 && exact32 && std::holds_alternative<std::vector<engine::gfx::Half>>(exact16->texels) && sameTexels(*exact16, exact) &&
                            sameTexels(*exact32, exact),
                   "binary16-exact values did not load bit-identically at Float16 and Float32");
+
+    // Same file at one channel: the scalar-map path, which must read R and stop there.
+    const std::optional<engine::gfx::ImageTexture<1>> exactScalar =
+        exactPath ? engine::gfx::loadImageTexture<1>(exactPath->string(), ScalarType::Float16) : std::nullopt;
+    ENGINE_EXPECT(ctx, exactScalar && exactScalar->width == exact16->width &&
+                           std::get<std::vector<engine::gfx::Half>>(exactScalar->texels).size() ==
+                               static_cast<std::size_t>(exact16->width) &&
+                           sameTexels(*exactScalar, exact),
+                  "single-channel read did not return R alone");
 
     // Arbitrary: needs rounding, including the exact midpoint above 1.0 (ties to even -> 1.0), a subnormal, and one below the smallest subnormal (-> 0).
     const std::vector<float> arbitrary = {0.1F, 1.0F + engine::gfx::kHalfUnitRoundoff, 3.14159265F, 1.0e-6F, 1.0e-20F, 60000.5F};
@@ -352,19 +364,19 @@ ENGINE_CHECK(image_texture_half_load, Fast, Exact) {
         rounded.push_back(static_cast<float>(static_cast<engine::gfx::Half>(v)));
     }
     const std::optional<std::filesystem::path> arbitraryPath = writeProbe("engine_io_half_arbitrary.exr", arbitrary);
-    const std::optional<engine::gfx::ImageTexture> arbitrary16 =
-        arbitraryPath ? engine::gfx::loadImageTexture(arbitraryPath->string(), ScalarType::Float16) : std::nullopt;
+    const std::optional<engine::gfx::ImageTexture<3>> arbitrary16 =
+        arbitraryPath ? engine::gfx::loadImageTexture<3>(arbitraryPath->string(), ScalarType::Float16) : std::nullopt;
     ENGINE_EXPECT(ctx, arbitrary16 && sameTexels(*arbitrary16, rounded),
                   "Float16 load differs from static_cast<Half> (round to nearest even)");
-    const std::optional<engine::gfx::ImageTexture> arbitrary32 =
-        arbitraryPath ? engine::gfx::loadImageTexture(arbitraryPath->string(), ScalarType::Float32) : std::nullopt;
+    const std::optional<engine::gfx::ImageTexture<3>> arbitrary32 =
+        arbitraryPath ? engine::gfx::loadImageTexture<3>(arbitraryPath->string(), ScalarType::Float32) : std::nullopt;
     ENGINE_EXPECT(ctx, arbitrary32 && sameTexels(*arbitrary32, arbitrary), "Float32 load is not an exact copy");
 
     // Overflow: 70000 is finite in float and beyond kHalfMax, so Float16 must reject it and Float32 must not.
     const std::optional<std::filesystem::path> overPath = writeProbe("engine_io_half_overflow.exr", {1.0F, 70000.0F});
-    ENGINE_EXPECT(ctx, overPath && !engine::gfx::loadImageTexture(overPath->string(), ScalarType::Float16),
+    ENGINE_EXPECT(ctx, overPath && !engine::gfx::loadImageTexture<3>(overPath->string(), ScalarType::Float16),
                   "Float16 accepted a texel above binary16's finite max");
-    ENGINE_EXPECT(ctx, overPath && engine::gfx::loadImageTexture(overPath->string(), ScalarType::Float32),
+    ENGINE_EXPECT(ctx, overPath && engine::gfx::loadImageTexture<3>(overPath->string(), ScalarType::Float32),
                   "Float32 rejected a finite texel");
     for (const std::optional<std::filesystem::path>& path : {exactPath, arbitraryPath, overPath}) {
         if (path) {
@@ -386,26 +398,31 @@ ENGINE_CHECK(image_texture_bilinear_half_bound, Fast, Exact) {
     std::mt19937 rng(static_cast<std::mt19937::result_type>(ctx.seed()));
     // Normal range of binary16: [2^-14, kHalfMax], log-uniform so every binade is exercised.
     std::uniform_real_distribution<float> logValue(-14.0F, std::log2(engine::gfx::kHalfMax));
-    std::vector<float> rgba(static_cast<std::size_t>(kWidth) * kHeight * 4);
-    for (float& v : rgba) {
-        v = std::exp2(logValue(rng));
-    }
-    const engine::gfx::ImageTexture full{kWidth, kHeight, rgba};
-    const engine::gfx::ImageTexture half{kWidth, kHeight, std::vector<engine::gfx::Half>(rgba.begin(), rgba.end())};
-
     std::uniform_real_distribution<float> unit(-1.0F, 2.0F);  // beyond [0,1] so both wrap directions are covered
     double worst = 0.0;
     double largest = 0.0;
-    for (int i = 0; i < kSamples; ++i) {
-        const glm::vec2 uv(unit(rng), unit(rng));
-        const glm::vec4 s32 = engine::gfx::sampleBilinear(full, uv);
-        const glm::vec4 s16 = engine::gfx::sampleBilinear(half, uv);
-        for (int c = 0; c < 4; ++c) {
-            const double relative = std::fabs(static_cast<double>(s16[c]) - s32[c]) / s32[c];
-            worst = std::max(worst, relative / bound);
-            largest = std::max(largest, relative);
+    // Run over both instantiated channel counts: the scalar maps sample at N=1 and the colour/normal/specular/HDRI maps at N=3, and each is its own generated kernel.
+    const auto sweep = [&]<int N>() {
+        std::vector<float> texels(static_cast<std::size_t>(kWidth) * kHeight * N);
+        for (float& v : texels) {
+            v = std::exp2(logValue(rng));
         }
-    }
+        const engine::gfx::ImageTexture<N> full{kWidth, kHeight, texels};
+        const engine::gfx::ImageTexture<N> half{kWidth, kHeight,
+                                                 std::vector<engine::gfx::Half>(texels.begin(), texels.end())};
+        for (int i = 0; i < kSamples; ++i) {
+            const glm::vec2 uv(unit(rng), unit(rng));
+            const glm::vec<N, float, glm::defaultp> s32 = engine::gfx::sampleBilinear(full, uv);
+            const glm::vec<N, float, glm::defaultp> s16 = engine::gfx::sampleBilinear(half, uv);
+            for (int c = 0; c < N; ++c) {
+                const double relative = std::fabs(static_cast<double>(s16[c]) - s32[c]) / s32[c];
+                worst = std::max(worst, relative / bound);
+                largest = std::max(largest, relative);
+            }
+        }
+    };
+    sweep.template operator()<3>();
+    sweep.template operator()<1>();
     ctx.plan(2);
     char detail[192];
     std::snprintf(detail, sizeof(detail), "worst |s16 - s32| / s32 is %.4g of the derived bound %.4g", worst, bound);

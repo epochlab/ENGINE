@@ -56,16 +56,16 @@ BsdfParams makeParams(float roughness, float metallic) {
 EnvironmentMap makeStructuredEnvironment(engine::gfx::ScalarType type) {
     constexpr int kWidth = 64;
     constexpr int kHeight = 32;
-    std::vector<float> rgba(static_cast<std::size_t>(kWidth) * kHeight * 4, 0.05F);
+    std::vector<float> rgb(static_cast<std::size_t>(kWidth) * kHeight * 3, 0.05F);
     for (int y = 8; y < 12; ++y) {
         for (int x = 20; x < 26; ++x) {
-            const std::size_t idx = ((static_cast<std::size_t>(y) * kWidth) + static_cast<std::size_t>(x)) * 4;
-            rgba[idx + 0] = 400.0F;
-            rgba[idx + 1] = 380.0F;
-            rgba[idx + 2] = 300.0F;
+            const std::size_t idx = ((static_cast<std::size_t>(y) * kWidth) + static_cast<std::size_t>(x)) * 3;
+            rgb[idx + 0] = 400.0F;
+            rgb[idx + 1] = 380.0F;
+            rgb[idx + 2] = 300.0F;
         }
     }
-    return EnvironmentMap(tools::fixtures::makeImageTexture(kWidth, kHeight, rgba, type));
+    return EnvironmentMap(tools::fixtures::makeImageTexture<3>(kWidth, kHeight, rgb, type));
 }
 
 // importanceSampleDirection returns a direction AND the solid-angle density it was drawn with; pdf()
@@ -115,11 +115,11 @@ ENGINE_CHECK(environment_pdf_tracks_stored_luminance, Fast, Exact) {
     constexpr int kPatchY = 16;
     constexpr int kBackgroundX = 40;
     const float midpoint = 1.0F + engine::gfx::kHalfUnitRoundoff;
-    std::vector<float> rgba(static_cast<std::size_t>(kWidth) * kHeight * 4, 1.0F);
-    const std::size_t patch = ((static_cast<std::size_t>(kPatchY) * kWidth) + kPatchX) * 4;
-    rgba[patch + 0] = midpoint;
-    rgba[patch + 1] = midpoint;
-    rgba[patch + 2] = midpoint;
+    std::vector<float> rgb(static_cast<std::size_t>(kWidth) * kHeight * 3, 1.0F);
+    const std::size_t patch = ((static_cast<std::size_t>(kPatchY) * kWidth) + kPatchX) * 3;
+    rgb[patch + 0] = midpoint;
+    rgb[patch + 1] = midpoint;
+    rgb[patch + 2] = midpoint;
 
     // Direction through a texel's centre, inverting equirectTexelOf's (u, v) = (phi / 2pi + 1/2, theta / pi).
     const auto centre = [](int x, int y) {
@@ -129,7 +129,7 @@ ENGINE_CHECK(environment_pdf_tracks_stored_luminance, Fast, Exact) {
     };
     ctx.plan(2);
     for (const engine::gfx::ScalarType type : {engine::gfx::ScalarType::Float16, engine::gfx::ScalarType::Float32}) {
-        const engine::gfx::ImageTexture image = tools::fixtures::makeImageTexture(kWidth, kHeight, rgba, type);
+        const engine::gfx::ImageTexture<3> image = tools::fixtures::makeImageTexture<3>(kWidth, kHeight, rgb, type);
         const float storedRatio = image.texel(kPatchX, kPatchY).g / image.texel(kBackgroundX, kPatchY).g;
         const float sourceRatio = midpoint;
         const EnvironmentMap env(image);

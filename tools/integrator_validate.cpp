@@ -4,7 +4,7 @@
 //   1. Depth invariance: with no indirect light, maxBounces=0 and maxBounces=1 must produce the same image. A depth cap dropping the terminal BSDF-sampled ray breaks this: at maxBounces=0 the ray built at bounce 0 is never intersected, so NEE's MIS weight (lightPdf^2/(lightPdf^2+bsdfPdf^2)) is never complemented by the BSDF-sampling half and the surface renders too dark, while maxBounces=1 traces that ray at bounce 1 and is complete; the gap is exactly bsdfPdf^2/(bsdfPdf^2+lightPdf^2) of the direct lighting, large on a glossy surface.
 //   2. Absolute agreement with the analytic reference, which no self-consistency check between two renderer settings can give on its own.
 // Russian roulette is exercised as a third case: it reweights by 1/p on survival, so an RR-enabled render must return the same answer as an RR-disabled one; RR lives in tracePath, so this is the only place it can be tested.
-// Material/MeshInstance are plain data (six ImageTexture members and a mat4) and need no GL context: an earlier comment in nee_validate.cpp claimed otherwise, which is why this suite had no integrator-level test until now.
+// Material/MeshInstance are plain data (five ImageTexture members and a mat4) and need no GL context: an earlier comment in nee_validate.cpp claimed otherwise, which is why this suite had no integrator-level test until now.
 
 #include <array>
 #include <atomic>

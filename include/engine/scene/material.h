@@ -4,15 +4,14 @@
 
 namespace engine::scene {
 
-// Metallic-roughness material, extended with Specular/AO -- the raw texture set this project's assets ship, beyond glTF's own pbrMetallicRoughness slots (see gltf_loader.cpp for how they're read out of the material's `extras`). Scalar/colour factors live on SceneConfig::material (scene_config.h), not here -- see resolveBsdfParams (path_tracer.cpp). Textures are CPU-resident (engine::gfx::HdrImage), sampled per-ray by the path tracer.
+// Metallic-roughness material, extended with Specular -- the raw texture set this project's assets ship, beyond glTF's own pbrMetallicRoughness slots (see gltf_loader.cpp for how they're read out of the material's `extras`). Scalar/colour factors live on SceneConfig::material (scene_config.h), not here -- see resolveBsdfParams (path_tracer.cpp). Textures are CPU-resident, sampled per-ray by the path tracer.
+// Each slot is stored at the channel count its consumer reads (gbuffer_shading.cpp) and no more: three for the colour and direction maps, one for the scalar maps, none for alpha. glTF's occlusion_texture has no slot at all -- AO is ray-traced per sample now (path_tracer.h's PathTraceResult::ao), which a baked map cannot express, so loading one cost a full texture's memory for a value nothing read.
 struct Material {
-    engine::gfx::ImageTexture baseColorTexture;
-    engine::gfx::ImageTexture normalTexture;
-    engine::gfx::ImageTexture bumpTexture;
-    engine::gfx::ImageTexture roughnessTexture;
-    engine::gfx::ImageTexture specularTexture;
-    // Loaded from glTF's occlusion_texture but read by nothing: AO is ray-traced per sample now (path_tracer.h's PathTraceResult::ao), which the baked texture cannot express. Kept so the asset pipeline stays lossless and a future baked/traced blend has the map to hand.
-    engine::gfx::ImageTexture aoTexture;
+    engine::gfx::ImageTexture<3> baseColorTexture;
+    engine::gfx::ImageTexture<3> normalTexture;
+    engine::gfx::ImageTexture<1> bumpTexture;
+    engine::gfx::ImageTexture<1> roughnessTexture;
+    engine::gfx::ImageTexture<3> specularTexture;
 };
 
 // Neutral, non-file default: every slot is a 1x1 texture whose constant value is the identity for
