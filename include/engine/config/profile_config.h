@@ -7,6 +7,7 @@
 #include <glm/glm.hpp>
 
 #include "engine/gfx/ocio_display_transform.h"
+#include "engine/gfx/scalar_type.h"
 #include "engine/scene/camera.h"
 
 namespace engine::config {
@@ -43,6 +44,10 @@ struct RenderConfig {
     // Index into engine::debug::AovId / kAovNames (aov.h) (0 = Beauty).
     int defaultAov;
     engine::gfx::OcioDisplayTransform::Lut defaultLut;
+    bool vsync;  // true paces each frame to the display's vblank (DisplayLink); false runs uncapped, bounded only by the one-frame-in-flight fence
+    // profile.json bit depths, 16 -> Float16, 32 -> Float32; 8-bit UNORM is not offered, it clamps scene-referred data to [0,1] before exposure.
+    engine::gfx::ScalarType displayFormat;  // displayBitDepth: the path-traced display texture's GL storage
+    engine::gfx::ScalarType textureType;    // textureBitDepth: environment HDRI and every material texture's CPU storage
 };
 
 struct PathTracerConfig {

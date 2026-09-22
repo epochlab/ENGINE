@@ -64,22 +64,21 @@ std::optional<int> extrasTextureIndex(const char* extrasJson, const std::string&
     return value;
 }
 
-std::optional<engine::gfx::HdrImage> loadTexture(const cgltf_texture* texture,
-                                                  const std::string& dir) {
+std::optional<engine::gfx::ImageTexture> loadTexture(const cgltf_texture* texture, const std::string& dir,
+                                                      engine::gfx::ScalarType textureType) {
     if (texture == nullptr || texture->image == nullptr || texture->image->uri == nullptr) {
         return std::nullopt;
     }
-    return engine::gfx::loadExr(dir + "/" + texture->image->uri);
+    return engine::gfx::loadImageTexture(dir + "/" + texture->image->uri, textureType);
 }
 
-std::optional<engine::gfx::HdrImage> loadTextureByIndex(const cgltf_data* data,
-                                                         std::optional<int> index,
-                                                         const std::string& dir) {
+std::optional<engine::gfx::ImageTexture> loadTextureByIndex(const cgltf_data* data, std::optional<int> index,
+                                                             const std::string& dir, engine::gfx::ScalarType textureType) {
     if (!index.has_value() || *index < 0 ||
         static_cast<cgltf_size>(*index) >= data->textures_count) {
         return std::nullopt;
     }
-    return loadTexture(&data->textures[static_cast<cgltf_size>(*index)], dir);
+    return loadTexture(&data->textures[static_cast<cgltf_size>(*index)], dir, textureType);
 }
 
 glm::mat4 localNodeTransform(const cgltf_node* node) {
@@ -218,37 +217,35 @@ std::optional<std::vector<unsigned int>> readIndices(const cgltf_accessor* indic
 // DOES reference a texture but fails to resolve/decode it (bad path, corrupt file) is a real
 // error and must still propagate as nullopt, not silently default -- distinguishing these two
 // nullopt-producing cases is exactly what loadTexture/loadTextureByIndex can't do alone.
-std::optional<engine::gfx::HdrImage> resolveTexture(const cgltf_texture* texture,
-                                                     const std::string& dir,
-                                                     engine::gfx::HdrImage fallback) {
+std::optional<engine::gfx::ImageTexture> resolveTexture(const cgltf_texture* texture, const std::string& dir,
+                                                         engine::gfx::ScalarType textureType, engine::gfx::ImageTexture fallback) {
     if (texture == nullptr) {
         return fallback;
     }
-    return loadTexture(texture, dir);
+    return loadTexture(texture, dir, textureType);
 }
 
-std::optional<engine::gfx::HdrImage> resolveTextureByIndex(const cgltf_data* data,
-                                                             std::optional<int> index,
-                                                             const std::string& dir,
-                                                             engine::gfx::HdrImage fallback) {
+std::optional<engine::gfx::ImageTexture> resolveTextureByIndex(const cgltf_data* data, std::optional<int> index,
+                                                                 const std::string& dir, engine::gfx::ScalarType textureType,
+                                                                 engine::gfx::ImageTexture fallback) {
     if (!index.has_value()) {
         return fallback;
     }
-    return loadTextureByIndex(data, index, dir);
+    return loadTextureByIndex(data, index, dir, textureType);
 }
 
 std::optional<Material> loadMaterialTextures(const cgltf_data* data, const cgltf_material& mat,
-                                              const std::string& dir) {
+                                              const std::string& dir, engine::gfx::ScalarType textureType) {
     const Material defaults = makeDefaultMaterial();
-    auto baseColor = resolveTexture(mat.pbr_metallic_roughness.base_color_texture.texture, dir,
+    auto baseColor = resolveTexture(mat.pbr_metallic_roughness.base_color_texture.texture, dir, textureType,
                                      defaults.baseColorTexture);
-    auto normal = resolveTexture(mat.normal_texture.texture, dir, defaults.normalTexture);
-    auto ao = resolveTexture(mat.occlusion_texture.texture, dir, defaults.aoTexture);
+    auto normal = resolveTexture(mat.normal_texture.texture, dir, textureType, defaults.normalTexture);
+    auto ao = resolveTexture(mat.occlusion_texture.texture, dir, textureType, defaults.aoTexture);
     auto roughness = resolveTextureByIndex(
-        data, extrasTextureIndex(mat.extras.data, "roughnessTexture"), dir, defaults.roughnessTexture);
+        data, extrasTextureIndex(mat.extras.data, "roughnessTexture"), dir, textureType, defaults.roughnessTexture);
     auto specular = resolveTextureByIndex(
-        data, extrasTextureIndex(mat.extras.data, "specularTexture"), dir, defaults.specularTexture);
-    auto bump = resolveTextureByIndex(data, extrasTextureIndex(mat.extras.data, "bumpTexture"), dir,
+        data, extrasTextureIndex(mat.extras.data, "specularTexture"), dir, textureType, defaults.specularTexture);
+    auto bump = resolveTextureByIndex(data, extrasTextureIndex(mat.extras.data, "bumpTexture"), dir, textureType,
                                        defaults.bumpTexture);
     if (!baseColor || !normal || !ao || !roughness || !specular || !bump) {
         std::cerr << "loadGltf: material '" << (mat.name != nullptr ? mat.name : "<unnamed>")
@@ -265,7 +262,7 @@ std::optional<Material> loadMaterialTextures(const cgltf_data* data, const cgltf
 // Builds one MeshInstance's Vertex/index arrays and Material from a single triangle primitive. Fails clearly (nullopt) rather than substituting a placeholder for a primitive this loader doesn't support (non-triangle mode, missing attributes). A material with no texture for a given slot -- or no material at all -- is not a failure: loadMaterialTextures substitutes a neutral default for that slot regardless, which for an absent material (kDefaultMaterial below) means every slot, reproducing glTF's own spec-defined default material.
 std::optional<MeshInstance> loadPrimitive(const cgltf_data* data, const cgltf_primitive& prim,
                                            const glm::mat4& transform, const std::string& dir,
-                                           int instanceIndex, const std::string& name,
+                                           engine::gfx::ScalarType textureType, int instanceIndex, const std::string& name,
                                            std::vector<Triangle>& outWorldTriangles,
                                            std::vector<ShadingTriangle>& outShadingTriangles) {
     if (prim.type != cgltf_primitive_type_triangles) {
@@ -286,7 +283,7 @@ std::optional<MeshInstance> loadPrimitive(const cgltf_data* data, const cgltf_pr
     // resolveTexture(..., default...()) calls already treat that as "use the neutral default".
     static const cgltf_material kDefaultMaterial{};
     std::optional<Material> material =
-        loadMaterialTextures(data, prim.material != nullptr ? *prim.material : kDefaultMaterial, dir);
+        loadMaterialTextures(data, prim.material != nullptr ? *prim.material : kDefaultMaterial, dir, textureType);
     if (!material.has_value()) {
         return std::nullopt;
     }
@@ -309,7 +306,7 @@ constexpr int kMaxNodeDepth = 256;
 // untrusted input, and an explicit stack would restate the call stack while gaining no invariant.
 // NOLINTNEXTLINE(misc-no-recursion)
 bool walkNodes(const cgltf_data* data, cgltf_node* const* nodes, cgltf_size count,
-               const glm::mat4& parentTransform, const std::string& dir,
+               const glm::mat4& parentTransform, const std::string& dir, engine::gfx::ScalarType textureType,
                std::vector<MeshInstance>& instances, std::vector<Triangle>& worldTriangles,
                std::vector<ShadingTriangle>& shadingTriangles, int depth = 0) {
     if (depth >= kMaxNodeDepth) {
@@ -326,7 +323,7 @@ bool walkNodes(const cgltf_data* data, cgltf_node* const* nodes, cgltf_size coun
             for (cgltf_size pi = 0; pi < node->mesh->primitives_count; ++pi) {
                 const int instanceIndex = static_cast<int>(instances.size());  // index this primitive's MeshInstance will get
                 std::optional<MeshInstance> instance =
-                    loadPrimitive(data, node->mesh->primitives[pi], world, dir, instanceIndex, name,
+                    loadPrimitive(data, node->mesh->primitives[pi], world, dir, textureType, instanceIndex, name,
                                   worldTriangles, shadingTriangles);
                 if (!instance.has_value()) {
                     return false;
@@ -335,7 +332,7 @@ bool walkNodes(const cgltf_data* data, cgltf_node* const* nodes, cgltf_size coun
             }
         }
 
-        if (!walkNodes(data, node->children, node->children_count, world, dir, instances,
+        if (!walkNodes(data, node->children, node->children_count, world, dir, textureType, instances,
                        worldTriangles, shadingTriangles, depth + 1)) {
             return false;
         }
@@ -345,8 +342,8 @@ bool walkNodes(const cgltf_data* data, cgltf_node* const* nodes, cgltf_size coun
 
 }  // namespace
 
-std::optional<LoadedModel> loadGltf(const std::string& path, const glm::mat4& rootTransform,
-                                     const std::string& textureDir) {
+std::optional<LoadedModel> loadGltf(const std::string& path, engine::gfx::ScalarType textureType,
+                                     const glm::mat4& rootTransform, const std::string& textureDir) {
     const cgltf_options options{};
     cgltf_data* data = nullptr;
 
@@ -369,7 +366,7 @@ std::optional<LoadedModel> loadGltf(const std::string& path, const glm::mat4& ro
     const std::string dir = textureDir.empty() ? dirOf(path) : textureDir;
     const bool ok = data->scene != nullptr &&
                     walkNodes(data, data->scene->nodes, data->scene->nodes_count, rootTransform,
-                              dir, model.instances, model.worldTriangles, model.shadingTriangles);
+                              dir, textureType, model.instances, model.worldTriangles, model.shadingTriangles);
 
     cgltf_free(data);
 

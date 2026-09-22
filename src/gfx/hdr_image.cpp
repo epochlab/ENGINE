@@ -4,6 +4,8 @@
 #include <cmath>
 #include <exception>
 #include <iostream>
+#include <type_traits>
+#include <utility>
 
 #include <OpenEXR/ImfChannelList.h>
 #include <OpenEXR/ImfChromaticities.h>
@@ -33,21 +35,57 @@ bool chromaticitiesMismatchRec709(const Imf::Chromaticities& c) {
            differs(c.blue, rec709.blue) || differs(c.white, rec709.white);
 }
 
-}  // namespace
+template <typename T>
+inline constexpr Imf::PixelType kExrPixelType = Imf::FLOAT;
+template <>
+inline constexpr Imf::PixelType kExrPixelType<Half> = Imf::HALF;
 
-std::optional<HdrImage> loadExr(const std::string& path) {
+template <typename T>
+inline constexpr ScalarType kScalarType = ScalarType::Float32;
+template <>
+inline constexpr ScalarType kScalarType<Half> = ScalarType::Float16;
+
+template <typename T>
+struct ExrPixels {
+    int width;
+    int height;
+    std::vector<T> rgba;
+};
+
+std::size_t texelIndex(int x, int y, int width) {
+    return ((static_cast<std::size_t>(y) * static_cast<std::size_t>(width)) + static_cast<std::size_t>(x)) * 4;
+}
+
+// Calls f with the stored texel vector through a two-way branch on the variant's fixed index, so f inlines; std::visit dispatches through libc++'s function-pointer table (__fmatrix), an indirect call per sample.
+template <typename F>
+glm::vec4 withTexels(const ImageTexture& image, F&& f) {
+    if (const auto* half = std::get_if<std::vector<Half>>(&image.texels)) {
+        return f(*half);
+    }
+    return f(*std::get_if<std::vector<float>>(&image.texels));
+}
+
+template <typename T>
+glm::vec4 widenTexel(const std::vector<T>& rgba, std::size_t idx) {
+    return {static_cast<float>(rgba[idx + 0]), static_cast<float>(rgba[idx + 1]), static_cast<float>(rgba[idx + 2]),
+            static_cast<float>(rgba[idx + 3])};
+}
+
+// Reads path's R/G/B/A as interleaved T (missing alpha = 1). nullopt, reported, on I/O failure or a non-finite texel -- callers like EnvironmentMap build importance-sampling CDFs from these values with no further validation.
+template <typename T>
+std::optional<ExrPixels<T>> readExrRgba(const std::string& path) {
     try {
         Imf::InputFile file(path.c_str());
         const Imath::Box2i& dw = file.header().dataWindow();
         if (dw.isEmpty()) {
-            std::cerr << "loadExr: empty data window in " << path << '\n';
+            std::cerr << "readExrRgba: empty data window in " << path << '\n';
             return std::nullopt;
         }
 
         // Primaries, not transfer: "linear" says nothing about which gamut the numbers are linear IN. Absence is left as the documented Rec.709 assumption; a present-but-different attribute is a real defect in the source asset (systematically wrong saturation/hue) but the image data itself is still usable, so this warns rather than rejecting the load the way the non-finite check below does.
         if (Imf::hasChromaticities(file.header()) &&
             chromaticitiesMismatchRec709(Imf::chromaticities(file.header()))) {
-            std::cerr << "loadExr: " << path
+            std::cerr << "readExrRgba: " << path
                       << " declares non-Rec.709 chromaticities -- colours will be systematically wrong "
                          "under this engine's Rec.709 assumption\n";
         }
@@ -55,45 +93,79 @@ std::optional<HdrImage> loadExr(const std::string& path) {
         const int width = dw.max.x - dw.min.x + 1;
         const int height = dw.max.y - dw.min.y + 1;
 
-        HdrImage image;
-        image.width = width;
-        image.height = height;
-        image.rgba.assign(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4, 0.0F);
+        ExrPixels<T> image{width, height, {}};
+        image.rgba.assign(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4, T(0));
         // Missing-alpha source defaults to 1.0, matching RgbaInputFile's documented fill this loader previously relied on.
         for (std::size_t i = 3; i < image.rgba.size(); i += 4) {
-            image.rgba[i] = 1.0F;
+            image.rgba[i] = T(1);
         }
 
-        // Interleaved RGBA float buffer read directly, replacing RgbaInputFile's half decode -- half saturates at 65504 and silently manufactures infinities from finite source values (see EnvironmentMap's importance-sampling CDFs, which this feeds). base offset by dw.min handles a non-zero data-window origin, same idiom RgbaInputFile used internally.
+        // Interleaved RGBA read straight into T: OpenEXR converts each source channel to kExrPixelType<T>, so a Float16 read turns a source at or above binary16's overflow threshold into Inf, caught by the finiteness check below rather than reaching EnvironmentMap's CDFs. base offset by dw.min handles a non-zero data-window origin, same idiom RgbaInputFile used internally.
         char* base = reinterpret_cast<char*>(image.rgba.data()) -
                      ((static_cast<std::size_t>(dw.min.x) + (static_cast<std::size_t>(dw.min.y) * width)) *
-                      4 * sizeof(float));
-        const std::size_t xStride = 4 * sizeof(float);
+                      4 * sizeof(T));
+        const std::size_t xStride = 4 * sizeof(T);
         const std::size_t yStride = xStride * static_cast<std::size_t>(width);
         Imf::FrameBuffer frameBuffer;
         const std::array<std::pair<const char*, int>, 4> planes{
             {{"R", 0}, {"G", 1}, {"B", 2}, {"A", 3}}};
         for (const auto& [name, offset] : planes) {
             if (file.header().channels().findChannel(name) != nullptr) {
-                frameBuffer.insert(name, Imf::Slice(Imf::FLOAT, base + (offset * sizeof(float)),
+                frameBuffer.insert(name, Imf::Slice(kExrPixelType<T>, base + (offset * sizeof(T)),
                                                      xStride, yStride));
             }
         }
         file.setFrameBuffer(frameBuffer);
         file.readPixels(dw.min.y, dw.max.y);
 
-        for (const float texel : image.rgba) {
-            if (!std::isfinite(texel)) {
-                std::cerr << "loadExr: non-finite texel in " << path
-                          << " -- rejecting rather than propagating garbage into importance sampling\n";
+        for (const T texel : image.rgba) {
+            if (!std::isfinite(static_cast<float>(texel))) {
+                std::cerr << "readExrRgba: non-finite texel in " << path << " read as " << scalarTypeName(kScalarType<T>)
+                          << " (source Inf/NaN";
+                if constexpr (std::is_same_v<T, Half>) {
+                    std::cerr << ", or a finite value above binary16's max " << kHalfMax;
+                }
+                std::cerr << ") -- rejecting rather than propagating garbage into importance sampling\n";
                 return std::nullopt;
             }
         }
         return image;
     } catch (const std::exception& e) {
-        std::cerr << "loadExr: failed to load " << path << ": " << e.what() << '\n';
+        std::cerr << "readExrRgba: failed to load " << path << ": " << e.what() << '\n';
         return std::nullopt;
     }
+}
+
+}  // namespace
+
+std::optional<HdrImage> loadExr(const std::string& path) {
+    std::optional<ExrPixels<float>> pixels = readExrRgba<float>(path);
+    if (!pixels) {
+        return std::nullopt;
+    }
+    return HdrImage{pixels->width, pixels->height, std::move(pixels->rgba)};
+}
+
+std::optional<ImageTexture> loadImageTexture(const std::string& path, ScalarType type) {
+    const auto load = [&path]<typename T>() -> std::optional<ImageTexture> {
+        std::optional<ExrPixels<T>> pixels = readExrRgba<T>(path);
+        if (!pixels) {
+            return std::nullopt;
+        }
+        return ImageTexture{pixels->width, pixels->height, std::move(pixels->rgba)};
+    };
+    switch (type) {
+        case ScalarType::Float16:
+            return load.template operator()<Half>();
+        case ScalarType::Float32:
+            return load.template operator()<float>();
+    }
+    return std::nullopt;
+}
+
+glm::vec4 ImageTexture::texel(int x, int y) const {
+    const std::size_t idx = texelIndex(x, y, width);
+    return withTexels(*this, [idx](const auto& rgba) { return widenTexel(rgba, idx); });
 }
 
 bool writeExr(const std::string& path, const HdrImage& image) {
@@ -126,7 +198,7 @@ bool writeExr(const std::string& path, const HdrImage& image) {
     }
 }
 
-glm::vec4 sampleBilinear(const HdrImage& image, glm::vec2 uv) {
+glm::vec4 sampleBilinear(const ImageTexture& image, glm::vec2 uv) {
     // Texel-center convention, matching GL_LINEAR.
     const float fx = (uv.x * static_cast<float>(image.width)) - 0.5F;
     const float fy = (uv.y * static_cast<float>(image.height)) - 0.5F;
@@ -134,20 +206,17 @@ glm::vec4 sampleBilinear(const HdrImage& image, glm::vec2 uv) {
     const int y0 = static_cast<int>(std::floor(fy));
     const float tx = fx - static_cast<float>(x0);
     const float ty = fy - static_cast<float>(y0);
+    const int wx0 = wrapPixel(x0, image.width);
+    const int wx1 = wrapPixel(x0 + 1, image.width);
+    const int wy0 = wrapPixel(y0, image.height);
+    const int wy1 = wrapPixel(y0 + 1, image.height);
 
-    const auto texel = [&](int x, int y) {
-        const int wx = wrapPixel(x, image.width);
-        const int wy = wrapPixel(y, image.height);
-        const std::size_t idx = (static_cast<std::size_t>(wy) * static_cast<std::size_t>(image.width) +
-                                  static_cast<std::size_t>(wx)) *
-                                 4;
-        return glm::vec4(image.rgba[idx + 0], image.rgba[idx + 1], image.rgba[idx + 2],
-                          image.rgba[idx + 3]);
-    };
-
-    const glm::vec4 top = glm::mix(texel(x0, y0), texel(x0 + 1, y0), tx);
-    const glm::vec4 bottom = glm::mix(texel(x0, y0 + 1), texel(x0 + 1, y0 + 1), tx);
-    return glm::mix(top, bottom, ty);
+    return withTexels(image, [&](const auto& rgba) {
+        const auto texel = [&](int x, int y) { return widenTexel(rgba, texelIndex(x, y, image.width)); };
+        const glm::vec4 top = glm::mix(texel(wx0, wy0), texel(wx1, wy0), tx);
+        const glm::vec4 bottom = glm::mix(texel(wx0, wy1), texel(wx1, wy1), tx);
+        return glm::mix(top, bottom, ty);
+    });
 }
 
 }  // namespace engine::gfx

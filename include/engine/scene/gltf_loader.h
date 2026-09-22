@@ -6,6 +6,7 @@
 
 #include <glm/glm.hpp>
 
+#include "engine/gfx/scalar_type.h"
 #include "engine/scene/light.h"
 #include "engine/scene/material.h"
 #include "engine/scene/ray_types.h"
@@ -28,8 +29,8 @@ struct LoadedModel {
     std::vector<ShadingTriangle> shadingTriangles;
 };
 
-// Parses path via cgltf, resolving each material's textures via loadExr -- this project's glTF assets ship linear EXR maps, not glTF's usual PNG/JPEG. Returns nullopt and logs to stderr on any failure (bad file, missing accessor, missing texture, non-triangle primitive): fails clearly rather than substituting a placeholder for something this loader doesn't yet support. rootTransform seeds the node-hierarchy walk in place of identity (scene_config.h position/rotation, composed by caller). textureDir, if non-empty, replaces path's own directory when resolving image URIs -- lets scene_config.h's texturePath override where textures are read from (e.g. swapping 2K/4K/8K sets) independently of which .gltf tier is loaded, since sibling tiers share the same UVs/texture set.
-std::optional<LoadedModel> loadGltf(const std::string& path,
+// Parses path via cgltf, resolving each material's textures via loadImageTexture at textureType -- this project's glTF assets ship linear EXR maps, not glTF's usual PNG/JPEG. Returns nullopt and logs to stderr on any failure (bad file, missing accessor, missing texture, non-triangle primitive): fails clearly rather than substituting a placeholder for something this loader doesn't yet support. rootTransform seeds the node-hierarchy walk in place of identity (scene_config.h position/rotation, composed by caller). textureDir, if non-empty, replaces path's own directory when resolving image URIs -- lets scene_config.h's texturePath override where textures are read from (e.g. swapping 2K/4K/8K sets) independently of which .gltf tier is loaded, since sibling tiers share the same UVs/texture set.
+std::optional<LoadedModel> loadGltf(const std::string& path, engine::gfx::ScalarType textureType,
                                      const glm::mat4& rootTransform = glm::mat4(1.0F),
                                      const std::string& textureDir = "");
 
