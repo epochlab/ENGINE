@@ -37,12 +37,8 @@ constexpr float kUnitEpsilon = 1e-2F;   // unit-vector/[0,1]-range fields (norma
 constexpr float kMaxCoverageMismatchFraction = 0.02F;
 constexpr float kMaxValueMismatchFraction = 0.02F;
 
-engine::gfx::HdrImage constantTexture(glm::vec4 color) {
-    engine::gfx::HdrImage image;
-    image.width = 1;
-    image.height = 1;
-    image.rgba = {color.r, color.g, color.b, color.a};
-    return image;
+engine::gfx::ImageTexture constantTexture(glm::vec4 color) {
+    return {1, 1, std::vector<float>{color.r, color.g, color.b, color.a}};
 }
 
 Material makeMaterial(glm::vec3 baseColor, float roughness) {

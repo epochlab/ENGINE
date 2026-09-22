@@ -384,7 +384,7 @@ void reportErrorSpectrum(const engine::gfx::HdrImage& image, const engine::gfx::
 // Everything the timed loop's cost depends on goes in `config`; output paths and exposure do not, so they never split two otherwise comparable runs.
 bool appendTimingRecord(const Options& options, int argc, char** argv, int width, int height,
                         const engine::scene::PathTraceSettings& settings, bool envLightEnabled,
-                        const std::vector<double>& milliseconds, const engine::debug::RayCounts& rays,
+                        engine::gfx::ScalarType textureType, const std::vector<double>& milliseconds, const engine::debug::RayCounts& rays,
                         const engine::gfx::HdrImage& accumulated) {
     const engine::debug::BenchRecord record{
         .tool = "render_beauty",
@@ -399,7 +399,8 @@ bool appendTimingRecord(const Options& options, int argc, char** argv, int width
                    {"spp_per_pass", settings.samplesPerPixel},
                    {"max_bounces", settings.maxBounces},
                    {"rr_start_bounce", settings.russianRouletteStartBounce},
-                   {"ao_max_distance", settings.aoMaxDistance}},
+                   {"ao_max_distance", settings.aoMaxDistance},
+                   {"texture_type", engine::gfx::scalarTypeName(textureType)}},
         .samples = {{"pass_ms", milliseconds}},
         .work = {{"rays", {{"primary", rays.primary}, {"bounce", rays.bounce}, {"ao", rays.ao}, {"shadow", rays.shadow}}},
                  {"crc32", engine::debug::floatCrc32(accumulated.rgba)}},
@@ -507,8 +508,8 @@ int main(int argc, char** argv) {
     }
     const std::optional<engine::config::MaterialConfig> materialConfig =
         engine::config::loadMaterialConfig(assetRoot + "/" + sceneConfig->materialPath);
-    std::optional<engine::gfx::HdrImage> environmentImage =
-        engine::gfx::loadExr(assetRoot + "/" + sceneConfig->environment.hdriPath);
+    std::optional<engine::gfx::ImageTexture> environmentImage = engine::gfx::loadImageTexture(
+        assetRoot + "/" + sceneConfig->environment.hdriPath, profileConfig->render.textureType);
     if (!materialConfig || !environmentImage) {
         return EXIT_FAILURE;
     }
@@ -520,7 +521,7 @@ int main(int argc, char** argv) {
         glm::rotate(glm::mat4(1.0F), glm::radians(sceneConfig->model.rotation.y), glm::vec3(0.0F, 1.0F, 0.0F)) *
         glm::rotate(glm::mat4(1.0F), glm::radians(sceneConfig->model.rotation.x), glm::vec3(1.0F, 0.0F, 0.0F));
     std::optional<engine::scene::LoadedModel> model = engine::scene::loadGltf(
-        assetRoot + "/" + sceneConfig->model.gltfPath, rootTransform,
+        assetRoot + "/" + sceneConfig->model.gltfPath, profileConfig->render.textureType, rootTransform,
         sceneConfig->model.texturePath.empty() ? "" : assetRoot + "/" + sceneConfig->model.texturePath);
     if (!model) {
         return EXIT_FAILURE;
@@ -782,7 +783,8 @@ int main(int argc, char** argv) {
               << totalMs << ")\n";
     // Before any output encode, so the record's rusage covers load, build and the timed passes but not PNG/EXR writing.
     if (!options.benchLogPath.empty() &&
-        !appendTimingRecord(options, argc, argv, width, height, baseSettings, envLightEnabled, milliseconds, rays,
+        !appendTimingRecord(options, argc, argv, width, height, baseSettings, envLightEnabled,
+                            profileConfig->render.textureType, milliseconds, rays,
                             accumulated)) {
         return EXIT_FAILURE;
     }

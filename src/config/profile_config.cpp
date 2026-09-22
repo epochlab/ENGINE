@@ -25,15 +25,9 @@ std::optional<engine::gfx::OcioDisplayTransform::Lut> parseLut(const std::string
     return std::nullopt;
 }
 
-std::optional<engine::gfx::TexelFormat> parseTexelFormat(int bitDepth) {
-    using TexelFormat = engine::gfx::TexelFormat;
-    if (bitDepth == 16) {
-        return TexelFormat::RGBA16F;
-    }
-    if (bitDepth == 32) {
-        return TexelFormat::RGBA32F;
-    }
-    return std::nullopt;
+// Integer-typed first: get<int>() would silently truncate 16.5 to 16.
+std::optional<engine::gfx::ScalarType> parseBitDepth(const nlohmann::json& bitDepth) {
+    return bitDepth.is_number_integer() ? engine::gfx::scalarTypeFromBitDepth(bitDepth.get<int>()) : std::nullopt;
 }
 
 }  // namespace
@@ -64,13 +58,13 @@ std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
             return std::nullopt;
         }
 
-        // Integer-typed first: get<int>() would silently truncate 16.5 to 16.
+        const nlohmann::json& displayBitDepth = render.at("displayBitDepth");
         const nlohmann::json& textureBitDepth = render.at("textureBitDepth");
-        const std::optional<engine::gfx::TexelFormat> displayTextureFormat =
-            textureBitDepth.is_number_integer() ? parseTexelFormat(textureBitDepth.get<int>()) : std::nullopt;
-        if (!displayTextureFormat.has_value()) {
-            std::cerr << "loadProfileConfig: " << path << " has a textureBitDepth " << textureBitDepth.dump()
-                       << ", expected 16 or 32\n";
+        const std::optional<engine::gfx::ScalarType> displayFormat = parseBitDepth(displayBitDepth);
+        const std::optional<engine::gfx::ScalarType> textureType = parseBitDepth(textureBitDepth);
+        if (!displayFormat.has_value() || !textureType.has_value()) {
+            std::cerr << "loadProfileConfig: " << path << " has displayBitDepth " << displayBitDepth.dump()
+                       << ", textureBitDepth " << textureBitDepth.dump() << ", each expected 16 or 32\n";
             return std::nullopt;
         }
 
@@ -144,7 +138,8 @@ std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
                 defaultAov,
                 *defaultLut,
                 vsync,
-                *displayTextureFormat,
+                *displayFormat,
+                *textureType,
             },
             PathTracerConfig{
                 samplesPerPixel,

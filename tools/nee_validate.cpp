@@ -53,24 +53,19 @@ BsdfParams makeParams(float roughness, float metallic) {
 // Structured environment: a dim background with one small bright patch, so the luminance CDF has real
 // structure to invert (a uniform map makes both marginal and conditional CDFs linear, which would let a
 // mis-scaled Jacobian or an off-by-one bin lookup pass unnoticed).
-EnvironmentMap makeStructuredEnvironment() {
-    engine::gfx::HdrImage image;
-    image.width = 64;
-    image.height = 32;
-    image.rgba.assign(static_cast<std::size_t>(image.width) * static_cast<std::size_t>(image.height) * 4,
-                       0.05F);
+EnvironmentMap makeStructuredEnvironment(engine::gfx::ScalarType type) {
+    constexpr int kWidth = 64;
+    constexpr int kHeight = 32;
+    std::vector<float> rgba(static_cast<std::size_t>(kWidth) * kHeight * 4, 0.05F);
     for (int y = 8; y < 12; ++y) {
         for (int x = 20; x < 26; ++x) {
-            const std::size_t idx =
-                ((static_cast<std::size_t>(y) * static_cast<std::size_t>(image.width)) +
-                 static_cast<std::size_t>(x)) *
-                4;
-            image.rgba[idx + 0] = 400.0F;
-            image.rgba[idx + 1] = 380.0F;
-            image.rgba[idx + 2] = 300.0F;
+            const std::size_t idx = ((static_cast<std::size_t>(y) * kWidth) + static_cast<std::size_t>(x)) * 4;
+            rgba[idx + 0] = 400.0F;
+            rgba[idx + 1] = 380.0F;
+            rgba[idx + 2] = 300.0F;
         }
     }
-    return EnvironmentMap(std::move(image));
+    return EnvironmentMap(tools::fixtures::makeImageTexture(kWidth, kHeight, rgba, type));
 }
 
 // importanceSampleDirection returns a direction AND the solid-angle density it was drawn with; pdf()
@@ -80,33 +75,75 @@ EnvironmentMap makeStructuredEnvironment() {
 ENGINE_CHECK(environment_pdf_consistency, Fast, Exact) {
     constexpr int kSampleCount = 20000;
     constexpr float kTolerance = 1e-3F;
-    const EnvironmentMap env = makeStructuredEnvironment();
-    std::mt19937 rng(static_cast<std::mt19937::result_type>(ctx.seed()));
-    std::uniform_real_distribution<float> unit(0.0F, 1.0F);
-
     // Non-zero rotation: the sample path rotates by +angle and the query path by -angle, so a sign slip
     // between them cancels at 0 and only shows up here.
     constexpr float kRotation = 0.7F;
-    ctx.plan(1);
-    int worstIndex = -1;
-    float worstRelative = 0.0F;
-    for (int i = 0; i < kSampleCount; ++i) {
-        const EnvironmentMap::EnvSample sample =
-            env.importanceSampleDirection(glm::vec2(unit(rng), unit(rng)), kRotation);
-        const float queried = env.pdf(sample.direction, kRotation);
-        const float relative = std::fabs(queried - sample.pdf) / std::max(sample.pdf, 1e-6F);
-        if (relative > worstRelative) {
-            worstRelative = relative;
-            worstIndex = i;
+    constexpr std::array<engine::gfx::ScalarType, 2> kTypes = {engine::gfx::ScalarType::Float32,
+                                                               engine::gfx::ScalarType::Float16};
+    ctx.plan(static_cast<int>(kTypes.size()));
+    for (const engine::gfx::ScalarType type : kTypes) {
+        const EnvironmentMap env = makeStructuredEnvironment(type);
+        std::mt19937 rng(static_cast<std::mt19937::result_type>(ctx.seed()));
+        std::uniform_real_distribution<float> unit(0.0F, 1.0F);
+        int worstIndex = -1;
+        float worstRelative = 0.0F;
+        for (int i = 0; i < kSampleCount; ++i) {
+            const EnvironmentMap::EnvSample sample =
+                env.importanceSampleDirection(glm::vec2(unit(rng), unit(rng)), kRotation);
+            const float queried = env.pdf(sample.direction, kRotation);
+            const float relative = std::fabs(queried - sample.pdf) / std::max(sample.pdf, 1e-6F);
+            if (relative > worstRelative) {
+                worstRelative = relative;
+                worstIndex = i;
+            }
         }
+        // An agreement between two code paths over the same direction, so this is an exactness assertion with a
+        // floating-point tolerance, not a statistical one: the two must agree or every MIS weight is wrong.
+        char detail[224];
+        std::snprintf(detail, sizeof(detail),
+                      "%s: worst relative mismatch %.3e at sample %d, between importanceSampleDirection's own pdf and pdf()",
+                      engine::gfx::scalarTypeName(type), static_cast<double>(worstRelative), worstIndex);
+        ENGINE_EXPECT(ctx, worstRelative <= kTolerance, detail);
     }
-    // An agreement between two code paths over the same direction, so this is an exactness assertion with a
-    // floating-point tolerance, not a statistical one: the two must agree or every MIS weight is wrong.
-    char detail[192];
-    std::snprintf(detail, sizeof(detail),
-                  "worst relative mismatch %.3e at sample %d, between importanceSampleDirection's own pdf and pdf()",
-                  static_cast<double>(worstRelative), worstIndex);
-    ENGINE_EXPECT(ctx, worstRelative <= kTolerance, detail);
+}
+
+// The CDFs must be built from the values the map returns, not the source they were rounded from, or the sampling density stops being proportional to the radiance it weights. Background 1.0 and one texel at 1 + 2^-11, the exact binary16 midpoint above 1.0: round-to-nearest-even stores it as 1.0, so at Float16 the pdf ratio must sit nearer the stored luminance ratio (1) than the source ratio (1 + 2^-11), and at Float32 the reverse. Discriminating by nearest hypothesis needs no tolerance.
+ENGINE_CHECK(environment_pdf_tracks_stored_luminance, Fast, Exact) {
+    constexpr int kWidth = 64;
+    constexpr int kHeight = 32;
+    constexpr int kPatchX = 20;
+    constexpr int kPatchY = 16;
+    constexpr int kBackgroundX = 40;
+    const float midpoint = 1.0F + engine::gfx::kHalfUnitRoundoff;
+    std::vector<float> rgba(static_cast<std::size_t>(kWidth) * kHeight * 4, 1.0F);
+    const std::size_t patch = ((static_cast<std::size_t>(kPatchY) * kWidth) + kPatchX) * 4;
+    rgba[patch + 0] = midpoint;
+    rgba[patch + 1] = midpoint;
+    rgba[patch + 2] = midpoint;
+
+    // Direction through a texel's centre, inverting equirectTexelOf's (u, v) = (phi / 2pi + 1/2, theta / pi).
+    const auto centre = [](int x, int y) {
+        const float phi = ((((static_cast<float>(x) + 0.5F) / kWidth) - 0.5F) * 2.0F * glm::pi<float>());
+        const float theta = ((static_cast<float>(y) + 0.5F) / kHeight) * glm::pi<float>();
+        return glm::vec3(std::sin(theta) * std::sin(phi), std::cos(theta), std::sin(theta) * std::cos(phi));
+    };
+    ctx.plan(2);
+    for (const engine::gfx::ScalarType type : {engine::gfx::ScalarType::Float16, engine::gfx::ScalarType::Float32}) {
+        const engine::gfx::ImageTexture image = tools::fixtures::makeImageTexture(kWidth, kHeight, rgba, type);
+        const float storedRatio = image.texel(kPatchX, kPatchY).g / image.texel(kBackgroundX, kPatchY).g;
+        const float sourceRatio = midpoint;
+        const EnvironmentMap env(image);
+        // Same row, so sin(theta) cancels and the solid-angle pdf ratio is the luminance ratio.
+        const float pdfRatio = env.pdf(centre(kPatchX, kPatchY), 0.0F) / env.pdf(centre(kBackgroundX, kPatchY), 0.0F);
+        const bool tracksStored = type == engine::gfx::ScalarType::Float16
+                                      ? std::fabs(pdfRatio - storedRatio) < std::fabs(pdfRatio - sourceRatio)
+                                      : std::fabs(pdfRatio - sourceRatio) < std::fabs(pdfRatio - 1.0F);
+        char detail[224];
+        std::snprintf(detail, sizeof(detail), "%s: pdf ratio %.9g, stored luminance ratio %.9g, source ratio %.9g",
+                      engine::gfx::scalarTypeName(type), static_cast<double>(pdfRatio),
+                      static_cast<double>(storedRatio), static_cast<double>(sourceRatio));
+        ENGINE_EXPECT(ctx, tracksStored, detail);
+    }
 }
 
 // MIS-combined NEE + BSDF-sampled estimator, mirroring path_tracer.cpp's tracePath exactly: power heuristic, no occlusion since there's no geometry here, so both strategies always reach the environment (matching a flat unoccluded surface).

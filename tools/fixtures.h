@@ -4,6 +4,7 @@
 #include <cmath>
 #include <optional>
 #include <random>
+#include <vector>
 
 #include <glm/glm.hpp>
 
@@ -92,22 +93,27 @@ inline SlabWalk slabWalkLo(const engine::scene::BsdfParams& params, int paths, s
     return {sum / count, static_cast<double>(vertices) / count, truncated};
 }
 
+// RGBA float test data stored at type, rounded to nearest even as loadImageTexture's OpenEXR read does.
+inline engine::gfx::ImageTexture makeImageTexture(int width, int height, const std::vector<float>& rgba,
+                                                  engine::gfx::ScalarType type) {
+    if (type == engine::gfx::ScalarType::Float32) {
+        return {width, height, rgba};
+    }
+    return {width, height, std::vector<engine::gfx::Half>(rgba.begin(), rgba.end())};
+}
+
 // Uniform-radiance (L0 = 1) equirect environment: constant regardless of resolution, but a real image so
 // EnvironmentMap's CDF machinery runs its normal (non-degenerate) path rather than the all-black fallback.
 inline engine::scene::EnvironmentMap makeUniformEnvironment() {
-    engine::gfx::HdrImage image;
-    image.width = 64;
-    image.height = 32;
-    image.rgba.assign(static_cast<std::size_t>(image.width) * static_cast<std::size_t>(image.height) * 4, 1.0F);
-    return engine::scene::EnvironmentMap(std::move(image));
+    constexpr int kWidth = 64;
+    constexpr int kHeight = 32;
+    return engine::scene::EnvironmentMap(makeImageTexture(
+        kWidth, kHeight, std::vector<float>(static_cast<std::size_t>(kWidth) * kHeight * 4, 1.0F),
+        engine::gfx::ScalarType::Float32));
 }
 
-inline engine::gfx::HdrImage makeConstantTexture(glm::vec3 rgb) {
-    engine::gfx::HdrImage image;
-    image.width = 1;
-    image.height = 1;
-    image.rgba = {rgb.x, rgb.y, rgb.z, 1.0F};
-    return image;
+inline engine::gfx::ImageTexture makeConstantTexture(glm::vec3 rgb) {
+    return makeImageTexture(1, 1, {rgb.x, rgb.y, rgb.z, 1.0F}, engine::gfx::ScalarType::Float32);
 }
 
 // 1x1 textures carrying the neutral values resolveBsdfParams/buildShadingFrame expect: a flat tangent-space normal

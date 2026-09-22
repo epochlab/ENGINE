@@ -17,12 +17,9 @@ glm::vec3 rotateAboutY(const glm::vec3& v, float angleRadians) {
 }
 
 // Same Rec.709 weights as edge_filter.frag's sampleLuminance.
-float luminanceOf(const engine::gfx::HdrImage& image, int x, int y) {
-    const std::size_t idx = ((static_cast<std::size_t>(y) * static_cast<std::size_t>(image.width)) +
-                              static_cast<std::size_t>(x)) *
-                             4;
-    return (0.2126F * image.rgba[idx + 0]) + (0.7152F * image.rgba[idx + 1]) +
-           (0.0722F * image.rgba[idx + 2]);
+float luminanceOf(const engine::gfx::ImageTexture& image, int x, int y) {
+    const glm::vec4 texel = image.texel(x, y);
+    return (0.2126F * texel.r) + (0.7152F * texel.g) + (0.0722F * texel.b);
 }
 
 // Inverts a piecewise-constant CDF slice [cdf[0], cdf[count]) (cdf[0]==0, cdf[count]==1) at u, returning the bin index and the fractional offset within that bin's probability mass -- shared by both the marginal (row) and conditional (column) inversion steps.
@@ -37,7 +34,7 @@ struct EquirectTexel {
     float sinTheta;
 };
 
-EquirectTexel equirectTexelOf(const engine::gfx::HdrImage& image, const glm::vec3& direction,
+EquirectTexel equirectTexelOf(const engine::gfx::ImageTexture& image, const glm::vec3& direction,
                                float envRotationRadians) {
     const glm::vec3 rotated = rotateAboutY(direction, -envRotationRadians);
     const float theta = std::acos(glm::clamp(rotated.y, -1.0F, 1.0F));
@@ -61,7 +58,7 @@ CdfSample invertCdf(const float* cdf, int count, float u) {
 
 }  // namespace
 
-EnvironmentMap::EnvironmentMap(engine::gfx::HdrImage image) : image_(std::move(image)) {
+EnvironmentMap::EnvironmentMap(engine::gfx::ImageTexture image) : image_(std::move(image)) {
     const int width = image_.width;
     const int height = image_.height;
     marginalCdf_.assign(static_cast<std::size_t>(height) + 1, 0.0F);
@@ -148,10 +145,7 @@ EnvironmentMap::EnvSample EnvironmentMap::importanceSampleDirection(glm::vec2 u,
 glm::vec3 EnvironmentMap::sampleDirectionNearest(const glm::vec3& direction,
                                                   float envRotationRadians) const {
     const EquirectTexel texel = equirectTexelOf(image_, direction, envRotationRadians);
-    const std::size_t idx = ((static_cast<std::size_t>(texel.y) * static_cast<std::size_t>(image_.width)) +
-                              static_cast<std::size_t>(texel.x)) *
-                             4;
-    return {image_.rgba[idx + 0], image_.rgba[idx + 1], image_.rgba[idx + 2]};
+    return glm::vec3(image_.texel(texel.x, texel.y));
 }
 
 float EnvironmentMap::pdf(const glm::vec3& direction, float envRotationRadians) const {

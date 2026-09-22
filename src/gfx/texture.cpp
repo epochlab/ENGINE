@@ -1,8 +1,6 @@
 #include "engine/gfx/texture.h"
 
 #include <cstddef>
-#include <cstdint>
-#include <cstdlib>
 #include <utility>
 
 #include <GL/glew.h>
@@ -14,40 +12,20 @@ namespace engine::gfx {
 
 namespace {
 
-GLint glInternalFormat(TexelFormat format) {
+// Sized RGBA float internal format for each component type.
+GLint glInternalFormat(ScalarType format) {
     switch (format) {
-        case TexelFormat::RGBA16F:
+        case ScalarType::Float16:
             return GL_RGBA16F;
-        case TexelFormat::RGBA32F:
+        case ScalarType::Float32:
             return GL_RGBA32F;
     }
-    std::abort();
-}
-
-// 4 channels x component size: binary16 is 2 bytes, binary32 is sizeof(float).
-std::size_t bytesPerTexel(TexelFormat format) {
-    switch (format) {
-        case TexelFormat::RGBA16F:
-            return 4 * sizeof(std::uint16_t);
-        case TexelFormat::RGBA32F:
-            return 4 * sizeof(float);
-    }
-    std::abort();
+    return 0;
 }
 
 }  // namespace
 
-const char* texelFormatName(TexelFormat format) {
-    switch (format) {
-        case TexelFormat::RGBA16F:
-            return "RGBA16F";
-        case TexelFormat::RGBA32F:
-            return "RGBA32F";
-    }
-    std::abort();
-}
-
-Texture::Texture(unsigned int id, TexelFormat format) : id_(id), format_(format) {}
+Texture::Texture(unsigned int id, ScalarType format) : id_(id), format_(format) {}
 
 Texture::~Texture() {
     if (id_ != 0) {
@@ -78,7 +56,7 @@ Texture& Texture::operator=(Texture&& other) noexcept {
     return *this;
 }
 
-Texture Texture::createFromFloatPixels(int width, int height, const float* rgba, TexelFormat format) {
+Texture Texture::createFromFloatPixels(int width, int height, const float* rgba, ScalarType format) {
     unsigned int id = 0;
     GL_CALL(glGenTextures(1, &id));
     GL_CALL(glBindTexture(GL_TEXTURE_2D, id));
@@ -109,7 +87,7 @@ void Texture::upload(int width, int height, const float* rgba) {
     height_ = height;
     engine::debug::trackGpuFree(byteSize_);
     // No mip chain, so no ~1/3 addition -- the HUD's GPU memory readout reports what is actually allocated.
-    byteSize_ = static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * bytesPerTexel(format_);
+    byteSize_ = static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4 * scalarBytes(format_);
     engine::debug::trackGpuAlloc(byteSize_);
 }
 
