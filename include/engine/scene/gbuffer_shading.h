@@ -35,7 +35,7 @@ struct LineProximity {
 
 [[nodiscard]] glm::vec3 geometricNormalOf(const ShadingTriangle& tri);
 
-// Writes an opaque (alpha=1) RGB texel -- every AOV field broadcasts to RGBA this way, matching HdrImage's fixed 4-floats/texel layout so it goes straight through Texture::createFromFloatPixels unchanged.
+// Writes an opaque (alpha=1) RGB texel -- every AOV field broadcasts to RGBA this way, matching HdrImage's fixed 4-floats/texel layout so it goes straight through Texture::create unchanged.
 void writeTexel(engine::gfx::HdrImage& image, int x, int y, glm::vec3 rgb);
 
 [[nodiscard]] engine::gfx::HdrImage makeImage(int width, int height);
