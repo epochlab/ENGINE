@@ -61,6 +61,7 @@ struct HudFrameData {
     // Fraction of Beauty's texels that would clip at the display encode, and the peak such value as a multiple of display range -- see main.cpp's updateOverRangeStats. Histogram alone can't distinguish "just over 1.0" from "100x over" since both pin its post-display-transform bin 255 identically.
     float overRangeFraction;
     float overRangePeakMultiple;
+    bool vsync;  // profile.json frame cap, for the Cap readout
 };
 
 // Owns the ImGui context and GLFW/OpenGL3 backends for one window's lifetime, move-only like this codebase's other RAII wrappers. Composites the debug panel onto the final backbuffer, after the OCIO tonemap pass, never into the linear HDR FBO (this project runs with no driver-level sRGB framebuffer conversion; display encoding happens only in-shader).

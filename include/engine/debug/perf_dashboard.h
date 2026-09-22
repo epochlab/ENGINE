@@ -39,6 +39,7 @@ struct DashboardFrame {
     float renderScale;
     bool interactiveScale;
     double refreshHz;  // the window's display, measured by DisplayLink
+    bool vsync;        // profile.json frame cap; the budget stays the refresh period either way
 };
 
 // Live terminal dashboard: redraws a fixed-height block in place at kRefreshHz using ANSI cursor-up plus erase-line, so the terminal shows one screenful rather than accumulating scrollback. Render-thread only -- update() is called at the end of renderFrame and reads that thread's own FrameStageTimes/FrameStats with no synchronization.

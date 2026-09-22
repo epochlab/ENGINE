@@ -6,13 +6,13 @@ namespace engine::scene {
 
 // Metallic-roughness material, extended with Specular/AO -- the raw texture set this project's assets ship, beyond glTF's own pbrMetallicRoughness slots (see gltf_loader.cpp for how they're read out of the material's `extras`). Scalar/colour factors live on SceneConfig::material (scene_config.h), not here -- see resolveBsdfParams (path_tracer.cpp). Textures are CPU-resident (engine::gfx::HdrImage), sampled per-ray by the path tracer.
 struct Material {
-    engine::gfx::HdrImage baseColorTexture;
-    engine::gfx::HdrImage normalTexture;
-    engine::gfx::HdrImage bumpTexture;
-    engine::gfx::HdrImage roughnessTexture;
-    engine::gfx::HdrImage specularTexture;
+    engine::gfx::ImageTexture baseColorTexture;
+    engine::gfx::ImageTexture normalTexture;
+    engine::gfx::ImageTexture bumpTexture;
+    engine::gfx::ImageTexture roughnessTexture;
+    engine::gfx::ImageTexture specularTexture;
     // Loaded from glTF's occlusion_texture but read by nothing: AO is ray-traced per sample now (path_tracer.h's PathTraceResult::ao), which the baked texture cannot express. Kept so the asset pipeline stays lossless and a future baked/traced blend has the map to hand.
-    engine::gfx::HdrImage aoTexture;
+    engine::gfx::ImageTexture aoTexture;
 };
 
 // Neutral, non-file default: every slot is a 1x1 texture whose constant value is the identity for

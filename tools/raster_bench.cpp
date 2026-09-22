@@ -46,12 +46,8 @@ struct Options {
     std::string benchLogPath;  // appends the run to this JSON Lines benchmark log (bench_log.h); empty = no log
 };
 
-engine::gfx::HdrImage constantTexture(glm::vec4 color) {
-    engine::gfx::HdrImage image;
-    image.width = 1;
-    image.height = 1;
-    image.rgba = {color.r, color.g, color.b, color.a};
-    return image;
+engine::gfx::ImageTexture constantTexture(glm::vec4 color) {
+    return {1, 1, std::vector<float>{color.r, color.g, color.b, color.a}};
 }
 
 Material makeMaterial(glm::vec3 baseColor, float roughness) {
