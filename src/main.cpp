@@ -287,6 +287,10 @@ struct AppResources {
     engine::gfx::ScalarType textureType;    // scene textures' storage (profile.json textureBitDepth), recorded in -bench configs
     std::unique_ptr<engine::scene::PathTraceDriver> pathTraceDriver;
     std::optional<engine::gfx::Texture> pathTraceDisplayTexture;
+    // The half texels pathTraceDisplayTexture is fed at displayBitDepth 16 (uploadDisplayTexture), sized on the first upload of each render resolution and reused across every upload at that resolution -- the same allocate-once convention as PathTraceDriver's buffer pool. Empty for the process's life at displayBitDepth 32, which uploads the HdrImage itself.
+    std::vector<engine::gfx::Half> displayStaging;
+    // Scratch for the one AOV whose displayed texels are not its published ones: BounceCount's Turbo mapping (ensurePathTraceDisplayTexture). Reused rather than allocated per upload, for the same reason as displayStaging; stays empty unless that AOV is selected.
+    engine::gfx::HdrImage displayColormap;
     // Which image pathTraceDisplayTexture currently holds -- the image, not the AovId that selected it, so every AOV reading the same buffer shares one upload: Beauty and the four GPU post-filters over it (presentFrame) all pass &PathTraceResult::beauty. An interior pointer into pathTraceDisplayedOwner below, which is what keeps it valid and ABA-free.
     const engine::gfx::HdrImage* pathTraceDisplayedImage;  // nullptr = nothing uploaded yet
     // Max raw Depth value seen in the last rebuilt pathTraceDisplayTexture -- see ensurePathTraceDisplayTexture; only meaningful/updated when aov==Depth.
@@ -458,7 +462,7 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
 
     std::optional<RequiredShaders> shaders = loadShaders();
     // Decoded once here (not via a texture-upload helper): the path tracer is the only consumer, sampling this CPU ImageTexture directly, with no GPU upload step in between.
-    std::optional<engine::gfx::ImageTexture> environmentImage = engine::gfx::loadImageTexture(
+    std::optional<engine::gfx::ImageTexture<3>> environmentImage = engine::gfx::loadImageTexture<3>(
         std::string(ASSET_ROOT_DIR) + "/" + sceneConfig.environment.hdriPath, profileConfig.render.textureType);
     std::optional<engine::config::MaterialConfig> materialConfig = engine::config::loadMaterialConfig(
         std::string(ASSET_ROOT_DIR) + "/" + sceneConfig.materialPath);
@@ -612,6 +616,8 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         // Constructed in main() right after initializeApp() returns -- see path_trace_driver.h's constructor precondition (its reference members must bind to sceneAccel/environmentMap/stumpModel at their final, permanent address, which this designated-initializer expression, still local-variable-based and one AppResources move away from that address, cannot yet guarantee).
         .pathTraceDriver = nullptr,
         .pathTraceDisplayTexture = std::nullopt,
+        .displayStaging = {},
+        .displayColormap = {},
         .pathTraceDisplayedImage = nullptr,
         .pathTraceDisplayedDepthMax = 0.0F,
         .pathTraceDisplayedGeneration = 0,
@@ -894,6 +900,26 @@ engine::debug::PixelProbeSample samplePixelProbe(
     return {true, glm::vec4(pixel[0], pixel[1], pixel[2], pixel[3]) / 255.0F};
 }
 
+// Uploads `image` into pathTraceDisplayTexture (creating it on first use) at app.displayFormat's own component type, so the driver converts nothing: Float32 uploads the HdrImage directly, Float16 converts once into a staging buffer reused across uploads and sends GL_HALF_FLOAT. That removes the driver's own conversion (46% of upload_ms on cornell, 68% on the stump) and halves the bytes transferred.
+// Same displayed image: static_cast<Half> and the driver's conversion are both IEEE 754 round-to-nearest-even into binary16, and a value above 65504 still becomes Inf, which is what displayBitDepth 32 exists for.
+// Serial by measurement, not by default: the same loop dispatched over rows on rasterThreadPool read slower than the driver conversion it replaces, because the trace workers saturate every core and the pool's join then waits on a descheduled worker (results/wave8).
+void uploadDisplayTexture(AppResources& app, const engine::gfx::HdrImage& image) {
+    const void* texels = image.rgba.data();
+    if (app.displayFormat == engine::gfx::ScalarType::Float16) {
+        app.displayStaging.resize(image.rgba.size());
+        for (std::size_t i = 0; i < image.rgba.size(); ++i) {
+            app.displayStaging[i] = static_cast<engine::gfx::Half>(image.rgba[i]);
+        }
+        texels = app.displayStaging.data();
+    }
+    if (app.pathTraceDisplayTexture.has_value()) {
+        app.pathTraceDisplayTexture->upload(image.width, image.height, texels);
+        return;
+    }
+    app.pathTraceDisplayTexture =
+        engine::gfx::Texture::create(image.width, image.height, texels, app.displayFormat);
+}
+
 // Re-uploads pathTraceDisplayTexture only when the selected AOV or the published object that owns the image actually changed: re-sending 33MB over PCIe every frame just to redisplay texels the GPU already holds would violate this codebase's no-work-per-frame-without-a-reason convention.
 // The upload itself no longer destroys and recreates the texture object (Texture::upload).
 // The driver publishes a fresh result object every completed pass, though, so while it's actively converging this does rebuild the texture up to once per rendered frame; that per-frame cap (not a lower one) is deliberate, it is what makes newly-accumulated samples visible at all.
@@ -918,9 +944,10 @@ void ensurePathTraceDisplayTexture(AppResources& app, const std::shared_ptr<cons
     }
     // BounceCount is a mean-termination-depth scalar (R==G==B, see path_tracer.cpp's writeTexel call), not a colour, mapped through Turbo here, on the CPU, before upload, rather than as a display-shader uniform.
     // This function already only runs once per rebuilt pass (see the cache-key check above), so the map costs nothing extra per frame and needs no new uniform/texture unit.
+    // No row-reversed scratch copy and no texture object churn -- fullscreen_triangle.vert resolves the row-order convention, and Texture::upload reallocates only if the render resolution actually changed.
     if (app.aov == static_cast<int>(engine::debug::AovId::BounceCount)) {
         const float maxBounceCount = static_cast<float>(app.pathTraceSettings.maxBounces) + 1.0F;
-        engine::gfx::HdrImage mapped;
+        engine::gfx::HdrImage& mapped = app.displayColormap;
         mapped.width = image.width;
         mapped.height = image.height;
         mapped.rgba.resize(image.rgba.size());
@@ -933,24 +960,9 @@ void ensurePathTraceDisplayTexture(AppResources& app, const std::shared_ptr<cons
             mapped.rgba[idx + 2] = mappedColor.b;
             mapped.rgba[idx + 3] = image.rgba[idx + 3];
         }
-        if (app.pathTraceDisplayTexture.has_value()) {
-            app.pathTraceDisplayTexture->upload(mapped.width, mapped.height, mapped.rgba.data());
-        } else {
-            app.pathTraceDisplayTexture = engine::gfx::Texture::createFromFloatPixels(
-                mapped.width, mapped.height, mapped.rgba.data(), app.displayFormat);
-        }
-        app.pathTraceDisplayedImage = &image;
-        app.pathTraceDisplayedOwner = owner;
-        app.pathTraceDisplayedGeneration = generation;
-        return;
-    }
-    // Uploaded straight from the HdrImage: no row-reversed scratch copy, and no texture object churn -- fullscreen_triangle.vert now resolves the row-order convention, and Texture::upload reallocates only if the render resolution actually changed.
-    if (app.pathTraceDisplayTexture.has_value()) {
-        app.pathTraceDisplayTexture->upload(image.width, image.height, image.rgba.data());
+        uploadDisplayTexture(app, mapped);
     } else {
-        app.pathTraceDisplayTexture =
-            engine::gfx::Texture::createFromFloatPixels(image.width, image.height, image.rgba.data(),
-                                                         app.displayFormat);
+        uploadDisplayTexture(app, image);
     }
     app.pathTraceDisplayedImage = &image;
     app.pathTraceDisplayedOwner = owner;

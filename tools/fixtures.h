@@ -93,13 +93,14 @@ inline SlabWalk slabWalkLo(const engine::scene::BsdfParams& params, int paths, s
     return {sum / count, static_cast<double>(vertices) / count, truncated};
 }
 
-// RGBA float test data stored at type, rounded to nearest even as loadImageTexture's OpenEXR read does.
-inline engine::gfx::ImageTexture makeImageTexture(int width, int height, const std::vector<float>& rgba,
-                                                  engine::gfx::ScalarType type) {
+// N-channel float test data stored at type, rounded to nearest even as loadImageTexture's OpenEXR read does.
+template <int N>
+engine::gfx::ImageTexture<N> makeImageTexture(int width, int height, const std::vector<float>& texels,
+                                               engine::gfx::ScalarType type) {
     if (type == engine::gfx::ScalarType::Float32) {
-        return {width, height, rgba};
+        return {width, height, texels};
     }
-    return {width, height, std::vector<engine::gfx::Half>(rgba.begin(), rgba.end())};
+    return {width, height, std::vector<engine::gfx::Half>(texels.begin(), texels.end())};
 }
 
 // Uniform-radiance (L0 = 1) equirect environment: constant regardless of resolution, but a real image so
@@ -107,26 +108,29 @@ inline engine::gfx::ImageTexture makeImageTexture(int width, int height, const s
 inline engine::scene::EnvironmentMap makeUniformEnvironment() {
     constexpr int kWidth = 64;
     constexpr int kHeight = 32;
-    return engine::scene::EnvironmentMap(makeImageTexture(
-        kWidth, kHeight, std::vector<float>(static_cast<std::size_t>(kWidth) * kHeight * 4, 1.0F),
+    return engine::scene::EnvironmentMap(makeImageTexture<3>(
+        kWidth, kHeight, std::vector<float>(static_cast<std::size_t>(kWidth) * kHeight * 3, 1.0F),
         engine::gfx::ScalarType::Float32));
 }
 
-inline engine::gfx::ImageTexture makeConstantTexture(glm::vec3 rgb) {
-    return makeImageTexture(1, 1, {rgb.x, rgb.y, rgb.z, 1.0F}, engine::gfx::ScalarType::Float32);
+inline engine::gfx::ImageTexture<3> makeConstantTexture(glm::vec3 rgb) {
+    return makeImageTexture<3>(1, 1, {rgb.x, rgb.y, rgb.z}, engine::gfx::ScalarType::Float32);
+}
+
+inline engine::gfx::ImageTexture<1> makeConstantTexture(float value) {
+    return makeImageTexture<1>(1, 1, {value}, engine::gfx::ScalarType::Float32);
 }
 
 // 1x1 textures carrying the neutral values resolveBsdfParams/buildShadingFrame expect: a flat tangent-space normal
-// (0.5,0.5,1), the requested roughness in .r, and f0 in the specular slot. Callers set bumpStrength to 0, so the bump
+// (0.5,0.5,1), the requested roughness, and f0 in the specular slot. Callers set bumpStrength to 0, so the bump
 // texture's value is irrelevant.
 inline engine::scene::Material makeMaterial(float roughness, glm::vec3 f0) {
     return engine::scene::Material{
         makeConstantTexture(glm::vec3(1.0F)),              // baseColor -- white, worst case
         makeConstantTexture(glm::vec3(0.5F, 0.5F, 1.0F)),  // normal -- flat
-        makeConstantTexture(glm::vec3(0.5F)),              // bump -- unused, bumpStrength 0
-        makeConstantTexture(glm::vec3(roughness)),         // roughness
+        makeConstantTexture(0.5F),                         // bump -- unused, bumpStrength 0
+        makeConstantTexture(roughness),                    // roughness
         makeConstantTexture(f0),                           // specular -> f0
-        makeConstantTexture(glm::vec3(1.0F)),              // AO -- unoccluded
     };
 }
 

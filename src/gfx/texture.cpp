@@ -23,6 +23,17 @@ GLint glInternalFormat(ScalarType format) {
     return 0;
 }
 
+// Client-side component type of the pixels handed to glTex(Sub)Image2D. Matched to the internal format above so the driver copies rather than converts: GL_HALF_FLOAT is IEEE 754 binary16 (GL 4.1 core, table 8.2), the same layout scalar_type.h asserts for Half.
+GLenum glComponentType(ScalarType format) {
+    switch (format) {
+        case ScalarType::Float16:
+            return GL_HALF_FLOAT;
+        case ScalarType::Float32:
+            return GL_FLOAT;
+    }
+    return 0;
+}
+
 }  // namespace
 
 Texture::Texture(unsigned int id, ScalarType format) : id_(id), format_(format) {}
@@ -56,7 +67,7 @@ Texture& Texture::operator=(Texture&& other) noexcept {
     return *this;
 }
 
-Texture Texture::createFromFloatPixels(int width, int height, const float* rgba, ScalarType format) {
+Texture Texture::create(int width, int height, const void* texels, ScalarType format) {
     unsigned int id = 0;
     GL_CALL(glGenTextures(1, &id));
     GL_CALL(glBindTexture(GL_TEXTURE_2D, id));
@@ -68,21 +79,22 @@ Texture Texture::createFromFloatPixels(int width, int height, const float* rgba,
     GL_CALL(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR));
 
     Texture texture(id, format);
-    texture.upload(width, height, rgba);
+    texture.upload(width, height, texels);
     GL_CALL(glBindTexture(GL_TEXTURE_2D, 0));
     return texture;
 }
 
 // Not wrapped in GL_CALL on the in-place path: runs every frame the displayed image changes, and glGetError is a driver sync point -- same convention as bind() below. The resize path is rare enough to check.
-void Texture::upload(int width, int height, const float* rgba) {
-    // GL_UNPACK_ALIGNMENT untouched: RGBA float rows are always a multiple of the default 4-byte alignment.
+void Texture::upload(int width, int height, const void* texels) {
+    // GL_UNPACK_ALIGNMENT untouched: an RGBA row is 4 or 8 bytes per texel, both multiples of the default 4-byte alignment.
     if (width == width_ && height == height_) {
         glBindTexture(GL_TEXTURE_2D, id_);
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGBA, GL_FLOAT, rgba);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGBA, glComponentType(format_), texels);
         return;
     }
     GL_CALL(glBindTexture(GL_TEXTURE_2D, id_));
-    GL_CALL(glTexImage2D(GL_TEXTURE_2D, 0, glInternalFormat(format_), width, height, 0, GL_RGBA, GL_FLOAT, rgba));
+    GL_CALL(glTexImage2D(GL_TEXTURE_2D, 0, glInternalFormat(format_), width, height, 0, GL_RGBA,
+                          glComponentType(format_), texels));
     width_ = width;
     height_ = height;
     engine::debug::trackGpuFree(byteSize_);
