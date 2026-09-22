@@ -283,7 +283,8 @@ struct AppResources {
     // World-space AABB per instance, parallel-indexed with stumpModel.instances. Static geometry, so computed once at startup and read every rasterizer call for the Wireframe AOV's per-object box edges (rasterizer.h).
     std::vector<engine::scene::AabbBounds> instanceBounds;
     int maxSamples;  // accumulated-pass cap for PathTraceDriver; 0 = unbounded
-    engine::gfx::TexelFormat displayTextureFormat;  // pathTraceDisplayTexture's storage format (profile.json textureBitDepth)
+    engine::gfx::ScalarType displayFormat;  // pathTraceDisplayTexture's component type (profile.json displayBitDepth)
+    engine::gfx::ScalarType textureType;    // scene textures' storage (profile.json textureBitDepth), recorded in -bench configs
     std::unique_ptr<engine::scene::PathTraceDriver> pathTraceDriver;
     std::optional<engine::gfx::Texture> pathTraceDisplayTexture;
     // Which image pathTraceDisplayTexture currently holds -- the image, not the AovId that selected it, so every AOV reading the same buffer shares one upload: Beauty and the four GPU post-filters over it (presentFrame) all pass &PathTraceResult::beauty. An interior pointer into pathTraceDisplayedOwner below, which is what keeps it valid and ABA-free.
@@ -437,7 +438,7 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
 
     const auto loadStart = std::chrono::steady_clock::now();
     std::optional<engine::scene::LoadedModel> stumpModel = engine::scene::loadGltf(
-        std::string(ASSET_ROOT_DIR) + "/" + sceneConfig.model.gltfPath, sceneTransform,
+        std::string(ASSET_ROOT_DIR) + "/" + sceneConfig.model.gltfPath, profileConfig.render.textureType, sceneTransform,
         std::string(ASSET_ROOT_DIR) + "/" + sceneConfig.model.texturePath);
     const double loadMs =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - loadStart)
@@ -456,9 +457,9 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
     const int totalPoints = totalTriangles * 3;
 
     std::optional<RequiredShaders> shaders = loadShaders();
-    // Decoded once here (not via a texture-upload helper): the path tracer is the only consumer, sampling this CPU HdrImage directly, with no GPU upload step in between.
-    std::optional<engine::gfx::HdrImage> environmentImage =
-        engine::gfx::loadExr(std::string(ASSET_ROOT_DIR) + "/" + sceneConfig.environment.hdriPath);
+    // Decoded once here (not via a texture-upload helper): the path tracer is the only consumer, sampling this CPU ImageTexture directly, with no GPU upload step in between.
+    std::optional<engine::gfx::ImageTexture> environmentImage = engine::gfx::loadImageTexture(
+        std::string(ASSET_ROOT_DIR) + "/" + sceneConfig.environment.hdriPath, profileConfig.render.textureType);
     std::optional<engine::config::MaterialConfig> materialConfig = engine::config::loadMaterialConfig(
         std::string(ASSET_ROOT_DIR) + "/" + sceneConfig.materialPath);
 
@@ -606,7 +607,8 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         .perInstanceSettings = std::move(*perInstanceSettings),
         .instanceBounds = std::move(instanceBounds),
         .maxSamples = profileConfig.pathTracer.maxSamples,
-        .displayTextureFormat = profileConfig.render.displayTextureFormat,
+        .displayFormat = profileConfig.render.displayFormat,
+        .textureType = profileConfig.render.textureType,
         // Constructed in main() right after initializeApp() returns -- see path_trace_driver.h's constructor precondition (its reference members must bind to sceneAccel/environmentMap/stumpModel at their final, permanent address, which this designated-initializer expression, still local-variable-based and one AppResources move away from that address, cannot yet guarantee).
         .pathTraceDriver = nullptr,
         .pathTraceDisplayTexture = std::nullopt,
@@ -935,7 +937,7 @@ void ensurePathTraceDisplayTexture(AppResources& app, const std::shared_ptr<cons
             app.pathTraceDisplayTexture->upload(mapped.width, mapped.height, mapped.rgba.data());
         } else {
             app.pathTraceDisplayTexture = engine::gfx::Texture::createFromFloatPixels(
-                mapped.width, mapped.height, mapped.rgba.data(), app.displayTextureFormat);
+                mapped.width, mapped.height, mapped.rgba.data(), app.displayFormat);
         }
         app.pathTraceDisplayedImage = &image;
         app.pathTraceDisplayedOwner = owner;
@@ -948,7 +950,7 @@ void ensurePathTraceDisplayTexture(AppResources& app, const std::shared_ptr<cons
     } else {
         app.pathTraceDisplayTexture =
             engine::gfx::Texture::createFromFloatPixels(image.width, image.height, image.rgba.data(),
-                                                         app.displayTextureFormat);
+                                                         app.displayFormat);
     }
     app.pathTraceDisplayedImage = &image;
     app.pathTraceDisplayedOwner = owner;
@@ -1326,7 +1328,8 @@ nlohmann::json benchConfig(const AppResources& app, const BenchCapture& bench) {
                      {"light", app.envLightEnabled}, {"show_sky", app.showSky}}},
             {"hud", app.showHud},
             {"vsync", app.vsync},
-            {"display_texture_format", engine::gfx::texelFormatName(app.displayTextureFormat)}};
+            {"display_type", engine::gfx::scalarTypeName(app.displayFormat)},
+            {"texture_type", engine::gfx::scalarTypeName(app.textureType)}};
     // Only with -bench-aovs, so a single-stage record stays comparable with every one logged before this existed. The whole switch sequence, not just the AOV left selected at exit: it IS the workload, and bench_compare run refuses to pair records whose configs differ.
     if (!schedule.empty()) {
         config["aov_schedule"] = schedule;
