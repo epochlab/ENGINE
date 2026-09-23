@@ -103,7 +103,7 @@ struct FrameStageTimes {
     float probeMs = 0.0F;       // samplePixelProbe, including its synchronous glReadPixels on the post-filter AOVs
     float hudMs = 0.0F;         // HUD draw + camera write-back + render, INCLUSIVE of hudRenderMs -- the build half is the difference
     float hudRenderMs = 0.0F;   // HudOverlay::render (ImGui::Render + RenderDrawData), unconditional so it is paid with the HUD hidden
-    float swapMs = 0.0F;        // swapBuffers at swap interval 0: the flushBuffer hand-off to the compositor, no vblank wait; its tail is WindowServer reply latency (README §2 Frame pacing), not engine cost
+    float swapMs = 0.0F;        // swapBuffers at swap interval 0: the flushBuffer hand-off to the compositor, no vblank wait; its tail is WindowServer reply latency (docs/components.md, Frame pacing), not engine cost
 };
 
 // RAII steady_clock scope timer writing elapsed milliseconds into a caller-owned float.
