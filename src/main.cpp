@@ -1388,7 +1388,7 @@ nlohmann::json benchSamples(const BenchCapture& bench) {
 // Writes the captured accumulation as one benchmark-log record. Refuses an incomplete capture -- closed early, or a pass whose record was overwritten before a frame read it -- rather than logging a workload that differs from its config.
 bool finishBench(const AppResources& app, const BenchCapture& bench) {
     if (!bench.complete) {
-        std::cerr << "engine: -bench closed before the schedule finished; nothing logged\n";
+        std::cerr << "pathtracer: -bench closed before the schedule finished; nothing logged\n";
         return false;
     }
     // Contiguous from 1 within each generation rather than across the whole column: a schedule spans several accumulations, and each restart numbers its own passes from 1. A gap still means a PassRecord was overwritten before a frame read it, so the capture would not describe its config.
@@ -1400,7 +1400,7 @@ bool finishBench(const AppResources& app, const BenchCapture& bench) {
             expected = 0;
         }
         if (pass.passIndex != ++expected) {
-            std::cerr << "engine: -bench missed a pass record of generation " << generation << " (two passes finished within one frame); nothing logged\n";
+            std::cerr << "pathtracer: -bench missed a pass record of generation " << generation << " (two passes finished within one frame); nothing logged\n";
             return false;
         }
     }
@@ -1409,7 +1409,7 @@ bool finishBench(const AppResources& app, const BenchCapture& bench) {
         rays.add(pass.rays);
     }
     const engine::debug::BenchRecord record{
-        .tool = "engine",
+        .tool = "pathtracer",
         .argv = bench.argv,
         .config = benchConfig(app, bench),
         .samples = benchSamples(bench),
@@ -1522,7 +1522,7 @@ std::optional<std::vector<int>> parseAovList(const char* list) {
         const auto* match = std::find_if(std::begin(engine::debug::kAovNames), std::end(engine::debug::kAovNames),
                                           [&name](const char* candidate) { return name == candidate; });
         if (match == std::end(engine::debug::kAovNames)) {
-            std::cerr << "engine: -bench-aovs has no AOV named '" << name << "'; valid names are";
+            std::cerr << "pathtracer: -bench-aovs has no AOV named '" << name << "'; valid names are";
             for (const char* candidate : engine::debug::kAovNames) {
                 std::cerr << " '" << candidate << "'";
             }
@@ -1545,7 +1545,7 @@ std::optional<Options> parseOptions(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "-scene") == 0) {
             if (i + 1 >= argc) {
-                std::cerr << "engine: -scene expects a value\n";
+                std::cerr << "pathtracer: -scene expects a value\n";
                 return std::nullopt;
             }
             options.scenePath = argv[++i];
@@ -1553,13 +1553,13 @@ std::optional<Options> parseOptions(int argc, char** argv) {
             options.stats = true;
         } else if (std::strcmp(argv[i], "-bench") == 0) {
             if (i + 1 >= argc) {
-                std::cerr << "engine: -bench expects a value\n";
+                std::cerr << "pathtracer: -bench expects a value\n";
                 return std::nullopt;
             }
             options.benchLogPath = argv[++i];
         } else if (std::strcmp(argv[i], "-bench-aovs") == 0) {
             if (i + 1 >= argc) {
-                std::cerr << "engine: -bench-aovs expects a value\n";
+                std::cerr << "pathtracer: -bench-aovs expects a value\n";
                 return std::nullopt;
             }
             std::optional<std::vector<int>> aovs = parseAovList(argv[++i]);
@@ -1568,8 +1568,8 @@ std::optional<Options> parseOptions(int argc, char** argv) {
             }
             options.benchAovs = std::move(*aovs);
         } else {
-            std::cerr << "engine: unknown flag " << argv[i]
-                       << "\n  usage: engine [-scene path/to/scene.json] [-stats] [-bench log.jsonl] [-bench-aovs Beauty,Normal,...]\n";
+            std::cerr << "pathtracer: unknown flag " << argv[i]
+                       << "\n  usage: pathtracer [-scene path/to/scene.json] [-stats] [-bench log.jsonl] [-bench-aovs Beauty,Normal,...]\n";
             return std::nullopt;
         }
     }
@@ -1616,7 +1616,7 @@ int main(int argc, char** argv) {
         } else {
             // Window construction creates the GL 4.1 core/fwd-compat context and makes it current; fatal failure inside it exits the process directly (see window.cpp) since nothing recoverable exists yet.
             engine::platform::Window window(profileConfig->window.width, profileConfig->window.height,
-                                             "ENGINE");
+                                             "PATHTRACER");
 
             glewExperimental = GL_TRUE;
             const GLenum glewStatus = glewInit();

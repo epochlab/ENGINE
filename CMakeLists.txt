@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(Engine LANGUAGES CXX OBJCXX)
+project(Pathtracer LANGUAGES CXX OBJCXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -62,7 +62,7 @@ if(CPPCHECK_EXE)
         COMMENT "cppcheck over src/")
 endif()
 
-# Opt-in (default off, zero effect on a normal build): the engine parses external glTF/JSON/EXR files, where memory-safety tooling earns its keep. `cmake -B build -DENGINE_SANITIZE=ON`.
+# Opt-in (default off, zero effect on a normal build): the pathtracer parses external glTF/JSON/EXR files, where memory-safety tooling earns its keep. `cmake -B build -DENGINE_SANITIZE=ON`.
 option(ENGINE_SANITIZE "Build with AddressSanitizer + UndefinedBehaviorSanitizer" OFF)
 if(ENGINE_SANITIZE)
     add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
@@ -92,7 +92,7 @@ target_include_directories(vendored_no_tidy PRIVATE ${IMGUI_DIR} ${IMGUI_DIR}/ba
 target_link_libraries(vendored_no_tidy PRIVATE glfw)
 target_compile_options(vendored_no_tidy PRIVATE -w)
 
-add_executable(engine
+add_executable(pathtracer
     src/main.cpp
     src/platform/window.cpp
     src/platform/display_link.mm
@@ -132,25 +132,25 @@ add_executable(engine
     src/debug/spec_report.cpp
     src/debug/perf_dashboard.cpp
     $<TARGET_OBJECTS:vendored_no_tidy>)
-target_include_directories(engine PRIVATE include ${IMGUI_DIR} ${IMGUI_DIR}/backends ${CGLTF_DIR} ${JSON_DIR}
+target_include_directories(pathtracer PRIVATE include ${IMGUI_DIR} ${IMGUI_DIR}/backends ${CGLTF_DIR} ${JSON_DIR}
                            ${ENGINE_GENERATED_DIR})
-add_dependencies(engine engine_git_sha)
-target_compile_definitions(engine PRIVATE
+add_dependencies(pathtracer engine_git_sha)
+target_compile_definitions(pathtracer PRIVATE
     GL_SILENCE_DEPRECATION
     ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets"
     ${ENGINE_PROVENANCE_DEFINITIONS})
-target_compile_options(engine PRIVATE -Wall -Wextra -Werror -march=native)
-target_link_libraries(engine PRIVATE
+target_compile_options(pathtracer PRIVATE -Wall -Wextra -Werror -march=native)
+target_link_libraries(pathtracer PRIVATE
     glfw GLEW::GLEW OpenGL::GL glm::glm
     OpenEXR::OpenEXR Imath::Imath OpenColorIO::OpenColorIO embree ZLIB::ZLIB
     "-framework AppKit" "-framework QuartzCore")
 set_source_files_properties(src/platform/display_link.mm PROPERTIES COMPILE_OPTIONS -fobjc-arc)
 if(CLANG_TIDY_EXE)
-    set_target_properties(engine PROPERTIES CXX_CLANG_TIDY "${CLANG_TIDY_COMMAND}")
+    set_target_properties(pathtracer PROPERTIES CXX_CLANG_TIDY "${CLANG_TIDY_COMMAND}")
 endif()
 # Free codegen speedup for the path tracer's hot loop (ray traversal, BSDF eval), no behavior/quality change. No-op if the toolchain lacks IPO support, mirroring the clang-tidy/cppcheck no-op-if-absent pattern above.
 if(IPO_SUPPORTED)
-    set_target_properties(engine PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
+    set_target_properties(pathtracer PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
 endif()
 
 add_executable(test_pattern tools/test_pattern.cpp)
@@ -204,7 +204,7 @@ target_compile_options(metal_fit PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(metal_fit PRIVATE glm::glm)
 
 # Headless correctness checks (Phase 4): no test framework exists yet, so these follow test_pattern/downsample's standalone-CLI convention (non-zero exit on failure).
-# -march=native/IPO mirror the engine target's flags so these tools validate the exact codegen that ships, not a differently-optimized build of the same math.
+# -march=native/IPO mirror the pathtracer target's flags so these tools validate the exact codegen that ships, not a differently-optimized build of the same math.
 # Shared validator harness (tools/check.h, tools/stats.h). Deliberately depends on nothing but glm: the light
 # validators (sampler, embree) must not be forced to link Embree or OpenEXR just to reach a chi-square survival
 # function. Built with the same flags as the tools it serves so the harness is not a different codegen from them.
