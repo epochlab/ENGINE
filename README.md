@@ -29,12 +29,12 @@ cmake --build build
 ## Run
 
 ```
-./build/engine [-scene path/to/scene.json] [-stats] [-bench log.jsonl]
+./build/pathtracer [-scene path/to/scene.json] [-stats] [-bench log.jsonl]
 ```
 
 ## Benchmark
 
-Timing runs append one JSON Lines record each to a local log: `engine -bench PATH`, `render_beauty --bench-log PATH`, `raster_bench --bench-log PATH`. A performance claim is made with a randomized interleaved A/B of two builds, not by comparing two runs by eye:
+Timing runs append one JSON Lines record each to a local log: `pathtracer -bench PATH`, `render_beauty --bench-log PATH`, `raster_bench --bench-log PATH`. A performance claim is made with a randomized interleaved A/B of two builds, not by comparing two runs by eye:
 
 ```
 ./build/bench_compare run --a buildA/render_beauty --b buildB/render_beauty --rounds 12 --log renders/bench.jsonl \
@@ -104,7 +104,7 @@ It prints B/A with a distribution-free confidence interval, and says "not resolv
 |---|---|
 | Startup spec block | One plain-text provenance block on stdout: GPU/driver/refresh rate, host CPU topology and cache line from `sysctl`, compiler/build type/`-march`/IPO/git SHA, runtime-queried library versions, and the scene's load/BVH-build cost — confirms the actual GPU/backend before a wrong-adapter bug masquerades as a render bug, and makes every timing number attributable |
 | Render telemetry (`-stats`) | 78-column terminal dashboard redrawn in place at 3 Hz via a single `write(2)`: render-thread stages with share-of-frame bars, path-trace phases, ray counts by type with Mray/s, and a `cpu total` / `frame measured` / `unaccounted` reconciliation — shows where every millisecond goes, and what it can't account for |
-| Frame pacing | `DisplayLink` (`display_link.mm`): `-[NSView displayLinkWithTarget:selector:]` on a user-interactive-QoS thread wakes the render loop once per vblank of the window's own display, at swap interval 0 with a one-frame GPU fence. NSGL's swap interval lets two swaps through per refresh on current macOS, and GLFW substitutes a fixed 60 Hz `usleep` while occluded, so neither is used. A minimised window, whose link stops ticking, free-runs on the display's period grid. `render.vsync: false` (`profile.json`) skips the vblank wait and runs uncapped, still bounded to one frame in flight by the fence. The measured period is the refresh rate every consumer reports. `swap_ms` still has a tail outside the engine: NSOpenGL's flush makes a synchronous WindowServer query (`SLSFlushSurfaceWithOptionsAndIndex` -> `_CGSWindowIsOrderedIn`). In 7 visible convergences (88k frames), 808 of the 827 1 ms samples that found the render thread blocked inside a swap over a quarter period were in it, and none found it runnable-waiting for a core. Swaps over half a period were 96-98% off-CPU, unchanged with the trace and driver threads at utility QoS (13 vs 9, P = 0.52) and over-represented right after display-texture uploads (7 vs 1.3 expected). A per-frame maximum of `swap_ms` or `frame_ms` therefore measures WindowServer, not the engine |
+| Frame pacing | `DisplayLink` (`display_link.mm`): `-[NSView displayLinkWithTarget:selector:]` on a user-interactive-QoS thread wakes the render loop once per vblank of the window's own display, at swap interval 0 with a one-frame GPU fence. NSGL's swap interval lets two swaps through per refresh on current macOS, and GLFW substitutes a fixed 60 Hz `usleep` while occluded, so neither is used. A minimised window, whose link stops ticking, free-runs on the display's period grid. `render.vsync: false` (`profile.json`) skips the vblank wait and runs uncapped, still bounded to one frame in flight by the fence. The measured period is the refresh rate every consumer reports. `swap_ms` still has a tail outside the pathtracer: NSOpenGL's flush makes a synchronous WindowServer query (`SLSFlushSurfaceWithOptionsAndIndex` -> `_CGSWindowIsOrderedIn`). In 7 visible convergences (88k frames), 808 of the 827 1 ms samples that found the render thread blocked inside a swap over a quarter period were in it, and none found it runnable-waiting for a core. Swaps over half a period were 96-98% off-CPU, unchanged with the trace and driver threads at utility QoS (13 vs 9, P = 0.52) and over-represented right after display-texture uploads (7 vs 1.3 expected). A per-frame maximum of `swap_ms` or `frame_ms` therefore measures WindowServer, not the pathtracer |
 | Frame-timing HUD | Ring buffer of recent frame times; rolling FPS/avg/min/max, GPU timer query around the post-process blit — makes blit cost measurable frame to frame |
 | Memory HUD | Live RAM readout plus GPU allocation tracked at alloc/free (the path-traced display texture is the only GPU allocation left) — surfaces a memory regression immediately, not after VRAM exhaustion |
 | Scene stats | Object/triangle/point counts, viewport resolution — a scene-complexity readout |
@@ -126,7 +126,7 @@ Session settings live in `assets/config/profile.json`.
 
 ## Benchmark tooling
 
-`engine -bench` also takes `-bench-aovs "Beauty,Sobel,Direct Diffuse,Normal,Beauty"`, which walks that AOV sequence and times each switch into a `stage_wall_ms` column; the first entry is an unmeasured warm-up, so every switch is timed from an already-converged image. Comparability is exact: `config` carries only configured inputs, never a measured one -- the display refresh the run was paced at is a per-frame `refresh_hz` sample, since a measured double cannot satisfy an equality contract.
+`pathtracer -bench` also takes `-bench-aovs "Beauty,Sobel,Direct Diffuse,Normal,Beauty"`, which walks that AOV sequence and times each switch into a `stage_wall_ms` column; the first entry is an unmeasured warm-up, so every switch is timed from an already-converged image. Comparability is exact: `config` carries only configured inputs, never a measured one -- the display refresh the run was paced at is a per-frame `refresh_hz` sample, since a measured double cannot satisfy an equality contract.
 
 It prints B/A with a distribution-free confidence interval, and says "not resolved" when that interval contains 1. `bench_compare compare` and `bench_compare history --tool T` read records already in the log (unpaired, so drift is not controlled). `--metric` picks any samples column (its mean per event -- per frame, per upload or per pass, since frame count scales with run duration) or rusage field such as `user_s`.
 
