@@ -3,7 +3,7 @@
 namespace engine::debug {
 
 // Single source of truth for every AOV the HUD can select and the path tracer can produce -- AppResources.aov stays a plain int (ImGui::Combo needs int&), cast via static_cast<AovId>(app.aov).
-// Grouped by category (README.md §3): Utility, Material, Transport, Lighting.
+// Grouped by category (docs/aovs.md): Utility, Material, Transport, Lighting.
 enum class AovId : int {
     // Utility.
     Beauty = 0,
