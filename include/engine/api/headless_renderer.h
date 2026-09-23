@@ -70,7 +70,7 @@ public:
     [[nodiscard]] int defaultHeight() const { return profile_.window.height; }
 
     // Blocking. outputs is parallel to request.aovs, and outputs[i] must hold width * height * aovChannels(aovs[i]) floats -- caller-allocated so no buffer ownership crosses the boundary (the C ABI hands numpy's own memory straight through).
-    // Each producer runs AT MOST ONCE regardless of how many of its AOVs are asked for: the 10 path-traced lanes share one sample set and one reconstruction filter, the 13 rasterizer lanes share one scan-conversion, and the 4 filters share the one accumulated Beauty. Asking for beauty+depth+normal+sobel is one accumulation, one rasterizer pass and one filter -- not four renders.
+    // Each producer runs AT MOST ONCE regardless of how many of its AOVs are asked for: the 10 path-traced lanes share one sample set and one reconstruction filter, the 14 rasterizer lanes share one scan-conversion, and the 4 filters share the one accumulated Beauty. Asking for beauty+depth+normal+sobel is one accumulation, one rasterizer pass and one filter -- not four renders.
     [[nodiscard]] bool render(const Request& request, std::span<float* const> outputs,
                                std::string& error);
 

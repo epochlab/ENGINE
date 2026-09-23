@@ -32,6 +32,9 @@ struct PathTraceSettings {
     // Ambient-occlusion ray length bound, and the scale of the obscurance falloff over it (Zhukov et al. 1998; Iones et al. 2003): a hit at distance t contributes 1 - (1 - t/aoMaxDistance)^2 visibility, so the AO AOV measures local contact rather than whole-room enclosure and reaches full visibility smoothly at the bound instead of stepping there.
     // Weaker than the hard cutoff it replaces at the same value: this is now the distance occlusion has faded to nothing by, not the one it fully occludes out to, so a scene tuned against the old behaviour wants a larger number here. Scene-scale dependent, sourced from profile.json. Defaulted because the validation tools build settings by value-init plus assignment, where an undefaulted field would silently be 0 and disable every AO ray.
     float aoMaxDistance = 1.0F;
+    // Horizon of the Lookahead AOV's ramp (rasterizer.h's RasterGBuffer::lookahead), scene units: the primary hit's camera-space Z maps linearly to 1 at the camera plane and 0 here, clamped. Read by the rasterizer rather than the integrator, but carried here because that is the settings bundle shadePixel is already handed.
+    // Defaulted for the same reason aoMaxDistance is: the validation tools build settings by value-init plus assignment, where an undefaulted field would be 0 and make every covered pixel a division by zero.
+    float lookaheadDistance = 10.0F;
     float rrMinProb = 0.05F;  // floor: stops a near-zero-throughput path being killed with near-certainty
     // Ceiling of exactly 1.0: a path carrying full throughput must never be terminated. Any lower caps survival for no gain -- it saves a fraction of deep-path tracing and pays for it with variance costing more than that fraction in extra samples.
     float rrMaxProb = 1.0F;

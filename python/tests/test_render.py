@@ -8,6 +8,7 @@ same scene, resolution, seed and pass count. Any tolerance there would hide the 
 from __future__ import annotations
 
 import dataclasses
+import json
 import subprocess
 import time
 from pathlib import Path
@@ -28,8 +29,8 @@ def renderer() -> Renderer:
 
 
 def test_aov_table_is_populated() -> None:
-    assert len(AOVS) == 27
-    for name in ("Beauty", "Depth", "Normal", "Sobel", "Luminance", "Gabor", "HSV"):
+    assert len(AOVS) == 28
+    for name in ("Beauty", "Depth", "Lookahead", "Normal", "Sobel", "Luminance", "Gabor", "HSV"):
         assert name in AOVS
 
 
@@ -69,6 +70,20 @@ def test_depth_is_positive_inside_the_box_and_far_on_the_background(renderer: Re
     assert (depth[hit] > 0.0).all()
     # The Cornell box encloses the camera, so every primary ray hits something well inside the far clip.
     assert depth[hit].max() < renderer.default_camera.far_clip
+
+
+def test_lookahead_is_depth_on_the_profile_horizon(renderer: Renderer) -> None:
+    """The lane's whole contract: clamp(1 - Z/lookaheadDistance, 0, 1) against the Depth lane of the same render."""
+    horizon = json.loads((REPO_ROOT / "assets" / "config" / "profile.json").read_text())["pathTracer"]["lookaheadDistance"]
+    frame = renderer.render(aovs=("lookahead", "depth", "alpha"), width=64, height=48)
+    lookahead, depth, alpha = frame["lookahead"][..., 0], frame["depth"][..., 0], frame["alpha"][..., 0]
+    hit = alpha > 0.0
+    assert hit.any(), "the default camera should see geometry"
+    expected = np.clip(1.0 - depth[hit] / horizon, 0.0, 1.0)
+    assert np.allclose(lookahead[hit], expected, rtol=0.0, atol=1e-6)
+    # A primary miss reads 0, the same value geometry beyond the horizon reads -- alpha is what separates the two.
+    assert (lookahead[~hit] == 0.0).all() if (~hit).any() else True
+    assert ((lookahead >= 0.0) & (lookahead <= 1.0)).all()
 
 
 def test_normals_are_unit_length_where_geometry_was_hit(renderer: Renderer) -> None:

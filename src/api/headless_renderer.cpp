@@ -38,6 +38,7 @@ using engine::gfx::HdrImage;
         .maxBounces = profile.pathTracer.maxBounces,
         .russianRouletteStartBounce = profile.pathTracer.russianRouletteStartBounce,
         .aoMaxDistance = profile.pathTracer.aoMaxDistance,
+        .lookaheadDistance = profile.pathTracer.lookaheadDistance,
         .bumpStrength = material.bumpStrength,
         .roughnessMin = material.roughnessMin,
         .roughnessMax = material.roughnessMax,
@@ -196,7 +197,7 @@ void HeadlessRenderer::resizeBuffers(int width, int height) {
         return;
     }
     pathTraced_ = engine::scene::makePathTraceResult(width, height);
-    // renderRasterGBuffer reallocates its own 13 images when the size changes and clears them per row otherwise; resetting the generation stamp is what tells it this buffer holds nothing yet.
+    // renderRasterGBuffer reallocates its own 14 images when the size changes and clears them per row otherwise; resetting the generation stamp is what tells it this buffer holds nothing yet.
     gbuffer_ = engine::scene::RasterGBuffer{};
     accumulators_.clear();
     bufferWidth_ = width;

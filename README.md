@@ -12,7 +12,7 @@
 | [Pipeline](#pipeline) | How a frame is produced, below |
 | [Components](#components) | Every subsystem, session settings, benchmark tooling |
 | [Material Library](#material-library) | Shipped presets and every `MaterialConfig` field |
-| [AOV](#aov) | All 27 debug outputs, by category |
+| [AOV](#aov) | All 28 debug outputs, by category |
 | [References](#references) | The literature each technique implements |
 
 ## Build
@@ -34,7 +34,7 @@ cmake --build build
 
 ## Python
 
-Every AOV is reachable headlessly from Python as a numpy array, for training data and for HOST's cognitive pipeline (`notes/agent.md`). The renderer is a plain C ABI (`include/engine/api/pathtracer_c.h`) loaded with `ctypes`, so there is no build-time Python dependency and one library serves every interpreter.
+Every AOV is reachable headlessly from Python as a numpy array. The renderer is a plain C ABI (`include/engine/api/pathtracer_c.h`) loaded with `ctypes`; no build-time Python dependency and one library serves every interpreter.
 
 ```
 cmake --build build --target pathtracer_c
@@ -44,13 +44,12 @@ pip install -e python
 ```python
 from pathtracer import Renderer
 
-renderer = Renderer("scenes/cornell.json")                      # loads the scene, BVH and thread pool once
-frame = renderer.render(aovs=("beauty", "depth", "normal"),
-                        width=256, height=256, samples=64, seed=1)
+renderer = Renderer("scenes/cornell.json")
+frame = renderer.render(aovs=("beauty", "depth", "normal"), width=128, height=64, samples=8, seed=1)
 
-frame["beauty"]   # (256, 256, 3) float32, linear Rec.709 radiance
-frame["depth"]    # (256, 256, 1) float32, camera-space Z
-frame["normal"]   # (256, 256, 3) float32, normal-mapped shading normal
+frame["beauty"]   # (64, 128, 3) float32, linear Rec.709 radiance
+frame["depth"]    # (64, 128, 1) float32, camera-space Z
+frame["normal"]   # (64, 128, 3) float32, normal-mapped shading normal
 ```
 
 Values are scene-referred linear and unclamped, with no display transform: what a model trains on, not what a monitor shows. Use `render_beauty --out` for a display-encoded picture. Arrays are C-contiguous float32, so `torch.from_numpy(...)` shares memory and leaves one explicit `.to(device)`.
@@ -65,8 +64,6 @@ Timing runs append one JSON Lines record each to a local log: `pathtracer -bench
 ./build/bench_compare run --a buildA/render_beauty --b buildB/render_beauty --rounds 12 --log renders/bench.jsonl \
     -- --scene scenes/cornell.json --out renders/ab.png --passes 32 --width 640 --height 360 --bench-log renders/bench.jsonl
 ```
-
-It prints B/A with a distribution-free confidence interval, and says "not resolved" when that interval contains 1. See [Benchmark tooling](#benchmark-tooling) for the rest.
 
 ## Pipeline
 
@@ -86,7 +83,7 @@ It prints B/A with a distribution-free confidence interval, and says "not resolv
   4. Recursive bounce loop with Russian roulette, Chiang/Li/Burley 2019 shadow-terminator-corrected secondary-ray origins, Beer-Lambert extinction inside transmissive media
   5. Radiance + full G-buffer/transport-component AOV set accumulated per pass, published lock-free for the render thread
 
-- **Rasterizer** — a synchronous CPU pass (`rasterizer.cpp`) computes the 13 primary-hit-only AOVs (`aov.h`) every frame on the render thread: watertight edge-function rasterization (Pineda 1988) -- view-frustum Sutherland-Hodgman clipping, vertices snapped to a fixed-point grid whose precision is derived per frame for exact int64 edge functions, and the top-left fill rule, so triangles sharing an edge cover every pixel centre on it exactly once -- sharing `gbuffer_shading.h`'s material sampling with the path tracer but no Embree/BSDF/recursion. This gives those AOVs instant, glitch-free feedback during camera movement, decoupled from Beauty's own progressive convergence — the path-traced request above only restarts when the selected AOV needs light-transport data.
+- **Rasterizer** — a synchronous CPU pass (`rasterizer.cpp`) computes the 14 primary-hit-only AOVs (`aov.h`) every frame on the render thread: watertight edge-function rasterization (Pineda 1988) -- view-frustum Sutherland-Hodgman clipping, vertices snapped to a fixed-point grid whose precision is derived per frame for exact int64 edge functions, and the top-left fill rule, so triangles sharing an edge cover every pixel centre on it exactly once -- sharing `gbuffer_shading.h`'s material sampling with the path tracer but no Embree/BSDF/recursion. This gives those AOVs instant, glitch-free feedback during camera movement, decoupled from Beauty's own progressive convergence — the path-traced request above only restarts when the selected AOV needs light-transport data.
 
 **Display.** The render thread blits whichever AOV is selected through OCIO's display transform (exposure/tone-mapping) and the debug HUD, converging over subsequent passes rather than blocking on one long render. No GPU rasterization anywhere: OpenGL exists only for the window, the post-process/OCIO blit, and ImGui; the primary-hit rasterizer is CPU-only.
 
@@ -165,7 +162,7 @@ Named presets live in `assets/materials/*.json`, parsed into `MaterialConfig` (`
 
 Add a new material by dropping a JSON file in `assets/materials/` and pointing `materialPath`/`materialOverrides` at it — no code or schema change needed.
 
-## Shipped presets
+## `MaterialConfig`
 
 | File | metallic | transmission | roughness (factor / min) | Notes |
 |---|---|---|---|---|
@@ -173,8 +170,6 @@ Add a new material by dropping a JSON file in `assets/materials/` and pointing `
 | `clay.json` | 0.0 | 0.0 | 0.5 / 0.045 | Neutral matte dielectric, no bump |
 | `chrome.json` | 1.0 | 0.0 | 0.05 / 0.045 | Measured chromium (Johnson & Christy 1974): `diffuseColour` (which at `metallic=1` *is* `f0`, Gulbrandsen's reflectivity `r`) `[0.5496, 0.5560, 0.5542]` and `edgeTint` `[0.5417, 0.5692, 0.6942]`, both verbatim `tools/metal_fit` output (CIE 1931 2°, D65, linear Rec.709), so the grazing reflectance dip is the measured one. `colour.chrome_matches_measured_chromium` fails if this file drifts from the fit |
 | `glass.json` | 0.0 | 1.0 | 0.02 / 0.01 | Schott N-BK7 crown glass, `ior: 1.5168` at the d line with `abbe: 64.17` for dispersion; tinted via Beer-Lambert `transmissionColor: [0.96, 0.98, 1.0]` over `transmissionDepth: 0.4` world units — `diffuseColour` cannot tint transmission at all (see below) |
-
-## `MaterialConfig` fields
 
 | Field | Meaning |
 |---|---|
@@ -191,27 +186,19 @@ Add a new material by dropping a JSON file in `assets/materials/` and pointing `
 
 # AOV
 
-The full set the viewer's dropdown, `render_beauty --aov` and the Python binding name, defined in `include/engine/debug/aov.h` and grouped here by category. Three producers, classified once by `aovSource`: the 13 primary-hit-only AOVs are scan-converted synchronously by the CPU rasterizer every frame (`rasterizer.h`), 10 are accumulated lanes of the path tracer (`path_tracer.h`), and 4 are image-space filters over a finished Beauty (`aov_filters.h`). The latter 14 need light-transport data and converge progressively with Beauty (`aovNeedsLightTransport`). Every one of the 27 is available headlessly and from Python; the filters exist as both a CPU implementation and a display shader, sharing one Gabor kernel so they cannot drift.
-
-## Utility
-
 | AOV | Mechanism |
 |---|---|
 | Beauty | Final accumulated radiance, post tone-mapping — the primary output |
 | Wireframe | Screen-space line rasterization (Pineda 1988), z-tested against the scene's own depth: white mesh-triangle edges, plus one bounding box per instance in that instance's `falseColorForId` hue, the same hue ObjectID gives it (drawn on top, so the box wins) — visualizes triangle density/topology and each object's extent/placement in one view |
 | Alpha | 1.0 on a primary hit, 0.0 on a primary miss — a real coverage mask (this renderer isn't opaque-only-by-construction) |
 | Depth | Planar camera-space Z (Arnold/RenderMan/EXR "Z" convention) at the primary hit, for depth-based compositing/debugging |
+| Lookahead | Depth on a fixed, declared scale: `clamp(1 - Z/lookaheadDistance, 0, 1)`, so it reads 1 at the camera plane and falls linearly to 0 at `lookaheadDistance` (`profile.json`, scene units). Proximity without the consumer having to source a range of its own — unlike Depth, which is unbounded and auto-ranged only at display time. Geometry at or beyond the horizon reads 0, the same value a primary miss reads, so Alpha is what separates "too far" from "nothing there" |
 | HSV | Colour-space transform of Beauty — isolates hue/saturation shifts a pure RGB view can hide |
 | Luminance | Rec.709 luminance of Beauty — isolates perceived brightness from colour |
 | Sobel | 3×3 Sobel gradient magnitude of Luminance — a cheap edge/gradient signal |
 | Gabor | 4-orientation Gabor kernel bank, max response, of Luminance — directional edge/texture response Sobel's isotropic magnitude can't distinguish |
 | WorldPos | Raw world-space primary-hit position, for debugging geometry/UV placement independent of shading |
 | UV | Primary-hit interpolated UV (fractional part) — visualizes the texture-space mapping directly |
-
-## Material
-
-| AOV | Mechanism |
-|---|---|
 | Normal | Shading (normal-mapped) normal at the primary hit — the normal actually used in shading |
 | GeomNormal | Smooth interpolated vertex normal, before normal-mapping — separates a bad normal map from a bad base mesh |
 | Albedo | Base-colour texture sample at the primary hit — isolates texture data from lighting |
@@ -220,19 +207,9 @@ The full set the viewer's dropdown, `render_beauty --aov` and the Python binding
 | Tangent | Shading tangent basis at the primary hit — debugs the tangent-space basis used for normal mapping |
 | ObjectID | Per-instance index, false-coloured (`falseColorForId`) — an isolation mask for compositing/debugging |
 | AO | Cosine-weighted obscurance (Zhukov et al. 1998; Iones et al. 2003), the distance-weighted generalisation of ambient occlusion (Miller 1994; Landis 2002). One hemisphere ray per sample bounded by `aoMaxDistance` (`profile.json`), each hit weighted `1 - (1 - t/aoMaxDistance)^2` so occlusion grades with proximity and reaches full visibility smoothly at the bound. 1.0 = unoccluded, the opposite polarity to Shadow — reads contact/corner darkening off the actual geometry, independent of material and lighting |
-
-## Transport
-
-| AOV | Mechanism |
-|---|---|
 | Fresnel | Expected Fresnel reflectance over the **visible microfacet normal distribution**, `E[F(wo.wh)]` for `wh ~ D_vis(wo)`. One VNDF draw per sample (Heitz 2018, the same `D_vis` and `alpha` `sampleBsdf` draws from), through `mix(exact dielectric Fresnel, exact complex-IOR conductor Fresnel, metallic)` (`fresnelAtMicrofacet`, `bsdf.h`), progressive like every other path-traced lane. This is the angle the microfacet BSDF actually evaluates Fresnel at (Walter et al. 2007), so it is roughness-dependent where a macro-normal value cannot be. At `n.wo = 0.05` on an `ior` 1.5 dielectric it reads 0.7521 at the roughness floor, 0.4406 at roughness 0.3 and 0.1692 at 0.6, against a macro-normal 0.7521 throughout. Full RGB — a conductor's Fresnel is chromatic by construction (`edgeTint` inverts to a per-channel complex IOR), which the rasterizer's `(F, 1-F, 0)` packing discarded. Collapses onto the macro-normal value to 4 decimals as `alpha` reaches its `kMinAlpha` floor, so it is a strict generalisation of the AOV it replaces, not a different quantity |
 | IOR | Per-instance dielectric IOR (`settings.ior`), -1 on a miss — isolates the raw refractive-index input driving Fresnel/transmission |
 | BounceCount | Mean path termination depth across samples, per pixel — debugs Russian roulette/termination behaviour |
-
-## Lighting
-
-| AOV | Mechanism |
-|---|---|
 | DirectDiffuse | Diffuse-bucketed radiance from a path's first (bounce-0) surface, physical (base colour included) — isolates direct diffuse light arrival, in the same units as Beauty |
 | IndirectDiffuse | Diffuse-bucketed radiance from later bounces — isolates indirect (bounced) diffuse contribution |
 | DirectSpecular | Specular-reflection-bucketed radiance, one bounce from camera — isolates direct specular contribution |
