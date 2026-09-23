@@ -1,5 +1,6 @@
 // Standalone correctness check for engine::scene::renderRasterGBuffer (rasterizer.h): synthetic dependency-free scene (no glTF/EXR asset -- constant-color 1x1 textures), cross-checked against a fresh pixel-center Embree primary-ray intersection resolved through the same gbuffer_shading.h sampling functions, deliberately independent of renderRasterGBuffer's own code path so agreement is a real cross-check, not a tautology. Same standalone-CLI convention as embree_validate.cpp/bsdf_validate.cpp/nee_validate.cpp: no test framework, non-zero exit on failure. A small fraction of coverage/value mismatches at triangle silhouette edges is tolerated -- an inherent rasterizer-vs-raytracer tie-break difference, not a bug.
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdlib>
@@ -32,6 +33,9 @@ constexpr int kWidth = 96;
 constexpr int kHeight = 96;
 constexpr int kTriangleCount = 150;
 constexpr int kMaterialCount = 4;
+// Depth span the synthetic scene's triangle centres are drawn over, in front of a camera at the origin. Named because the lookahead check derives its horizon from it: a horizon outside this span would leave the lane saturated at one end and the check blind to the remap.
+constexpr float kSceneNearZ = 1.0F;
+constexpr float kSceneFarZ = 16.0F;
 constexpr float kPosEpsilon = 5e-2F;    // world-space units (worldPos, depth)
 constexpr float kUnitEpsilon = 1e-2F;   // unit-vector/[0,1]-range fields (normal, uv, albedo, ...)
 constexpr float kMaxCoverageMismatchFraction = 0.02F;
@@ -60,7 +64,7 @@ glm::vec4 tangentFor(const glm::vec3& normal) {
 // Random triangles in [-8,8]x[-8,8] x/y, [-1,-16] z (in front of the origin, looking down -Z) -- overlapping in depth (exercises the z-buffer), dense enough near z=-1 that a camera placed inside the cluster (clipTest below) clips some at the near plane.
 std::vector<ShadingTriangle> makeSyntheticTriangles(std::mt19937& rng) {
     std::uniform_real_distribution<float> centerXY(-8.0F, 8.0F);
-    std::uniform_real_distribution<float> centerZ(-16.0F, -1.0F);
+    std::uniform_real_distribution<float> centerZ(-kSceneFarZ, -kSceneNearZ);
     std::uniform_real_distribution<float> offset(-1.5F, 1.5F);
 
     std::vector<ShadingTriangle> triangles;
@@ -167,6 +171,9 @@ bool checkPose(const char* poseName, const Camera& camera, const EmbreeAccel& ac
 
             const std::vector<FieldCheck> fields{
                 {"depth", texelAt(raster.depth, x, y), glm::vec3(depth), kPosEpsilon},
+                {"lookahead", texelAt(raster.lookahead, x, y),
+                 glm::vec3(std::clamp(1.0F - (depth / settings.lookaheadDistance), 0.0F, 1.0F)),
+                 kUnitEpsilon},
                 {"worldPos", texelAt(raster.worldPos, x, y), shading.position, kPosEpsilon},
                 {"uv", texelAt(raster.uv, x, y), glm::vec3(glm::fract(shading.uv), 0.0F), kUnitEpsilon},
                 {"normal", texelAt(raster.normal, x, y), frame.normal, kUnitEpsilon},
@@ -267,6 +274,8 @@ PathTraceSettings makeTestSettings() {
     settings.samplesPerPixel = 1;
     settings.maxBounces = 0;
     settings.russianRouletteStartBounce = 1;
+    // Derived from the scene's own depth span, not profile.json's default: the horizon must fall strictly inside it or one of the remap's two branches carries no pixels and the check cannot see that branch break. The midpoint populates both -- roughly half the frame in the linear region, half clamped at the far end. Verified by mutation: inverting the ramp and deleting the clamp each fail this check.
+    settings.lookaheadDistance = 0.5F * (kSceneNearZ + kSceneFarZ);
     settings.bumpStrength = 1.0F;
     settings.roughnessMin = 0.045F;
     settings.roughnessMax = 1.0F;

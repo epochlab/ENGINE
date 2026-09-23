@@ -12,6 +12,7 @@ enum class AovId : int {
     Wireframe,  // combined AOV: white mesh-edge lines + one false-coloured bounding box per instance (rasterizer.h)
     Alpha,
     Depth,
+    Lookahead,  // Depth remapped through profile.json's lookaheadDistance: 1 at the camera plane, 0 at that horizon and beyond
     HSV,
     Luminance,
     Sobel,
@@ -44,8 +45,8 @@ enum class AovId : int {
 // Display name, index-parallel to AovId -- the single array HudOverlay's combo box binds to. Reordering must keep this parallel with AovId's declaration order; the static_assert below only catches a length mismatch, not a reorder.
 inline constexpr const char* kAovNames[] = {
     "Beauty",       "Wireframe",      "Alpha",           "Depth",
-    "HSV",          "Luminance",      "Sobel",           "Gabor",
-    "WorldPos",     "UV",
+    "Lookahead",    "HSV",            "Luminance",       "Sobel",
+    "Gabor",        "WorldPos",       "UV",
     "Normal",       "GeomNormal",     "Albedo",          "Metallic",
     "Roughness",    "Tangent",        "ObjectID",        "AO",
     "Fresnel",      "IOR",            "Bounce Count",
@@ -55,7 +56,7 @@ inline constexpr const char* kAovNames[] = {
 static_assert(sizeof(kAovNames) / sizeof(kAovNames[0]) == static_cast<int>(AovId::Count),
               "kAovNames must stay index-parallel with AovId");
 
-// Which of the renderer's three producers computes each AOV. They are not interchangeable: the path tracer's 10 accumulated lanes (path_tracer.h's PathTraceResult), the rasterizer's 13 primary-hit lanes (rasterizer.h's RasterGBuffer), and 4 image-space filters over a finished Beauty (aov_filters.h).
+// Which of the renderer's three producers computes each AOV. They are not interchangeable: the path tracer's 10 accumulated lanes (path_tracer.h's PathTraceResult), the rasterizer's 14 primary-hit lanes (rasterizer.h's RasterGBuffer), and 4 image-space filters over a finished Beauty (aov_filters.h).
 // The single source of truth for producer selection. Previously this knowledge was restated in four places -- main.cpp's aovNeedsLightTransport and selectPathTracedImage, render_beauty's own lane table, and the README -- which is three chances for them to disagree about what produces what.
 enum class AovSource { PathTraced, GBuffer, BeautyFilter };
 
@@ -64,7 +65,7 @@ enum class AovSource { PathTraced, GBuffer, BeautyFilter };
 // Channels the AOV actually carries. A property of what it MEANS, not of how it is stored: HdrImage is always 4 floats/texel and scalar AOVs are broadcast to RGB so they can go straight to a display texture. A consumer reading the data rather than looking at it wants the one real channel of a depth map, not three copies of it.
 [[nodiscard]] int aovChannels(AovId aov);
 
-// True for AOVs needing light-transport data -- Beauty, the transport components, and the filters reading Beauty -- false for the 13 primary-hit-only AOVs the rasterizer covers. Selects which producer runs, and nothing else.
+// True for AOVs needing light-transport data -- Beauty, the transport components, and the filters reading Beauty -- false for the 14 primary-hit-only AOVs the rasterizer covers. Selects which producer runs, and nothing else.
 // Derived from aovSource rather than tabulated beside it, so the two cannot drift apart.
 [[nodiscard]] inline bool aovNeedsLightTransport(AovId aov) {
     return aovSource(aov) != AovSource::GBuffer;

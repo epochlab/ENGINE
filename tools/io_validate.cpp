@@ -19,6 +19,7 @@
 #include <optional>
 #include <random>
 #include <string>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -28,6 +29,7 @@
 #include "check.h"
 #include "engine/config/profile_config.h"
 #include "engine/config/scene_config.h"
+#include "engine/debug/aov.h"
 #include "engine/debug/bench_log.h"
 #include "engine/gfx/hdr_image.h"
 #include "engine/gfx/texture.h"
@@ -304,6 +306,98 @@ ENGINE_CHECK(profile_config_render_display_settings, Fast, Exact) {
             ENGINE_EXPECT(ctx,
                           loaded.has_value() && loaded->render.displayFormat == display &&
                               loaded->render.textureType == texture && loaded->render.vsync == vsync,
+                          detail);
+        } else {
+            std::snprintf(detail, sizeof(detail), "loadProfileConfig accepted %s", testCase.name.c_str());
+            ENGINE_EXPECT(ctx, !loaded.has_value(), detail);
+        }
+    }
+}
+
+// render.defaultAOV is a raw index into kAovNames that main.cpp's startup spec block dereferences unchecked, so the bound has to hold at load. Both ends plus the first value past the top, which is the one an AOV insertion moves.
+ENGINE_CHECK(profile_config_default_aov_is_in_range, Fast, Exact) {
+    const int aovCount = static_cast<int>(engine::debug::AovId::Count);
+    const std::vector<std::pair<nlohmann::json, bool>> cases = {
+        {0, true}, {aovCount - 1, true}, {aovCount, false}, {-1, false}, {nlohmann::json(nullptr), false},
+    };
+
+    const std::filesystem::path shippedPath = std::filesystem::path(ASSET_ROOT_DIR) / "config" / "profile.json";
+    std::ifstream shippedFile(shippedPath);
+    const nlohmann::json shipped = nlohmann::json::parse(shippedFile);
+    ctx.plan(static_cast<int>(cases.size()) + 1);
+    ENGINE_EXPECT(ctx, engine::config::loadProfileConfig(shippedPath.string()).has_value(),
+                  "the shipped profile does not load, so no row below means anything");
+    for (const auto& [value, accepted] : cases) {
+        nlohmann::json edited = shipped;
+        if (value.is_null()) {
+            edited["render"].erase("defaultAOV");
+        } else {
+            edited["render"]["defaultAOV"] = value;
+        }
+        const std::filesystem::path path = writeJson("engine_io_profile_defaultaov.json", edited.dump());
+        const std::optional<engine::config::ProfileConfig> loaded = engine::config::loadProfileConfig(path.string());
+        std::filesystem::remove(path);
+        char detail[224];
+        std::snprintf(detail, sizeof(detail), "loadProfileConfig %s defaultAOV %s",
+                      accepted ? "rejected" : "accepted", value.dump().c_str());
+        ENGINE_EXPECT(ctx, loaded.has_value() == accepted && (!accepted || loaded->render.defaultAov == value.get<int>()),
+                      detail);
+    }
+}
+
+// The two scene-scale distances in `pathTracer`, each a divisor at its point of use: aoMaxDistance normalizes the AO obscurance falloff (path_tracer.cpp), lookaheadDistance the Lookahead AOV's ramp (rasterizer.cpp). At or below zero the lane is inf/NaN rather than the bounded gradient it is defined to be, and a missing or non-numeric key must fail at this asset-load boundary rather than default silently. Each varied alone against the shipped profile, so an accepted row also proves the value reaches the struct unaltered and leaves the other distance alone.
+ENGINE_CHECK(profile_config_scene_scale_distances, Fast, Exact) {
+    struct Case {
+        std::string name;
+        const char* key;
+        nlohmann::json value;  // null = key removed
+        bool accepted;
+    };
+    std::vector<Case> cases;
+    for (const char* key : {"aoMaxDistance", "lookaheadDistance"}) {
+        cases.push_back({std::string(key) + " 0.5", key, 0.5, true});
+        for (const nlohmann::json& bad : {nlohmann::json(0.0), nlohmann::json(-1.0), nlohmann::json("1.0"),
+                                          nlohmann::json(nullptr)}) {
+            cases.push_back({std::string(key) + " " + (bad.is_null() ? "missing" : bad.dump()), key, bad, false});
+        }
+    }
+
+    const auto distanceOf = [](const engine::config::PathTracerConfig& config, const char* key) {
+        return std::string(key) == "aoMaxDistance" ? config.aoMaxDistance : config.lookaheadDistance;
+    };
+    const auto otherKey = [](const char* key) {
+        return std::string(key) == "aoMaxDistance" ? "lookaheadDistance" : "aoMaxDistance";
+    };
+
+    const std::filesystem::path shippedPath = std::filesystem::path(ASSET_ROOT_DIR) / "config" / "profile.json";
+    const std::optional<engine::config::ProfileConfig> shippedConfig =
+        engine::config::loadProfileConfig(shippedPath.string());
+    std::ifstream shippedFile(shippedPath);
+    const nlohmann::json shipped = nlohmann::json::parse(shippedFile);
+    ctx.plan(static_cast<int>(cases.size()) + 1);
+    ENGINE_EXPECT(ctx, shippedConfig.has_value(), "the shipped profile does not load, so no row below means anything");
+    if (!shippedConfig) {
+        return;
+    }
+    for (const Case& testCase : cases) {
+        nlohmann::json edited = shipped;
+        if (testCase.value.is_null()) {
+            edited["pathTracer"].erase(testCase.key);
+        } else {
+            edited["pathTracer"][testCase.key] = testCase.value;
+        }
+        const std::filesystem::path path = writeJson("engine_io_profile_distances.json", edited.dump());
+        const std::optional<engine::config::ProfileConfig> loaded = engine::config::loadProfileConfig(path.string());
+        std::filesystem::remove(path);
+        char detail[224];
+        if (testCase.accepted) {
+            std::snprintf(detail, sizeof(detail), "loadProfileConfig rejected or mis-mapped %s",
+                          testCase.name.c_str());
+            ENGINE_EXPECT(ctx,
+                          loaded.has_value() &&
+                              distanceOf(loaded->pathTracer, testCase.key) == testCase.value.get<float>() &&
+                              distanceOf(loaded->pathTracer, otherKey(testCase.key)) ==
+                                  distanceOf(shippedConfig->pathTracer, otherKey(testCase.key)),
                           detail);
         } else {
             std::snprintf(detail, sizeof(detail), "loadProfileConfig accepted %s", testCase.name.c_str());

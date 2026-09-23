@@ -26,6 +26,7 @@
 #include "engine/config/profile_config.h"
 #include "engine/config/scene_config.h"
 #include "engine/debug/aov.h"
+#include "engine/debug/aov_routing.h"
 #include "engine/debug/aov_filters.h"
 #include "engine/debug/bench_log.h"
 #include "engine/debug/colormap.h"
@@ -248,7 +249,7 @@ struct AppResources {
     float interactiveRenderScale;
     std::chrono::steady_clock::time_point lastInputChange;
 
-    // Synchronous per-frame CPU rasterizer for the 13 primary-hit-only G-buffer AOVs (rasterizer.h) -- their only producer, decoupled from PathTraceDriver's async convergence loop. unique_ptr for the same reason as pathTraceDriver: ThreadPool's copy/move are deleted (owns worker threads), so a by-value member would break AppResources's movability.
+    // Synchronous per-frame CPU rasterizer for the 14 primary-hit-only G-buffer AOVs (rasterizer.h) -- their only producer, decoupled from PathTraceDriver's async convergence loop. unique_ptr for the same reason as pathTraceDriver: ThreadPool's copy/move are deleted (owns worker threads), so a by-value member would break AppResources's movability.
     std::unique_ptr<engine::scene::ThreadPool> rasterThreadPool;
     // Allocated once and rendered into in place (rasterizer.h), never republished -- its `generation` field, not its address, is what tells one render from the next. Refreshed synchronously in requestPathTraceIfTriggerChanged whenever a rasterizer-backed AOV is selected and lastRasterTrigger shows this view has not been rasterized yet; generation stays 0 while only light-transport AOVs are ever shown, because then it never runs at all.
     std::shared_ptr<engine::scene::RasterGBuffer> rasterGBuffer;
@@ -446,6 +447,7 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         .maxBounces = profileConfig.pathTracer.maxBounces,
         .russianRouletteStartBounce = profileConfig.pathTracer.russianRouletteStartBounce,
         .aoMaxDistance = profileConfig.pathTracer.aoMaxDistance,
+        .lookaheadDistance = profileConfig.pathTracer.lookaheadDistance,
         .bumpStrength = materialConfig->bumpStrength,
         .roughnessMin = materialConfig->roughnessMin,
         .roughnessMax = materialConfig->roughnessMax,
@@ -721,74 +723,26 @@ void resolveOrbitPick(engine::platform::Window& window, AppResources& app,
 struct PathTracedAovSource {
     const engine::gfx::HdrImage* image = nullptr;
     std::shared_ptr<const void> owner;
-    // RasterGBuffer's render counter for the 13 rasterizer-backed AOVs, 0 for the path-traced ones. The rasterizer's buffer is now reused in place, so its address is constant and `owner` alone can no longer tell one render from the next; a PathTraceResult is still a fresh object per pass and needs no counter.
+    // RasterGBuffer's render counter for the 14 rasterizer-backed AOVs, 0 for the path-traced ones. The rasterizer's buffer is now reused in place, so its address is constant and `owner` alone can no longer tell one render from the next; a PathTraceResult is still a fresh object per pass and needs no counter.
     std::uint64_t generation = 0;
 };
 
-// Returns a default (null image) if the specific source an AOV needs hasn't published yet -- callers show black instead. The 13 primary-hit-only AOVs read rasterGBuffer (refreshed synchronously when one of them is selected and this view has not been rasterized yet, requestPathTraceIfTriggerChanged); Beauty and the light-transport AOVs read the driver's asynchronously published PathTraceResult. Extended as RasterGBuffer/PathTraceResult grow more buffers.
+// Returns a default (null image) if the specific source an AOV needs hasn't published yet -- callers show black instead. The 14 primary-hit-only AOVs read rasterGBuffer (refreshed synchronously when one of them is selected and this view has not been rasterized yet, requestPathTraceIfTriggerChanged); Beauty and the light-transport AOVs read the driver's asynchronously published PathTraceResult. The four Beauty filters own no buffer and fall through to a null image, which presentFrame handles before reaching here.
+// Routed through aov_routing.h's lane tables rather than a switch restating them: that switch was a third copy of the AovId-to-buffer mapping aov.cpp already holds and headless_renderer.cpp already consumes, so a new AOV had to be added in two places or the viewer silently showed black.
 PathTracedAovSource selectPathTracedImage(
     const std::shared_ptr<const engine::scene::PathTraceResult>& snapshot,
     const std::shared_ptr<engine::scene::RasterGBuffer>& rasterGBuffer,
     engine::debug::AovId aov) {
-    // One construction site for all 13 rasterizer-backed AOVs, so the generation stamp cannot be omitted at one of them. The buffer is allocated for the process's life now, so a null check no longer distinguishes "no render yet" -- generation 0 does.
-    const auto fromRaster = [&rasterGBuffer](const engine::gfx::HdrImage& image) {
+    if (const engine::debug::GBufferLane lane = engine::debug::gbufferLane(aov)) {
+        // The buffer is allocated for the process's life now, so a null check no longer distinguishes "no render yet" -- generation 0 does.
         return rasterGBuffer->generation == 0
                    ? PathTracedAovSource{}
-                   : PathTracedAovSource{&image, rasterGBuffer, rasterGBuffer->generation};
-    };
-    const auto fromSnapshot = [&snapshot](const engine::gfx::HdrImage& image) {
-        return PathTracedAovSource{&image, snapshot};
-    };
-    switch (aov) {
-        case engine::debug::AovId::Beauty:
-            return snapshot ? fromSnapshot(snapshot->beauty) : PathTracedAovSource{};
-        case engine::debug::AovId::IOR:
-            return fromRaster(rasterGBuffer->iorAov);
-        case engine::debug::AovId::BounceCount:
-            return snapshot ? fromSnapshot(snapshot->bounceHeatmap) : PathTracedAovSource{};
-        case engine::debug::AovId::Depth:
-            return fromRaster(rasterGBuffer->depth);
-        case engine::debug::AovId::WorldPos:
-            return fromRaster(rasterGBuffer->worldPos);
-        case engine::debug::AovId::UV:
-            return fromRaster(rasterGBuffer->uv);
-        case engine::debug::AovId::Normal:
-            return fromRaster(rasterGBuffer->normal);
-        case engine::debug::AovId::GeomNormal:
-            return fromRaster(rasterGBuffer->geomNormal);
-        case engine::debug::AovId::Albedo:
-            return fromRaster(rasterGBuffer->albedo);
-        case engine::debug::AovId::Metallic:
-            return fromRaster(rasterGBuffer->metallic);
-        case engine::debug::AovId::Roughness:
-            return fromRaster(rasterGBuffer->roughness);
-        case engine::debug::AovId::Tangent:
-            return fromRaster(rasterGBuffer->tangent);
-        case engine::debug::AovId::ObjectID:
-            return fromRaster(rasterGBuffer->objectId);
-        case engine::debug::AovId::Alpha:
-            return fromRaster(rasterGBuffer->alpha);
-        case engine::debug::AovId::Fresnel:
-            return snapshot ? fromSnapshot(snapshot->fresnel) : PathTracedAovSource{};
-        case engine::debug::AovId::AO:
-            return snapshot ? fromSnapshot(snapshot->ao) : PathTracedAovSource{};
-        case engine::debug::AovId::Shadow:
-            return snapshot ? fromSnapshot(snapshot->shadow) : PathTracedAovSource{};
-        case engine::debug::AovId::Wireframe:
-            return fromRaster(rasterGBuffer->wireframe);
-        case engine::debug::AovId::DirectDiffuse:
-            return snapshot ? fromSnapshot(snapshot->directDiffuse) : PathTracedAovSource{};
-        case engine::debug::AovId::IndirectDiffuse:
-            return snapshot ? fromSnapshot(snapshot->indirectDiffuse) : PathTracedAovSource{};
-        case engine::debug::AovId::DirectSpecular:
-            return snapshot ? fromSnapshot(snapshot->directSpecular) : PathTracedAovSource{};
-        case engine::debug::AovId::IndirectSpecular:
-            return snapshot ? fromSnapshot(snapshot->indirectSpecular) : PathTracedAovSource{};
-        case engine::debug::AovId::Refraction:
-            return snapshot ? fromSnapshot(snapshot->refraction) : PathTracedAovSource{};
-        default:
-            return {};
+                   : PathTracedAovSource{&(*rasterGBuffer.*lane), rasterGBuffer, rasterGBuffer->generation};
     }
+    if (const engine::debug::PathTracedLane lane = engine::debug::pathTracedLane(aov)) {
+        return snapshot ? PathTracedAovSource{&(*snapshot.*lane), snapshot} : PathTracedAovSource{};
+    }
+    return {};
 }
 
 // Bottom-right HUD probe: the post-filter AOVs (HSV/Luminance/Sobel/Gabor, which have no independent buffer of their own, see presentFrame's isPostFilterAov) are GPU-only shader filters over Beauty with no CPU-side equivalent to sample, so they read back the literal composited, OCIO-display-transformed pixel from framebuffer 0, since that is the value being shown.
@@ -1461,7 +1415,7 @@ struct Options {
     std::vector<int> benchAovs;
 };
 
-// Resolves a comma-separated AOV list against kAovNames, so -bench-aovs and the HUD dropdown name the same 27 AOVs identically. Nullopt on an unknown name, which parseOptions surfaces rather than defaulting around.
+// Resolves a comma-separated AOV list against kAovNames, so -bench-aovs and the HUD dropdown name the same 28 AOVs identically. Nullopt on an unknown name, which parseOptions surfaces rather than defaulting around.
 std::optional<std::vector<int>> parseAovList(const char* list) {
     std::vector<int> aovs;
     const std::string text(list);

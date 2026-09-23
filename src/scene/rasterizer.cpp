@@ -442,6 +442,8 @@ void shadePixel(RasterGBuffer& result, int x, int y, float viewZ, float origU, f
                       ((st.meshEdges & 4U) != 0 && nearLineSegmentPx(p, p0, p1, kLineThicknessPx).near);
 
     writeTexel(result.depth, x, y, glm::vec3(viewZ));
+    writeTexel(result.lookahead, x, y,
+                glm::vec3(std::clamp(1.0F - (viewZ / settings.lookaheadDistance), 0.0F, 1.0F)));
     writeTexel(result.worldPos, x, y, shading.position);
     writeTexel(result.uv, x, y, glm::vec3(glm::fract(shading.uv), 0.0F));
     writeTexel(result.normal, x, y, frame.normal);
@@ -537,8 +539,8 @@ void drawBoxEdgesRow(RasterGBuffer& result, int y, const std::vector<RasterLineS
 }
 
 // Every AOV image in one place, so the reallocation and the per-row clear below cannot disagree about which fields exist -- adding an AOV to RasterGBuffer without adding it here leaves it uncleared, which this array's fixed size catches at compile time.
-std::array<engine::gfx::HdrImage*, 13> aovImages(RasterGBuffer& g) {
-    return {&g.iorAov, &g.depth,    &g.worldPos, &g.uv,      &g.normal,
+std::array<engine::gfx::HdrImage*, 14> aovImages(RasterGBuffer& g) {
+    return {&g.iorAov, &g.depth,    &g.lookahead, &g.worldPos, &g.uv,      &g.normal,
             &g.geomNormal, &g.albedo, &g.metallic, &g.roughness, &g.tangent,
             &g.objectId, &g.alpha,  &g.wireframe};
 }
@@ -550,7 +552,7 @@ void renderRasterGBuffer(const Camera& camera, const std::vector<ShadingTriangle
                           const std::vector<PathTraceSettings>& perInstanceSettings,
                           const std::vector<AabbBounds>& instanceBounds, int width, int height,
                           ThreadPool& threadPool, RasterGBuffer& result) {
-    const std::array<engine::gfx::HdrImage*, 13> images = aovImages(result);
+    const std::array<engine::gfx::HdrImage*, 14> images = aovImages(result);
     // Reallocated only on a resolution change; every other call reuses the storage and relies on renderRow's clear. makeImage's own zeroing is redundant against that clear but runs once per resize, not once per frame.
     if (result.depth.width != width || result.depth.height != height) {
         for (engine::gfx::HdrImage* image : images) {
@@ -580,7 +582,7 @@ void renderRasterGBuffer(const Camera& camera, const std::vector<ShadingTriangle
     std::vector<int> winners(pixelCount);
 
     const auto renderRow = [&](int y) {
-        // Clearing this row of every AOV is what makes the buffers reusable across calls: the worker that is about to overwrite the row zeroes it first, in parallel and while it is already cache-warm, instead of 13 sequential full-image memsets before the dispatch. An uncovered pixel therefore still reads back zero (alpha 0, the miss test every consumer uses) exactly as a freshly allocated image did.
+        // Clearing this row of every AOV is what makes the buffers reusable across calls: the worker that is about to overwrite the row zeroes it first, in parallel and while it is already cache-warm, instead of 14 sequential full-image memsets before the dispatch. An uncovered pixel therefore still reads back zero (alpha 0, the miss test every consumer uses) exactly as a freshly allocated image did.
         const std::size_t rowStart = static_cast<std::size_t>(y) * static_cast<std::size_t>(width);
         for (engine::gfx::HdrImage* image : images) {
             float* row = image->rgba.data() + (rowStart * 4);
