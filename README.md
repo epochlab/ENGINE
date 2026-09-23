@@ -54,7 +54,12 @@ It prints B/A with a distribution-free confidence interval, and says "not resolv
 
 - **Path tracer** — `PathTraceDriver` hands a fresh request to a background thread pool (one worker/core, row-parallel, dynamic scheduling), restarting progressive accumulation:
   1. Camera ray generation (pinhole) → Embree intersection (`rtcIntersect1`/`rtcOccluded1`)
-  2. BSDF eval/sampling (Heitz 2018 GGX VNDF specular; EON rough-diffuse, Portsmouth/Kutz/Hill 2025; Walter 2007 rough dielectric transmission with exact Fresnel/TIR, falling back to a Snell delta lobe below the smooth-roughness threshold and at an index-matched interface; Kulla-Conty multiple-scattering compensation on both interfaces; exact complex-IOR conductor Fresnel via Gulbrandsen 2014's reflectivity/edge-tint parameterisation)
+  2. BSDF eval/sampling, combining five techniques:
+     - Heitz 2018 GGX VNDF specular
+     - EON rough-diffuse (Portsmouth/Kutz/Hill 2025)
+     - Walter 2007 rough dielectric transmission with exact Fresnel/TIR, falling back to a Snell delta lobe below the smooth-roughness threshold and at an index-matched interface
+     - Kulla-Conty multiple-scattering compensation on both interfaces
+     - exact complex-IOR conductor Fresnel via Gulbrandsen 2014's reflectivity/edge-tint parameterisation
   3. NEE against a `LightSet` (environment map, optionally excluded via the HUD's "Environment Light" checkbox, plus any area lights — uniform selection, quads importance-sampled by solid angle via Ureña/Fajardo/King 2013's spherical-rectangle parametrisation), MIS-combined with BSDF sampling (power heuristic, Veach 1997)
   4. Recursive bounce loop with Russian roulette, Chiang/Li/Burley 2019 shadow-terminator-corrected secondary-ray origins, Beer-Lambert extinction inside transmissive media
   5. Radiance + full G-buffer/transport-component AOV set accumulated per pass, published lock-free for the render thread
