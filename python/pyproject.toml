@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pathtracer"
+version = "0.1.0"
+description = "Headless AOV rendering from the PATHTRACER engine, as numpy arrays"
+requires-python = ">=3.10"
+# numpy only. The renderer itself is a C ABI loaded with ctypes from the standard library, so there is no build-time
+# dependency on Python headers and no compiled extension to keep in step with an interpreter version.
+dependencies = ["numpy>=1.24"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "ruff>=0.5", "mypy>=1.8"]
+
+[tool.setuptools.packages.find]
+include = ["pathtracer*"]
+
+[tool.ruff]
+# Wide enough for the project's single-line comment convention (notes/architect.md §7: "what and why", one
+# unwrapped line each), which a 79- or 110-column limit would force into exactly the multi-line comments that rule
+# exists to prevent. Code, as opposed to comments and docstrings, stays well inside this.
+line-length = 140
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+# Deliberately unpinned: mypy then checks against the interpreter actually in use, rather than asserting conformance
+# to a version whose typeshed and numpy stubs were never loaded. numpy's own stubs already require 3.12+.
+strict = true
+# ctypes pointer expressions are Any-typed at the boundary by construction; the ABI is asserted by the tests and by
+# the argtypes declarations in _ffi, not by the type checker.
+disallow_any_expr = false

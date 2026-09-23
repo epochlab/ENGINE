@@ -26,6 +26,7 @@
 #include "engine/config/profile_config.h"
 #include "engine/config/scene_config.h"
 #include "engine/debug/aov.h"
+#include "engine/debug/aov_filters.h"
 #include "engine/debug/bench_log.h"
 #include "engine/debug/colormap.h"
 #include "engine/debug/frame_stats.h"
@@ -70,60 +71,6 @@ void glfwErrorCallback(int error, const char* description) {
 const char* lutName(engine::gfx::OcioDisplayTransform::Lut lut) {
     using Lut = engine::gfx::OcioDisplayTransform::Lut;
     return lut == Lut::SRGB ? "sRGB" : lut == Lut::Rec709 ? "Rec709" : "Raw";
-}
-
-// Static Gabor kernel weights: 4 orientations (0/45/90/135deg) x 5x5 taps, precomputed once here rather than in the shader -- these never change at runtime, so re-deriving sin/cos/exp per-fragment on the GPU would be pure redundant work. Consumed by edge_filter.frag's Gabor branch; tap order (dy outer, dx inner, both -2..2) must match its sampling loop.
-std::array<float, 100> buildGaborKernel() {
-    constexpr float kSigma = 1.4F;
-    constexpr float kLambda = 4.0F;
-    constexpr float kGamma = 0.5F;
-    constexpr std::array<float, 4> kOrientationsDeg = {0.0F, 45.0F, 90.0F, 135.0F};
-
-    std::array<float, 100> kernel{};
-    for (int o = 0; o < 4; ++o) {
-        const float theta = glm::radians(kOrientationsDeg[static_cast<std::size_t>(o)]);
-        int tapIndex = 0;
-        for (int dy = -2; dy <= 2; ++dy) {
-            for (int dx = -2; dx <= 2; ++dx) {
-                const auto x = static_cast<float>(dx);
-                const auto y = static_cast<float>(dy);
-                const float xp = (x * std::cos(theta)) + (y * std::sin(theta));
-                const float yp = (-x * std::sin(theta)) + (y * std::cos(theta));
-                const float envelope = std::exp(
-                    -((xp * xp) + (kGamma * kGamma * yp * yp)) / (2.0F * kSigma * kSigma));
-                // Odd/quadrature carrier (sin, not cos) -- edge-sensitive, not bar/ridge-sensitive.
-                const float carrier = std::sin(2.0F * glm::pi<float>() * xp / kLambda);
-                kernel[(static_cast<std::size_t>(o) * 25) + static_cast<std::size_t>(tapIndex)] =
-                    envelope * carrier;
-                ++tapIndex;
-            }
-        }
-    }
-    return kernel;
-}
-
-// True for AOVs needing light-transport data (Beauty, transport-component AOVs, post-filter AOVs reading Beauty) -- false for the 13 primary-hit-only AOVs the rasterizer covers (rasterizer.h). Selects which producer runs, and nothing else: it parks the driver while an AOV it does not produce is shown (requestPathTraceIfTriggerChanged) and gates the rasterizer symmetrically. Deliberately NOT part of either producer's trigger key -- keying on it made every switch across the boundary restart a converged accumulation.
-bool aovNeedsLightTransport(engine::debug::AovId aov) {
-    using engine::debug::AovId;
-    switch (aov) {
-        case AovId::Beauty:
-        case AovId::HSV:
-        case AovId::Luminance:
-        case AovId::Sobel:
-        case AovId::Gabor:
-        case AovId::AO:
-        case AovId::Fresnel:
-        case AovId::BounceCount:
-        case AovId::Shadow:
-        case AovId::DirectDiffuse:
-        case AovId::IndirectDiffuse:
-        case AovId::DirectSpecular:
-        case AovId::IndirectSpecular:
-        case AovId::Refraction:
-            return true;
-        default:
-            return false;
-    }
 }
 
 // Camera and framebuffer geometry: the whole of what renderRasterGBuffer's output depends on (rasterizer.h takes no environment argument), and the leading part of what renderPathTraced's does. Factored out rather than duplicated so the two producers compare the same fields without either being able to drift from the other. fbWidth/fbHeight default to 0, a size no real framebuffer has, so the very first comparison of either producer always mismatches and both render on the first frame with no separate startup call.
@@ -362,8 +309,10 @@ struct EdgeFilterUniforms {
 EdgeFilterUniforms setupEdgeFilterShader(const engine::gfx::ShaderProgram& edgeFilterShader) {
     edgeFilterShader.use();
     GL_CALL(glUniform1i(edgeFilterShader.uniformLocation("uHdrColor"), 0));
-    const std::array<float, 100> gaborKernel = buildGaborKernel();
-    GL_CALL(glUniform1fv(edgeFilterShader.uniformLocation("uGaborKernel"), 100, gaborKernel.data()));
+    const std::array<float, engine::debug::kGaborOrientations * engine::debug::kGaborTaps> gaborKernel =
+        engine::debug::buildGaborKernel();
+    GL_CALL(glUniform1fv(edgeFilterShader.uniformLocation("uGaborKernel"),
+                          static_cast<GLsizei>(gaborKernel.size()), gaborKernel.data()));
     return EdgeFilterUniforms{edgeFilterShader.uniformLocation("uFilterMode"),
                                edgeFilterShader.uniformLocation("uChannelView"),
                                edgeFilterShader.uniformLocation("uExposure"),

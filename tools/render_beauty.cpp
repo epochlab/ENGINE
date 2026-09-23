@@ -17,6 +17,8 @@
 #include <iomanip>
 #include <iostream>
 #include <numeric>
+#include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -25,8 +27,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <zlib.h>
 
-#include "engine/config/profile_config.h"
-#include "engine/config/scene_config.h"
+#include "engine/api/headless_renderer.h"
 #include "engine/debug/aov.h"
 #include "engine/debug/bench_log.h"
 #include "engine/debug/power_spectrum.h"
@@ -37,38 +38,10 @@
 #include "engine/gfx/ocio_cpu_transform.h"
 #include "engine/gfx/ocio_display_transform.h"
 #include "engine/scene/camera.h"
-#include "engine/scene/embree_accel.h"
-#include "engine/scene/environment_map.h"
-#include "engine/scene/gltf_loader.h"
-#include "engine/scene/light.h"
-#include "engine/scene/material_binding.h"
-#include "engine/scene/path_tracer.h"
-#include "engine/scene/thread_pool.h"
 
 namespace OCIO = OCIO_NAMESPACE;
 
 namespace {
-
-// Which PathTraceResult image an AOV reads, null for the AOVs renderPathTraced does not produce. Keyed off AovId rather than a private name list so --aov and the viewer's dropdown name the same 27 AOVs by the same names; which buffer each one displays is main.cpp's selectPathTracedImage and is not restated here.
-using PathTracedLane = engine::gfx::HdrImage engine::scene::PathTraceResult::*;
-
-PathTracedLane pathTracedLane(engine::debug::AovId aov) {
-    using engine::debug::AovId;
-    using Result = engine::scene::PathTraceResult;
-    switch (aov) {
-        case AovId::Beauty:           return &Result::beauty;
-        case AovId::BounceCount:      return &Result::bounceHeatmap;
-        case AovId::AO:               return &Result::ao;
-        case AovId::Shadow:           return &Result::shadow;
-        case AovId::DirectDiffuse:    return &Result::directDiffuse;
-        case AovId::IndirectDiffuse:  return &Result::indirectDiffuse;
-        case AovId::DirectSpecular:   return &Result::directSpecular;
-        case AovId::IndirectSpecular: return &Result::indirectSpecular;
-        case AovId::Refraction:       return &Result::refraction;
-        case AovId::Fresnel:          return &Result::fresnel;
-        default:                      return nullptr;
-    }
-}
 
 struct Options {
     std::string scenePath = "scenes/cornell.json";
@@ -106,50 +79,24 @@ struct Options {
     // image, no tuned threshold -- see the gate itself for the construction.
     bool assertConverged = false;
     // Resolved by --aov. Defaulting to Beauty keeps every existing invocation -- and the bit-identity gate built on them -- unchanged.
-    PathTracedLane lane = &engine::scene::PathTraceResult::beauty;
-    std::string aovName = "Beauty";
+    engine::debug::AovId aov = engine::debug::AovId::Beauty;
     // Appends the timing run to this JSON Lines benchmark log (bench_log.h); empty = no log.
     std::string benchLogPath;
 };
 
-// Case- and separator-insensitive match against kAovNames, whose entries are HUD labels ("Bounce Count", "Indirect Specular"): the CLI takes bounce-count, bounce_count or bouncecount for the same AOV rather than introducing a second vocabulary to keep in sync.
-std::string normalizeAovName(const std::string& name) {
-    std::string out;
-    for (const char c : name) {
-        if (c == ' ' || c == '-' || c == '_') {
-            continue;
-        }
-        out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
-    }
-    return out;
-}
-
-// Rejects by category so the message says why an AOV is unavailable rather than that it is unknown: the primary-hit AOVs live in rasterizer.h's RasterGBuffer and HSV/Luminance/Sobel/Gabor are GPU filters over Beauty, and this tool runs neither the rasterizer nor a GL context.
+// Every AOV is reachable now that HeadlessRenderer drives the rasterizer and the Beauty filters as well as the path tracer; the name vocabulary is engine/debug/aov.h's, shared with the viewer's dropdown and the C ABI rather than restated here.
 bool resolveAov(const std::string& requested, Options& options) {
-    const std::string wanted = normalizeAovName(requested);
-    for (int i = 0; i < static_cast<int>(engine::debug::AovId::Count); ++i) {
-        if (normalizeAovName(engine::debug::kAovNames[i]) != wanted) {
-            continue;
+    const engine::debug::AovId aov = engine::debug::aovIdFromName(requested);
+    if (aov == engine::debug::AovId::Count) {
+        std::cerr << "render_beauty: unknown AOV \"" << requested << "\"; known AOVs are:";
+        for (int i = 0; i < static_cast<int>(engine::debug::AovId::Count); ++i) {
+            std::cerr << ' ' << engine::debug::kAovNames[i];
         }
-        const PathTracedLane lane = pathTracedLane(static_cast<engine::debug::AovId>(i));
-        if (lane == nullptr) {
-            std::cerr << "render_beauty: AOV \"" << engine::debug::kAovNames[i]
-                      << "\" is not path-traced -- it is a rasterizer G-buffer AOV or a post-filter "
-                         "over Beauty, neither of which this tool runs\n";
-            return false;
-        }
-        options.lane = lane;
-        options.aovName = engine::debug::kAovNames[i];
-        return true;
+        std::cerr << '\n';
+        return false;
     }
-    std::cerr << "render_beauty: unknown AOV \"" << requested << "\"; path-traced AOVs are:";
-    for (int i = 0; i < static_cast<int>(engine::debug::AovId::Count); ++i) {
-        if (pathTracedLane(static_cast<engine::debug::AovId>(i)) != nullptr) {
-            std::cerr << ' ' << normalizeAovName(engine::debug::kAovNames[i]);
-        }
-    }
-    std::cerr << '\n';
-    return false;
+    options.aov = aov;
+    return true;
 }
 
 // Big-endian u32 append -- PNG is network byte order throughout.
@@ -303,6 +250,15 @@ glm::vec3 ditherOffset(float u, float v) {
 
 // Scene-referred image -> display-referred 8-bit, matching the viewer's pipeline exactly: exposure multiply, the display curve, then dither and quantize.
 // applyDisplayTransform mirrors presentFrame's `isBeauty ? userLut : Raw`: only Beauty is scene-referred radiance, and putting a data AOV like AO or Shadow through a display curve would distort values that are already display-ready. Raw is the OCIO-free branch, exactly what buildRawFragmentSource does -- exposure, then dither and quantize.
+// Largest RGB value in the image, for an AOV whose raw range is not [0,1] and must be normalized before an 8-bit encode. Alpha is excluded: it is 1 by the broadcast convention and would pin the result at 1 for every scalar AOV.
+float maxChannel(const engine::gfx::HdrImage& image) {
+    float peak = 0.0F;
+    for (std::size_t texel = 0; texel + 3 < image.rgba.size(); texel += 4) {
+        peak = std::max({peak, image.rgba[texel], image.rgba[texel + 1], image.rgba[texel + 2]});
+    }
+    return peak;
+}
+
 std::vector<unsigned char> encodeForDisplay(const engine::gfx::HdrImage& image, float exposureEv,
                                              bool applyDisplayTransform) {
     std::vector<float> rgb(static_cast<std::size_t>(image.width) *
@@ -383,7 +339,8 @@ void reportErrorSpectrum(const engine::gfx::HdrImage& image, const engine::gfx::
 
 // Everything the timed loop's cost depends on goes in `config`; output paths and exposure do not, so they never split two otherwise comparable runs.
 bool appendTimingRecord(const Options& options, int argc, char** argv, int width, int height,
-                        const engine::scene::PathTraceSettings& settings, bool envLightEnabled,
+                        const std::string& aovName, const engine::scene::PathTraceSettings& settings,
+                        bool envLightEnabled, double rasterMs,
                         engine::gfx::ScalarType textureType, const std::vector<double>& milliseconds, const engine::debug::RayCounts& rays,
                         const engine::gfx::HdrImage& accumulated) {
     const engine::debug::BenchRecord record{
@@ -394,14 +351,15 @@ bool appendTimingRecord(const Options& options, int argc, char** argv, int width
                    {"height", height},
                    {"passes", options.passes},
                    {"seed", options.scrambleSeed},
-                   {"aov", options.aovName},
+                   {"aov", aovName},
                    {"env_light", envLightEnabled},
                    {"spp_per_pass", settings.samplesPerPixel},
                    {"max_bounces", settings.maxBounces},
                    {"rr_start_bounce", settings.russianRouletteStartBounce},
                    {"ao_max_distance", settings.aoMaxDistance},
                    {"texture_type", engine::gfx::scalarTypeName(textureType)}},
-        .samples = {{"pass_ms", milliseconds}},
+        .samples = {milliseconds.empty() ? std::pair<std::string, std::vector<double>>{"raster_ms", {rasterMs}}
+                                          : std::pair<std::string, std::vector<double>>{"pass_ms", milliseconds}},
         .work = {{"rays", {{"primary", rays.primary}, {"bounce", rays.bounce}, {"ao", rays.ao}, {"shadow", rays.shadow}}},
                  {"crc32", engine::debug::floatCrc32(accumulated.rgba)}},
     };
@@ -499,141 +457,48 @@ int main(int argc, char** argv) {
     }
 
     const std::string assetRoot = ASSET_ROOT_DIR;
-    const std::optional<engine::config::ProfileConfig> profileConfig =
-        engine::config::loadProfileConfig(assetRoot + "/config/profile.json");
-    const std::optional<engine::config::SceneConfig> sceneConfig =
-        engine::config::loadSceneConfig(assetRoot + "/" + options.scenePath);
-    if (!profileConfig || !sceneConfig) {
-        return EXIT_FAILURE;
-    }
-    const std::optional<engine::config::MaterialConfig> materialConfig =
-        engine::config::loadMaterialConfig(assetRoot + "/" + sceneConfig->materialPath);
-    std::optional<engine::gfx::ImageTexture> environmentImage = engine::gfx::loadImageTexture(
-        assetRoot + "/" + sceneConfig->environment.hdriPath, profileConfig->render.textureType);
-    if (!materialConfig || !environmentImage) {
+    std::string error;
+    const std::unique_ptr<engine::api::HeadlessRenderer> renderer =
+        engine::api::HeadlessRenderer::open(assetRoot, options.scenePath, error);
+    if (!renderer) {
+        std::cerr << "render_beauty: " << error << "\n";
         return EXIT_FAILURE;
     }
 
-    // Scene-level placement, order X,Y,Z -- must stay identical to main.cpp's composition or the comparison renders a different scene than the viewer shows.
-    const glm::mat4 rootTransform =
-        glm::translate(glm::mat4(1.0F), sceneConfig->model.position) *
-        glm::rotate(glm::mat4(1.0F), glm::radians(sceneConfig->model.rotation.z), glm::vec3(0.0F, 0.0F, 1.0F)) *
-        glm::rotate(glm::mat4(1.0F), glm::radians(sceneConfig->model.rotation.y), glm::vec3(0.0F, 1.0F, 0.0F)) *
-        glm::rotate(glm::mat4(1.0F), glm::radians(sceneConfig->model.rotation.x), glm::vec3(1.0F, 0.0F, 0.0F));
-    std::optional<engine::scene::LoadedModel> model = engine::scene::loadGltf(
-        assetRoot + "/" + sceneConfig->model.gltfPath, profileConfig->render.textureType, rootTransform,
-        sceneConfig->model.texturePath.empty() ? "" : assetRoot + "/" + sceneConfig->model.texturePath);
-    if (!model) {
-        return EXIT_FAILURE;
-    }
-    std::vector<int> instanceLightIndex(model->instances.size(), -1);
-    const std::vector<engine::scene::QuadLight> quadLights =
-        engine::scene::buildQuadLights(sceneConfig->lights, rootTransform);
-    engine::scene::appendQuadLights(*model, quadLights, instanceLightIndex);
-
-    // Resolved the same way as main.cpp's initializeApp: profile.json names a preset, assets/config/camera.json supplies its dimensions.
-    const std::optional<std::vector<engine::scene::Camera::FilmBackPreset>> filmBackPresets =
-        engine::config::loadFilmBackPresets(assetRoot + "/config/camera.json");
-    if (!filmBackPresets) {
-        return EXIT_FAILURE;
-    }
-    const auto filmBackPresetIt =
-        std::find_if(filmBackPresets->begin(), filmBackPresets->end(),
-                     [&](const engine::scene::Camera::FilmBackPreset& preset) {
-                         return preset.name == profileConfig->camera.defaultFilmBackPresetName;
-                     });
-    if (filmBackPresetIt == filmBackPresets->end()) {
-        std::cerr << "render_beauty: profile.json filmBackPreset \""
-                   << profileConfig->camera.defaultFilmBackPresetName << "\" not found in camera.json\n";
-        return EXIT_FAILURE;
-    }
-
-    const engine::config::CameraConfig& cameraConfig = profileConfig->camera;
-    const engine::scene::Camera camera(cameraConfig.position, cameraConfig.yawDegrees,
-                                        cameraConfig.pitchDegrees, filmBackPresetIt->filmBack,
-                                        cameraConfig.focalLengthMm, cameraConfig.nearClip,
-                                        cameraConfig.farClip, cameraConfig.aperture,
-                                        cameraConfig.shutterSeconds, cameraConfig.iso);
-
-    const int width = options.width > 0 ? options.width : profileConfig->window.width;
-    const int height = options.height > 0 ? options.height : profileConfig->window.height;
-
-    const engine::scene::PathTraceSettings baseSettings{
-        .samplesPerPixel = 1,  // one sample per pass; convergence comes from accumulating passes below
-        .maxBounces = profileConfig->pathTracer.maxBounces,
-        .russianRouletteStartBounce = profileConfig->pathTracer.russianRouletteStartBounce,
-        .aoMaxDistance = profileConfig->pathTracer.aoMaxDistance,
-        .bumpStrength = materialConfig->bumpStrength,
-        .roughnessMin = materialConfig->roughnessMin,
-        .roughnessMax = materialConfig->roughnessMax,
-        .diffuseColour = materialConfig->diffuseColour,
-        .ior = materialConfig->ior,
-        .abbe = materialConfig->abbe,
-        .transmissionFactor = materialConfig->transmissionFactor,
-        .metallicFactor = materialConfig->metallicFactor,
-        .roughnessFactor = materialConfig->roughnessFactor,
-        .diffuseRoughness = materialConfig->diffuseRoughness,
-        .transmissionColor = materialConfig->transmissionColor,
-        .transmissionDepth = materialConfig->transmissionDepth,
-        .edgeTint = materialConfig->edgeTint,
-    };
-    const std::optional<std::vector<engine::scene::PathTraceSettings>> perInstanceSettings =
-        engine::scene::resolvePerInstanceSettings(baseSettings, model->instances,
-                                                   sceneConfig->materialOverrides, assetRoot);
-    if (!perInstanceSettings) {
-        return EXIT_FAILURE;
-    }
-
-    std::optional<engine::scene::EmbreeAccel> accel =
-        engine::scene::EmbreeAccel::build(std::move(model->worldTriangles));
-    if (!accel) {
-        std::cerr << "render_beauty: Embree scene build failed\n";
-        return EXIT_FAILURE;
-    }
-    const engine::scene::EnvironmentMap environmentMap(std::move(*environmentImage));
-    engine::scene::ThreadPool threadPool;
-
+    // Fixed camera from profile.json, no controller: what makes two runs comparable is that neither can have been nudged.
+    const engine::scene::Camera camera = renderer->defaultCamera();
+    const int width = options.width > 0 ? options.width : renderer->defaultWidth();
+    const int height = options.height > 0 ? options.height : renderer->defaultHeight();
     // --env-light overrides the scene's own authored default (-1 = no override).
-    const bool envLightEnabled =
-        options.envLight >= 0 ? options.envLight != 0 : sceneConfig->environment.lightEnabled;
-    const engine::scene::LightSet lights(envLightEnabled ? &environmentMap : nullptr,
-                                         /*envRotationRadians=*/0.0F, /*envExposure=*/1.0F, quadLights);
-
-    // Mean of `passes` single-sample passes -- the same accumulation PathTraceDriver performs, done synchronously. Each pass advances the sampler's sequence index rather than re-randomizing it, so the accumulated samples stratify against each other exactly as they do in the viewer; the scramble seed is held fixed for the whole render (--seed, default 1), which is what makes two runs over unchanged code byte-identical. Every lane is traced regardless of which one --aov selects: they share the sample set and the reconstruction filter, so producing one alone would not be cheaper.
-    engine::scene::PathTraceResult result = engine::scene::makePathTraceResult(width, height);
-    engine::gfx::HdrImage accumulated = engine::gfx::HdrImage{
-        width, height, std::vector<float>(static_cast<std::size_t>(width) *
-                                           static_cast<std::size_t>(height) * 4, 0.0F)};
-    const std::atomic<std::uint64_t> generation{1};
-    // Reported, not discarded: ray counts are the one figure that says whether a change altered what the integrator
-    // actually did, as opposed to only which values it sampled. Deterministic here where the viewer's are not, since
-    // this tool renders a fixed pass count with no cancellation.
-    engine::debug::PassStats stats;
+    const std::optional<bool> envLightOverride =
+        options.envLight >= 0 ? std::optional<bool>(options.envLight != 0) : std::nullopt;
+    const bool envLightEnabled = envLightOverride.value_or(renderer->defaultEnvLightEnabled());
+    const std::string aovName = engine::debug::kAovNames[static_cast<int>(options.aov)];
 
     // One accumulation, parameterised by its randomization. Factored out so the gates below can render the same scene
-    // several times: everything above this point (scene, accel, lights, camera) is built once and shared, so a gate
-    // costs renders and nothing else.
+    // several times: the scene, BVH, lights, camera and thread pool are built once by HeadlessRenderer and shared, so
+    // a gate costs renders and nothing else.
+    // Mean of `passes` single-sample passes -- the same accumulation PathTraceDriver performs, done synchronously.
+    // Each pass advances the sampler's sequence index rather than re-randomizing it, so the accumulated samples
+    // stratify against each other exactly as they do in the viewer; the scramble seed is held fixed for the whole
+    // render (--seed, default 1), which is what makes two runs over unchanged code byte-identical.
     const auto accumulate = [&](std::uint32_t scrambleSeed, int passes) {
-        engine::scene::PathTraceResult pass = engine::scene::makePathTraceResult(width, height);
-        engine::gfx::HdrImage mean{width, height,
-                                    std::vector<float>(static_cast<std::size_t>(width) *
-                                                        static_cast<std::size_t>(height) * 4, 0.0F)};
-        const std::atomic<std::uint64_t> localGeneration{1};
-        engine::debug::PassStats localStats;
-        for (int p = 0; p < passes; ++p) {
-            engine::scene::renderPathTraced(camera, *accel, model->shadingTriangles, model->instances,
-                                             instanceLightIndex, lights, width, height, /*showSky=*/true,
-                                             baseSettings, *perInstanceSettings, scrambleSeed, /*sampleBase=*/p,
-                                             /*sampleCount=*/passes, localGeneration, /*requestedGeneration=*/1U,
-                                             threadPool, localStats, pass);
-            for (std::size_t i = 0; i < mean.rgba.size(); ++i) {
-                mean.rgba[i] += (pass.*options.lane).rgba[i];
-            }
+        const engine::api::HeadlessRenderer::Request request{
+            .camera = camera,
+            .width = width,
+            .height = height,
+            .samples = passes,
+            .scrambleSeed = scrambleSeed,
+            .aovs = {options.aov},
+            .envLightEnabled = envLightOverride,
+        };
+        if (!renderer->render(request, error)) {
+            // Unreachable: parseArgs already rejects a non-positive pass count, and the resolution is positive by
+            // construction above -- those are render()'s only failure modes for a valid AOV.
+            std::cerr << "render_beauty: " << error << "\n";
+            std::exit(EXIT_FAILURE);
         }
-        for (float& v : mean.rgba) {
-            v /= static_cast<float>(passes);
-        }
-        return mean;
+        return renderer->lastImage(options.aov);
     };
 
     // --- Determinism gate. Exact, and the only gate here that needs no statistics at all: the same seed must produce
@@ -752,40 +617,35 @@ int main(int argc, char** argv) {
         return EXIT_SUCCESS;  // a gate renders for its verdict, not for an image
     }
 
-    // Per-pass wall clock, so a change's traversal cost is measured rather than argued. Only the trace is timed: the accumulate below is O(pixels) and identical across revisions. Mean is the figure to compare -- unlike raster_bench's single-threaded frames, a pass's minimum is set by how the tile queue happened to drain and varies ~12% run to run, where the mean holds to ~1%. Reported alongside best/worst so a run disturbed by other load is visible rather than silently folded in. Pass 0 carries the pool spin-up and first-touch faults and is counted like any other: discarding it would change the image, and it biases both sides of an A/B equally.
-    std::vector<double> milliseconds;
-    milliseconds.reserve(static_cast<std::size_t>(options.passes));
-    for (int pass = 0; pass < options.passes; ++pass) {
-        const auto start = std::chrono::steady_clock::now();
-        engine::scene::renderPathTraced(camera, *accel, model->shadingTriangles, model->instances,
-                                         instanceLightIndex, lights, width, height,
-                                         /*showSky=*/true, baseSettings, *perInstanceSettings,
-                                         options.scrambleSeed, /*sampleBase=*/pass, /*sampleCount=*/options.passes, generation,
-                                         /*requestedGeneration=*/1U, threadPool, stats, result);
-        const auto end = std::chrono::steady_clock::now();
-        milliseconds.push_back(std::chrono::duration<double, std::milli>(end - start).count());
-        for (std::size_t i = 0; i < accumulated.rgba.size(); ++i) {
-            accumulated.rgba[i] += (result.*options.lane).rgba[i];
-        }
-    }
-    for (float& v : accumulated.rgba) {
-        v /= static_cast<float>(options.passes);
-    }
+    // Per-pass wall clock, so a change's traversal cost is measured rather than argued. Only the trace is timed: the accumulation inside HeadlessRenderer is O(pixels) and identical across revisions. Mean is the figure to compare -- unlike raster_bench's single-threaded frames, a pass's minimum is set by how the tile queue happened to drain and varies ~12% run to run, where the mean holds to ~1%. Reported alongside best/worst so a run disturbed by other load is visible rather than silently folded in. Pass 0 carries the pool spin-up and first-touch faults and is counted like any other: discarding it would change the image, and it biases both sides of an A/B equally.
+    const engine::gfx::HdrImage accumulated = accumulate(options.scrambleSeed, options.passes);
+    const std::vector<double>& milliseconds = renderer->lastStats().passMilliseconds;
 
-    const engine::debug::RayCounts rays = stats.rays();
-    std::cout << "render_beauty: rays over " << options.passes << " passes -- primary " << rays.primary << ", bounce "
-              << rays.bounce << ", ao " << rays.ao << ", shadow " << rays.shadow << ", total " << rays.total() << "\n";
-
-    const auto [best, worst] = std::minmax_element(milliseconds.begin(), milliseconds.end());
-    const double totalMs = std::accumulate(milliseconds.begin(), milliseconds.end(), 0.0);
-    std::cout << "render_beauty: best-of-" << options.passes << ": " << *best << " ms/pass  (mean "
-              << totalMs / static_cast<double>(options.passes) << ", worst " << *worst << ", total "
-              << totalMs << ")\n";
+    const engine::api::HeadlessRenderer::RenderStats& stats = renderer->lastStats();
+    const engine::debug::RayCounts rays = stats.rays;
+    // A rasterizer-backed AOV traces no rays and runs no passes -- it is scan-converted once -- so there is no
+    // per-pass distribution to report for it, and reporting one would be a fabrication rather than a measurement.
+    if (!milliseconds.empty()) {
+        std::cout << "render_beauty: rays over " << options.passes << " passes -- primary " << rays.primary
+                  << ", bounce " << rays.bounce << ", ao " << rays.ao << ", shadow " << rays.shadow << ", total "
+                  << rays.total() << "\n";
+        const auto [best, worst] = std::minmax_element(milliseconds.begin(), milliseconds.end());
+        const double totalMs = std::accumulate(milliseconds.begin(), milliseconds.end(), 0.0);
+        std::cout << "render_beauty: best-of-" << options.passes << ": " << *best << " ms/pass  (mean "
+                  << totalMs / static_cast<double>(options.passes) << ", worst " << *worst << ", total "
+                  << totalMs << ")\n";
+    }
+    if (stats.rasterMilliseconds > 0.0) {
+        std::cout << "render_beauty: rasterized G-buffer in " << stats.rasterMilliseconds << " ms\n";
+    }
+    if (stats.filterMilliseconds > 0.0) {
+        std::cout << "render_beauty: Beauty filter in " << stats.filterMilliseconds << " ms\n";
+    }
     // Before any output encode, so the record's rusage covers load, build and the timed passes but not PNG/EXR writing.
     if (!options.benchLogPath.empty() &&
-        !appendTimingRecord(options, argc, argv, width, height, baseSettings, envLightEnabled,
-                            profileConfig->render.textureType, milliseconds, rays,
-                            accumulated)) {
+        !appendTimingRecord(options, argc, argv, width, height, aovName, renderer->baseSettings(),
+                            envLightEnabled, stats.rasterMilliseconds, renderer->textureType(), milliseconds,
+                            rays, accumulated)) {
         return EXIT_FAILURE;
     }
 
@@ -793,7 +653,7 @@ int main(int argc, char** argv) {
         if (!engine::gfx::writeExr(options.outExrPath, accumulated)) {
             return EXIT_FAILURE;
         }
-        std::cout << "render_beauty: wrote " << options.outExrPath << " (linear " << options.aovName << ", "
+        std::cout << "render_beauty: wrote " << options.outExrPath << " (linear " << aovName << ", "
                   << width << "x" << height << ", " << options.passes << " passes)\n";
     }
 
@@ -835,13 +695,19 @@ int main(int argc, char** argv) {
         }
     }
 
-    const bool isBeauty = options.lane == &engine::scene::PathTraceResult::beauty;
-    const std::vector<unsigned char> encoded =
-        encodeForDisplay(accumulated, options.exposureEv, isBeauty);
+    const bool isBeauty = options.aov == engine::debug::AovId::Beauty;
+    // Depth is auto-ranged to the buffer's own maximum, exactly as the viewer does (main.cpp's presentFrame): its raw
+    // metres exceed the 8-bit [0,1] range and would quantize to solid white, and Camera::farClip is a conservative ray
+    // tMax bound rather than a proxy for the scene's real depth extent, so normalizing by it reads as near-black. This
+    // overrides --exposure for Depth, which is again what the viewer does -- the AOV has no photographic exposure.
+    const float exposureEv = options.aov == engine::debug::AovId::Depth
+                                 ? -std::log2(std::max(maxChannel(accumulated), 1e-4F))
+                                 : options.exposureEv;
+    const std::vector<unsigned char> encoded = encodeForDisplay(accumulated, exposureEv, isBeauty);
     if (!writePng(options.outPath, width, height, encoded)) {
         return EXIT_FAILURE;
     }
-    std::cout << "render_beauty: wrote " << options.outPath << " (" << options.aovName << ", " << width
+    std::cout << "render_beauty: wrote " << options.outPath << " (" << aovName << ", " << width
               << "x" << height << ", " << options.passes << " passes)\n";
 
     if (!options.comparePath.empty()) {
