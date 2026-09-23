@@ -4,8 +4,8 @@
 // it does not check one, so it stays out of the ctest loop.
 // This used to run at every process start (bsdf.cpp's `const AlbedoTable kAlbedo = buildAlbedoTable()`), which sized
 // the grid and the quadrature by startup latency rather than by the accuracy the energy tests need. Offline that bound
-// is gone, so the reflect side is resolved to the point where E is an instrument rather than a floor -- README section
-// 5.1 wants F_avg pinned against a 2.0e-4 signal, and the old table's own error was ~1.5e-3; this reports 1.1e-6 on
+// is gone, so the reflect side is resolved to the point where E is an instrument rather than a floor -- bsdf_validate's
+// energy tests pin F_avg against a 2.0e-4 signal, and the old table's own error was ~1.5e-3; this reports 1.1e-6 on
 // the cosine-weighted means and 3.0e-5 on the directional grid.
 // Determinism is why this target is built with neither -march=native nor IPO, unlike every other tool here: the output
 // is committed source, so it must reproduce bit-for-bit on any machine, and FMA contraction is free to differ. The bake
@@ -427,7 +427,7 @@ float reflectAtUniformMu(const AlbedoTable& table, int ri, int mi) {
     return at(m0) + (mt * (at(m0 + 1) - at(m0)));
 }
 
-// --- Sampling shape for the reflected multiple-scattering lobe (README section 5.1's exact (1-E)cos sampler).
+// --- Sampling shape for the reflected multiple-scattering lobe: the exact (1-E)cos sampler.
 // That lobe's value is fms*(1-E(mu_o))*(1-E(mu_i))/(pi*(1-Eavg)), so its own zero-variance density is
 // (1-E(mu_i))*cos / (pi*(1-Eavg)), and cosine sampling pays the ratio (1-E(mu_i))/(1-Eavg) as weight variance.
 // Measured off the table above rather than assumed, and the answer inverts the intuition: the ratio is harmless at

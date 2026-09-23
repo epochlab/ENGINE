@@ -104,7 +104,7 @@ struct BsdfEval {
 [[nodiscard]] glm::vec3 eonAlbedoInversion(const glm::vec3& albedo, float r);
 
 // Representative wavelength of each RGB channel, from OpenPBR_BaseRgbWavelengths_nm in Adobe's OpenPBR BSDF reference implementation (openpbr_constants.h) -- the same standard this pipeline already takes edgeTint and EON from.
-// Known error, in that implementation's own words: one fixed wavelength per channel makes dispersion "produce ... discrete RGB bands" rather than natural rainbow colours, because an RGB channel integrates a band and cannot be represented by a line. Its documented remedy is a stochastically drawn lambda per path, which needs only this lookup replaced by a draw -- see the README roadmap.
+// Known error, in that implementation's own words: one fixed wavelength per channel makes dispersion "produce ... discrete RGB bands" rather than natural rainbow colours, because an RGB channel integrates a band and cannot be represented by a line. Its documented remedy is a stochastically drawn lambda per path, which needs only this lookup replaced by a draw -- see docs/roadmap.md transport #5.
 inline constexpr glm::vec3 kRgbWavelengthsNm(620.0F, 540.0F, 450.0F);
 
 // Cauchy dispersion n(lambda) inverted from an authored (ior at the d line, Abbe number V_d), per Khronos KHR_materials_dispersion. abbe <= 0 returns iorD unchanged, which is how a non-dispersive material stays bit-identical. Exported for tools/bsdf_validate.cpp's checkCauchyDispersion; taken per-wavelength rather than per-channel so the Fraunhofer identities it is defined by are directly assertable.
