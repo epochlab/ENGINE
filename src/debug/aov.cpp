@@ -30,10 +30,11 @@ AovSource aovSource(AovId aov) {
         case AovId::Gabor:
             return AovSource::BeautyFilter;
 
-        // The 13 primary-hit lanes renderRasterGBuffer scan-converts. No default: a new AovId must be classified here, and -Werror makes forgetting a compile error rather than a silent misroute.
+        // The 14 primary-hit lanes renderRasterGBuffer scan-converts. No default: a new AovId must be classified here, and -Werror makes forgetting a compile error rather than a silent misroute.
         case AovId::Wireframe:
         case AovId::Alpha:
         case AovId::Depth:
+        case AovId::Lookahead:
         case AovId::WorldPos:
         case AovId::UV:
         case AovId::Normal:
@@ -54,6 +55,7 @@ int aovChannels(AovId aov) {
     switch (aov) {
         // Scalars, broadcast to RGB for display but carrying one value: a depth, an occlusion fraction, a filter response.
         case AovId::Depth:
+        case AovId::Lookahead:
         case AovId::Alpha:
         case AovId::Metallic:
         case AovId::Roughness:
@@ -114,6 +116,7 @@ GBufferLane gbufferLane(AovId aov) {
     switch (aov) {
         case AovId::IOR:        return &GBuffer::iorAov;
         case AovId::Depth:      return &GBuffer::depth;
+        case AovId::Lookahead:  return &GBuffer::lookahead;
         case AovId::WorldPos:   return &GBuffer::worldPos;
         case AovId::UV:         return &GBuffer::uv;
         case AovId::Normal:     return &GBuffer::normal;

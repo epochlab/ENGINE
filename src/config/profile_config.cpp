@@ -5,6 +5,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "engine/debug/aov.h"
 #include "json_glm.h"
 
 namespace engine::config {
@@ -91,6 +92,7 @@ std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
         const int russianRouletteStartBounce = pathTracer.at("russianRouletteStartBounce").get<int>();
         const int maxSamples = pathTracer.at("maxSamples").get<int>();
         const float aoMaxDistance = pathTracer.at("aoMaxDistance").get<float>();
+        const float lookaheadDistance = pathTracer.at("lookaheadDistance").get<float>();
 
         // These feed Camera::verticalFovRadians()/ev100() as denominators or bases of a physically meaningful quantity -- a zero/negative value would silently produce inf/NaN there instead of failing at this asset-load boundary. filmBack itself is validated by loadFilmBackPresets, not here -- this function never loads that file.
         if (focalLengthMm <= 0.0F || aperture <= 0.0F || shutterSeconds <= 0.0F || iso <= 0.0F) {
@@ -105,9 +107,20 @@ std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
                        << " has a renderScale/interactiveRenderScale outside (0,1]\n";
             return std::nullopt;
         }
+        // A raw index into kAovNames, dereferenced unchecked by main.cpp's startup spec block and cast to AovId by the HUD, so an out-of-range value here is an out-of-bounds read rather than a wrong picture. Checked at the load boundary like every other field, not trusted as an internal invariant.
+        if (defaultAov < 0 || defaultAov >= static_cast<int>(engine::debug::AovId::Count)) {
+            std::cerr << "loadProfileConfig: " << path << " has a defaultAOV outside [0, "
+                       << static_cast<int>(engine::debug::AovId::Count) - 1 << "]\n";
+            return std::nullopt;
+        }
         // AO ray tfar. At or below zero every occlusion ray is degenerate (tfar < tnear), Embree reports no hit, and the AO AOV reads a uniform 1.0 -- the inert white this feature exists to replace.
         if (aoMaxDistance <= 0.0F) {
             std::cerr << "loadProfileConfig: " << path << " has a non-positive aoMaxDistance\n";
+            return std::nullopt;
+        }
+        // The Lookahead AOV's ramp divisor: at or below zero every covered pixel divides by it, so the lane is inf/NaN rather than the [0,1] gradient it is defined to be.
+        if (lookaheadDistance <= 0.0F) {
+            std::cerr << "loadProfileConfig: " << path << " has a non-positive lookaheadDistance\n";
             return std::nullopt;
         }
 
@@ -147,6 +160,7 @@ std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
                 russianRouletteStartBounce,
                 maxSamples,
                 aoMaxDistance,
+                lookaheadDistance,
             },
         };
     } catch (const nlohmann::json::exception& e) {
