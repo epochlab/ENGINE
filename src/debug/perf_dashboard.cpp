@@ -185,7 +185,7 @@ void PerfDashboard::update(const DashboardFrame& frame) {
 
 void PerfDashboard::drawNonTty(const DashboardFrame& frame) {
     const auto& pass = frame.pass;
-    append("engine perf: frame p50 %.2fms p95 %.2fms | pass #%d %.1fms %.2f Mray/s | rss %.2f GiB\n",
+    append("pathtracer perf: frame p50 %.2fms p95 %.2fms | pass #%d %.1fms %.2f Mray/s | rss %.2f GiB\n",
             static_cast<double>(frame.frameStats.percentileMs(0.5F)),
             static_cast<double>(frame.frameStats.percentileMs(0.95F)), pass.passIndex, pass.traceMs,
             rate(pass.rays.total(), pass.traceMs) / kMillion,
@@ -235,7 +235,7 @@ void PerfDashboard::draw(const DashboardFrame& frame) {
 // Fixed 78-column grid, and it is a grid rather than eyeballed spacing: the left pane is columns 0-42, the divider sits at column 43 on every split row, and the right pane fills 44-77. Rows whose left half carries no numbers (the section headers, the sub-rules, the blank spacer) are padded to the same 43, because one column of drift there is what makes a two-pane table read as two unrelated tables.
 void PerfDashboard::drawFrameHeader(const DashboardFrame& frame) {
     const double budgetMs = 1000.0 / frame.refreshHz;
-    append("\x1b[2K== ENGINE PERF ================================================== %5.1f fps ==\n",
+    append("\x1b[2K== PATHTRACER PERF ============================================== %5.1f fps ==\n",
             static_cast<double>(frame.frameStats.fps()));
     // Percentiles lead, mean trails: a mean hides the hitch, and the hitch is what a viewer feels. p95 rather than p99 because 120 samples cannot express a 99th percentile -- see FrameStats::percentileMs.
     append("\x1b[2K frame    p50 %6.2f   p95 %6.2f   max %6.2f   mean %6.2f ms   (%3d frames)\n",
