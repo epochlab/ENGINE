@@ -1,10 +1,5 @@
 # Roadmap
 
-[← README](../README.md)
-
-
-**Large** is two independent spines. **Transport** is a strict dependency chain, each item blocked by the one before it. **HOST integration** carries the renderer into `notes/neural.md`'s cognitive loop; it is blocked only by its own first step and runs alongside transport, not after it. Everything under **Next** is small, independent and grouped by area — no item there blocks another. **Parked** is the backlog.
-
 ## Large
 
 #### Transport: strict dependency order
