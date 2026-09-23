@@ -1,0 +1,180 @@
+#include "engine/api/pathtracer_c.h"
+
+#include <cstring>
+#include <memory>
+#include <span>
+#include <string>
+#include <vector>
+
+#include "engine/api/headless_renderer.h"
+#include "engine/debug/aov.h"
+
+namespace {
+
+using engine::api::HeadlessRenderer;
+using engine::debug::AovId;
+
+// Every entry point is noexcept at the boundary: an exception crossing into ctypes is undefined behaviour, so each one is caught here and reported through the same err/return convention as an ordinary failure.
+void writeError(char* err, int errCap, const std::string& message) {
+    if (err == nullptr || errCap <= 0) {
+        return;
+    }
+    const auto length = std::min(message.size(), static_cast<std::size_t>(errCap - 1));
+    std::memcpy(err, message.data(), length);
+    err[length] = '\0';
+}
+
+[[nodiscard]] bool validAov(int aov) {
+    return aov >= 0 && aov < static_cast<int>(AovId::Count);
+}
+
+[[nodiscard]] engine::scene::Camera toCamera(const PtCamera& camera) {
+    return engine::scene::Camera{
+        glm::vec3(camera.position[0], camera.position[1], camera.position[2]),
+        camera.yaw_degrees,
+        camera.pitch_degrees,
+        engine::scene::Camera::FilmBack{camera.film_back_mm[0], camera.film_back_mm[1]},
+        camera.focal_length_mm,
+        camera.near_clip,
+        camera.far_clip,
+        camera.aperture,
+        camera.shutter_seconds,
+        camera.iso};
+}
+
+}  // namespace
+
+extern "C" {
+
+PtRenderer* pt_renderer_open(const char* asset_root, const char* scene_path, char* err, int err_cap) {
+    try {
+        if (scene_path == nullptr) {
+            writeError(err, err_cap, "scene_path is null");
+            return nullptr;
+        }
+        const std::string assetRoot = asset_root != nullptr ? asset_root : ASSET_ROOT_DIR;
+        std::string error;
+        std::unique_ptr<HeadlessRenderer> renderer = HeadlessRenderer::open(assetRoot, scene_path, error);
+        if (!renderer) {
+            writeError(err, err_cap, error);
+            return nullptr;
+        }
+        return reinterpret_cast<PtRenderer*>(renderer.release());
+    } catch (const std::exception& e) {
+        writeError(err, err_cap, e.what());
+        return nullptr;
+    } catch (...) {
+        writeError(err, err_cap, "unknown error opening scene");
+        return nullptr;
+    }
+}
+
+void pt_renderer_close(PtRenderer* renderer) {
+    delete reinterpret_cast<HeadlessRenderer*>(renderer);
+}
+
+int pt_aov_count(void) { return static_cast<int>(AovId::Count); }
+
+const char* pt_aov_name(int aov) {
+    return validAov(aov) ? engine::debug::kAovNames[aov] : nullptr;
+}
+
+int pt_aov_id(const char* name) {
+    if (name == nullptr) {
+        return -1;
+    }
+    const AovId aov = engine::debug::aovIdFromName(name);
+    return aov == AovId::Count ? -1 : static_cast<int>(aov);
+}
+
+int pt_aov_channels(int aov) {
+    return validAov(aov) ? engine::debug::aovChannels(static_cast<AovId>(aov)) : -1;
+}
+
+int pt_aov_needs_samples(int aov) {
+    return validAov(aov) && engine::debug::aovNeedsLightTransport(static_cast<AovId>(aov)) ? 1 : 0;
+}
+
+void pt_renderer_default_camera(const PtRenderer* renderer, PtCamera* out) {
+    if (renderer == nullptr || out == nullptr) {
+        return;
+    }
+    const engine::scene::Camera& camera =
+        reinterpret_cast<const HeadlessRenderer*>(renderer)->defaultCamera();
+    const glm::vec3 position = camera.position();
+    const engine::scene::Camera::FilmBack filmBack = camera.filmBack();
+    out->position[0] = position.x;
+    out->position[1] = position.y;
+    out->position[2] = position.z;
+    out->yaw_degrees = camera.yawDegrees();
+    out->pitch_degrees = camera.pitchDegrees();
+    out->film_back_mm[0] = filmBack.widthMm;
+    out->film_back_mm[1] = filmBack.heightMm;
+    out->focal_length_mm = camera.focalLengthMm();
+    out->near_clip = camera.nearClip();
+    out->far_clip = camera.farClip();
+    out->aperture = camera.aperture();
+    out->shutter_seconds = camera.shutterSeconds();
+    out->iso = camera.iso();
+}
+
+int pt_renderer_default_width(const PtRenderer* renderer) {
+    return renderer == nullptr ? 0 : reinterpret_cast<const HeadlessRenderer*>(renderer)->defaultWidth();
+}
+
+int pt_renderer_default_height(const PtRenderer* renderer) {
+    return renderer == nullptr ? 0 : reinterpret_cast<const HeadlessRenderer*>(renderer)->defaultHeight();
+}
+
+int pt_render(PtRenderer* renderer, const PtRenderRequest* request, float* const* out, char* err,
+              int err_cap) {
+    try {
+        if (renderer == nullptr || request == nullptr || out == nullptr) {
+            writeError(err, err_cap, "null renderer, request or output");
+            return PT_ERROR;
+        }
+        if (request->aovs == nullptr || request->aov_count <= 0) {
+            writeError(err, err_cap, "no AOVs requested");
+            return PT_ERROR;
+        }
+        std::vector<AovId> aovs;
+        aovs.reserve(static_cast<std::size_t>(request->aov_count));
+        for (int i = 0; i < request->aov_count; ++i) {
+            if (!validAov(request->aovs[i])) {
+                writeError(err, err_cap, "AOV id " + std::to_string(request->aovs[i]) + " is out of range");
+                return PT_ERROR;
+            }
+            aovs.push_back(static_cast<AovId>(request->aovs[i]));
+        }
+        const HeadlessRenderer::Request internal{
+            .camera = toCamera(request->camera),
+            .width = request->width,
+            .height = request->height,
+            .samples = request->samples,
+            .scrambleSeed = request->seed,
+            .aovs = std::move(aovs),
+        };
+        for (int i = 0; i < request->aov_count; ++i) {
+            if (out[i] == nullptr) {
+                writeError(err, err_cap, "output buffer " + std::to_string(i) + " is null");
+                return PT_ERROR;
+            }
+        }
+
+        std::string error;
+        const std::span<float* const> outputs(out, static_cast<std::size_t>(request->aov_count));
+        if (!reinterpret_cast<HeadlessRenderer*>(renderer)->render(internal, outputs, error)) {
+            writeError(err, err_cap, error);
+            return PT_ERROR;
+        }
+        return PT_OK;
+    } catch (const std::exception& e) {
+        writeError(err, err_cap, e.what());
+        return PT_ERROR;
+    } catch (...) {
+        writeError(err, err_cap, "unknown error during render");
+        return PT_ERROR;
+    }
+}
+
+}  // extern "C"

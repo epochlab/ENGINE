@@ -32,6 +32,31 @@ cmake --build build
 ./build/pathtracer [-scene path/to/scene.json] [-stats] [-bench log.jsonl]
 ```
 
+## Python
+
+Every AOV is reachable headlessly from Python as a numpy array, for training data and for HOST's cognitive pipeline (`notes/agent.md`). The renderer is a plain C ABI (`include/engine/api/pathtracer_c.h`) loaded with `ctypes`, so there is no build-time Python dependency and one library serves every interpreter.
+
+```
+cmake --build build --target pathtracer_c
+pip install -e python
+```
+
+```python
+from pathtracer import Renderer
+
+renderer = Renderer("scenes/cornell.json")                      # loads the scene, BVH and thread pool once
+frame = renderer.render(aovs=("beauty", "depth", "normal"),
+                        width=256, height=256, samples=64, seed=1)
+
+frame["beauty"]   # (256, 256, 3) float32, linear Rec.709 radiance
+frame["depth"]    # (256, 256, 1) float32, camera-space Z
+frame["normal"]   # (256, 256, 3) float32, normal-mapped shading normal
+```
+
+Values are scene-referred linear and unclamped, with no display transform: what a model trains on, not what a monitor shows. Use `render_beauty --out` for a display-encoded picture. Arrays are C-contiguous float32, so `torch.from_numpy(...)` shares memory and leaves one explicit `.to(device)`.
+
+Each producer runs at most once per call, so requesting several AOVs together costs far less than requesting them one at a time; a request with no path-traced AOV skips the integrator entirely. Override the camera with `dataclasses.replace(renderer.default_camera, ...)` — note that `aperture`/`shutter_seconds`/`iso` set exposure only, since the camera is a pinhole with no depth of field.
+
 ## Benchmark
 
 Timing runs append one JSON Lines record each to a local log: `pathtracer -bench PATH`, `render_beauty --bench-log PATH`, `raster_bench --bench-log PATH`. A performance claim is made with a randomized interleaved A/B of two builds, not by comparing two runs by eye:
@@ -166,7 +191,7 @@ Add a new material by dropping a JSON file in `assets/materials/` and pointing `
 
 # AOV
 
-The full set the viewer's dropdown and `render_beauty --aov` name, defined in `include/engine/debug/aov.h` and grouped here by category. The 13 primary-hit-only AOVs are produced synchronously by the CPU rasterizer every frame (`rasterizer.h`); the other 14 need light-transport data and converge progressively with Beauty (`aovNeedsLightTransport`).
+The full set the viewer's dropdown, `render_beauty --aov` and the Python binding name, defined in `include/engine/debug/aov.h` and grouped here by category. Three producers, classified once by `aovSource`: the 13 primary-hit-only AOVs are scan-converted synchronously by the CPU rasterizer every frame (`rasterizer.h`), 10 are accumulated lanes of the path tracer (`path_tracer.h`), and 4 are image-space filters over a finished Beauty (`aov_filters.h`). The latter 14 need light-transport data and converge progressively with Beauty (`aovNeedsLightTransport`). Every one of the 27 is available headlessly and from Python; the filters exist as both a CPU implementation and a display shader, sharing one Gabor kernel so they cannot drift.
 
 ## Utility
 
