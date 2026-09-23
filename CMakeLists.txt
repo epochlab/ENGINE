@@ -86,25 +86,36 @@ set(CGLTF_DIR ${CMAKE_SOURCE_DIR}/third_party/cgltf)
 set(JSON_DIR ${CMAKE_SOURCE_DIR}/third_party)
 
 # Vendored code, not ours to fix: imgui_impl_glfw.cpp pulls in Apple's ApplicationServices.h via GLFW's native-handle header, which warns against itself; cgltf_impl.cpp is C99 with implicit conversions that trip -Wall/-Wextra.
-# Built as a separate OBJECT library rather than a per-source override: CXX_CLANG_TIDY is target-level-only in CMake, so keeping clang-tidy off vendored sources requires a target that never sets the property.
-add_library(vendored_no_tidy OBJECT ${IMGUI_SOURCES} src/scene/cgltf_impl.cpp)
-target_include_directories(vendored_no_tidy PRIVATE ${IMGUI_DIR} ${IMGUI_DIR}/backends ${CGLTF_DIR})
-target_link_libraries(vendored_no_tidy PRIVATE glfw)
-target_compile_options(vendored_no_tidy PRIVATE -w)
+# Built as OBJECT libraries rather than per-source overrides: CXX_CLANG_TIDY is target-level-only in CMake, so keeping clang-tidy off vendored sources requires a target that never sets the property.
+# Two libraries, not one: cgltf is needed by every headless consumer and imgui by none of them, so bundling them made glfw and all of imgui a link dependency of render_beauty, which never opens a window.
+add_library(vendored_cgltf OBJECT src/scene/cgltf_impl.cpp)
+target_include_directories(vendored_cgltf PRIVATE ${CGLTF_DIR})
+target_compile_options(vendored_cgltf PRIVATE -w)
 
-add_executable(pathtracer
-    src/main.cpp
-    src/platform/window.cpp
-    src/platform/display_link.mm
-    src/gfx/gl_debug.cpp
-    src/gfx/shader_program.cpp
-    src/gfx/texture.cpp
+add_library(vendored_imgui OBJECT ${IMGUI_SOURCES})
+target_include_directories(vendored_imgui PRIVATE ${IMGUI_DIR} ${IMGUI_DIR}/backends)
+target_link_libraries(vendored_imgui PRIVATE glfw)
+target_compile_options(vendored_imgui PRIVATE -w)
+
+# The renderer proper: every source that does not touch GL/GLFW/imgui, listed once and linked by everything.
+# The membership rule is exactly "does this file include a GL, GLFW or imgui header" -- nothing here can open a window, which is what lets a foreign runtime (tools/, and the C ABI in src/api/) link it.
+# cie.cpp is deliberately absent: it belongs to metal_fit_core, which is built without -march=native/IPO so its committed output reproduces bit-for-bit on any machine, and having it here too would be a duplicate symbol.
+# -march=native/IPO match what the GUI target used to build these sources with, so the library is the same codegen that shipped, not a differently-optimized copy of the same math.
+add_library(pathtracer_core STATIC
+    src/config/profile_config.cpp
+    src/config/scene_config.cpp
+    src/debug/aov.cpp
+    src/debug/aov_filters.cpp
+    src/debug/bench_log.cpp
+    src/debug/frame_stats.cpp
+    src/debug/host_info.cpp
+    src/debug/memory_tracker.cpp
+    src/debug/perf_dashboard.cpp
+    src/debug/power_spectrum.cpp
     src/gfx/hdr_image.cpp
-    src/gfx/post_process_pass.cpp
-    src/gfx/ocio_display_transform.cpp
+    src/gfx/ocio_cpu_transform.cpp
     src/scene/bsdf.cpp
     src/scene/camera.cpp
-    src/scene/debug_camera_controller.cpp
     src/scene/embree_accel.cpp
     src/scene/environment_map.cpp
     src/scene/gbuffer_shading.cpp
@@ -112,37 +123,67 @@ add_executable(pathtracer
     src/scene/light.cpp
     src/scene/material.cpp
     src/scene/material_binding.cpp
-    src/scene/path_tracer.cpp
     src/scene/path_trace_driver.cpp
+    src/scene/path_tracer.cpp
     src/scene/rasterizer.cpp
     src/scene/ray_types.cpp
-    src/scene/thread_pool.cpp
     src/scene/sampler.cpp
     src/scene/shading_scene.cpp
-    src/config/profile_config.cpp
-    src/config/scene_config.cpp
-    src/debug/system_info.cpp
-    src/debug/host_info.cpp
-    src/debug/bench_log.cpp
-    src/debug/frame_stats.cpp
+    src/scene/thread_pool.cpp
+    src/api/headless_renderer.cpp
+    $<TARGET_OBJECTS:vendored_cgltf>)
+# include/ and the vendored json headers are PUBLIC because every consumer includes engine/... and several parse JSON; cgltf and the generated SHA header are implementation details of gltf_loader.cpp and host_info.cpp respectively.
+target_include_directories(pathtracer_core PUBLIC include ${JSON_DIR})
+target_include_directories(pathtracer_core PRIVATE ${CGLTF_DIR} ${ENGINE_GENERATED_DIR})
+add_dependencies(pathtracer_core engine_git_sha)
+target_compile_definitions(pathtracer_core PRIVATE ${ENGINE_PROVENANCE_DEFINITIONS})
+target_compile_options(pathtracer_core PRIVATE -Wall -Wextra -Werror -march=native)
+target_link_libraries(pathtracer_core PUBLIC glm::glm embree OpenEXR::OpenEXR Imath::Imath
+                       OpenColorIO::OpenColorIO ZLIB::ZLIB)
+if(CLANG_TIDY_EXE)
+    set_target_properties(pathtracer_core PROPERTIES CXX_CLANG_TIDY "${CLANG_TIDY_COMMAND}")
+endif()
+if(IPO_SUPPORTED)
+    set_target_properties(pathtracer_core PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
+endif()
+
+# The C ABI a foreign runtime binds to (python/pathtracer loads this via ctypes). Shared, not static: it is dlopen'd, not linked.
+# Deliberately the only target here that is not an executable or an object library -- everything it exposes is declared in include/engine/api/pathtracer_c.h and implemented over pathtracer_core.
+add_library(pathtracer_c SHARED src/api/pathtracer_c.cpp)
+target_compile_definitions(pathtracer_c PRIVATE ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets")
+target_compile_options(pathtracer_c PRIVATE -Wall -Wextra -Werror -march=native)
+target_link_libraries(pathtracer_c PRIVATE pathtracer_core)
+if(CLANG_TIDY_EXE)
+    set_target_properties(pathtracer_c PROPERTIES CXX_CLANG_TIDY "${CLANG_TIDY_COMMAND}")
+endif()
+if(IPO_SUPPORTED)
+    set_target_properties(pathtracer_c PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
+endif()
+
+# The GUI application: main.cpp plus exactly the sources that touch GL/GLFW/imgui. Everything else it needs comes from pathtracer_core.
+add_executable(pathtracer
+    src/main.cpp
+    src/platform/window.cpp
+    src/platform/display_link.mm
+    src/gfx/gl_debug.cpp
+    src/gfx/shader_program.cpp
+    src/gfx/texture.cpp
+    src/gfx/post_process_pass.cpp
+    src/gfx/ocio_display_transform.cpp
+    src/scene/debug_camera_controller.cpp
     src/debug/gpu_timer.cpp
-    src/debug/memory_tracker.cpp
     src/debug/histogram.cpp
     src/debug/hud_overlay.cpp
+    src/debug/system_info.cpp
     src/debug/spec_report.cpp
-    src/debug/perf_dashboard.cpp
-    $<TARGET_OBJECTS:vendored_no_tidy>)
-target_include_directories(pathtracer PRIVATE include ${IMGUI_DIR} ${IMGUI_DIR}/backends ${CGLTF_DIR} ${JSON_DIR}
-                           ${ENGINE_GENERATED_DIR})
-add_dependencies(pathtracer engine_git_sha)
+    $<TARGET_OBJECTS:vendored_imgui>)
+target_include_directories(pathtracer PRIVATE ${IMGUI_DIR} ${IMGUI_DIR}/backends)
 target_compile_definitions(pathtracer PRIVATE
     GL_SILENCE_DEPRECATION
-    ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets"
-    ${ENGINE_PROVENANCE_DEFINITIONS})
+    ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets")
 target_compile_options(pathtracer PRIVATE -Wall -Wextra -Werror -march=native)
 target_link_libraries(pathtracer PRIVATE
-    glfw GLEW::GLEW OpenGL::GL glm::glm
-    OpenEXR::OpenEXR Imath::Imath OpenColorIO::OpenColorIO embree ZLIB::ZLIB
+    pathtracer_core glfw GLEW::GLEW OpenGL::GL
     "-framework AppKit" "-framework QuartzCore")
 set_source_files_properties(src/platform/display_link.mm PROPERTIES COMPILE_OPTIONS -fobjc-arc)
 if(CLANG_TIDY_EXE)
@@ -153,6 +194,9 @@ if(IPO_SUPPORTED)
     set_target_properties(pathtracer PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
 endif()
 
+# Asset/codegen CLIs. These deliberately do NOT link pathtracer_core: test_pattern and downsample need
+# nothing but OpenEXR, gltf_tangent nothing but glm, and albedo_table/metal_fit are built without
+# -march=native/IPO so their committed output reproduces bit-for-bit on any machine (see below).
 add_executable(test_pattern tools/test_pattern.cpp)
 target_compile_definitions(test_pattern PRIVATE
     ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets")
@@ -175,10 +219,9 @@ target_link_libraries(gltf_tangent PRIVATE glm::glm)
 # Offline generator for src/scene/blue_noise_mask.inc, the void-and-cluster dither array sampler.cpp bakes in. Grouped
 # with gltf_tangent rather than with the validate tools below: it produces a committed artifact, it does not check one,
 # so it stays out of the ctest loop. -march=native/IPO because it is convolution-bound and only ever run by hand.
-add_executable(bluenoise_mask tools/bluenoise_mask.cpp src/gfx/hdr_image.cpp)
-target_include_directories(bluenoise_mask PRIVATE include)
+add_executable(bluenoise_mask tools/bluenoise_mask.cpp)
 target_compile_options(bluenoise_mask PRIVATE -Wall -Wextra -Werror -march=native)
-target_link_libraries(bluenoise_mask PRIVATE glm::glm OpenEXR::OpenEXR Imath::Imath)
+target_link_libraries(bluenoise_mask PRIVATE pathtracer_core)
 if(IPO_SUPPORTED)
     set_target_properties(bluenoise_mask PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
 endif()
@@ -187,6 +230,7 @@ endif()
 # bluenoise_mask for the same reason: it produces a committed artifact, it does not check one, so it stays out of the
 # ctest loop. Neither -march=native nor IPO, unlike every other tool here -- the output is committed source and must
 # reproduce bit-for-bit on any machine, and FMA contraction is free to differ; the bake runs in seconds regardless.
+# Links no library for that reason: pathtracer_core is built -march=native, which is exactly what this must avoid.
 add_executable(albedo_table tools/albedo_table.cpp)
 target_include_directories(albedo_table PRIVATE include)
 target_compile_options(albedo_table PRIVATE -Wall -Wextra -Werror)
@@ -220,158 +264,62 @@ target_include_directories(check_selftest PRIVATE tools)
 target_compile_options(check_selftest PRIVATE -Wall -Wextra -Werror -march=native)
 target_link_libraries(check_selftest PRIVATE glm::glm)
 
-add_executable(embree_validate tools/embree_validate.cpp src/scene/embree_accel.cpp src/scene/ray_types.cpp
-               $<TARGET_OBJECTS:engine_check>)
-target_include_directories(embree_validate PRIVATE include tools)
-target_compile_options(embree_validate PRIVATE -Wall -Wextra -Werror -march=native)
-target_link_libraries(embree_validate PRIVATE glm::glm embree)
-if(IPO_SUPPORTED)
-    set_target_properties(embree_validate PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
-endif()
+# Every validator below links pathtracer_core for the renderer sources it exercises, and engine_check for the harness.
+# What each one asserts is documented at the top of its own tools/*.cpp; only the targets that need an asset path or a
+# second object library say anything extra here.
+foreach(validator embree_validate bsdf_validate sampler_validate nee_validate rasterizer_validate
+                  integrator_validate driver_validate io_validate display_validate)
+    add_executable(${validator} tools/${validator}.cpp $<TARGET_OBJECTS:engine_check>)
+    target_include_directories(${validator} PRIVATE tools)
+    target_compile_options(${validator} PRIVATE -Wall -Wextra -Werror -march=native)
+    target_link_libraries(${validator} PRIVATE pathtracer_core)
+    if(IPO_SUPPORTED)
+        set_target_properties(${validator} PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
+    endif()
+endforeach()
 
-add_executable(bsdf_validate tools/bsdf_validate.cpp src/scene/bsdf.cpp src/scene/sampler.cpp
-               $<TARGET_OBJECTS:engine_check>)
-target_include_directories(bsdf_validate PRIVATE include tools)
-target_compile_options(bsdf_validate PRIVATE -Wall -Wextra -Werror -march=native)
-target_link_libraries(bsdf_validate PRIVATE glm::glm)
-if(IPO_SUPPORTED)
-    set_target_properties(bsdf_validate PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
-endif()
-
-add_executable(sampler_validate tools/sampler_validate.cpp src/scene/sampler.cpp src/debug/power_spectrum.cpp
-               $<TARGET_OBJECTS:engine_check>)
-target_include_directories(sampler_validate PRIVATE include tools)
-target_compile_options(sampler_validate PRIVATE -Wall -Wextra -Werror -march=native)
-target_link_libraries(sampler_validate PRIVATE glm::glm)
-if(IPO_SUPPORTED)
-    set_target_properties(sampler_validate PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
-endif()
-
-add_executable(nee_validate tools/nee_validate.cpp src/scene/bsdf.cpp src/scene/sampler.cpp
-               src/scene/environment_map.cpp src/scene/light.cpp src/gfx/hdr_image.cpp
-               $<TARGET_OBJECTS:engine_check>)
-target_include_directories(nee_validate PRIVATE include tools)
-target_compile_options(nee_validate PRIVATE -Wall -Wextra -Werror -march=native)
-target_link_libraries(nee_validate PRIVATE glm::glm OpenEXR::OpenEXR Imath::Imath)
-if(IPO_SUPPORTED)
-    set_target_properties(nee_validate PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
-endif()
-
-add_executable(rasterizer_validate tools/rasterizer_validate.cpp src/scene/rasterizer.cpp
-               src/scene/gbuffer_shading.cpp src/scene/embree_accel.cpp src/scene/ray_types.cpp
-               src/scene/shading_scene.cpp src/scene/bsdf.cpp src/scene/sampler.cpp
-               src/scene/camera.cpp src/scene/thread_pool.cpp src/gfx/hdr_image.cpp
-               $<TARGET_OBJECTS:engine_check>)
-target_include_directories(rasterizer_validate PRIVATE include tools)
-target_compile_options(rasterizer_validate PRIVATE -Wall -Wextra -Werror -march=native)
-target_link_libraries(rasterizer_validate PRIVATE glm::glm embree OpenEXR::OpenEXR Imath::Imath)
-if(IPO_SUPPORTED)
-    set_target_properties(rasterizer_validate PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
-endif()
-
-add_executable(integrator_validate tools/integrator_validate.cpp src/scene/path_tracer.cpp
-               src/scene/gbuffer_shading.cpp src/scene/embree_accel.cpp src/scene/ray_types.cpp
-               src/scene/shading_scene.cpp src/scene/bsdf.cpp src/scene/sampler.cpp
-               src/scene/environment_map.cpp src/scene/light.cpp src/scene/camera.cpp src/scene/thread_pool.cpp
-               src/scene/material_binding.cpp src/config/scene_config.cpp src/gfx/hdr_image.cpp
-               $<TARGET_OBJECTS:engine_check>)
-# material_binding/scene_config and the asset root are for checkMaterialBinding, which resolves real assets/materials/*.json files against named instances -- the materialOverrides path no other validator touches.
-target_include_directories(integrator_validate PRIVATE include tools ${JSON_DIR})
-target_compile_definitions(integrator_validate PRIVATE
-    ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets")
-target_compile_options(integrator_validate PRIVATE -Wall -Wextra -Werror -march=native)
-target_link_libraries(integrator_validate PRIVATE glm::glm embree OpenEXR::OpenEXR Imath::Imath)
-if(IPO_SUPPORTED)
-    set_target_properties(integrator_validate PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
-endif()
-
-# Progressive-accumulation driver (src/scene/path_trace_driver.cpp), previously the largest CPU component with no
-# coverage at all. Links the same transport sources integrator_validate does, plus the driver itself.
-add_executable(driver_validate tools/driver_validate.cpp src/scene/path_trace_driver.cpp
-               src/scene/path_tracer.cpp src/scene/gbuffer_shading.cpp src/scene/embree_accel.cpp
-               src/scene/ray_types.cpp src/scene/shading_scene.cpp src/scene/bsdf.cpp src/scene/sampler.cpp
-               src/scene/environment_map.cpp src/scene/light.cpp src/scene/camera.cpp
-               src/scene/thread_pool.cpp src/gfx/hdr_image.cpp
-               $<TARGET_OBJECTS:engine_check>)
-target_include_directories(driver_validate PRIVATE include tools)
-target_compile_options(driver_validate PRIVATE -Wall -Wextra -Werror -march=native)
-target_link_libraries(driver_validate PRIVATE glm::glm embree OpenEXR::OpenEXR Imath::Imath)
-if(IPO_SUPPORTED)
-    set_target_properties(driver_validate PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
-endif()
-
-# File-boundary validation (gfx/hdr_image.cpp EXR round trip, config/*.cpp JSON parsing). The EXR path was linked into
-# three validators and invoked by none of them; profile_config.cpp had no coverage at all.
-add_executable(io_validate tools/io_validate.cpp src/gfx/hdr_image.cpp src/config/scene_config.cpp
-               src/config/profile_config.cpp src/scene/camera.cpp src/debug/bench_log.cpp src/debug/host_info.cpp
-               src/debug/memory_tracker.cpp
-               $<TARGET_OBJECTS:engine_check>)
-target_include_directories(io_validate PRIVATE include tools ${JSON_DIR} ${ENGINE_GENERATED_DIR})
-add_dependencies(io_validate engine_git_sha)
-target_compile_definitions(io_validate PRIVATE ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets"
-                           ${ENGINE_PROVENANCE_DEFINITIONS})
-target_compile_options(io_validate PRIVATE -Wall -Wextra -Werror -march=native)
-target_link_libraries(io_validate PRIVATE glm::glm OpenEXR::OpenEXR Imath::Imath ZLIB::ZLIB embree)
-if(IPO_SUPPORTED)
-    set_target_properties(io_validate PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
-endif()
-
-# CPU-evaluable display and statistics path. The OCIO transform's pinned-config property was asserted only by a
-# comment in its own header; frame_stats is testable exactly now that tick() takes an injectable clock.
-add_executable(display_validate tools/display_validate.cpp src/gfx/ocio_cpu_transform.cpp
-               src/debug/frame_stats.cpp
-               $<TARGET_OBJECTS:engine_check>)
-target_include_directories(display_validate PRIVATE include tools)
-target_compile_options(display_validate PRIVATE -Wall -Wextra -Werror -march=native)
-target_link_libraries(display_validate PRIVATE glm::glm OpenColorIO::OpenColorIO)
-if(IPO_SUPPORTED)
-    set_target_properties(display_validate PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
-endif()
+# integrator_validate's checkMaterialBinding and io_validate's config checks resolve real assets/ files against named
+# instances -- the materialOverrides path no other validator touches.
+target_compile_definitions(integrator_validate PRIVATE ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets")
+target_compile_definitions(io_validate PRIVATE ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets")
 
 # CIE 1931 module and the measured-metal fit, checked end to end against the Fresnel the renderer shades chrome.json with.
-add_executable(colour_validate tools/colour_validate.cpp src/scene/bsdf.cpp src/scene/sampler.cpp
-               src/config/scene_config.cpp $<TARGET_OBJECTS:metal_fit_core> $<TARGET_OBJECTS:engine_check>)
-target_include_directories(colour_validate PRIVATE include tools ${JSON_DIR})
+add_executable(colour_validate tools/colour_validate.cpp
+               $<TARGET_OBJECTS:metal_fit_core> $<TARGET_OBJECTS:engine_check>)
+target_include_directories(colour_validate PRIVATE tools)
 target_compile_definitions(colour_validate PRIVATE ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets"
                            TOOLS_DATA_DIR="${CMAKE_SOURCE_DIR}/tools/data")
 target_compile_options(colour_validate PRIVATE -Wall -Wextra -Werror -march=native)
-target_link_libraries(colour_validate PRIVATE glm::glm)
+target_link_libraries(colour_validate PRIVATE pathtracer_core)
 if(IPO_SUPPORTED)
     set_target_properties(colour_validate PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
 endif()
 
-# Headless before/after comparison renders (tools/render_beauty.cpp). Not a correctness gate and deliberately absent from the add_test loop below: its output is a picture for a human to look at, and a full-scene render is far slower than any validator. Needs OCIO (the display transform, evaluated on the CPU) and zlib (PNG encode) on top of the usual render dependencies.
-add_executable(render_beauty tools/render_beauty.cpp src/debug/power_spectrum.cpp src/scene/path_tracer.cpp
-               src/scene/gbuffer_shading.cpp src/scene/embree_accel.cpp src/scene/ray_types.cpp
-               src/scene/shading_scene.cpp src/scene/bsdf.cpp src/scene/sampler.cpp
-               src/scene/environment_map.cpp src/scene/light.cpp src/scene/camera.cpp src/scene/thread_pool.cpp
-               src/scene/gltf_loader.cpp src/scene/material.cpp src/scene/material_binding.cpp
-               src/config/scene_config.cpp src/config/profile_config.cpp src/gfx/hdr_image.cpp
-               src/gfx/ocio_cpu_transform.cpp src/debug/bench_log.cpp src/debug/host_info.cpp
-               src/debug/memory_tracker.cpp
-               $<TARGET_OBJECTS:vendored_no_tidy> $<TARGET_OBJECTS:engine_check>)
-target_include_directories(render_beauty PRIVATE include tools ${CGLTF_DIR} ${JSON_DIR} ${ENGINE_GENERATED_DIR})
-add_dependencies(render_beauty engine_git_sha)
-target_compile_definitions(render_beauty PRIVATE ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets"
-                           ${ENGINE_PROVENANCE_DEFINITIONS})
+# The headless render path itself (src/api/headless_renderer.cpp) exercised through the C ABI's own contract:
+# producer dispatch, per-AOV channel counts, and agreement with a direct renderPathTraced accumulation.
+add_executable(api_validate tools/api_validate.cpp $<TARGET_OBJECTS:engine_check>)
+target_include_directories(api_validate PRIVATE tools)
+target_compile_definitions(api_validate PRIVATE ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets")
+target_compile_options(api_validate PRIVATE -Wall -Wextra -Werror -march=native)
+target_link_libraries(api_validate PRIVATE pathtracer_core)
+if(IPO_SUPPORTED)
+    set_target_properties(api_validate PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
+endif()
+
+# Headless before/after comparison renders (tools/render_beauty.cpp). Not a correctness gate and deliberately absent from the add_test loop below: its output is a picture for a human to look at, and a full-scene render is far slower than any validator.
+add_executable(render_beauty tools/render_beauty.cpp $<TARGET_OBJECTS:engine_check>)
+target_include_directories(render_beauty PRIVATE tools)
+target_compile_definitions(render_beauty PRIVATE ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets")
 target_compile_options(render_beauty PRIVATE -Wall -Wextra -Werror -march=native)
-target_link_libraries(render_beauty PRIVATE glm::glm embree OpenEXR::OpenEXR Imath::Imath
-                       OpenColorIO::OpenColorIO ZLIB::ZLIB glfw)
+target_link_libraries(render_beauty PRIVATE pathtracer_core)
 if(IPO_SUPPORTED)
     set_target_properties(render_beauty PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
 endif()
 
-# Timing harness, not a correctness gate: deliberately absent from the add_test loop below (a benchmark's pass/fail is a human reading a number, and it would make ctest as slow as its worst --triangles sweep). Same sources and -march=native/IPO flags as rasterizer_validate, so it times the exact codegen that ships.
-add_executable(raster_bench tools/raster_bench.cpp src/scene/rasterizer.cpp
-               src/scene/gbuffer_shading.cpp src/scene/embree_accel.cpp src/scene/ray_types.cpp
-               src/scene/shading_scene.cpp src/scene/bsdf.cpp src/scene/sampler.cpp
-               src/scene/camera.cpp src/scene/thread_pool.cpp src/gfx/hdr_image.cpp
-               src/debug/bench_log.cpp src/debug/host_info.cpp src/debug/memory_tracker.cpp)
-target_include_directories(raster_bench PRIVATE include ${JSON_DIR} ${ENGINE_GENERATED_DIR})
-add_dependencies(raster_bench engine_git_sha)
-target_compile_definitions(raster_bench PRIVATE ${ENGINE_PROVENANCE_DEFINITIONS})
+# Timing harness, not a correctness gate: deliberately absent from the add_test loop below (a benchmark's pass/fail is a human reading a number, and it would make ctest as slow as its worst --triangles sweep). Same flags as the validators, so it times the exact codegen that ships.
+add_executable(raster_bench tools/raster_bench.cpp)
 target_compile_options(raster_bench PRIVATE -Wall -Wextra -Werror -march=native)
-target_link_libraries(raster_bench PRIVATE glm::glm embree OpenEXR::OpenEXR Imath::Imath ZLIB::ZLIB)
+target_link_libraries(raster_bench PRIVATE pathtracer_core)
 if(IPO_SUPPORTED)
     set_target_properties(raster_bench PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
 endif()
@@ -380,6 +328,7 @@ endif()
 add_executable(bench_compare tools/bench_compare.cpp)
 target_include_directories(bench_compare PRIVATE include tools ${JSON_DIR})
 target_compile_options(bench_compare PRIVATE -Wall -Wextra -Werror)
+
 
 # All correctness tools run under `ctest --test-dir build`; previously buildable but unrun, so a regression only surfaced if someone remembered to invoke them by hand.
 enable_testing()
@@ -407,6 +356,14 @@ add_test(NAME image.determinism
                  --assert-deterministic)
 set_tests_properties(image.determinism PROPERTIES LABELS "image;fast;exact" TIMEOUT 300)
 
+# A rasterizer-backed AOV runs no path-traced passes, so there is no per-pass distribution for the timing report to
+# summarise. Reducing over that empty set segfaulted until the reporting learned to say so; at this size the gate is
+# nearly free, and it is the only test that exercises render_beauty's non-path-traced output path end to end.
+add_test(NAME image.gbuffer_aov
+         COMMAND render_beauty --scene scenes/cornell.json --width 48 --height 36 --passes 4
+                 --aov depth --out gbuffer_aov.png)
+set_tests_properties(image.gbuffer_aov PROPERTIES LABELS "image;fast;exact" TIMEOUT 300)
+
 add_test(NAME image.convergence
          COMMAND render_beauty --scene scenes/cornell.json --width 48 --height 36 --passes 64
                  --assert-converged)
@@ -425,4 +382,5 @@ engine_discover_checks(driver_validate)
 engine_discover_checks(io_validate)
 engine_discover_checks(display_validate)
 engine_discover_checks(colour_validate)
+engine_discover_checks(api_validate)
 

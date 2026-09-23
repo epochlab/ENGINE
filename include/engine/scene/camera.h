@@ -37,6 +37,10 @@ public:
 
     [[nodiscard]] glm::vec3 position() const { return position_; }
 
+    // Orientation in the degrees it was authored in, completing the set of accessors that hand back every constructor parameter as given. Stored as radians because every consumer of the angles themselves needs radians; a caller reconstructing or serialising a Camera needs the authored units back.
+    [[nodiscard]] float yawDegrees() const { return glm::degrees(yawRadians_); }
+    [[nodiscard]] float pitchDegrees() const { return glm::degrees(pitchRadians_); }
+
     // Unit-length view direction derived from yaw/pitch.
     [[nodiscard]] glm::vec3 forward() const;
     [[nodiscard]] FilmBack filmBack() const { return filmBack_; }

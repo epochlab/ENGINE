@@ -10,3 +10,11 @@ renders/
 
 # Before/after measurement captures: renders, bench logs and validator output, kept locally for review
 /results
+
+# Python binding build artefacts. The package itself is source-only -- the renderer is a dylib loaded at runtime -- so
+# there is nothing here but caches.
+__pycache__/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
