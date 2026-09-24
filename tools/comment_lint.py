@@ -157,9 +157,12 @@ def scan(text: str) -> tuple[set[int], set[int]]:
     for begin, end, span_owns in comment_spans(text):
         first = bisect.bisect_right(starts, begin) - 1
         last = bisect.bisect_right(starts, max(end - 1, begin)) - 1
+        # A comment with code after it on its closing line is an inline annotation -- a /*name=*/
+        # argument label, say -- not a line of prose, so it cannot start or extend a prose block.
+        trailing = text[end : text.find("\n", end) if "\n" in text[end:] else len(text)]
         for ln in range(first, last + 1):
             carries.add(ln)
-            if span_owns:
+            if span_owns and not trailing.strip():
                 owns.add(ln)
     return carries, owns
 

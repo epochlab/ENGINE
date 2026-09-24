@@ -46,6 +46,10 @@ expect("indented standalone owned", owns("    // why\n"), {0})
 
 expect("block spans lines", carries("/* a\nb\nc */\n"), {0, 1, 2})
 expect("inline block not owned", owns("code(); /* a\nb */\n"), set())
+
+# A /*name=*/ argument label has code after it on the same line, so it is an inline annotation
+# rather than a line of prose and must not stack into a block.
+expect("argument label not owned", owns("f(/*a=*/1,\n  /*b=*/2);\n"), set())
 expect("standalone block owned", owns("/* a\nb */\n"), {0, 1})
 
 # A backslash at end of line splices the next line into the same // comment.
@@ -75,6 +79,7 @@ expect("at-budget accepted", check_text("//" + "x" * (MAX_COLS - 2) + "\n")[0], 
 expect("three lines accepted", check_text("// a\n// b\n// c\n")[0], 0)
 expect("four lines flagged", check_text("// a\n// b\n// c\n// d\n")[0], 1)
 expect("split runs accepted", check_text("// a\n// b\ncode();\n// c\n// d\n")[0], 0)
+expect("four argument labels accepted", check_text("f(/*a=*/1,\n/*b=*/2,\n/*c=*/3,\n/*d=*/4);\n")[0], 0)
 expect("no trailing newline", check_text("// a")[1], 1)
 
 # The dead-gate guard: a root with no sources must fail loudly, not report a clean tree.
