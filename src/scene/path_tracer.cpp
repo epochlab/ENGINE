@@ -1,4 +1,4 @@
-#include "engine/scene/path_tracer.h"
+#include "pathtracer/scene/path_tracer.h"
 
 #include <algorithm>
 #include <array>
@@ -9,33 +9,26 @@
 #include <optional>
 #include <vector>
 
-#include "engine/scene/bsdf.h"
-#include "engine/scene/gbuffer_shading.h"
-#include "engine/scene/sampler.h"
-#include "engine/scene/shading_scene.h"
+#include "pathtracer/scene/bsdf.h"
+#include "pathtracer/scene/gbuffer_shading.h"
+#include "pathtracer/scene/sampler.h"
+#include "pathtracer/scene/shading_scene.h"
 
-namespace engine::scene {
+namespace pathtracer::scene {
 
 namespace {
 
 constexpr float kRayEpsilon = 1e-4F;
 
-// Offsets the AO sampler's seed from the path sampler's so the two streams are independent and the eight pre-existing images stay bit-identical. 2^32/phi, the standard decorrelating odd constant (Knuth; boost::hash_combine); any fixed offset would do, since hashSeed's SplitMix64 avalanche is what actually separates the streams.
+// Offsets the AO sampler's seed from the path sampler's so the two streams are independent. 2^32/phi, Knuth's decorrelating constant.
 constexpr std::uint32_t kAoSeedOffset = 0x9E3779B9U;
 // The same for the Fresnel AOV's stream: frac(sqrt 2)*2^32, kAoSeedOffset's sibling. Distinct, non-zero and odd is the whole requirement.
 constexpr std::uint32_t kFresnelSeedOffset = 0x6A09E667U;
 
-// pbrt's ShadowEpsilon convention (Pharr/Jakob/Humphreys Sec 6.8.6): a relative back-off on a finite
-// shadow ray's own tMax, needed now that a light can be real geometry sitting in the BVH -- an
-// unshortened tMax lets the light's own front face register as its own occluder at t == distance.
-// A no-op for the environment (distance == FLT_MAX): FLT_MAX * (1 - 1e-3) is still a normal,
-// effectively-unbounded float, so one formula covers both light kinds with no branch.
+// pbrt's ShadowEpsilon (PBR 6.8.6): a relative back-off on tMax, or a light's own front face occludes it. A no-op for the environment.
 constexpr float kShadowDistanceEpsilon = 1e-3F;
 
-// Beer-Lambert absorption coefficient (Arnold standard_surface / OpenPBR convention): sigma_a = -ln(transmissionColor)/transmissionDepth, transmissionColor being the colour white light reaches after travelling transmissionDepth inside the medium.
-// depth == 0 means there is no interior medium at all, not an infinitely dense one: transmissionColor is then the on-surface tint BsdfParams::transmissionTint carries, so absorption here is exactly zero rather than the -ln(c)/1e-4 a floored divide used to return, which rendered any coloured depth-0 material black.
-// Zero rather than an absent medium, so tracePath's enter/exit toggle below stays symmetric across a depth == 0 interface.
-// The colour floor stays: color == 0 is a reachable material-file input and -log(0) = +inf would meet a t = +inf as 0*inf on a miss.
+// Beer-Lambert (Arnold/OpenPBR): sigma_a = -ln(color)/depth. The colour floor stays, since -log(0) would meet t = inf as 0*inf.
 glm::vec3 sigmaAFromTransmission(const glm::vec3& color, float depth) {
     if (depth <= 0.0F) {
         return glm::vec3(0.0F);
@@ -43,19 +36,7 @@ glm::vec3 sigmaAFromTransmission(const glm::vec3& color, float depth) {
     return -glm::log(glm::max(color, glm::vec3(1e-6F))) / depth;
 }
 
-// Reflection/diffuse continuation rays stay close to the geometric normal's hemisphere, where
-// kRayEpsilon (a floating-point-scale constant) has always been sufficient. Transmission bends sharply
-// away from it, and on curved geometry approximated by flat facets, the shading-normal-derived refraction
-// direction can clip a NEIGHBOURING facet a small-but-nonzero distance away -- a genuine geometric
-// intersection, not floating-point noise (measured on a 500-triangle sphere: self-intersections at ~1e-3,
-// an order of magnitude below a facet's own edge length).
-// Scaled by curvature, not raw facet size: the mechanism is the smooth shading normal diverging from the
-// flat facet's true geometric normal across the facet, so the fix must vanish wherever that divergence
-// does. sin(angle) between each pair of vertex normals (cross product of two unit vectors) is exactly
-// zero on any planar patch -- coplanar vertex normals, whatever the facet's absolute size -- and grows
-// with tessellation coarseness on genuinely curved geometry. Scaling raw edge length alone (an earlier,
-// broken version of this fix) has no such zero: it blew up on a flat 2000-unit slab quad, pushing the
-// continuation ray origin far past the geometry it needed to traverse (caught by integrator_validate).
+// Transmission needs a curvature-scaled offset, measured ~1e-3 on a 500-triangle sphere. See docs/DERIVATIONS.md "Transmission ray offset".
 float transmissionOffsetEpsilon(const ShadingTriangle& tri) {
     const glm::vec3 n0 = glm::normalize(tri.v0.normal);
     const glm::vec3 n1 = glm::normalize(tri.v1.normal);
@@ -68,15 +49,16 @@ float transmissionOffsetEpsilon(const ShadingTriangle& tri) {
     return std::max(kRayEpsilon, std::max({e0, e1, e2}) * curvature);
 }
 
-// Blackman-Harris at Arnold's default 1.5px radius: support wider than one pixel, so neighbouring footprints overlap and each sample reconstructs several pixels instead of only the one it was drawn in -- which is where nearly all of a reconstruction filter's benefit over the 1px box comes from. Non-negative everywhere, so no pixel can end up with a zero or negative total weight and no ringing appears around highlights.
+// Blackman-Harris at Arnold's default 1.5px radius: support wider than one pixel, so each sample reconstructs several pixels.
 constexpr float kFilterRadius = 1.5F;
-constexpr int kFilterExtent = 1;  // how many pixels either side of a sample its splat can reach: a sample sits at most 1.0 past its own pixel's far centre, so a destination two pixels away is at least kFilterRadius off and weighs exactly zero
+// How far a splat reaches: a sample sits at most 1.0 past its own pixel's far centre, so two pixels away weighs exactly zero.
+constexpr int kFilterExtent = 1;
 constexpr int kFilterTableSize = 64;
-// Per-tile accumulator lanes: beauty.rgb, termination bounce, shadow, the five transport buckets' rgb, ambient occlusion, then the microfacet Fresnel's rgb -- the scalars take one lane each and are broadcast to RGB at write-out, matching writeTexel's convention. Each new lane is appended rather than placed beside its relatives so no existing lane index moves.
+// Per-tile lanes: beauty.rgb, termination bounce, shadow, five transport buckets, AO, Fresnel. Scalars broadcast to RGB at write-out.
 constexpr int kSampleLanes = 24;
 constexpr int kTileLanes = kSampleLanes + 1;  // plus the per-pixel filter weight the lanes above are normalised by
 
-// Sampled at |x| = i/(kFilterTableSize-1) * kFilterRadius and read back by truncating lookup, the same table trick PBRT uses: the filter is smooth over 1.5px, and this replaces three cos() per tap on the renderer's hottest inner loop.
+// Sampled at |x| = i/(N-1) * kFilterRadius, read by truncating lookup: PBRT's table trick, replacing three cos() per tap.
 std::array<float, kFilterTableSize> buildFilterTable() {
     constexpr float kA0 = 0.35875F;
     constexpr float kA1 = 0.48829F;
@@ -85,7 +67,7 @@ std::array<float, kFilterTableSize> buildFilterTable() {
     constexpr float kPi = 3.14159265F;
     std::array<float, kFilterTableSize> table{};
     for (int i = 0; i < kFilterTableSize; ++i) {
-        // Blackman-Harris is defined over [0,1]; the window's own centre is t = 0.5, so a sample at |x| = 0 maps there and one at the radius maps to the (effectively zero) end of the window.
+        // Blackman-Harris is defined over [0,1] centred at t = 0.5, so |x| = 0 maps there and the radius to the zero end.
         const float t = 0.5F + (0.5F * static_cast<float>(i) / static_cast<float>(kFilterTableSize - 1));
         table[static_cast<std::size_t>(i)] = kA0 - (kA1 * std::cos(2.0F * kPi * t)) +
                                               (kA2 * std::cos(4.0F * kPi * t)) -
@@ -108,8 +90,9 @@ struct TraceResult {
     glm::vec3 radiance;
     int terminationBounce;  // bounce index the path stopped at (== maxBounces + 1 if depth-capped)
     float shadow;           // 1.0 = shadowed/occluded, 0.0 = lit or no primary hit at all (background)
-    float ao;               // 1.0 = unoccluded, 0.0 = occluded within aoMaxDistance -- inverted relative to shadow above, see PathTraceResult
-    glm::vec3 fresnel{0.0F};  // one VNDF draw's Fresnel at the primary hit (bsdf.h's fresnelAtMicrofacet); 0 where there is no BSDF vertex at bounce 0
+    float ao;  // 1.0 = unoccluded, 0.0 = occluded within aoMaxDistance -- inverted relative to shadow above
+    // One VNDF draw's Fresnel at the primary hit; 0 where there is no BSDF vertex at bounce 0.
+    glm::vec3 fresnel{0.0F};
 
     // Transport-component breakdown -- see PathTraceResult's doc comment for the bucketing rule.
     glm::vec3 directDiffuse{0.0F};
@@ -119,7 +102,7 @@ struct TraceResult {
     glm::vec3 refraction{0.0F};
 };
 
-// Which of the five transport-component AOV buckets a path's contribution belongs to -- set once at bounce 0's lobe, stickily overridden to Refraction the moment any bounce samples a transmission lobe. Direct-vs-indirect for Diffuse/SpecularReflection isn't tracked here; it falls out of which bounce index the radiance-contributing miss lands on (see tracePath).
+// Which transport bucket a path belongs to: set at bounce 0's lobe, stickily overridden to Refraction by any transmission sample.
 enum class PathBucket { Diffuse, SpecularReflection, Refraction };
 
 TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
@@ -129,27 +112,22 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
                        bool showSky, const PathTraceSettings& settings,
                        const std::vector<PathTraceSettings>& perInstanceSettings,
                        Sampler& sampler, glm::vec2 aoSample, glm::vec2 fresnelSample,
-                       engine::debug::RayCounts& __restrict rays) {
+                       pathtracer::debug::RayCounts& __restrict rays) {
     glm::vec3 radiance(0.0F);
     glm::vec3 throughput(1.0F);
     Ray ray = primaryRay;
     int bounce = 0;
     std::optional<PathBucket> pathBucket;  // unset until bounce 0 successfully samples a lobe
-    // Single-level medium stack: nullopt = vacuum, set = the sigmaA of the dielectric the ray is
-    // currently inside. Toggled below on every Transmission-lobe sample (entering sets it, exiting
-    // clears it) -- sufficient for one glass object; would need generalising to a real stack before a
-    // second, overlapping transmissive object entered the scene.
+    // Single-level medium stack: nullopt = vacuum, set = the sigmaA the ray is inside. Enough for one glass object, not two overlapping.
     std::optional<glm::vec3> mediumSigmaA;
-    // The RGB channel this path has committed to, once it reaches a dispersive interface -- unset means
-    // full RGB transport, which is every path in a scene authoring no Abbe number. See the selection
-    // block below for the estimator, and gbuffer_shading.cpp's resolveBsdfParams for what it selects.
+    // The RGB channel this path committed to at a dispersive interface; unset means full RGB transport. See the selection block below.
     std::optional<int> heroChannel;
     glm::vec3 directDiffuseAccum(0.0F);
     glm::vec3 indirectDiffuseAccum(0.0F);
     glm::vec3 directSpecularAccum(0.0F);
     glm::vec3 indirectSpecularAccum(0.0F);
     glm::vec3 refractionAccum(0.0F);
-    // Routes a radiance contribution into the path's bucket -- a no-op when pathBucket is unset, i.e. the camera ray missed all geometry on bounce 0 (background seen directly): that contribution is real (added to `radiance`/beauty by the caller) but isn't attributed to any of the five transport-component AOVs, the same way a "background" AOV is conventionally kept separate from surface-interaction AOVs in production renderers. isDirect: "exactly one surface vertex between camera and light" -- for a BSDF-sampled miss, that's bounce==1 (one hit at bounce 0, then straight to the environment); for NEE firing at the vertex reached at bounce 0 (querying the light directly from the first surface hit, no extra bounce needed), that's bounce==0. Both describe the same physical path length; see call sites.
+    // Routes a contribution into the path's bucket; a no-op when unset, that background radiance being deliberately unbucketed.
     const auto addToBucket = [&](const glm::vec3& contribution, bool isDirect) {
         if (!pathBucket.has_value()) {
             return;
@@ -168,25 +146,22 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
     };
     float gShadow = 0.0F;  // default: no surface hit at all -- not "shadowed", just background
     float gAo = 1.0F;      // default: background is fully unoccluded, matching the polarity in PathTraceResult
-    glm::vec3 gFresnel(0.0F);  // default: no BSDF vertex at bounce 0 -- the camera ray missed, or hit an emitter, which breaks out before the block below
+    // Default: no BSDF vertex at bounce 0 -- the camera ray missed, or hit an emitter, which returns before shading.
+    glm::vec3 gFresnel(0.0F);
 
-    // MIS state for the *previous* bounce's BSDF sample (the one that produced `ray`) -- used to reweight this bounce's miss contribution against NEE's light-sampling pdf, so a direction reachable by both strategies isn't double-counted. Meaningless at bounce==0 (ray is the primary/camera ray, not a BSDF sample -- its miss is a pure camera-visibility event, not part of the two-strategy light-transport estimator NEE/MIS balances).
+    // MIS state for the previous bounce's BSDF sample: reweights this bounce's miss against NEE's pdf so neither double-counts.
     float lastBsdfPdf = 0.0F;
-    // A delta lobe has no density for NEE to double-count against, so its miss takes full weight. Derived from lastBsdfPdf rather than the lobe type: pdfBsdf returns exactly 0 only for the smooth-glass transmission branch, and sampleBsdf rejects pdf <= 1e-8 on every other lobe.
+    // A delta lobe has no density for NEE to double-count, so its miss takes full weight; only the smooth-glass branch gives pdf 0.
     bool lastSampleWasDelta = false;
-    // The previous vertex's SHADING position, not ray.origin: an emitter hit's MIS weight must use the pdf NEE would actually have had, and NEE samples from shading.position (see the NEE block below) while ray.origin carries the epsilon offset that keeps the continuation ray off the surface. Solid angle measured from two points ~1e-4 apart differs, so weighting from ray.origin leaves the two strategies' weights not summing to 1 -- a small but real bias. pbrt carries the previous interaction for the same reason.
+    // The previous vertex's shading position, not ray.origin: MIS needs the pdf NEE would have had, taken from shading.position.
     glm::vec3 lastShadingPosition(0.0F);
 
-    // bounce 0 (the primary/camera ray, direct lighting via NEE) always traces regardless of maxBounces -- maxBounces counts secondary/indirect bounces beyond it, so maxBounces==0 means direct lighting only, no continuation rays. The loop runs one iteration PAST maxBounces so the final BSDF-sampled ray can still collect its MIS-weighted environment contribution via the miss branch below; that extra iteration breaks at the depth guard before any surface interaction -- see the guard for why the terminal ray must be traced rather than dropped.
+    // bounce 0 always traces: maxBounces counts secondary bounces, so maxBounces==0 is direct lighting with no continuation rays.
     for (; bounce <= settings.maxBounces + 1; ++bounce) {
         (bounce == 0 ? rays.primary : rays.bounce) += 1;
         const std::optional<Hit> hit = accel.intersect(ray);
 
-        // Beer-Lambert attenuation for the segment just traveled (ray.origin to this hit/miss), gated on
-        // medium state carried over from the previous iteration's Transmission sample. hit->t is genuine
-        // Euclidean distance: every ray direction reaching this point is unit-length (primary rays via
-        // Camera::primaryRay, continuation rays via ShadingFrame::toWorld of a normalized local sample).
-        // A miss is an unbounded segment: transmittance is exp(-sigmaA * inf), which is 0 in any channel that absorbs and 1 in any that does not. Written per channel because 0 * inf is NaN, so the exp form cannot express the non-absorbing case. Reachable whenever a transmissive object is not watertight -- integrator_validate's own two-quad slab has open sides -- where the previous hit-only gate contributed unattenuated environment radiance and gained energy.
+        // Beer-Lambert for the segment just travelled. A miss is unbounded, so it is written per channel: exp(-0 * inf) is NaN.
         if (mediumSigmaA.has_value()) {
             const glm::vec3& sigmaA = *mediumSigmaA;
             throughput *= hit.has_value()
@@ -197,12 +172,12 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
         }
 
         if (!hit.has_value()) {
-            // showSky gates only the primary ray's own miss (the camera seeing the background directly) -- indirect bounces and NEE (below) always sample real environment radiance regardless of showSky, so hiding the background doesn't unlight the scene.
+            // showSky gates only the primary ray's miss; indirect bounces and NEE always sample real environment radiance.
             if (bounce == 0 && !showSky) {
                 break;
             }
             const glm::vec3 envRadiance = lights.environmentRadiance(ray.dir, /*nearest=*/false);
-            // Power heuristic (Veach 1997): full weight for bounce 0 (camera ray, not part of the MIS estimator) and after a delta sample, where NEE has zero density and there is nothing to balance against. A ROUGH transmission sample is MIS-eligible like any other lobe and takes the heuristic -- NEE reaches the far side of a transmissive vertex (see the NEE block below), so weighting it at 1.0 double-counted their overlap.
+            // Power heuristic (Veach 1997): full weight at bounce 0 and after a delta sample, neither having a density to balance.
             float misWeight = 1.0F;
             if (bounce > 0 && !lastSampleWasDelta) {
                 const float lightPdf = lights.pdfEnvironment(ray.dir);
@@ -218,12 +193,7 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
         const ShadingTriangle& triangle =
             shadingTriangles[static_cast<std::size_t>(hit->triangleIndex)];
 
-        // An emitter hit (a quad light's own two triangles, injected into the BVH so they occlude and
-        // are BSDF-hittable): Le, MIS-weighted exactly like the environment miss above, then terminate --
-        // a pure emitter has no BSDF to continue sampling from (Arnold quad_light semantics). Checked
-        // BEFORE the depth cap below, symmetric with the miss branch above: the extra iteration past
-        // maxBounces exists so the final BSDF-sampled ray can still collect ITS light contribution,
-        // whichever light it reaches, and an emitter hit is exactly as eligible as a miss is.
+        // An emitter hit, a quad light's triangles being in the BVH: Le, MIS-weighted like a miss, then terminate. Before the depth cap.
         const int lightIndex = instanceLightIndex[static_cast<std::size_t>(triangle.instanceIndex)];
         if (lightIndex >= 0) {
             const glm::vec3 emitted = lights.quadRadianceToward(lightIndex, ray.dir);
@@ -239,7 +209,7 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
             break;
         }
 
-        // Depth cap. The extra iteration past maxBounces exists solely so the final BSDF-sampled ray can collect its MIS-weighted light contribution in the miss/emitter-hit branches above; a ray reaching ordinary (non-emitting) geometry here contributes nothing and must not shade. Without it, NEE at the final vertex is MIS-weighted down against a BSDF-sampling counterpart that never fires, losing bsdfPdf^2/(bsdfPdf^2 + lightPdf^2) of that vertex's direct lighting -- approaching 100% where bsdfPdf >> lightPdf, and applying to every second surface vertex at maxBounces==1. Breaking here keeps terminationBounce == maxBounces + 1 for a depth-capped path, unchanged from before.
+        // Depth cap. The extra iteration exists only so the final BSDF ray can collect its MIS-weighted miss or emitter hit.
         if (bounce > settings.maxBounces) {
             break;
         }
@@ -249,23 +219,7 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
         const PathTraceSettings& instanceSettings =
             perInstanceSettings[static_cast<std::size_t>(triangle.instanceIndex)];
 
-        // Dispersion: commit the path to one RGB channel on first reaching a dispersive interface, before
-        // any BSDF work at this vertex, since it is the whole interaction that is wavelength dependent --
-        // Fresnel and the lobe probabilities as much as the refraction direction -- and every later vertex
-        // then stays on that wavelength, medium included. Committing here rather than at path start, as a
-        // spectral hero-wavelength renderer must (Wilkie et al. 2014), is strictly cheaper: a path that
-        // never meets dispersive glass keeps full RGB and pays nothing.
-        // One-sample channel estimator with probabilities proportional to the throughput carried so far
-        // (OpenPBR implementation note, arXiv:2512.23696): the surviving channel takes T_c/p_c, which is
-        // sum(T) for every c, so the estimator is unbiased AND the path's magnitude -- hence Russian
-        // roulette's continuation probability below -- no longer depends on which channel was drawn.
-        // The heroChannel guard is a draw the estimator does not need, not a correctness gate: masking
-        // leaves two channels exactly zero, so a throughput-weighted redraw at a later dispersive vertex
-        // can only return the same channel (measured: 400k redraws, zero changed). What it buys is one
-        // fewer sampler dimension per later crossing. Under uniform 1/3 selection it WOULD be load-bearing.
-        // sum == 0 is reachable, not impossible: rrMinProb floors the roulette, so a zero-throughput path
-        // survives rather than being killed. It carries no energy to any channel, so there is nothing to
-        // commit and the draw is skipped.
+        // Commit to one RGB channel at the first dispersive interface. See docs/DERIVATIONS.md "Dispersion channel commitment".
         if (!heroChannel.has_value() && instanceSettings.abbe > 0.0F &&
             instanceSettings.transmissionFactor > 0.0F) {
             const float sum = throughput.x + throughput.y + throughput.z;
@@ -283,17 +237,16 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
         const BsdfParams params =
             resolveBsdfParams(material, shading.uv, shading.colour, instanceSettings, heroChannel);
         const glm::vec3 woWorld = -ray.dir;
-        // True flat per-triangle plane normal -- used below for the normal-map light-leak rejection and for offsetting shadow/continuation ray origins off the surface, both of which need the actual geometry rather than the interpolated or normal-mapped shading normal.
+        // True flat plane normal, for light-leak rejection and ray-origin offsets: both need geometry, not the shading normal.
         const glm::vec3 geoNormal = geometricNormalOf(triangle);
 
         const glm::vec3 woLocal = frame.toLocal(woWorld);
 
         if (bounce == 0) {
             gShadow = 1.0F;  // assume shadowed once we know there's a real surface; the NEE check below may clear this
-            // The Fresnel the microfacet lobe evaluates at this vertex, one VNDF draw per sample (bsdf.h). Its own stream, for the same reason AO has one -- see the draw sites in renderPathTraced. No ray, no BVH query: the half-vector is drawn analytically from the distribution sampleBsdf would draw it from.
+            // The Fresnel the microfacet lobe evaluates here, one VNDF draw per sample, on its own stream. No ray and no BVH query.
             gFresnel = fresnelAtMicrofacet(params, woLocal, fresnelSample);
-            // Cosine-weighted obscurance (Zhukov et al. 1998; Iones et al. 2003), the distance-weighted generalisation of AO (Miller 1994; Landis 2002): W = (1/pi) * int rho(t(w)) cos(theta) dw, and sampling at pdf = cos/pi cancels both factors, so a single ray IS an unbiased one-sample estimate. The driver's pass accumulation does the averaging, which is why there is no ray-count setting here.
-            // Negating the sampled direction maps the hemisphere about the shading normal onto the one about its opposite -- the cosine density is symmetric, so this is exact -- and points a back-facing primary hit's ray outward instead of into the surface it sits on.
+            // Obscurance (Zhukov 1998; Iones 2003): sampling at pdf = cos/pi cancels both factors, so the estimator is the mean of rho.
             const bool frontSide = glm::dot(geoNormal, woWorld) > 0.0F;
             const glm::vec3 aoDir =
                 frame.toWorld(sampleCosineHemisphere(aoSample)) * (frontSide ? 1.0F : -1.0F);
@@ -301,11 +254,10 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
             const glm::vec3 aoOrigin = shadowTerminatorOffset(triangle, hit->u, hit->v, frontSide) +
                                         (geoNormal * kRayEpsilon * (frontSide ? 1.0F : -1.0F));
             ++rays.ao;
-            // Closest-hit rather than any-hit because rho needs the distance; measured at under 1.3% of frame time, since a ray bounded this short leaves any-hit almost nothing to early-terminate out of.
+            // Closest-hit, not any-hit, because rho needs the distance; measured under 1.3% of frame time at this ray length.
             const std::optional<Hit> aoHit =
                 accel.intersect(Ray{aoOrigin, aoDir, kRayEpsilon, settings.aoMaxDistance});
-            // rho(x) = 1 - (1-x)^2 over x = t/D is the lowest-degree polynomial meeting the three conditions the bounded ray imposes: rho(0) = 0 (contact fully occludes), rho(1) = 1 (no value step at the bound) and rho'(1) = 0 (no gradient step either, which is what the hard cutoff could not give). No free parameter, so aoMaxDistance stays the only AO setting.
-            // Embree clamps t to tfar, so an ulp of overshoot makes k a tiny negative and k*k a tiny positive: rho stays within [0,1] by construction, no clamp.
+            // rho(x) = 1 - (1-x)^2 is the lowest-degree polynomial with rho(0)=0, rho(1)=1 and rho'(1)=0, so nothing steps at D.
             if (aoHit.has_value()) {
                 const float k = 1.0F - (aoHit->t / settings.aoMaxDistance);
                 gAo = 1.0F - (k * k);
@@ -314,10 +266,10 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
             }
         }
 
-        // A failed sample must NOT skip the NEE block below: NEE and the continuing ray are independent estimators of independent directions, sharing only this vertex's params/frame, so the failure of one says nothing about the other. sampleBsdf returns nullopt on a below-horizon VNDF reflection, an underflowed mixture pdf, or a transmission lobe with no mass (bsdf.cpp) -- none of which say anything about the BSDF's value toward the light. The terminating break is therefore deferred to after NEE, matching the geometric-consistency rejection further down, which already breaks there.
+        // A failed sample must not skip the NEE block: the two are independent estimators, sharing only this vertex's params and frame.
         const std::optional<BsdfSample> sample = sampleBsdf(params, woLocal, sampler);
 
-        // Bucket assignment: bounce 0 sets the path's bucket from scratch; any later bounce only ever overrides it to Refraction (sticky -- once a path passes through a transmission lobe, its remaining contribution is refraction transport regardless of what it was before). Skipped entirely when no lobe could be sampled, leaving pathBucket unset at bounce 0 -- the same convention addToBucket already applies to an unbucketed background contribution.
+        // Bucket assignment: bounce 0 sets it from scratch, any later bounce only ever overrides it to Refraction, stickily.
         if (sample.has_value()) {
             if (bounce == 0) {
                 pathBucket = sample->type == LobeType::Transmission ? PathBucket::Refraction
@@ -328,11 +280,7 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
             }
         }
 
-        // Medium-state toggle, co-located with the bucket assignment above since both key off the same
-        // condition: a Transmission sample crossed the interface. Entering (currently vacuum) starts
-        // absorbing at this instance's sigmaA; exiting (already inside) returns to vacuum. Reflection
-        // bounces, including TIR, leave the state untouched -- the ray stays in whichever medium it was
-        // already in.
+        // Medium toggle, co-located with the bucket since both key off a Transmission sample. Reflection and TIR leave it untouched.
         if (sample.has_value() && sample->type == LobeType::Transmission) {
             mediumSigmaA = mediumSigmaA.has_value()
                                ? std::nullopt
@@ -341,34 +289,23 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
                                      instanceSettings.transmissionDepth));
         }
 
-        // Next-event estimation: sample a light directly from this vertex (LightSet::sample -- the
-        // environment map and/or any rectangular emitters, selected uniformly and then importance-
-        // sampled within whichever was picked, see light.h), evaluate the combined BSDF value/pdf
-        // toward it, and add the MIS-weighted contribution if unoccluded. Independent of whichever lobe
-        // `sample` above drew for the continuing bounce -- NEE and the continuing ray are two separate
-        // estimators for two separate directions from the same vertex, only sharing this vertex's
-        // params/frame. Firing unconditionally (no lobe-type check) is deliberate: the guard below
-        // admits both sides of a transmissive vertex, so refraction is light-sampled rather than left
-        // to BSDF sampling alone, and the MIS weights above and below now balance the same two
-        // strategies over the same directions. nullopt (no light in the set, or a degenerate quad at
-        // this exact vertex) simply skips NEE for this vertex -- the continuing ray still fires below.
+        // NEE: sample a light, evaluate the BSDF toward it, add it MIS-weighted if unoccluded. Fired whatever lobe `sample` drew.
         const std::optional<LightSample> lightSample = lights.sample(shading.position, sampler);
         if (lightSample.has_value()) {
             const float geoCos = glm::dot(lightSample->direction, geoNormal);
             const float shadingCos = glm::dot(lightSample->direction, frame.normal);
-            // Both sides, not just wo's: on a transmissive surface a light behind the vertex reaches the eye through the transmission lobe, so restricting NEE to the near side left rough glass lit by BSDF sampling alone. Requiring geoCos and shadingCos to agree in sign keeps the normal-map light-leak rejection intact on either side. The lobe itself decides whether the far side carries anything -- a delta interface returns pdfBsdf == 0 there and the guard below drops it, which is correct since a delta lobe cannot be light-sampled.
+            // Both sides, not just wo's: on a transmissive surface a light behind the vertex reaches the eye through the transmission lobe.
             const bool nearSide = geoCos > 0.0F && shadingCos > 0.0F;
             const bool farSide = geoCos < 0.0F && shadingCos < 0.0F && params.transmissionFactor > 0.0F;
             if (nearSide || farSide) {
                 const glm::vec3 wiLocalLight = frame.toLocal(lightSample->direction);
                 const float lightCos = std::abs(shadingCos);  // far-side samples carry a negative cosine
-                // One evaluation for the value, the pdf and the per-lobe split the transport AOVs need -- the four separate calls this replaced (evaluateBsdf, pdfBsdf, and one isolating call per lobe) each recomputed the same lobe probabilities, GGX/Fresnel terms and albedo-table lookups.
+                // One evaluation for the value, the pdf and the per-lobe split: four separate calls recomputed the same lookups.
                 const BsdfEval eval = evaluateBsdfSplit(params, woLocal, wiLocalLight);
                 const glm::vec3 bsdfValue = eval.total();
                 if (eval.pdf > 0.0F &&
                     (bsdfValue.x > 0.0F || bsdfValue.y > 0.0F || bsdfValue.z > 0.0F)) {
-                    // Offset along geoNormal toward whichever side the light sample is on -- the far side for a transmissive vertex lit from behind, the near side otherwise.
-                    // Far side crosses the interface like a transmission continuation ray, so it takes the same curvature-scaled offset: kRayEpsilon does not clear the neighbouring facet on curved geometry, leaking env radiance through a surface that should occlude it. Near side keeps kRayEpsilon; flat geometry collapses to it.
+                    // Offset along geoNormal toward the light's side: the far side crosses the interface, so it takes the curvature offset.
                     const float shadowEpsilon =
                         farSide ? transmissionOffsetEpsilon(triangle) : kRayEpsilon;
                     const glm::vec3 shadowOrigin =
@@ -389,12 +326,12 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
                         const glm::vec3 neeContribution = bsdfValue * common;
                         radiance += neeContribution;
                         if (bounce == 0) {
-                            // Bounce 0's NEE contribution is split across the buckets by the LOBE THAT CARRIED IT, deterministically and at its own physical value -- never routed by sample->type, which is the lobe the continuation ray happened to draw and has nothing to do with NEE. The three components partition eval.total() exactly (bsdf.h), so this writes the same energy `radiance` just took, only attributed. `common` carries throughput as a factor shared by `radiance` and all three accumulators, so the partition holds whatever throughput is -- including the two exactly-zero channels a dispersive path is masked to, which the hero-channel block above can set before this point at bounce 0 (measured: 132461 of 2000000 bounce-0 NEE splits reach here non-unit).
+                            // Bounce 0 splits NEE by the lobe that carried it, not sample->type, which names the continuation.
                             directDiffuseAccum += eval.diffuse * common;
                             directSpecularAccum += eval.specular * common;
                             refractionAccum += eval.transmission * common;
                         } else {
-                            // Deeper bounces keep the path's sticky bucket at the full physical contribution: which lobe carries the light at THIS vertex no longer names the transport type of a path already bucketed at bounce 0, and this vertex's own colour legitimately tints indirect transport.
+                            // Deeper bounces keep the sticky bucket: which lobe carries light here no longer names the transport type.
                             addToBucket(neeContribution, /*isDirect=*/false);
                         }
                     }
@@ -402,7 +339,7 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
             }
         }
 
-        // No continuation direction could be sampled -- terminate here, after NEE has already taken this vertex's direct lighting (see sampleBsdf's call site above for why the two are independent).
+        // No continuation direction could be sampled: terminate, NEE having already taken this vertex's direct lighting.
         if (!sample.has_value()) {
             break;
         }
@@ -413,7 +350,7 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
 
         const glm::vec3 wiWorld = frame.toWorld(sample->wiLocal);
 
-        // Geometric-normal-consistency rejection (normal-map robustness -- simpler stand-in for Schussler et al. 2017's full two-facet microsurface reconstruction): a reflection/diffuse sample crossing to the wrong side of the true triangle plane is a normal-map light-leak artifact, not a physical bounce.
+        // Geometric-normal-consistency rejection, a stand-in for Schussler et al. 2017: a sample crossing to the wrong side is rejected.
         if (sample->type != LobeType::Transmission) {
             const bool woAbove = glm::dot(woWorld, geoNormal) > 0.0F;
             const bool wiAbove = glm::dot(wiWorld, geoNormal) > 0.0F;
@@ -434,8 +371,7 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
             throughput /= continueProb;
         }
 
-        // Chiang/Li/Burley shadow-terminator-corrected origin, nudged off the true triangle plane along the geometric normal (toward wi's side) to avoid self-intersection. Transmission gets a facet-scaled epsilon instead of the fixed one -- see transmissionOffsetEpsilon.
-        // The correction is projected toward whichever side wi leaves on: it pulls the hit onto the vertex tangent planes, which moves it strictly along +normal, so on an inward-going ray (refraction entering, or TIR inside a dielectric) the unmirrored form pushes the origin back through the interface. That crossing registers no transmission event, desynchronising the medium stack -- measured at 0.93% of glass entries in cornell, each contributing unattenuated environment radiance on a later miss.
+        // Chiang/Li/Burley origin nudged toward wi's side: unmirrored, it desynced the medium stack on 0.93% of cornell's glass entries.
         const bool leavingOnNormalSide = glm::dot(wiWorld, geoNormal) > 0.0F;
         const float offsetEpsilon = sample->type == LobeType::Transmission
                                          ? transmissionOffsetEpsilon(triangle)
@@ -454,7 +390,7 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
 }  // namespace
 
 PathTraceResult makePathTraceResult(int width, int height) {
-    // 10 images (beauty/bounceHeatmap/ao/shadow + 5 transport-component AOVs + fresnel) -- see PathTraceResult's declaration order in path_tracer.h, which this positional init must match. The trailing overRange field is deliberately left to its own initialiser: it is a reduction of beauty, not an allocation.
+    // 10 images in PathTraceResult's declaration order, which this positional init must match; overRange is left default.
     return {makeImage(width, height), makeImage(width, height), makeImage(width, height),
             makeImage(width, height), makeImage(width, height), makeImage(width, height),
             makeImage(width, height), makeImage(width, height), makeImage(width, height),
@@ -470,26 +406,25 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                        std::uint32_t scrambleSeed, int sampleBase, int sampleCount,
                        const std::atomic<std::uint64_t>& generation,
                        std::uint64_t requestedGeneration, ThreadPool& threadPool,
-                       engine::debug::PassStats& stats, PathTraceResult& out) {
+                       pathtracer::debug::PassStats& stats, PathTraceResult& out) {
     const float aspect = static_cast<float>(width) / static_cast<float>(height);
-    // Constant for the whole pass, so it is built once here rather than per primary ray: the aspect-taking primaryRay rebuilds it every call, which at samplesPerPixel rays per pixel is millions of identical reconstructions per pass. rasterizer.cpp already hoists it the same way.
+    // Constant for the whole pass, so built once: the aspect-taking primaryRay rebuilds it on every one of millions of rays.
     const Camera::ViewBasis basis = camera.viewBasis(aspect);
     const int tilesX = (width + kPathTraceTileSize - 1) / kPathTraceTileSize;
     const int tilesY = (height + kPathTraceTileSize - 1) / kPathTraceTileSize;
 
-    // One worker owns every output pixel of one tile, and traces every pixel within the filter radius of it -- the kFilterExtent-wide halo, whose samples are therefore traced twice, once by each of the two tiles they splat into. Sampler is seeded per (x, y, sampleBase + s, scrambleSeed), all four pass-wide constants or loop indices, so both tiles compute the identical sample; the cost is ~13% more rays at this tile size, and what it buys is that no splat ever crosses into another worker's pixels, so the whole pass needs no locks, no atomics and no merge phase.
+    // One worker owns every output pixel of one tile and traces every pixel within the filter radius: the halo is traced twice.
     const auto renderTile = [&](int tileIndex) {
         const int tileX0 = (tileIndex % tilesX) * kPathTraceTileSize;
         const int tileY0 = (tileIndex / tilesX) * kPathTraceTileSize;
         const int tileX1 = std::min(tileX0 + kPathTraceTileSize, width);
         const int tileY1 = std::min(tileY0 + kPathTraceTileSize, height);
 
-        // Stack-local, not thread_local like the accumulator below: zeroed by construction, so the reset boundary is the tile boundary with no bookkeeping. A thread_local would outlive the tile AND the pass, and a missed reset would silently double-count. tracePath increments this in place through a __restrict reference -- see render_stats.h for the measurement that settled that over returning the counts by value.
-        engine::debug::RayCounts tileRays;
+        // Stack-local, not thread_local: zeroed by construction, so the reset boundary is the tile boundary with no bookkeeping.
+        pathtracer::debug::RayCounts tileRays;
 
-        // Reused for the life of the worker thread, so a pass allocates nothing: sized for a full tile even at the image edge, which keeps the row stride a constant kPathTraceTileSize.
-        // Block scope, so this already has internal linkage; misc-use-internal-linkage targets namespace-scope
-        // variables and misfires on a function-local thread_local.
+        // Reused for the worker's life, so a pass allocates nothing; sized for a full tile so the stride stays kPathTraceTileSize.
+
         // NOLINTNEXTLINE(misc-use-internal-linkage)
         thread_local std::vector<float> accumulator;
         accumulator.assign(static_cast<std::size_t>(kPathTraceTileSize) * kPathTraceTileSize * kTileLanes, 0.0F);
@@ -499,9 +434,7 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
             for (int x = std::max(tileX0 - kFilterExtent, 0);
                  x < std::min(tileX1 + kFilterExtent, width); ++x) {
                 for (int s = 0; s < settings.samplesPerPixel; ++s) {
-                    // sampleBase + s is this sample's position in the pixel's accumulated sequence, not a per-pass
-                    // seed: it must advance across passes for the Sobol points to stratify against the samples already
-                    // accumulated. scrambleSeed stays fixed for the whole accumulation -- see sampler.h.
+                    // sampleBase + s is this sample's position in the accumulated sequence: it must advance across passes to stratify.
                     const int sampleIndex = sampleBase + s;
                     Sampler sampler(x, y, sampleIndex, sampleCount, scrambleSeed);
                     const glm::vec2 jitter = sampler.next2D();
@@ -511,8 +444,7 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                     // HdrImage row 0 is the top (EXR/glTF convention); NDC +Y is up -- flip.
                     const float ndcY = 1.0F - ((filmY / static_cast<float>(height)) * 2.0F);
                     const Ray primary = camera.primaryRay(basis, ndcX, ndcY);
-                    // AO and the Fresnel AOV each draw from a stream of their own, not `sampler`: taking dimensions from the path's sampler would shift every later dimension and move every pre-existing image. Passing the drawn pair rather than the sampler makes it provable that AO consumes exactly two dimensions and cannot drift. Seeding stays a pure function of (x, y, sampleIndex, seed), which is what the halo determinism above rests on.
-                    // The offset goes on the SCRAMBLE SEED, never the sample index: a shifted index would have AO walk the same Sobol points as the path a few steps along, correlating the two streams, whereas an offset seed gives AO an independently scrambled copy of the same well-stratified sequence.
+                    // AO and Fresnel draw from their own stream: taking dimensions from `sampler` would shift every later dimension.
                     Sampler aoSampler(x, y, sampleIndex, sampleCount, scrambleSeed ^ kAoSeedOffset);
                     const glm::vec2 aoSample = aoSampler.next2D();
                     Sampler fresnelSampler(x, y, sampleIndex, sampleCount, scrambleSeed ^ kFresnelSeedOffset);
@@ -535,13 +467,13 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                         trace.ao,                  trace.fresnel.x,
                         trace.fresnel.y,           trace.fresnel.z};
 
-                    // Clipped to this tile: the taps falling outside it belong to a neighbouring tile, which traces this same sample itself rather than receiving it.
+                    // Clipped to this tile: taps outside belong to a neighbouring tile, which traces this same sample itself.
                     const int splatX0 = std::max(tileX0, static_cast<int>(std::ceil(filmX - 0.5F - kFilterRadius)));
                     const int splatX1 = std::min(tileX1 - 1, static_cast<int>(std::floor(filmX - 0.5F + kFilterRadius)));
                     const int splatY0 = std::max(tileY0, static_cast<int>(std::ceil(filmY - 0.5F - kFilterRadius)));
                     const int splatY1 = std::min(tileY1 - 1, static_cast<int>(std::floor(filmY - 0.5F + kFilterRadius)));
                     for (int splatY = splatY0; splatY <= splatY1; ++splatY) {
-                        // Separable: the 2D weight is the product of the two 1D lookups, so a row's own factor is hoisted out of the inner loop.
+                        // Separable: the 2D weight is the product of two 1D lookups, so a row's factor hoists out of the inner loop.
                         const float weightY = filterWeight(filmY - (static_cast<float>(splatY) + 0.5F));
                         if (weightY <= 0.0F) {
                             continue;
@@ -571,7 +503,7 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                 const float* lanes = accumulator.data() +
                                       ((static_cast<std::size_t>(y - tileY0) * kPathTraceTileSize) +
                                        static_cast<std::size_t>(x - tileX0)) * kTileLanes;
-                // Always positive: a pixel's own samples land within half a pixel of its centre, well inside the 1.5px support, and samplesPerPixel is at least 1.
+                // Always positive: a pixel's own samples land within half a pixel of its centre, well inside the 1.5px support.
                 const float invWeight = 1.0F / lanes[kSampleLanes];
                 writeTexel(out.beauty, x, y, glm::vec3(lanes[0], lanes[1], lanes[2]) * invWeight);
                 writeTexel(out.bounceHeatmap, x, y, glm::vec3(lanes[3] * invWeight));
@@ -599,4 +531,4 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
     });
 }
 
-}  // namespace engine::scene
+}  // namespace pathtracer::scene

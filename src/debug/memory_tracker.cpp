@@ -1,4 +1,4 @@
-#include "engine/debug/memory_tracker.h"
+#include "pathtracer/debug/memory_tracker.h"
 
 #include <atomic>
 #include <cassert>
@@ -8,7 +8,7 @@
 #include <mach/vm_statistics.h>
 #include <sys/sysctl.h>
 
-namespace engine::debug {
+namespace pathtracer::debug {
 
 namespace {
 std::atomic<std::size_t> gGpuBytes{0};
@@ -19,7 +19,7 @@ void trackGpuAlloc(std::size_t bytes) {
 }
 
 void trackGpuFree(std::size_t bytes) {
-    // Freeing more than was ever tracked is a programming-invariant violation (a missing/duplicated trackGpuAlloc call), not user input -- assert rather than let the unsigned counter wrap.
+    // Freeing more than was tracked is an invariant violation, not user input: assert rather than let the subtraction wrap.
     assert(bytes <= gGpuBytes);
     gGpuBytes -= bytes;
 }
@@ -59,4 +59,4 @@ std::size_t availableSystemBytes() {
                                      static_cast<std::uint64_t>(pageSize));
 }
 
-}  // namespace engine::debug
+}  // namespace pathtracer::debug

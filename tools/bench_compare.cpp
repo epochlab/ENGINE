@@ -1,8 +1,4 @@
-// Reads the JSON Lines benchmark log (engine/debug/bench_log.h) and states, with a distribution-free confidence interval, whether one build is faster than another.
-// run: Randomized Multiple Interleaved Trials (Abedi & Brecht 2017) -- each round runs A and B back to back in a random order, so slow drift (thermal, background load) cancels in the paired log-ratio.
-// compare/history: unpaired analysis of records already in the log; weaker than run, since drift between the two groups is not controlled.
-// The unit of replication is the process invocation (Kalibera & Jones 2013); each invocation is summarised by its column's mean per event, since every column holds one entry per event of its own (frame, upload, pass) and only some event counts are fixed by config: frame count scales with run duration.
-// Same standalone-CLI convention as the other tools: non-zero exit on bad input or a failed child.
+// Benchmark-log analysis: interleaved paired trials (Abedi & Brecht 2017), replicating per process invocation (Kalibera & Jones 2013).
 
 #include <fcntl.h>
 #include <spawn.h>
@@ -26,7 +22,7 @@
 
 #include <nlohmann/json.hpp>
 
-#include "engine/debug/bench_log.h"
+#include "pathtracer/debug/bench_log.h"
 #include "stats.h"
 
 extern char** environ;  // NOLINT(readability-redundant-declaration) -- POSIX leaves it undeclared in <unistd.h> on Darwin
@@ -50,7 +46,7 @@ struct Options {
 
 constexpr const char* kUsage =
     "usage: bench_compare run --a BIN --b BIN --rounds N --log PATH [--metric M] [--alpha A] [--seed S] -- ARGS...\n"
-    "         ARGS must make the child append to PATH (render_beauty/raster_bench --bench-log PATH, engine -bench PATH)\n"
+    "         ARGS must make the child append to PATH (render_beauty/raster_bench --bench-log PATH, pathtracer -bench PATH)\n"
     "       bench_compare compare --log PATH --a ID --b ID [--metric M] [--alpha A]\n"
     "       bench_compare history --log PATH --tool T [--metric M] [--alpha A]\n"
     "  ID: a build uuid prefix or git SHA; M: a samples column or rusage field (default: the only samples column)\n";
@@ -111,7 +107,7 @@ std::optional<Options> parseArgs(int argc, char** argv) {
     return options;
 }
 
-// Every line must parse at the current schema with every object this tool indexes: a malformed or foreign record is an error, never silently skipped.
+// Every line must parse at the current schema with every indexed object: a malformed or foreign record is an error, never skipped.
 constexpr const char* kRecordObjects[] = {"build", "config", "samples", "rusage", "work"};
 
 std::optional<std::vector<json>> loadLog(const std::string& path) {
@@ -129,7 +125,7 @@ std::optional<std::vector<json>> loadLog(const std::string& path) {
             return std::all_of(std::begin(kRecordObjects), std::end(kRecordObjects),
                                [&record](const char* key) { return record.contains(key) && record[key].is_object(); });
         };
-        // Columns are read as numbers below, so they are type-checked here rather than at every read: loadLog is the one validation boundary.
+        // Columns are read as numbers below, so they are type-checked here: loadLog is the one validation boundary.
         const auto numericColumns = [&record] {
             for (const auto& [name, column] : record["samples"].items()) {
                 if (!column.is_array() || !std::all_of(column.begin(), column.end(), [](const json& v) { return v.is_number(); })) {
@@ -139,10 +135,10 @@ std::optional<std::vector<json>> loadLog(const std::string& path) {
             return std::all_of(record["rusage"].begin(), record["rusage"].end(), [](const json& v) { return v.is_number(); });
         };
         // is_object() before value(): nlohmann's value() throws on a non-object, and a bare `null` or `[]` line parses fine.
-        if (record.is_discarded() || !record.is_object() || record.value("schema", 0) != engine::debug::kBenchLogSchema || !hasObjects() ||
+        if (record.is_discarded() || !record.is_object() || record.value("schema", 0) != pathtracer::debug::kBenchLogSchema || !hasObjects() ||
             !record.contains("tool") || !record.contains("pid") || !numericColumns()) {
             std::cerr << "bench_compare: " << path << ':' << lineNumber << " is not a schema-"
-                      << engine::debug::kBenchLogSchema << " record\n";
+                      << pathtracer::debug::kBenchLogSchema << " record\n";
             return std::nullopt;
         }
         records.push_back(std::move(record));
@@ -195,7 +191,7 @@ std::string shortId(const json& record) {
     return record["build"].value("uuid", std::string()).substr(0, 8) + " " + record["build"].value("git", std::string());
 }
 
-// A log-ratio needs a strictly positive value from every record; the metric is resolved from one representative, and config equality does not constrain the column set, so a build that renamed a column reaches here without it.
+// A log-ratio needs a strictly positive value from every record, and config equality does not constrain the column set.
 bool positiveValues(const std::vector<const json*>& group, const std::string& metric) {
     for (const json* r : group) {
         const std::optional<double> value = metricValue(*r, metric);
@@ -250,7 +246,7 @@ void printGroup(const char* name, const std::vector<const json*>& group, const s
                 group.size(), metric.c_str(), median(values), median(preemptions));
 }
 
-// Identical work is what makes a timing ratio mean "faster at the same job"; a differing CRC is reported, not fatal, since a change may legitimately alter output.
+// Identical work is what makes a timing ratio mean "faster at the same job"; a differing CRC is reported, not fatal.
 void printWork(const std::vector<const json*>& a, const std::vector<const json*>& b) {
     const json& reference = (*a.front())["work"];
     const auto same = [&](const json* r) { return (*r)["work"] == reference; };
@@ -442,7 +438,11 @@ int historyCommand(const Options& options, const std::vector<json>& records) {
             return (*g.front())["build"].value("uuid", std::string()) == r["build"].value("uuid", std::string());
         };
         const auto it = std::find_if(builds.begin(), builds.end(), sameBuild);
-        (it == builds.end() ? builds.emplace_back() : *it).push_back(&r);
+        if (it == builds.end()) {
+            builds.emplace_back().push_back(&r);
+        } else {
+            it->push_back(&r);
+        }
     }
     if (!std::all_of(builds.begin(), builds.end(), [&](const std::vector<const json*>& g) { return positiveValues(g, *metric); })) {
         return EXIT_FAILURE;

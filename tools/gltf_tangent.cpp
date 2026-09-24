@@ -33,9 +33,7 @@ std::size_t byteOffset(const json& j, const char* key) {
     return j.contains(key) ? j.at(key).get<std::size_t>() : 0;
 }
 
-// Reads a tightly-packed float VEC3 accessor. This tool only ever reads NORMAL (to synthesize a
-// tangent from), which Houdini's glTF ROP -- this tool's sole input format -- always exports as
-// float, non-interleaved; no stride/componentType generality is needed beyond that one case.
+// Reads a tightly-packed float VEC3 accessor: only NORMAL, which Houdini's glTF ROP always exports as float and non-interleaved.
 std::vector<glm::vec3> readNormals(const json& accessor, const json& bufferViews,
                                     const std::vector<std::uint8_t>& bin) {
     if (accessor.at("componentType").get<int>() != 5126) {
@@ -54,9 +52,7 @@ std::vector<glm::vec3> readNormals(const json& accessor, const json& bufferViews
     return out;
 }
 
-// Branchless orthonormal-basis-from-normal (Duff et al., "Building an Orthonormal Basis,
-// Revisited"). Direction is provably irrelevant here: with no normal/bump texture in play, no
-// in-plane tangent direction shows up in the shaded result.
+// Branchless orthonormal basis from a normal (Duff et al.); direction is irrelevant with no normal or bump texture in play.
 glm::vec4 tangentFromNormal(const glm::vec3& n) {
     const float sign = n.z >= 0.0F ? 1.0F : -1.0F;
     const float a = -1.0F / (sign + n.z);
@@ -70,10 +66,7 @@ void appendFloats(std::vector<std::uint8_t>& bin, const float* data, std::size_t
     bin.insert(bin.end(), bytes, bytes + (count * sizeof(float)));
 }
 
-// Adds a synthesized TANGENT accessor/bufferView/binary segment to one primitive that lacks one.
-// Every other attribute (POSITION, NORMAL, TEXCOORD_0, COLOR_0, or anything else), every material,
-// and every other primitive is never read into memory at all, so nothing else is ever dropped or
-// rewritten -- this is the tool's entire remaining job.
+// Adds a synthesized TANGENT accessor to a primitive lacking one; nothing else is read into memory, so nothing else is rewritten.
 bool addTangentsToPrimitive(json& primitive, json& accessors, json& bufferViews,
                              std::vector<std::uint8_t>& bin) {
     json& attrs = primitive.at("attributes");
@@ -121,8 +114,7 @@ int main(int argc, char** argv) {
         json j;
         inFile >> j;
 
-        // Single-buffer input assumed throughout, matching Houdini's glTF ROP output (this tool's
-        // sole supported input format).
+        // Single-buffer input assumed throughout, matching Houdini's glTF ROP output, this tool's sole supported format.
         const std::string bufferUri = j.at("buffers").at(0).at("uri").get<std::string>();
         const std::filesystem::path binPath = gltfPath.parent_path() / bufferUri;
         std::vector<std::uint8_t> bin = readBinaryFile(binPath);

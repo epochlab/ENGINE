@@ -1,10 +1,4 @@
-// Standalone correctness check for path_tracer.cpp's integrator (renderPathTraced/tracePath), distinct from bsdf_validate.cpp/nee_validate.cpp which exercise the BSDF and MIS weighting in isolation and never run a real trace. Same standalone-CLI convention: no test framework, non-zero exit on failure.
-// Reference configuration: one large unoccluded quad under a uniform-radiance (L0=1) environment. Nothing else is in the scene, so every ray leaving the surface reaches the environment directly (no indirect light), and the converged radiance is exactly the single-scatter direct lighting, Lo(wo) = integral over the hemisphere of evaluateBsdf(wo,wi)*cos(wi) dwi, the same quantity nee_validate.cpp's referenceLo computes.
-// Two invariants follow, catching different integrator bugs than a BSDF-level furnace test can:
-//   1. Depth invariance: with no indirect light, maxBounces=0 and maxBounces=1 must produce the same image. A depth cap dropping the terminal BSDF-sampled ray breaks this: at maxBounces=0 the ray built at bounce 0 is never intersected, so NEE's MIS weight (lightPdf^2/(lightPdf^2+bsdfPdf^2)) is never complemented by the BSDF-sampling half and the surface renders too dark, while maxBounces=1 traces that ray at bounce 1 and is complete; the gap is exactly bsdfPdf^2/(bsdfPdf^2+lightPdf^2) of the direct lighting, large on a glossy surface.
-//   2. Absolute agreement with the analytic reference, which no self-consistency check between two renderer settings can give on its own.
-// Russian roulette is exercised as a third case: it reweights by 1/p on survival, so an RR-enabled render must return the same answer as an RR-disabled one; RR lives in tracePath, so this is the only place it can be tested.
-// Material/MeshInstance are plain data (six ImageTexture members and a mat4) and need no GL context: an earlier comment in nee_validate.cpp claimed otherwise, which is why this suite had no integrator-level test until now.
+// Correctness check for path_tracer.cpp's integrator (renderPathTraced/tracePath); see docs/DERIVATIONS.md "Integrator validation".
 
 #include <array>
 #include <atomic>
@@ -23,33 +17,33 @@
 
 #include <glm/glm.hpp>
 
-#include "engine/config/scene_config.h"
-#include "engine/gfx/hdr_image.h"
+#include "pathtracer/config/scene_config.h"
+#include "pathtracer/gfx/hdr_image.h"
 #include "check.h"
 #include "fixtures.h"
 #include "stats.h"
-#include "engine/scene/bsdf.h"
-#include "engine/scene/camera.h"
-#include "engine/scene/embree_accel.h"
-#include "engine/scene/environment_map.h"
-#include "engine/scene/gltf_loader.h"
-#include "engine/scene/light.h"
-#include "engine/scene/material_binding.h"
-#include "engine/scene/path_tracer.h"
-#include "engine/scene/shading_scene.h"
-#include "engine/scene/thread_pool.h"
+#include "pathtracer/scene/bsdf.h"
+#include "pathtracer/scene/camera.h"
+#include "pathtracer/scene/embree_accel.h"
+#include "pathtracer/scene/environment_map.h"
+#include "pathtracer/scene/gltf_loader.h"
+#include "pathtracer/scene/light.h"
+#include "pathtracer/scene/material_binding.h"
+#include "pathtracer/scene/path_tracer.h"
+#include "pathtracer/scene/shading_scene.h"
+#include "pathtracer/scene/thread_pool.h"
 
 namespace {
 
-using engine::scene::BsdfParams;
-using engine::scene::Camera;
-using engine::scene::EmbreeAccel;
-using engine::scene::EnvironmentMap;
-using engine::scene::MeshInstance;
-using engine::scene::PathTraceSettings;
-using engine::scene::ShadingTriangle;
-using engine::scene::ShadingVertex;
-using engine::scene::Triangle;
+using pathtracer::scene::BsdfParams;
+using pathtracer::scene::Camera;
+using pathtracer::scene::EmbreeAccel;
+using pathtracer::scene::EnvironmentMap;
+using pathtracer::scene::MeshInstance;
+using pathtracer::scene::PathTraceSettings;
+using pathtracer::scene::ShadingTriangle;
+using pathtracer::scene::ShadingVertex;
+using pathtracer::scene::Triangle;
 
 using tools::fixtures::kPi;
 using tools::fixtures::makeConstantTexture;
@@ -57,29 +51,25 @@ using tools::fixtures::makeMaterial;
 using tools::fixtures::makeUniformEnvironment;
 using tools::fixtures::referenceLo;
 
-// One pool for the whole binary. Eleven checks each constructed their own, which spun up and tore down
-// hardware_concurrency() worker threads eleven times per run for no isolation gained -- ThreadPool carries no state
-// between dispatches. Sized from the runner's --threads so concurrent ctest jobs do not oversubscribe the machine.
-engine::scene::ThreadPool& sharedPool(int threads) {
-    static engine::scene::ThreadPool pool(static_cast<unsigned int>(threads));
+// One pool for the whole binary, sized from the runner's --threads so concurrent ctest jobs do not oversubscribe the machine.
+pathtracer::scene::ThreadPool& sharedPool(int threads) {
+    static pathtracer::scene::ThreadPool pool(static_cast<unsigned int>(threads));
     return pool;
 }
 
-// Each check below keeps its own `ok` accumulator and its per-row stderr diagnostics -- those messages carry the
-// scene, the row and the measured value, which is what makes a failure diagnosable -- and reports the verdict through
-// one assertion. Rewriting several hundred rows into individual assertions would gain a count and lose the context.
+// Each check keeps its own `ok` accumulator and per-row diagnostics, reporting one verdict: per-row assertions would lose that context.
 void finish(tools::check::Context& ctx, bool ok, const char* what) {
     ctx.plan(1);
-    ENGINE_EXPECT(ctx, ok, what);
+    PT_EXPECT(ctx, ok, what);
 }
 
-// Quad half-extent: large enough that every primary ray in the narrow test FOV lands on it, so no pixel sees the environment directly and the measured value is purely surface radiance.
+// Quad half-extent: large enough that every primary ray in the narrow test FOV lands on it, so no pixel sees the environment directly.
 constexpr float kQuadExtent = 1000.0F;
-// Sphere test geometry, shared by the two checks that use it so their tessellations cannot drift apart -- checkBeerLambert's expected transmittance is a function of the chord, so the two must agree on the radius.
+// Sphere geometry shared by its two checks so tessellations cannot drift: checkBeerLambert's transmittance depends on this exact mesh.
 constexpr float kSphereRadius = 1.0F;
 constexpr int kSphereSlices = 64;
 constexpr int kSphereStacks = 32;
-// Narrow FOV (200mm on a 36x24 gate, ~6.9 degrees vertical) so every pixel's view direction is within a fraction of a degree of the quad normal -- lets one analytic reference at wo = the normal stand for the whole probed region.
+// Narrow FOV (200mm on a 36x24 gate, ~6.9 degrees vertical) so every pixel direction is within a fraction of a degree of the quad normal.
 constexpr float kFocalLengthMm = 200.0F;
 constexpr int kImageSize = 16;
 constexpr int kSamplesPerPixel = 512;
@@ -90,7 +80,7 @@ struct TestScene {
     std::vector<MeshInstance> instances;
 };
 
-// One quad in the z=0 plane facing +Z, wound counter-clockwise as seen from +Z so geometricNormalOf gives (0,0,1). The camera sits at +Z looking down -Z (yaw=0/pitch=0, this codebase's default orientation), so the centre pixel's view direction is exactly the surface normal.
+// One quad in the z=0 plane facing +Z, wound counter-clockwise as seen from +Z so geometricNormalOf gives (0,0,1).
 TestScene makeQuadScene(float roughness, glm::vec3 f0) {
     const glm::vec3 normal(0.0F, 0.0F, 1.0F);
     const glm::vec4 tangent(1.0F, 0.0F, 0.0F, 1.0F);
@@ -110,7 +100,7 @@ TestScene makeQuadScene(float roughness, glm::vec3 f0) {
     return scene;
 }
 
-// Two parallel quads with opposing geometric normals: the front facing the camera at +Z, the back facing away at -Z. A camera ray enters at the front face (woLocal.z>0) and leaves at the back (woLocal.z<0), the only configuration that exercises bsdf.cpp's exiting side and the far-side NEE guard. A single quad cannot: it is entered from the front and every hit reads as entering.
+// Two parallel quads with opposing geometric normals, front at +Z and back at -Z, so a camera ray enters the front and exits the back.
 TestScene makeSlabScene(float roughness, glm::vec3 f0, float thickness) {
     const glm::vec4 tangent(1.0F, 0.0F, 0.0F, 1.0F);
     const auto vertex = [&](float x, float y, float z, float nz) {
@@ -138,8 +128,7 @@ TestScene makeSlabScene(float roughness, glm::vec3 f0, float thickness) {
     return scene;
 }
 
-// The quad above plus an opaque wall at x=wallX facing -X, the only scene here where a non-transmissive path reaches a second surface: the wall sits outside the narrow view frustum (primary rays land within |x|<0.31 at z=0) so it is never primary-visible, but it catches the floor's +X-going bounce rays, and NEE fires there at bounce>=1, the only way anything reaches the Indirect buckets.
-// wallX defaults to the transport checks' original 1, and the AO checks push it out to kAoWallDistance -- see there for why that distance is load-bearing for them and irrelevant here.
+// The quad above plus an opaque wall at wallX facing -X, the only scene here where a non-transmissive path reaches a second surface.
 TestScene makeCornerScene(float roughness, glm::vec3 f0, float wallX = 1.0F) {
     TestScene scene = makeQuadScene(roughness, f0);
     const glm::vec3 wallNormal(-1.0F, 0.0F, 0.0F);
@@ -160,9 +149,7 @@ TestScene makeCornerScene(float roughness, glm::vec3 f0, float wallX = 1.0F) {
     return scene;
 }
 
-// UV sphere at the origin, poles on Y so the camera (at +Z looking down -Z) reads the well-tessellated equator rather than the degenerate pole fan. Vertex normals are the exact analytic outward normals and the tangent is d(position)/d(theta), non-degenerate everywhere including the poles.
-// THE POINT IS THE CURVATURE. Every other scene here is flat quads, whose coplanar vertex normals make transmissionOffsetEpsilon's curvature factor exactly zero and shadowTerminatorOffset a no-op -- so the two integrator bugs those two mechanisms actually had (a far-side NEE shadow ray on the flat kRayEpsilon, and the shadow-terminator projection pushing an inward-going ray back out through the interface and desynchronising the medium stack) were invisible to all four suites while plainly visible in a cornell render. Here both are non-zero.
-// The tessellation sets the offset epsilon (max edge length * sin of the vertex-normal divergence, both taken across the quad's diagonal), which backs each ray origin that much into the medium and so shortens every measured in-medium segment. At 64x32 on a unit sphere that is 1.93e-2. Coarse enough that the curvature terms are firmly non-zero, fine enough that checkBeerLambert's analytic chord stays accurate; the detection strength this costs was measured, not assumed, by re-running the checks at 24x12 (528 triangles, cornell's own tessellation), where they behave the same.
+// UV sphere, poles on Y so the camera reads the tessellated equator; curvature is the point, as flat quads zero transmissionOffsetEpsilon.
 TestScene makeSphereScene(float roughness, glm::vec3 f0) {
     const auto vertexAt = [&](int stack, int slice) {
         const float phi = kPi * static_cast<float>(stack) / static_cast<float>(kSphereStacks);
@@ -180,7 +167,7 @@ TestScene makeSphereScene(float roughness, glm::vec3 f0) {
             const ShadingVertex v10 = vertexAt(stack + 1, slice);
             const ShadingVertex v11 = vertexAt(stack + 1, slice + 1);
             const ShadingVertex v01 = vertexAt(stack, slice + 1);
-            // Wound so geometricNormalOf points outward. Each pole row contributes one triangle, not two: the half-quad whose two vertices collapse onto the pole is dropped rather than emitted with zero area, which would normalize(0) to NaN in geometricNormalOf. Guarding the wrong half of each row leaves an annular hole at both poles (measured: 128 zero-area triangles, surface area 12.4808 against 4*pi) and silently unseals the medium.
+            // Wound so geometricNormalOf points outward; each pole row contributes one triangle, the collapsed half-quad being degenerate.
             if (stack + 1 < kSphereStacks) {
                 scene.worldTriangles.push_back(Triangle{v00.position, v10.position, v11.position});
                 scene.shadingTriangles.push_back(ShadingTriangle{v00, v10, v11, 0});
@@ -195,8 +182,7 @@ TestScene makeSphereScene(float roughness, glm::vec3 f0) {
     return scene;
 }
 
-// Two coplanar quads meeting at x=0, each its OWN MeshInstance, so shadingTriangles carry instanceIndex 0 on the left and 1 on the right. The only scene here with more than one instance, and therefore the only one where perInstanceSettings is indexed by anything but 0 -- see checkPerInstanceMaterials.
-// Both instances get the identical Material, so nothing distinguishes them except which perInstanceSettings entry the integrator resolves for their triangles.
+// Two coplanar quads meeting at x=0, one MeshInstance each with identical Materials: only the resolved perInstanceSettings entry differs.
 TestScene makeTwoInstanceScene(float roughness, glm::vec3 f0) {
     const glm::vec3 normal(0.0F, 0.0F, 1.0F);
     const glm::vec4 tangent(1.0F, 0.0F, 0.0F, 1.0F);
@@ -223,7 +209,7 @@ TestScene makeTwoInstanceScene(float roughness, glm::vec3 f0) {
     return scene;
 }
 
-// Only `metallic` travels through PathTraceSettings; roughness and f0 reach the renderer through the material's 1x1 roughness and specular textures, which resolveBsdfParams samples (gbuffer_shading.cpp).
+// Only `metallic` travels through PathTraceSettings; roughness and f0 reach the renderer through the material's shared 1x1 textures.
 PathTraceSettings makeSettings(int maxBounces, int rrStartBounce, float metallic,
                                float transmission = 0.0F) {
     PathTraceSettings settings{};
@@ -247,7 +233,7 @@ Camera makeCamera() {
 }
 
 // Mean radiance over the half-open pixel block [x0,x1) x [y0,y1).
-glm::vec3 regionMean(const engine::gfx::HdrImage& image, int x0, int y0, int x1, int y1) {
+glm::vec3 regionMean(const pathtracer::gfx::HdrImage& image, int x0, int y0, int x1, int y1) {
     glm::vec3 sum(0.0F);
     int count = 0;
     for (int y = y0; y < y1; ++y) {
@@ -263,26 +249,26 @@ glm::vec3 regionMean(const engine::gfx::HdrImage& image, int x0, int y0, int x1,
     return sum / static_cast<float>(count);
 }
 
-// Mean radiance over the centre 4x4 block -- averaging several pixels tightens the estimate without widening the view-direction spread enough to matter at this FOV.
-glm::vec3 centreMean(const engine::gfx::HdrImage& image) {
+// Mean radiance over the centre 4x4 block: averaging tightens the estimate without widening the view-direction spread enough to matter.
+glm::vec3 centreMean(const pathtracer::gfx::HdrImage& image) {
     return regionMean(image, (kImageSize / 2) - 2, (kImageSize / 2) - 2, (kImageSize / 2) + 2,
                        (kImageSize / 2) + 2);
 }
 
-// Runs one full renderPathTraced pass with an explicit per-instance settings vector, the only way to give two instances different materials. showSky gates only the primary ray's own miss, so turning it off zeroes the background term the transport buckets deliberately exclude.
-engine::scene::PathTraceResult renderPassPerInstance(
+// Runs one renderPathTraced pass with an explicit per-instance settings vector, the only way to give two instances different materials.
+pathtracer::scene::PathTraceResult renderPassPerInstance(
     const TestScene& scene, const EnvironmentMap& env, const PathTraceSettings& settings,
     const std::vector<PathTraceSettings>& perInstanceSettings, EmbreeAccel& accel,
-    engine::scene::ThreadPool& pool, bool showSky, std::uint32_t scrambleSeed = 7U) {
+    pathtracer::scene::ThreadPool& pool, bool showSky, std::uint32_t scrambleSeed = 7U) {
     const std::atomic<std::uint64_t> generation{1};
-    engine::scene::PathTraceResult result =
-        engine::scene::makePathTraceResult(kImageSize, kImageSize);
+    pathtracer::scene::PathTraceResult result =
+        pathtracer::scene::makePathTraceResult(kImageSize, kImageSize);
     // No test scene here authors an emitter -- every instance is ordinary geometry.
     const std::vector<int> instanceLightIndex(scene.instances.size(), -1);
-    const std::vector<engine::scene::QuadLight> noQuads;
-    const engine::scene::LightSet lights(&env, /*envRotationRadians=*/0.0F, /*envExposure=*/1.0F, noQuads);
-    engine::debug::PassStats stats;  // required by renderPathTraced; this tool checks radiance, not throughput
-    engine::scene::renderPathTraced(makeCamera(), accel, scene.shadingTriangles, scene.instances,
+    const std::vector<pathtracer::scene::QuadLight> noQuads;
+    const pathtracer::scene::LightSet lights(&env, /*envRotationRadians=*/0.0F, /*envExposure=*/1.0F, noQuads);
+    pathtracer::debug::PassStats stats;  // required by renderPathTraced; this tool checks radiance, not throughput
+    pathtracer::scene::renderPathTraced(makeCamera(), accel, scene.shadingTriangles, scene.instances,
                                      instanceLightIndex, lights, kImageSize, kImageSize, showSky,
                                      settings, perInstanceSettings, scrambleSeed, /*sampleBase=*/0,
                                      /*sampleCount=*/settings.samplesPerPixel, generation,
@@ -291,9 +277,9 @@ engine::scene::PathTraceResult renderPassPerInstance(
 }
 
 // The same pass with every instance on one material, which is what every check but checkPerInstanceMaterials wants.
-engine::scene::PathTraceResult renderPass(const TestScene& scene, const EnvironmentMap& env,
+pathtracer::scene::PathTraceResult renderPass(const TestScene& scene, const EnvironmentMap& env,
                                            const PathTraceSettings& settings, EmbreeAccel& accel,
-                                           engine::scene::ThreadPool& pool, bool showSky,
+                                           pathtracer::scene::ThreadPool& pool, bool showSky,
                                            std::uint32_t scrambleSeed = 7U) {
     return renderPassPerInstance(
         scene, env, settings, std::vector<PathTraceSettings>(scene.instances.size(), settings), accel,
@@ -302,7 +288,7 @@ engine::scene::PathTraceResult renderPass(const TestScene& scene, const Environm
 
 // Centre-region mean radiance of one pass.
 float renderCentre(const TestScene& scene, const EnvironmentMap& env, const PathTraceSettings& settings,
-                    EmbreeAccel& accel, engine::scene::ThreadPool& pool) {
+                    EmbreeAccel& accel, pathtracer::scene::ThreadPool& pool) {
     const glm::vec3 mean = centreMean(renderPass(scene, env, settings, accel, pool, true).beauty);
     return std::max({mean.x, mean.y, mean.z});
 }
@@ -314,8 +300,8 @@ struct Case {
     glm::vec3 f0;
 };
 
-ENGINE_CHECK(depth_and_russian_roulette_invariance, Slow, Statistical) {
-    // Roughness restricted to values where the uniform-hemisphere reference converges (same limitation nee_validate.cpp documents for its own tight two-sided check); a sharp low-roughness lobe biases the reference low and would produce false failures.
+PT_CHECK(depth_and_russian_roulette_invariance, Slow, Statistical) {
+    // Roughness restricted to values where the uniform-hemisphere reference converges, the same limitation nee_validate documents.
     const std::array<Case, 4> cases{{
         {"diffuse (metallic 0, rough 1.0)", 1.0F, 0.0F, glm::vec3(0.04F)},
         {"glossy dielectric (rough 0.35)", 0.35F, 0.0F, glm::vec3(0.04F)},
@@ -323,13 +309,13 @@ ENGINE_CHECK(depth_and_russian_roulette_invariance, Slow, Statistical) {
         {"rough conductor (rough 0.25)", 0.25F, 1.0F, glm::vec3(1.0F)},
     }};
 
-    // Depth invariance is exact up to Monte Carlo noise, so it gets the tighter bound. Absolute agreement is looser: the uniform-hemisphere reference converges slowly, and single-scatter GGX legitimately loses energy at high roughness (Heitz et al. 2016), which the renderer reproduces faithfully and the reference does not correct for -- both sides compute the same single-scatter BSDF, so they agree, but only to within the reference's own noise.
+    // Depth invariance is exact up to Monte Carlo noise, so it gets the tighter bound; absolute agreement is looser, its reference noisier.
     constexpr float kDepthInvarianceTolerance = 0.02F;
     constexpr float kReferenceTolerance = 0.06F;
     constexpr int kReferenceSamples = 400000;
 
     const EnvironmentMap env = makeUniformEnvironment();
-    engine::scene::ThreadPool& pool = sharedPool(ctx.threads());
+    pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
     std::mt19937 referenceRng(99);
     bool ok = true;
 
@@ -345,7 +331,7 @@ ENGINE_CHECK(depth_and_russian_roulette_invariance, Slow, Statistical) {
             return;
         }
 
-        // rrStartBounce far above maxBounces disables Russian roulette for the first two renders, so depth invariance is measured without RR's extra variance folded in.
+        // rrStartBounce far above maxBounces disables Russian roulette for the first two renders, so depth invariance sheds that variance.
         const float loDepth0 = renderCentre(
             scene, env, makeSettings(0, 999, testCase.metallic),
             *accel, pool);
@@ -360,7 +346,7 @@ ENGINE_CHECK(depth_and_russian_roulette_invariance, Slow, Statistical) {
         const BsdfParams params{glm::vec3(1.0F),      testCase.metallic, testCase.roughness,
                                  testCase.f0,          glm::vec3(1.0F),   /*ior=*/1.5F,
                                  /*transmissionFactor=*/0.0F, /*diffuseRoughness=*/0.0F,
-                                 engine::scene::eonAlbedoInversion(glm::vec3(1.0F), 0.0F),
+                                 pathtracer::scene::eonAlbedoInversion(glm::vec3(1.0F), 0.0F),
                                  /*transmissionTint=*/glm::vec3(1.0F)};
         const float reference = referenceLo(params, glm::vec3(0.0F, 0.0F, 1.0F), kReferenceSamples,
                                              referenceRng);
@@ -396,12 +382,8 @@ ENGINE_CHECK(depth_and_russian_roulette_invariance, Slow, Statistical) {
     return;
 }
 
-// A white, non-absorbing dielectric slab in a uniform L0=1 environment is invisible: every photon entering the front face leaves somewhere, and the non-symmetric eta^2 radiance compression applied on entering is undone on exiting.
-// This is the only case in the suite that reaches a transmissive exiting vertex, gating the far-side NEE guard against the miss branch's MIS weight: weighting a rough transmission sample at 1.0 (correct only for a delta lobe) while NEE also evaluates the transmission lobe double-counts their overlap.
-// Held to the BSDF-only walk (fixtures::slabWalkLo) rather than to 1.0, so it measures what the integrator adds and nothing else: the BSDF's own energy closure is bsdf_validate's transmissive_slab_walk, and a table error would otherwise read here as an integrator bias.
-// Both sides are replicated over independent scramble seeds and compared as the difference of two estimators (Welch). The whole image is averaged: the slab is infinite and every view within 3.5 degrees of normal, where the walk's normal-incidence value holds to well inside the band.
-// The centre-4x4, single-seed reading this replaced carried ~3% standard error against a hand-set 0.03 tolerance -- what read as "2.7% over" at roughness 1 was that noise, and the unbiased reading was below 1.
-ENGINE_CHECK(transmissive_slab_energy, Slow, Statistical) {
+// A white non-absorbing dielectric slab is invisible under a uniform environment, the only case reaching a transmissive exiting vertex.
+PT_CHECK(transmissive_slab_energy, Slow, Statistical) {
     // Enough depth for internally reflected paths to converge; truncation only ever darkens.
     constexpr int kSlabBounces = 12;
     constexpr float kThickness = 0.5F;
@@ -411,7 +393,7 @@ ENGINE_CHECK(transmissive_slab_energy, Slow, Statistical) {
 
     ctx.plan(static_cast<int>(2 * roughnesses.size()));
     const EnvironmentMap env = makeUniformEnvironment();
-    engine::scene::ThreadPool& pool = sharedPool(ctx.threads());
+    pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
     PathTraceSettings settings = makeSettings(kSlabBounces, 999, /*metallic=*/0.0F, /*transmission=*/1.0F);
     settings.samplesPerPixel = kSamplesPerPixel / tools::stats::kReplicates;
 
@@ -422,14 +404,14 @@ ENGINE_CHECK(transmissive_slab_energy, Slow, Statistical) {
         const std::uint64_t rowSeed = ctx.subSeed(label);
         const TestScene scene = makeSlabScene(roughness, glm::vec3(0.04F), kThickness);
         std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
-        ENGINE_EXPECT(ctx, accel.has_value(), "failed to build the Embree slab scene");
+        PT_EXPECT(ctx, accel.has_value(), "failed to build the Embree slab scene");
         if (!accel.has_value()) {
             continue;
         }
         // The shading params the integrator resolves for this material: white, fully transmissive, the settings' ior.
         const glm::vec3 white(1.0F);
-        const engine::scene::BsdfParams params{white, 0.0F, roughness, glm::vec3(0.04F), white, settings.ior,
-                                                1.0F, 0.0F, engine::scene::eonAlbedoInversion(white, 0.0F), white};
+        const pathtracer::scene::BsdfParams params{white, 0.0F, roughness, glm::vec3(0.04F), white, settings.ior,
+                                                1.0F, 0.0F, pathtracer::scene::eonAlbedoInversion(white, 0.0F), white};
         tools::stats::Welford render;
         tools::stats::Welford walk;
         for (int r = 0; r < tools::stats::kReplicates; ++r) {
@@ -448,21 +430,20 @@ ENGINE_CHECK(transmissive_slab_energy, Slow, Statistical) {
                       "miss double-count the transmission lobe, below means a transmissive vertex loses energy",
                       label, render.mean(), walk.mean(), difference, band.halfWidth());
         std::cout << "  " << detail << '\n';
-        ENGINE_EXPECT(ctx, band.contains(difference), detail);
+        PT_EXPECT(ctx, band.contains(difference), detail);
     }
 }
 
-// The curved counterpart of checkTransmissiveSlab, on the same invariant for the same reason: a white, non-absorbing dielectric under a uniform L0=1 environment is invisible WHATEVER ITS SHAPE, since every photon entering leaves again and the eta^2 radiance compression cancels over the round trip. Only the geometry changes, and the geometry is the whole point -- this is the suite's only case where a transmissive vertex sees non-zero curvature, so it is the only one that can see a bug in transmissionOffsetEpsilon or in shadowTerminatorOffset's projection side (see makeSphereScene).
-// A sphere traps far more light than a slab: past the critical angle every internal hit totally internally reflects, so paths ring around the inside for many bounces. Truncation only ever darkens, which is why the depth is well above the slab's and the band is two-sided.
-ENGINE_CHECK(transmissive_sphere_energy, Slow, Statistical) {
+// The curved counterpart on the same invariant: a sphere traps far more light, internal hits past the critical angle reflecting totally.
+PT_CHECK(transmissive_sphere_energy, Slow, Statistical) {
     // Measured convergence point, not a guess: 32 and 96 bounces are bit-identical to this, and 12 is not.
     constexpr int kSphereBounces = 16;
     constexpr float kTolerance = 0.03F;
-    // 0.02 is below bsdf.cpp's smooth-roughness threshold, so it takes the delta transmission path; the rest take the Walter lobe, where far-side NEE is the estimator that actually lights the far side.
+    // 0.02 is below bsdf.cpp's smooth-roughness threshold and takes the delta path; the rest take the Walter lobe with far-side NEE.
     const std::array<float, 4> roughnesses = {0.02F, 0.2F, 0.4F, 0.7F};
 
     const EnvironmentMap env = makeUniformEnvironment();
-    engine::scene::ThreadPool& pool = sharedPool(ctx.threads());
+    pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
     bool ok = true;
 
     std::cout << "integrator_validate: white non-absorbing glass sphere, uniform L0=1 (1.0 = invisible)\n";
@@ -489,17 +470,7 @@ ENGINE_CHECK(transmissive_sphere_energy, Slow, Statistical) {
         }
     }
 
-    // The same invariant again, now with the dielectric dispersive: a white non-absorbing sphere is
-    // invisible whatever its index, and a wavelength-varying index is still, at each wavelength, an index.
-    // This is what makes it the gate on the one-sample channel estimator (path_tracer.cpp's hero-channel
-    // block). Each channel is an independent estimate of the same 1.0, so a missing or mis-scaled 1/p
-    // reads ~1/3 in every channel, and a hero channel that is re-drawn instead of sticky loses another
-    // factor on each further interface crossing -- neither of which any analytic BSDF test can see, since
-    // the estimator lives in the integrator and not in the BSDF.
-    // Read per channel rather than through renderCentre's max, which would hide a per-channel loss behind
-    // whichever channel happened to read highest.
-    // Real catalogue pairs, and N-BK7 is the material assets/materials/glass.json ships: the suite asserts
-    // the invariant for the glass the renderer actually renders, not for a plausible-looking stand-in.
+    // The same invariant with a dispersive index, gating the one-sample channel estimator; see docs/DERIVATIONS.md "Integrator validation".
     struct DispersiveGlass {
         const char* name;
         float ior;
@@ -539,15 +510,11 @@ ENGINE_CHECK(transmissive_sphere_energy, Slow, Statistical) {
     return;
 }
 
-// Beer-Lambert volumetric absorption -- the newest thing in the pipeline and, until now, the only part of the transmissive path with no coverage at all: both slabs above are white and non-absorbing, so sigmaAFromTransmission and tracePath's medium attenuation were never once evaluated by this suite.
-// Asserts the documented contract rather than restating its formula: transmissionDepth is "the distance at which transmittance reaches transmissionColor" (scene_config.h), so setting transmissionDepth to the actual traversal distance makes the expected reading exactly transmissionColor, with no exp() written in the test at all. Halving transmissionDepth squares it, which is what separates a true exponential from anything linear in distance -- a test at one depth cannot tell the two apart.
-// ior 1.0 is what makes this exact rather than approximate, and it is a physically real configuration (an index-matched pure absorber), not a test-only dodge. The interface neither bends the ray -- so the traversal distance is the slab thickness or the sphere chord, both known in closed form -- nor reflects any of it, since fresnelDielectric is identically zero at eta 1. The delta transmission lobe contributes nothing through NEE either. Absorption is then the only mechanism left that can move the reading off 1.0.
-// Per-channel colour, distinct in every channel: a swapped or luminance-collapsed sigmaA passes a grey test and fails this one.
-ENGINE_CHECK(beer_lambert_absorption, Slow, Statistical) {
+// Beer-Lambert: transmissionDepth is the distance at which transmittance reaches transmissionColor, so that identity is the specification.
+PT_CHECK(beer_lambert_absorption, Slow, Statistical) {
     constexpr int kBounces = 8;
     constexpr float kSlabThickness = 0.5F;
-    // Relative, since the squared row's green channel is 0.0625 and an absolute band would be vacuous there.
-    // The flat rows are exact to 3e-4 relative. The sphere row reads systematically HIGH, from two named biases that both shorten its path and so under-absorb: the offset epsilon backs the origin 1.93e-2 into the medium (see makeSphereScene), and the probed block's outermost ray has an impact parameter of 0.075 rather than 0, a chord of 1.9944 rather than 2.0. Measured 0.89/1.82/0.35% across the three channels, which divided by each channel's own sigma_a give the same 0.025 path deficit -- one shortened path, matching the 0.019+0.006 predicted, and not a per-channel error. Worst row is therefore 1.8% against this band.
+    // Relative, since the squared row's green channel is 0.0625; the sphere row reads high from two path-shortening biases (DERIVATIONS).
     constexpr float kRelativeTolerance = 0.03F;
     const glm::vec3 colour(0.5F, 0.25F, 0.75F);
 
@@ -558,14 +525,7 @@ ENGINE_CHECK(beer_lambert_absorption, Slow, Statistical) {
         glm::vec3 expected;
         float abbe;
     };
-    // The dispersive row is the hero channel crossed with the already-per-channel sigmaA, and it isolates
-    // the channel estimator from the refraction geometry: at ior 1.0 the Cauchy B coefficient is exactly 0
-    // (see bsdf.cpp's cauchyIor), so n(lambda) == 1 at every wavelength and the interface stays exactly
-    // index-matched -- the ray path, the traversal distance and the expected reading are all unchanged --
-    // while the hero-channel selection still fires, since it keys on abbe and transmissionFactor alone.
-    // What it asserts is that the two mechanisms do not interact: the surviving channel is attenuated by
-    // its OWN sigma_a and the two masked-out channels stay exactly zero, so the reading is still the
-    // authored transmissionColor rather than a channel-averaged or channel-swapped version of it.
+    // The dispersive row crosses the hero channel with a per-channel sigmaA, asserting the two do not interact; see docs/DERIVATIONS.md.
     const std::array<AbsorptionCase, 4> cases{{
         {"flat slab, depth == thickness", false, kSlabThickness, colour, 0.0F},
         {"flat slab, depth == half thickness", false, kSlabThickness * 0.5F, colour * colour, 0.0F},
@@ -574,7 +534,7 @@ ENGINE_CHECK(beer_lambert_absorption, Slow, Statistical) {
     }};
 
     const EnvironmentMap env = makeUniformEnvironment();
-    engine::scene::ThreadPool& pool = sharedPool(ctx.threads());
+    pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
     bool ok = true;
 
     std::cout << "integrator_validate: Beer-Lambert absorption through an index-matched medium\n";
@@ -619,14 +579,11 @@ ENGINE_CHECK(beer_lambert_absorption, Slow, Statistical) {
     return;
 }
 
-// The other half of the transmission-tint convention: transmissionDepth == 0 means there is no interior medium at all, and transmissionColor is a constant on-surface tint instead -- OpenPBR, "if zero, acts as a constant (on-surface) transmission tint"; Arnold renders it as a flat filter colour.
-// Complementary to checkBeerLambert above rather than a restatement of it. That one authors a colour at depth > 0 and requires exactly transmissionColor after one traversal, so an on-surface tint leaking into the volumetric regime would read colour^3 there; this one authors depth 0 and requires exactly transmissionColor^2, one factor per interface crossed, entering and exiting.
-// A flat slab and a sphere, whose traversal distances differ by construction: an on-surface tint is a property of the interface, so it must read the SAME square on both, which is exactly what distinguishes it from absorption. checkBeerLambert's sphere row reads systematically high because the offset epsilon shortens its in-medium path; no reading here depends on distance, so that bias cannot appear at all.
-// ior 1.0 for the same reason as checkBeerLambert: an index-matched interface neither bends nor reflects the ray, and the delta transmission lobe contributes nothing through NEE, so the tint is the only mechanism left that can move the reading off 1.0.
-ENGINE_CHECK(on_surface_transmission_tint, Slow, Statistical) {
+// The other half of the convention: transmissionDepth == 0 is a tint applied once per crossing, so distance must not matter at all.
+PT_CHECK(on_surface_transmission_tint, Slow, Statistical) {
     constexpr int kBounces = 8;
     constexpr float kSlabThickness = 0.5F;
-    // Relative, and tight: with no absorption and no refraction there is no distance-dependent bias, so both rows carry only the estimator's own residual -- measured at 3.3e-4 in every channel of both, the same residual checkBeerLambert's flat rows show. 6x headroom on that, not a band wide enough to hide a leaked factor.
+    // Relative and tight: with no absorption and no refraction there is no distance bias, so both rows carry only estimator noise.
     constexpr float kRelativeTolerance = 0.002F;
     const glm::vec3 colour(0.5F, 0.25F, 0.75F);
     const glm::vec3 expected = colour * colour;   // two interfaces crossed, one factor each
@@ -638,7 +595,7 @@ ENGINE_CHECK(on_surface_transmission_tint, Slow, Statistical) {
     const std::array<TintCase, 2> cases{{{"flat slab, depth 0", false}, {"sphere, depth 0", true}}};
 
     const EnvironmentMap env = makeUniformEnvironment();
-    engine::scene::ThreadPool& pool = sharedPool(ctx.threads());
+    pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
     bool ok = true;
 
     std::cout << "integrator_validate: on-surface transmission tint at transmissionDepth 0\n";
@@ -681,12 +638,10 @@ ENGINE_CHECK(on_surface_transmission_tint, Slow, Statistical) {
     return;
 }
 
-// Per-instance material binding, integrator side: nothing asserted that ShadingTriangle::instanceIndex resolves into the RIGHT perInstanceSettings entry. Every other scene in this suite has exactly one instance, so every lookup is index 0 and any mis-indexing is invisible; in a real scene it renders plausibly and silently, which is the whole failure mode.
-// Two coplanar quads, one instance each, identical Materials, distinguished only by a per-instance diffuseColour -- red on the left of x=0, blue on the right. Under a white uniform environment the left block must read red-dominant and the right blue-dominant, and swapping the two vector entries must swap the two readings. The first assertion catches an off-by-one or a constant index; the second catches a reading that happens to come from anywhere other than this vector's order.
-// Probed columns stay 2px clear of the x=0 seam at the image centre, wider than the 1.5px reconstruction filter, so neither block contains a pixel the other instance splatted into.
-ENGINE_CHECK(per_instance_materials, Slow, Statistical) {
+// Per-instance material binding, integrator side: two coplanar quads distinguished only by a per-instance diffuseColour.
+PT_CHECK(per_instance_materials, Slow, Statistical) {
     constexpr float kRoughness = 1.0F;
-    constexpr float kDominance = 4.0F;   // the off-channel is the white specular coat, not zero, so this is a ratio test rather than an equality one
+    constexpr float kDominance = 4.0F;   // the off-channel is the white specular coat, not zero, so this is a ratio test, not an equality
     constexpr float kSwapTolerance = 0.02F;
     const glm::vec3 red(1.0F, 0.0F, 0.0F);
     const glm::vec3 blue(0.0F, 0.0F, 1.0F);
@@ -700,14 +655,14 @@ ENGINE_CHECK(per_instance_materials, Slow, Statistical) {
     }
 
     const EnvironmentMap env = makeUniformEnvironment();
-    engine::scene::ThreadPool& pool = sharedPool(ctx.threads());
+    pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
     const PathTraceSettings base = makeSettings(1, 999, /*metallic=*/0.0F);
 
     const auto render = [&](const glm::vec3& left, const glm::vec3& right) {
         std::vector<PathTraceSettings> perInstance(2, base);
         perInstance[0].diffuseColour = left;
         perInstance[1].diffuseColour = right;
-        const engine::gfx::HdrImage beauty =
+        const pathtracer::gfx::HdrImage beauty =
             renderPassPerInstance(scene, env, base, perInstance, *accel, pool, /*showSky=*/true).beauty;
         return std::pair{regionMean(beauty, 2, 6, 6, 10), regionMean(beauty, 10, 6, 14, 10)};
     };
@@ -731,7 +686,7 @@ ENGINE_CHECK(per_instance_materials, Slow, Statistical) {
                      "perInstanceSettings entry; a swap or a constant index lands here.\n";
         ok = false;
     }
-    // Swapping the vector must swap the picture. Compares each block against the OTHER assignment's opposite block, so it fails if the reading is driven by geometry, by triangle order, or by anything but this vector's order.
+    // Swapping the vector must swap the picture: each block is compared against the other assignment's opposite block.
     if (std::fabs(leftRed.x - rightRed.x) > kSwapTolerance ||
         std::fabs(rightBlue.z - leftBlue.z) > kSwapTolerance) {
         std::cerr << "integrator_validate: FAILED per-instance material binding under swap -- "
@@ -744,22 +699,20 @@ ENGINE_CHECK(per_instance_materials, Slow, Statistical) {
     return;
 }
 
-// Per-instance material binding, resolution side: resolvePerInstanceSettings maps each materialOverrides key (a glTF node NAME) onto the instance of that name, leaving every other instance on the scene-wide material, and refuses the whole scene if a key matches nothing.
-// No validator constructs a scene config, so this entire path was uncovered -- all five exit 0 on a build where it is broken, which is exactly what made a one-character typo in cornell.json render a 41% different image with no diagnostic before the unmatched-key gate landed. The bit-identical render that gated that change cannot see it either: a render only exercises the keys that already match.
-// Compared against loadMaterialConfig's own reading of the same file rather than against literals copied out of it, so editing assets/materials/glass.json cannot silently defeat this. The material files are shipped assets, not fixtures, which is the point: this asserts the binding the real scenes use.
-ENGINE_CHECK(material_binding_resolution, Fast, Exact) {
+// Per-instance material binding, resolution side: resolvePerInstanceSettings maps each materialOverrides glTF node name onto its instance.
+PT_CHECK(material_binding_resolution, Fast, Exact) {
     const std::string assetRoot = ASSET_ROOT_DIR;
-    const std::optional<engine::config::MaterialConfig> glass =
-        engine::config::loadMaterialConfig(assetRoot + "/materials/glass.json");
+    const std::optional<pathtracer::config::MaterialConfig> glass =
+        pathtracer::config::loadMaterialConfig(assetRoot + "/materials/glass.json");
     if (!glass.has_value()) {
         std::cerr << "integrator_validate: FAILED to load materials/glass.json\n";
         finish(ctx, false, "material_binding_resolution failed; see the rows above");
         return;
     }
 
-    // How many of the 13 fields resolvePerInstanceSettings copies currently match the material file. A count rather than a bool so the base settings below can be required to match ZERO of them, which is what makes each individual copy observable. Exact equality is right: this is a copy, not a computation.
+    // How many of the 13 copied fields match the material file; a count, so a coinciding base setting does not read as a success.
     const auto matchingFields = [](const PathTraceSettings& s,
-                                    const engine::config::MaterialConfig& m) {
+                                    const pathtracer::config::MaterialConfig& m) {
         return static_cast<int>(s.bumpStrength == m.bumpStrength) +
                static_cast<int>(s.roughnessMin == m.roughnessMin) +
                static_cast<int>(s.roughnessMax == m.roughnessMax) +
@@ -780,28 +733,26 @@ ENGINE_CHECK(material_binding_resolution, Fast, Exact) {
         MeshInstance{makeMaterial(1.0F, glm::vec3(0.04F)), glm::mat4(1.0F), "alpha"},
         MeshInstance{makeMaterial(1.0F, glm::vec3(0.04F)), glm::mat4(1.0F), "beta"},
         MeshInstance{makeMaterial(1.0F, glm::vec3(0.04F)), glm::mat4(1.0F), "gamma"}};
-    // Sentinel values, deliberately unlike glass.json in EVERY field -- nothing here is rendered, so these need not be plausible, only distinguishable. makeSettings' own defaults would not do: they happen to agree with glass.json on bumpStrength, roughnessMax, diffuseColour, ior, metallicFactor, diffuseRoughness and edgeTint, so a dropped copy of any of those seven would leave the resolved value equal to the base, which equals glass, and pass unnoticed.
+    // Sentinel values, deliberately unlike glass.json in every field: nothing here is rendered, so they need only be distinguishable.
     PathTraceSettings base = makeSettings(1, 999, /*metallic=*/1.0F);
     base.bumpStrength = 0.25F;
     base.roughnessMin = 0.2F;
     base.roughnessMax = 0.9F;
     base.diffuseColour = glm::vec3(0.3F, 0.4F, 0.5F);
     base.ior = 1.33F;
-    // Required, not cosmetic: at the commit that introduced abbe, glass.json did not yet declare one, so it
-    // loaded as the 0.0 default -- which is also makeSettings' value, and the non-vacuity gate below fires.
+    // Required, not cosmetic: glass.json declared no abbe then, so it loaded as the 0.0 default makeSettings also uses.
     base.abbe = 40.0F;
     base.roughnessFactor = 0.75F;
     base.diffuseRoughness = 0.6F;
     base.transmissionColor = glm::vec3(0.5F);
     base.transmissionDepth = 2.0F;
-    // glass.json omits edgeTint, so it loads as the [1,1,1] default -- which is also PathTraceSettings'
-    // own default, so without a sentinel here the two agree and the non-vacuity gate below fires.
+    // glass.json omits edgeTint, loading as the [1,1,1] default PathTraceSettings also uses: without a sentinel the non-vacuity gate fires.
     base.edgeTint = glm::vec3(0.4F, 0.5F, 0.6F);
 
     bool ok = true;
     std::cout << "integrator_validate: materialOverrides resolution (3 instances, 1 overridden)\n";
 
-    // Non-vacuity, and the assumption every assertion below rests on: the base must differ from the override in all 12 fields, so that each field's copy is independently observable. A field they happened to share would be untestable here whatever resolvePerInstanceSettings did with it.
+    // Non-vacuity: the base must differ from the override in all 12 fields, so each field's copy is independently observable.
     if (matchingFields(base, *glass) != 0) {
         std::cerr << "integrator_validate: FAILED material binding setup -- the base settings already "
                      "agree with glass.json on " << matchingFields(base, *glass)
@@ -812,7 +763,7 @@ ENGINE_CHECK(material_binding_resolution, Fast, Exact) {
     }
 
     const std::optional<std::vector<PathTraceSettings>> resolved =
-        engine::scene::resolvePerInstanceSettings(base, instances,
+        pathtracer::scene::resolvePerInstanceSettings(base, instances,
                                                    {{"beta", "materials/glass.json"}}, assetRoot);
     if (!resolved.has_value() || resolved->size() != instances.size()) {
         std::cerr << "integrator_validate: FAILED material binding -- a valid override was rejected, "
@@ -832,7 +783,7 @@ ENGINE_CHECK(material_binding_resolution, Fast, Exact) {
                      "not merely the ones a render happens to look at.\n";
         ok = false;
     }
-    // Zero, not "not all": the base differs from glass in every field, so any field matching glass here is one the override wrote onto an instance it does not name.
+    // Zero, not "not all": the base differs from glass everywhere, so a match is a field written onto an instance the override omits.
     if (matchingFields((*resolved)[0], *glass) != 0 || matchingFields((*resolved)[2], *glass) != 0) {
         std::cerr << "integrator_validate: FAILED material binding -- an override keyed on 'beta' "
                      "leaked onto an instance not named by it; instances 0 and 2 matched "
@@ -842,10 +793,10 @@ ENGINE_CHECK(material_binding_resolution, Fast, Exact) {
         ok = false;
     }
 
-    // Both rejection paths. A scene that silently renders the wrong material is worse than one that refuses to start, which is the contract resolvePerInstanceSettings documents.
+    // Both rejection paths: a scene that silently renders the wrong material is worse than one that refuses to start.
     std::cout << "  the two stderr diagnostics below are expected: they are the function under test "
                  "refusing a bad scene\n";
-    if (engine::scene::resolvePerInstanceSettings(base, instances,
+    if (pathtracer::scene::resolvePerInstanceSettings(base, instances,
                                                    {{"delta", "materials/glass.json"}}, assetRoot)
             .has_value()) {
         std::cerr << "integrator_validate: FAILED material binding -- an override key matching no "
@@ -853,7 +804,7 @@ ENGINE_CHECK(material_binding_resolution, Fast, Exact) {
                      "silently with the wrong material.\n";
         ok = false;
     }
-    if (engine::scene::resolvePerInstanceSettings(base, instances,
+    if (pathtracer::scene::resolvePerInstanceSettings(base, instances,
                                                    {{"beta", "materials/does_not_exist.json"}},
                                                    assetRoot)
             .has_value()) {
@@ -865,11 +816,9 @@ ENGINE_CHECK(material_binding_resolution, Fast, Exact) {
     return;
 }
 
-// The five transport buckets are a partition of beauty, not a set of related-looking images: with the background term zeroed (showSky off), DirectDiffuse + IndirectDiffuse + DirectSpecular + IndirectSpecular + Refraction must equal Beauty at every pixel, to float error.
-// Every radiance contribution tracePath adds is written to exactly one bucket at its own physical value, so any gap means a contribution was bucketed twice, dropped, or rescaled, exactly what the previous delighted buckets did by construction (they stripped baseColor at bounce 0 only, leaving direct and indirect in different units and neither summing to anything).
-// The slab rows carry the load: a single quad reaches only the Direct buckets, while the slab's internal reflections populate Indirect and Refraction and exercise the transmissive exiting vertex.
-ENGINE_CHECK(transport_aov_partition, Slow, Exact) {
-    // Relative to beauty, since the absolute scale differs by case; float error over kSamplesPerPixel accumulations of ~1e-3 each is orders of magnitude below this.
+// The five transport buckets are a partition of beauty, not related-looking images: their sum must equal Beauty at every pixel.
+PT_CHECK(transport_aov_partition, Slow, Exact) {
+    // Relative to beauty, since the absolute scale differs by case; float error over kSamplesPerPixel accumulations sits orders below this.
     constexpr float kTolerance = 1e-4F;
 
     enum class Geometry { Quad, Corner, Slab };
@@ -882,11 +831,7 @@ ENGINE_CHECK(transport_aov_partition, Slow, Exact) {
         int maxBounces;
         float abbe;
     };
-    // The dispersive row exists because the hero channel is the one mechanism that writes a DIFFERENT
-    // value into different channels of the same throughput -- it zeroes two of them. The partition is a
-    // per-channel identity, so a mask applied to beauty but not to the bucket accumulators (or vice versa)
-    // breaks it in exactly the two zeroed channels, which is invisible to every furnace in the suite:
-    // a furnace measures the total that arrives, and this asks where it was filed.
+    // The dispersive row is here because the hero channel is the one mechanism writing different values into channels of one throughput.
     const std::array<PartitionCase, 7> cases{{
         {"quad diffuse (rough 1.0)", Geometry::Quad, 1.0F, 0.0F, 0.0F, 1, 0.0F},
         {"quad glossy dielectric (rough 0.35)", Geometry::Quad, 0.35F, 0.0F, 0.0F, 1, 0.0F},
@@ -898,7 +843,7 @@ ENGINE_CHECK(transport_aov_partition, Slow, Exact) {
     }};
 
     const EnvironmentMap env = makeUniformEnvironment();
-    engine::scene::ThreadPool& pool = sharedPool(ctx.threads());
+    pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
     bool ok = true;
 
     std::cout << "integrator_validate: transport buckets partition beauty (showSky off)\n";
@@ -918,7 +863,7 @@ ENGINE_CHECK(transport_aov_partition, Slow, Exact) {
         PathTraceSettings settings =
             makeSettings(testCase.maxBounces, 999, testCase.metallic, testCase.transmission);
         settings.abbe = testCase.abbe;
-        const engine::scene::PathTraceResult result =
+        const pathtracer::scene::PathTraceResult result =
             renderPass(scene, env, settings, *accel, pool, /*showSky=*/false);
 
         float worstGap = 0.0F;
@@ -945,7 +890,7 @@ ENGINE_CHECK(transport_aov_partition, Slow, Exact) {
             std::cout << ' ';
         }
         std::cout << "worst relative gap " << worstGap << "   max indirect " << maxIndirect << '\n';
-        // A flat quad's continuation ray always escapes at bounce 1 (Direct) and the slab's every multi-vertex path is transmission-sticky (Refraction), so without the corner the two Indirect buckets are identically zero in every case and the identity guards nothing about them.
+        // Without the corner a flat quad escapes at bounce 1 and the slab's paths stay transmission-sticky, so both Indirect buckets are 0.
         if (testCase.geometry == Geometry::Corner && maxIndirect <= 0.0F) {
             std::cerr << "integrator_validate: FAILED transport partition coverage -- the corner scene "
                          "produced no Indirect bucket energy, so the identity below is not testing "
@@ -966,12 +911,8 @@ ENGINE_CHECK(transport_aov_partition, Slow, Exact) {
     return;
 }
 
-// Appends a QuadLight's own two emitting triangles to a TestScene, mirroring gltf_loader.cpp's
-// appendQuadLights (this file builds every scene by hand rather than through the real loader -- see
-// this file's own header comment on why no GL/cgltf context is needed here) so these checks exercise
-// the same shadow-ray self-occlusion regime (path_tracer.cpp's kShadowDistanceEpsilon) a real scene
-// does. instanceLightIndex must already be sized scene.instances.size(); quadIndex is this light's own position in the LightSet's quad vector, so a multi-light scene indexes the right emitter rather than always the first.
-void appendLightGeometry(TestScene& scene, const engine::scene::QuadLight& light, int quadIndex,
+// Appends a QuadLight's two emitting triangles as appendQuadLights does, so these checks meet a real scene's self-occlusion regime.
+void appendLightGeometry(TestScene& scene, const pathtracer::scene::QuadLight& light, int quadIndex,
                           std::vector<int>& instanceLightIndex) {
     const glm::vec3& normal = light.normal;
     const glm::vec4 tangent(glm::normalize(light.edge0), 1.0F);
@@ -992,22 +933,20 @@ void appendLightGeometry(TestScene& scene, const engine::scene::QuadLight& light
     instanceLightIndex.push_back(quadIndex);
 }
 
-// Like renderPassPerInstance, but for scenes carrying real light-set state: an explicit environment
-// pointer (nullptr to disable it entirely) and emitter instances/quads, rather than the always-env,
-// never-emitter defaults every check above this point uses.
-engine::scene::PathTraceResult renderPassWithLights(const TestScene& scene,
+// Like renderPassPerInstance, but for scenes carrying real light-set state: an explicit environment pointer and emitter instances/quads.
+pathtracer::scene::PathTraceResult renderPassWithLights(const TestScene& scene,
                                                      const std::vector<int>& instanceLightIndex,
-                                                     const std::vector<engine::scene::QuadLight>& quads,
+                                                     const std::vector<pathtracer::scene::QuadLight>& quads,
                                                      const EnvironmentMap* env,
                                                      const PathTraceSettings& settings,
-                                                     EmbreeAccel& accel, engine::scene::ThreadPool& pool,
+                                                     EmbreeAccel& accel, pathtracer::scene::ThreadPool& pool,
                                                      bool showSky) {
     const std::atomic<std::uint64_t> generation{1};
-    engine::scene::PathTraceResult result = engine::scene::makePathTraceResult(kImageSize, kImageSize);
-    const engine::scene::LightSet lights(env, /*envRotationRadians=*/0.0F, /*envExposure=*/1.0F, quads);
+    pathtracer::scene::PathTraceResult result = pathtracer::scene::makePathTraceResult(kImageSize, kImageSize);
+    const pathtracer::scene::LightSet lights(env, /*envRotationRadians=*/0.0F, /*envExposure=*/1.0F, quads);
     const std::vector<PathTraceSettings> perInstanceSettings(scene.instances.size(), settings);
-    engine::debug::PassStats stats;  // required by renderPathTraced; this tool checks radiance, not throughput
-    engine::scene::renderPathTraced(makeCamera(), accel, scene.shadingTriangles, scene.instances,
+    pathtracer::debug::PassStats stats;  // required by renderPathTraced; this tool checks radiance, not throughput
+    pathtracer::scene::renderPathTraced(makeCamera(), accel, scene.shadingTriangles, scene.instances,
                                      instanceLightIndex, lights, kImageSize, kImageSize, showSky,
                                      settings, perInstanceSettings, /*scrambleSeed=*/7U, /*sampleBase=*/0,
                                      /*sampleCount=*/settings.samplesPerPixel, generation,
@@ -1015,24 +954,20 @@ engine::scene::PathTraceResult renderPassWithLights(const TestScene& scene,
     return result;
 }
 
-// The rough transmission lobe's half of the transmissionDepth 0 convention, which on_surface_transmission_tint above cannot reach: it authors roughness 0.02 on both its scenes (alpha 4e-4, below bsdf.cpp's kSmoothAlpha), so every reading there comes from sampleBsdf's delta branch. Measured, not assumed: tinting only that branch and reverting evaluateTransmissionLobe and transmitMultiScatter fails bsdf_validate 54 times and leaves this binary entirely green.
-// ior 1.5 -- makeSettings' own, which is why this row does not override it, unlike every other transmissive check here -- and not the 1.0 the delta rows force. At ior 1 the transmission lobe IS the delta branch at every roughness (bsdf.cpp's transmissionIsRough, PBRT-v4's eta == 1 || EffectivelySmooth()), so an index-matched rough row would re-measure the path already covered above rather than the Walter lobe.
-// That costs the closed form -- colour^2 holds only where every path crosses exactly two interfaces -- so the scene supplies the invariant instead of an oracle. ONE interface, not a slab: a rough slab at ior 1.5 internally reflects, giving paths 2, 4, 6 ... crossings and a polynomial in the tint rather than a line. Black environment, one one-sided light behind that interface: a reflected path then sees nothing at all, so there is no untinted term anywhere in the reading and every photon in it crossed exactly once.
-// Lo is therefore exactly linear in transmissionColor through the origin, and Exact rather than Statistical: computeLobeProbabilities never reads transmissionTint and Russian roulette is off, so the three renders of a row draw the identical sampler sequence and select the identical lobe at every vertex. Each path's contribution carries the tint exactly once, so the relation holds path by path, noise and all, and the only residual is float multiplication not distributing over the accumulation sum.
-// The zero row is what makes the linearity worth asserting: linearity alone cannot distinguish transmitted energy that is never tinted from reflected energy, since both are constant in the tint. Here both are zero.
-ENGINE_CHECK(rough_transmission_tint, Slow, Exact) {
+// The rough lobe's half of the transmissionDepth 0 convention: Lo is exactly linear in transmissionColor; see docs/DERIVATIONS.md.
+PT_CHECK(rough_transmission_tint, Slow, Exact) {
     constexpr int kBounces = 4;
-    // Numerical, not physical: the paths are identical across the three renders, so the only slack is that fl(t*x) summed over a pass is not fl(t * sum(x)). Measured worst 1.37e-06 relative over both rows, and identical at 1, 2, 4 and 8 threads -- the accumulation order is fixed, so this is float non-distributivity and not a reduction-order race. 7x headroom on that; the faults it exists for are percent-scale (see the mutation rows in CHANGELOG), so there is no tension between this being tight and being stable.
+    // Numerical, not physical: the paths are identical, so the only slack is fl(t*x) summed vs fl(t * sum(x)); measured worst 1.37e-06.
     constexpr float kUlpBand = 1e-5F;
     const glm::vec3 tint(0.5F, 0.25F, 0.75F);
-    // Both far-hemisphere strategies, at the two ends of their split: at ior 1.5 and mu 0.8 msTransmit carries 2.6e-5 of the selection mass at roughness 0.15, where single-scatter refraction dominates, and 0.0263 at 0.6, where the multiple-scattering lobe is drawn in earnest.
+    // Both far-hemisphere strategies at their split's ends: msTransmit takes 2.6e-5 of the selection mass at roughness 0.15, 0.0263 at 0.6.
     const std::array<float, 2> roughnesses = {0.15F, 0.6F};
-    // Behind the interface, emitting face (cross(edge0, edge1) = +Z) pointing back at it, so the only way to the camera is through. Centred on the camera column, unlike makeOverheadLight below: the transmissive quad sits between the two, so the camera never reaches this light's face directly.
-    const engine::scene::QuadLight light{glm::vec3(-0.5F, -0.5F, -1.5F), glm::vec3(1.0F, 0.0F, 0.0F),
+    // Behind the interface, emitting face pointing back at it, so the only way to the camera is through; the quad hides it from the camera.
+    const pathtracer::scene::QuadLight light{glm::vec3(-0.5F, -0.5F, -1.5F), glm::vec3(1.0F, 0.0F, 0.0F),
                                           glm::vec3(0.0F, 1.0F, 0.0F), glm::vec3(3.0F)};
-    const std::vector<engine::scene::QuadLight> quads{light};
+    const std::vector<pathtracer::scene::QuadLight> quads{light};
 
-    engine::scene::ThreadPool& pool = sharedPool(ctx.threads());
+    pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
     bool ok = true;
     float worstRelative = 0.0F;
 
@@ -1061,13 +996,13 @@ ENGINE_CHECK(rough_transmission_tint, Slow, Exact) {
         const glm::vec3 white = render(glm::vec3(1.0F));
         const glm::vec3 tinted = render(tint);
 
-        // Raw triples rather than the tinted/expected ratio the other tint rows print: the ratio's denominator is the very quantity the guard below allows to be zero, so printing it here would put a nan on the one row a reader most needs to read. The quantitative statement is the worst relative departure, reported once at the end.
+        // Raw triples rather than a ratio: the ratio's denominator is what the guard below allows to be zero, so it would print nan.
         std::cout << "  roughness " << roughness << "   Lo(1) [" << white.x << ", " << white.y << ", "
                   << white.z << "]   Lo(tint) [" << tinted.x << ", " << tinted.y << ", " << tinted.z
                   << "]   Lo(0) [" << opaqueTint.x << ", " << opaqueTint.y << ", " << opaqueTint.z
                   << "]\n";
         for (int c = 0; c < 3; ++c) {
-            // Anti-vacuity, per channel: with a black environment and a one-sided light behind the surface, a change that stopped the interface transmitting would send every row to 0 and satisfy both assertions below by vacuum.
+            // Anti-vacuity, per channel: a change that stopped the interface transmitting would send every row to 0 and satisfy both.
             if (!(white[c] > 0.0F)) {
                 std::cerr << "integrator_validate: FAILED rough transmission tint at roughness="
                           << roughness << " channel " << c
@@ -1103,26 +1038,14 @@ ENGINE_CHECK(rough_transmission_tint, Slow, Exact) {
     return;
 }
 
-// A material with EXACTLY zero specular reflectance at every angle, not merely a small one: ior=1.0
-// makes fresnelDielectric identically zero (the same device checkBeerLambert/checkOnSurfaceTransmissionTint
-// use above for an unbent, unreflected ray), metallicFactor=0 and transmissionFactor=0 keep only the
-// diffuse lobe live, and diffuseRoughness=0 is EON's own documented Lambertian limit. What survives is
-// f(wo,wi) = baseColor/pi exactly, constant in direction -- the one BRDF shape Lambert's polygon
-// irradiance formula below can be compared against in closed form, since it integrates Le*cos alone
-// and has no way to fold in an angle-dependent BSDF term.
+// Exactly zero specular at every angle: ior=1 zeroes fresnelDielectric, diffuseRoughness=0 is EON's Lambertian limit, so f = baseColor/pi.
 PathTraceSettings makeLambertianSettings(int maxBounces) {
     PathTraceSettings settings = makeSettings(maxBounces, 999, /*metallic=*/0.0F, /*transmission=*/0.0F);
     settings.ior = 1.0F;
     return settings;
 }
 
-// Lambert's formula (1760) / Baum, Rushmeier & Winget 1989's closed-form polygon form factor: the
-// irradiance a uniform-radiance L planar convex polygon light produces at a Lambertian receiver point
-// p with normal n. Genuinely independent of light.cpp's spherical-rectangle solid-angle formula
-// (Girard's theorem on the polygon's INTERNAL vertex angles, for importance-sampling density) -- this
-// instead sums, over the polygon's EDGES, the great-circle angle each edge subtends as seen from p,
-// weighted by how much that edge's rotation axis aligns with the receiver normal: the PROJECTED solid
-// angle directly, which is exactly what a Lambertian receiver integrates (E = L * projected solid angle).
+// Lambert (1760) / Baum, Rushmeier & Winget 1989 polygon form factor, summing over EDGES rather than Girard's internal angles.
 float lambertPolygonIrradiance(const std::array<glm::vec3, 4>& vertices, const glm::vec3& p,
                                 const glm::vec3& n, float radiance) {
     float sum = 0.0F;
@@ -1130,10 +1053,7 @@ float lambertPolygonIrradiance(const std::array<glm::vec3, 4>& vertices, const g
         const glm::vec3 r0 = glm::normalize(vertices[i] - p);
         const glm::vec3 r1 = glm::normalize(vertices[(i + 1) % vertices.size()] - p);
         const float gamma = std::acos(glm::clamp(glm::dot(r0, r1), -1.0F, 1.0F));
-        // cross(r1, r0), not (r0, r1): the sign convention that makes this sum positive when `n`
-        // points toward the polygon depends on the traversal direction, fixed empirically against the
-        // renderer (which independently gets the physically-correct sign from quadRadianceToward's own
-        // front-face test) and matching Baum/Rushmeier/Winget's own vertex ordering convention.
+        // cross(r1, r0), not (r0, r1): the sign convention matching Baum/Rushmeier/Winget's vertex ordering, fixed against the renderer.
         const glm::vec3 axis = glm::cross(r1, r0);
         const float axisLen = glm::length(axis);
         if (axisLen > 1e-8F) {
@@ -1143,55 +1063,32 @@ float lambertPolygonIrradiance(const std::array<glm::vec3, 4>& vertices, const g
     return radiance * 0.5F * sum;
 }
 
-// The receiver: makeQuadScene's own z=0 quad facing +Z (camera at (0,0,5) looking down -Z, so the
-// centre pixel's wo is exactly the surface normal, as every other check in this file relies on) --
-// reused rather than re-declared so this and every analytic reference below describe the same surface.
+// The receiver: makeQuadScene's own z=0 quad facing +Z, reused so every analytic reference below describes the same surface.
 TestScene makeLambertianFloor() { return makeQuadScene(/*roughness=*/1.0F, glm::vec3(0.0F)); }
 
-// A one-sided quad light near the receiver, facing -Z back down toward it: cross(edge0, edge1) is
-// exactly (0, 0, -1). Offset in x (NOT centred at x=0 above the receiver): the camera sits at
-// (0,0,5) looking straight down the x=0,y=0 column, so a light straddling that column would put its
-// own (non-emitting, one-sided) back face directly in the camera's primary ray, reading black for a
-// reason unrelated to anything this check exercises. Offsetting clears the camera's narrow view cone
-// (radius ~0.2 at this depth) while staying close enough for a strong, easily-measured irradiance.
-engine::scene::QuadLight makeOverheadLight(bool twoSided = false) {
-    return engine::scene::QuadLight{glm::vec3(0.5F, -0.5F, 1.5F), glm::vec3(0.0F, 1.0F, 0.0F),
+// A one-sided quad light facing -Z at the receiver, offset in x so its non-emitting back face stays out of the camera's view cone.
+pathtracer::scene::QuadLight makeOverheadLight(bool twoSided = false) {
+    return pathtracer::scene::QuadLight{glm::vec3(0.5F, -0.5F, 1.5F), glm::vec3(0.0F, 1.0F, 0.0F),
                                      glm::vec3(1.0F, 0.0F, 0.0F), glm::vec3(3.0F), twoSided};
 }
 
-// checkQuadLightIrradiance: the receiver's centre-pixel Lo must equal (baseColor/pi) * E exactly, E
-// Lambert's closed-form polygon irradiance above -- no Monte Carlo anywhere in the reference. Several
-// light positions/sizes, since a single on-axis case cannot distinguish a mis-scaled solid angle from
-// a mis-scaled radiance (the same reasoning nee_validate.cpp's checkQuadLightSolidAngle documents for
-// why it checks more than one direction).
-// checkQuadLightOneSided: the SAME light position, edge0/edge1 swapped so the emitting face points UP
-// away from the receiver instead of down toward it -- the receiver still has geometric line of sight
-// (nearSide is true, NEE still fires), so this isolates quadRadianceToward's own front/back-face test
-// from the pre-existing near/far-side gating a light merely behind opaque geometry would exercise
-// instead. Must read exactly 0.
-// checkQuadLightOcclusion: the original (front-face-down) light, an opaque wall inserted between it
-// and the receiver -- must also read exactly 0. Paired with the irradiance check above, this brackets
-// kShadowDistanceEpsilon from both sides: too small and the light's own front face self-occludes
-// (irradiance check would read 0 when it should not), absent and this check's blocker stops working
-// (would read the unoccluded illuminance instead of 0). The wall is sized to the light's own footprint
-// as seen from the receiver, offset the same way as the light to keep clear of the camera's own ray.
-ENGINE_CHECK(quad_light_irradiance_and_occlusion, Slow, Statistical) {
+// Irradiance against the closed form, a one-sided face reading 0 and an occluded light 0; see docs/DERIVATIONS.md "Integrator validation".
+PT_CHECK(quad_light_irradiance_and_occlusion, Slow, Statistical) {
     constexpr float kTolerance = 0.02F;  // Monte Carlo NEE noise at kSamplesPerPixel, not a formula slop
-    engine::scene::ThreadPool& pool = sharedPool(ctx.threads());
+    pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
     bool ok = true;
 
     struct LightCase {
         const char* name;
-        engine::scene::QuadLight light;
+        pathtracer::scene::QuadLight light;
     };
     const std::array<LightCase, 3> cases{{
         {"close, off to one side, unit quad", makeOverheadLight()},
         {"off-axis, unit quad",
-         engine::scene::QuadLight{glm::vec3(0.3F, 0.2F, 3.0F), glm::vec3(0.0F, 0.8F, 0.0F),
+         pathtracer::scene::QuadLight{glm::vec3(0.3F, 0.2F, 3.0F), glm::vec3(0.0F, 0.8F, 0.0F),
                                    glm::vec3(0.8F, 0.0F, 0.0F), glm::vec3(5.0F), false}},
-        // Offset in x for the same camera-sightline reason as makeOverheadLight -- large enough that
-        // its NEAR edge (x=0.5) still clears the camera's view cone at this depth (~0.23 radius).
-        {"large, grazing", engine::scene::QuadLight{glm::vec3(0.5F, -3.0F, 1.2F),
+        // Offset in x for the same camera-sightline reason, far enough that its near edge (x=0.5) clears the view cone at this depth.
+        {"large, grazing", pathtracer::scene::QuadLight{glm::vec3(0.5F, -3.0F, 1.2F),
                                                       glm::vec3(0.0F, 6.0F, 0.0F),
                                                       glm::vec3(6.0F, 0.0F, 0.0F), glm::vec3(2.0F), false}},
     }};
@@ -1207,7 +1104,7 @@ ENGINE_CHECK(quad_light_irradiance_and_occlusion, Slow, Statistical) {
             finish(ctx, false, "quad_light_irradiance_and_occlusion failed; see the rows above");
             return;
         }
-        const std::vector<engine::scene::QuadLight> quads{testCase.light};
+        const std::vector<pathtracer::scene::QuadLight> quads{testCase.light};
         const glm::vec3 lo = centreMean(renderPassWithLights(scene, instanceLightIndex, quads,
                                                               /*env=*/nullptr,
                                                               makeLambertianSettings(0), *accel, pool,
@@ -1232,17 +1129,11 @@ ENGINE_CHECK(quad_light_irradiance_and_occlusion, Slow, Statistical) {
         }
     }
 
-    // One-sided: the SAME position/size/distance as makeOverheadLight, but edge0/edge1 swapped so
-    // cross(edge0,edge1) is (0,0,+1) -- the emitting face now points UP, away from the receiver. The
-    // receiver still has full geometric line of sight (nearSide is true, NEE still fires and evaluates
-    // the BSDF/occlusion exactly as the irradiance case does) -- only quadRadianceToward's own
-    // front/back-face test stands between this and a nonzero reading, unlike a light merely placed
-    // behind opaque geometry (which the pre-existing near/far-side gating would zero out on its own,
-    // testing nothing new). Must read exactly 0.
+    // The same position with edge0/edge1 swapped, so only quadRadianceToward's front/back-face test stands between this and nonzero.
     {
         TestScene scene = makeLambertianFloor();
         std::vector<int> instanceLightIndex(scene.instances.size(), -1);
-        const engine::scene::QuadLight light{glm::vec3(0.5F, -0.5F, 1.5F), glm::vec3(1.0F, 0.0F, 0.0F),
+        const pathtracer::scene::QuadLight light{glm::vec3(0.5F, -0.5F, 1.5F), glm::vec3(1.0F, 0.0F, 0.0F),
                                               glm::vec3(0.0F, 1.0F, 0.0F), glm::vec3(3.0F), false};
         appendLightGeometry(scene, light, /*quadIndex=*/0, instanceLightIndex);
         std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
@@ -1251,7 +1142,7 @@ ENGINE_CHECK(quad_light_irradiance_and_occlusion, Slow, Statistical) {
             finish(ctx, false, "quad_light_irradiance_and_occlusion failed; see the rows above");
             return;
         }
-        const std::vector<engine::scene::QuadLight> quads{light};
+        const std::vector<pathtracer::scene::QuadLight> quads{light};
         const glm::vec3 lo = centreMean(renderPassWithLights(scene, instanceLightIndex, quads,
                                                               /*env=*/nullptr, makeLambertianSettings(0),
                                                               *accel, pool, /*showSky=*/false)
@@ -1266,16 +1157,11 @@ ENGINE_CHECK(quad_light_irradiance_and_occlusion, Slow, Statistical) {
         }
     }
 
-    // Occlusion: the "close, off to one side" light from the first case, plus an opaque wall between
-    // it and the receiver -- must also read exactly 0. The wall is sized/positioned to the light's own
-    // footprint as projected from the receiver (light spans x[0.5,1.5] y[-0.5,0.5] at z=1.5; at the
-    // wall's z=1.0 that projects, by similar triangles, to x[0.333,1.0] y[-0.333,0.333] -- the wall
-    // below is oversized around that with margin) rather than kQuadExtent, which would also swallow
-    // the camera's own x=0,y=0 sightline and read the wall's lit topside instead of testing occlusion.
+    // The first case's light plus a wall sized to its projected footprint, not kQuadExtent, which would swallow the camera sightline.
     {
         TestScene scene = makeLambertianFloor();
         std::vector<int> instanceLightIndex(scene.instances.size(), -1);
-        const engine::scene::QuadLight light = makeOverheadLight();
+        const pathtracer::scene::QuadLight light = makeOverheadLight();
         appendLightGeometry(scene, light, /*quadIndex=*/0, instanceLightIndex);
 
         const glm::vec3 wallNormal(0.0F, 0.0F, 1.0F);
@@ -1302,7 +1188,7 @@ ENGINE_CHECK(quad_light_irradiance_and_occlusion, Slow, Statistical) {
             finish(ctx, false, "quad_light_irradiance_and_occlusion failed; see the rows above");
             return;
         }
-        const std::vector<engine::scene::QuadLight> quads{light};
+        const std::vector<pathtracer::scene::QuadLight> quads{light};
         const glm::vec3 lo = centreMean(renderPassWithLights(scene, instanceLightIndex, quads,
                                                               /*env=*/nullptr, makeLambertianSettings(0),
                                                               *accel, pool, /*showSky=*/false)
@@ -1322,43 +1208,28 @@ ENGINE_CHECK(quad_light_irradiance_and_occlusion, Slow, Statistical) {
     return;
 }
 
-// checkQuadLightInverseSquare: quadratic falloff is IMPLICIT in this renderer -- NEE divides by
-// pdf = selectionPdf/solidAngle (path_tracer.cpp), so the light's subtended solid angle enters as a
-// multiplier and shrinks as A*cos(theta_l)/d^2 with distance. There is deliberately no explicit 1/d^2
-// term anywhere: that is needed only under uniform-AREA sampling, where the geometry term
-// G = cos(theta_r)*cos(theta_l)/d^2 converts the measure. Nothing asserted the limit, so this does.
-// The statement tested is the inverse-square law itself, in the form that isolates it: for a small
-// light, E * d^2 / (L * A * cos(theta_r) * cos(theta_l)) -> 1 as d grows. Measured off the RENDERED
-// irradiance (Lo * pi, the receiver being the exact-Lambertian floor the check above establishes), so
-// it constrains the renderer rather than the reference.
-// The near-field row is the conditioning guard, not decoration: a large light close up must deviate
-// from the point-source model by a wide margin, and the renderer must follow the exact Lambert polygon
-// form there rather than the point model. Without it, a renderer that had hardcoded a 1/d^2 point light
-// would pass the far-field rows while being wrong everywhere a real area light differs from a point.
-ENGINE_CHECK(quad_light_inverse_square, Slow, Statistical) {
+// Quadratic falloff is implicit: NEE divides by selectionPdf/solidAngle, and nothing asserted the point-source limit until this.
+PT_CHECK(quad_light_inverse_square, Slow, Statistical) {
     constexpr float kTolerance = 0.02F;  // same Monte Carlo NEE noise band as checkQuadLightIrradiance above, at the same kSamplesPerPixel
-    // The far row must reach the point-source limit; 1e-2 is comfortably above the MC noise on the ratio and far below the near-field deviation the guard below demands, so the two cannot be confused.
+    // The far row must reach the point-source limit; 1e-2 sits above the MC noise and far below the near-field deviation demanded below.
     constexpr float kPointLimitTolerance = 1e-2F;
     constexpr float kMinNearFieldDeviation = 0.25F;
-    engine::scene::ThreadPool& pool = sharedPool(ctx.threads());
+    pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
     bool ok = true;
 
-    // Small square light facing -Z at the receiver, offset in x to clear the camera's own view cone for
-    // the same reason makeOverheadLight is (a one-sided light straddling the x=0,y=0 column shows the
-    // camera its non-emitting back face). Offset is held FIXED across the sweep, so the true probe-to-
-    // light distance is sqrt(kOffsetX^2 + z^2) rather than z, and is computed as such below.
+    // Small square light offset in x to clear the view cone, held FIXED across the sweep, so the true distance is sqrt(kOffsetX^2 + z^2).
     constexpr float kOffsetX = 0.5F;
     constexpr float kSide = 0.2F;
     constexpr float kRadiance = 4.0F;
     const auto makeLight = [](float centreX, float z, float side, float radiance) {
-        return engine::scene::QuadLight{glm::vec3(centreX - (side * 0.5F), -side * 0.5F, z),
+        return pathtracer::scene::QuadLight{glm::vec3(centreX - (side * 0.5F), -side * 0.5F, z),
                                          glm::vec3(0.0F, side, 0.0F), glm::vec3(side, 0.0F, 0.0F),
                                          glm::vec3(radiance), false};
     };
 
     struct Row {
         const char* name;
-        engine::scene::QuadLight light;
+        pathtracer::scene::QuadLight light;
         bool farField;  // true: must reach the point-source limit. false: the near-field conditioning guard.
     };
     const std::array<Row, 5> rows{{
@@ -1366,8 +1237,7 @@ ENGINE_CHECK(quad_light_inverse_square, Slow, Statistical) {
         {"z=1.0  small", makeLight(kOffsetX, 1.0F, kSide, kRadiance), false},
         {"z=2.0  small", makeLight(kOffsetX, 2.0F, kSide, kRadiance), true},
         {"z=4.0  small", makeLight(kOffsetX, 4.0F, kSide, kRadiance), true},
-        // Near field: a light 30x wider than the small one at half the nearest distance. Its solid angle
-        // approaches the receiver's whole hemisphere, where irradiance flattens instead of following 1/d^2.
+        // Near field: a light 30x wider at half the nearest distance, subtending nearly the whole hemisphere, where irradiance flattens.
         {"z=0.5  large (near field)", makeLight(3.5F, 0.5F, 6.0F, 1.0F), false},
     }};
 
@@ -1384,7 +1254,7 @@ ENGINE_CHECK(quad_light_inverse_square, Slow, Statistical) {
             finish(ctx, false, "quad_light_inverse_square failed; see the rows above");
             return;
         }
-        const std::vector<engine::scene::QuadLight> quads{row.light};
+        const std::vector<pathtracer::scene::QuadLight> quads{row.light};
         const glm::vec3 lo = centreMean(renderPassWithLights(scene, instanceLightIndex, quads,
                                                               /*env=*/nullptr,
                                                               makeLambertianSettings(0), *accel, pool,
@@ -1448,15 +1318,14 @@ ENGINE_CHECK(quad_light_inverse_square, Slow, Statistical) {
 
 // --- Ray-traced ambient occlusion (path_tracer.cpp's AO lane) ---------------------------------------
 
-// Wall distance for the AO checks, ten times makeCornerScene's default. Both reasons are quantitative. AO(c) is nonlinear, so the measured block's spatial spread in d biases its mean by about AO''(c)*Var(d/D)/2: the frame spans |x| <= 0.3 at the floor, which at d=10 holds that bias to 3.3e-5 at the worst row (c=0.50), 2% of its tolerance, where at d=1 it would be 100x larger and twice the tolerance there. And the c>1 row needs c above 1 at every measured pixel, not just at the centre: at d=10 the nearest is c=1.067, at d=1 it is below 1. Rays reach at most D = d/c <= 200 here, well inside the wall's kQuadExtent reach, so no ray escapes past its edges.
+// Wall distance for the AO checks, ten times makeCornerScene's default; both reasons are quantitative, in docs/DERIVATIONS.md.
 constexpr float kAoWallDistance = 10.0F;
-// One rho draw per sample, so the standard error falls only as 1/sqrt(N). This count puts the 6-sigma tolerance at least 8x below the gap to every curve the sweep must exclude: 10-23x for a linear rho, 26-116x for the old hard cutoff, and 8x at the narrowest for uniform-hemisphere sampling of the same rho, whose margin is what sets the count.
+// One rho draw per sample, so error falls as 1/sqrt(N); this count puts the 6-sigma tolerance 8x below every curve the sweep excludes.
 constexpr int kAoSamplesPerPixel = 1024;
-// Every pixel, not centreMean's 4x4 block: AO is a visibility query about the plane's constant +Z normal and does not depend on the view direction, so the spread centreMean exists to limit costs nothing here, and reading the whole frame gives the same N for a sixteenth of the traced paths.
+// Every pixel, not centreMean's 4x4: AO ignores view direction, so the whole frame gives the same N for a sixteenth of the paths.
 constexpr float kAoMeasuredPixels = static_cast<float>(kImageSize) * static_cast<float>(kImageSize);
 
-// Closed-form cosine-weighted obscurance for the corner scene: a receiver on the infinite floor at perpendicular distance d from the wall plane, occlusion range D, c = d/D. Malley's method makes the sampled direction's tangential projection uniform on the unit disk (PBR 4th ed. 13.6.3), and a ray reaches the wall plane at t = d/a for disk coordinate a, so it is in range exactly when a >= c and carries x = t/D = c/a there. Integrating the deficit 1 - rho = (1 - c/a)^2 over the disk's chord length 2*sqrt(1-a^2) gives I(c) = int_c^1 (1-c/a)^2 * 2*sqrt(1-a^2) da, elementary from int 2*sqrt(1-a^2), int sqrt(1-a^2)/a and int sqrt(1-a^2)/a^2, and AO = 1 - I/pi. Rotating the tangent frame maps a uniform disk onto itself, so this does not depend on how buildShadingFrame orients it. c -> 0 approaches the half-space limit 0.5, unchanged from the binary form; c >= 1 puts the whole wall beyond D.
-// In double because the three terms are O(1) while their sum vanishes as (32*sqrt(2)/105)*(1-c)^(7/2) -- that high-order tangency IS the rho'(1) = 0 condition, and it is severe cancellation to evaluate.
+// Closed-form cosine-weighted obscurance for the corner scene, in double for its (1-c)^(7/2) cancellation; derived in docs/DERIVATIONS.md.
 float analyticAmbientOcclusion(float c) {
     if (c >= 1.0F) {
         return 1.0F;
@@ -1468,20 +1337,20 @@ float analyticAmbientOcclusion(float c) {
     return static_cast<float>(1.0 - (deficit / std::numbers::pi));
 }
 
-// Standard error on the mean at ~6 sigma, the same device as nee_validate.cpp's quad-solid-angle tolerance: taken from the estimator's own statistics rather than picked by hand. The per-sample rho is no longer a Bernoulli draw but any value in [0,1], where Bhatia-Davis bounds Var <= (M-mu)(mu-m) = p(1-p), so this expression is now a conservative bound on the standard error rather than the exact one. N counts only the block's own samples; the 1.5px reconstruction filter mixes a one-pixel halo in, which can only raise the contributing count. At p = 1 this is exactly zero, which is correct rather than degenerate -- every sample is then deterministically unoccluded, and the AO lane and the filter-weight lane accumulate the identical sequence of weights, so the quotient at write-out is bit-exactly 1.0.
+// Standard error on the mean at ~6 sigma, from the estimator's own statistics, conservative by the Bhatia-Davis bound; docs/DERIVATIONS.md.
 float aoTolerance(float expected) {
     const float n = static_cast<float>(kAoSamplesPerPixel) * kAoMeasuredPixels;
     return 6.0F * std::sqrt(expected * (1.0F - expected) / n);
 }
 
-// One AO render, averaged over the whole frame. maxBounces=0 because AO is written at bounce 0 before any BSDF work, so the beauty path these checks never read costs the minimum; the Lambertian material is for the same reason, since AO is a pure visibility query and reads no material at all.
+// One AO render over the whole frame at maxBounces=0, since AO is written at bounce 0 and reads no material at all.
 bool checkAoRow(const char* label, const TestScene& scene, const EnvironmentMap& env,
                  float aoMaxDistance, float expected, EmbreeAccel& accel,
-                 engine::scene::ThreadPool& pool) {
+                 pathtracer::scene::ThreadPool& pool) {
     PathTraceSettings settings = makeLambertianSettings(/*maxBounces=*/0);
     settings.samplesPerPixel = kAoSamplesPerPixel;
     settings.aoMaxDistance = aoMaxDistance;
-    const engine::gfx::HdrImage& ao = renderPass(scene, env, settings, accel, pool, true).ao;
+    const pathtracer::gfx::HdrImage& ao = renderPass(scene, env, settings, accel, pool, true).ao;
     const float measured = regionMean(ao, 0, 0, kImageSize, kImageSize).x;
     const float tolerance = aoTolerance(expected);
     std::cout << "  " << label;
@@ -1503,11 +1372,11 @@ struct AoCase {
     float c;  // d / aoMaxDistance
 };
 
-// Ray-traced AO against its closed form, over two configurations. An unoccluded plane, where every AO ray escapes and the lane must read exactly 1.0 -- the row an inverted polarity fails outright. Then the corner scene swept over c, which pins the SHAPE of the curve: a sweep and not a point because three wrong integrators pass any single row -- uniform-hemisphere sampling of the same rho, a linear rho, and the hard cutoff this replaced. Rows chosen so the analytic value clears all three by the margins kAoSamplesPerPixel is sized for.
-ENGINE_CHECK(ambient_occlusion_analytic, Slow, Statistical) {
+// Ray-traced AO against its closed form: an unoccluded plane, then a sweep over c excluding three wrong integrators; docs/DERIVATIONS.md.
+PT_CHECK(ambient_occlusion_analytic, Slow, Statistical) {
     std::cout << "integrator_validate: ambient occlusion vs analytic cosine-weighted visibility\n";
     const EnvironmentMap env = makeUniformEnvironment();
-    engine::scene::ThreadPool& pool = sharedPool(ctx.threads());
+    pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
     const TestScene openScene = makeQuadScene(1.0F, glm::vec3(0.04F));
     std::optional<EmbreeAccel> openAccel = EmbreeAccel::build(openScene.worldTriangles);
     if (!openAccel.has_value()) {
@@ -1515,8 +1384,7 @@ ENGINE_CHECK(ambient_occlusion_analytic, Slow, Statistical) {
         finish(ctx, false, "ambient_occlusion_analytic failed; see the rows above");
         return;
     }
-    // The first row initialises the accumulator; later rows keep `check(...) && ok`, which evaluates each check first
-    // so no row is ever short-circuited away.
+    // The first row initialises the accumulator; later rows keep `check(...) && ok`, so no row is ever short-circuited away.
     bool ok = checkAoRow("unoccluded plane", openScene, env, kAoWallDistance, 1.0F, *openAccel, pool);
 
     const TestScene corner = makeCornerScene(1.0F, glm::vec3(0.04F), kAoWallDistance);
@@ -1539,12 +1407,11 @@ ENGINE_CHECK(ambient_occlusion_analytic, Slow, Statistical) {
     return;
 }
 
-// aoMaxDistance bracketed from both sides on one fixed geometry, so the only thing changing between the two rows is the bound itself. At c=0.50 the wall is inside range and darkens the plate by 11 tolerances; at c=1.1 it is outside and every ray escapes, so the lane must read exactly 1.0 -- exact rather than approximate because even the frame-edge sample nearest the wall, at the x=0.3 where the film clips, still sits at c=1.067. A build that ignores aoMaxDistance reads the unbounded half-space value 0.5 in both rows.
-// The inside row sits at c=0.50 and not just under the bound as it did for the hard cutoff: rho'(1) = 0 makes the deficit vanish as (1-c)^(7/2), so c=0.90 now reads 0.99995, within 0.6 tolerances of unoccluded and unresolvable at any practical N. That is the discontinuity being gone, not a lost test.
-ENGINE_CHECK(ambient_occlusion_distance_bound, Slow, Statistical) {
+// aoMaxDistance bracketed on one geometry: inside, the wall darkens by 11 tolerances; outside, every ray escapes and the lane reads 1.0.
+PT_CHECK(ambient_occlusion_distance_bound, Slow, Statistical) {
     std::cout << "integrator_validate: ambient occlusion respects aoMaxDistance\n";
     const EnvironmentMap env = makeUniformEnvironment();
-    engine::scene::ThreadPool& pool = sharedPool(ctx.threads());
+    pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
 
     const TestScene corner = makeCornerScene(1.0F, glm::vec3(0.04F), kAoWallDistance);
     std::optional<EmbreeAccel> accel = EmbreeAccel::build(corner.worldTriangles);
@@ -1567,4 +1434,4 @@ ENGINE_CHECK(ambient_occlusion_distance_bound, Slow, Statistical) {
 
 }  // namespace
 
-ENGINE_CHECK_MAIN("integrator")
+PT_CHECK_MAIN("integrator")

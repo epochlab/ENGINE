@@ -1,4 +1,4 @@
-#include "engine/debug/aov_filters.h"
+#include "pathtracer/debug/aov_filters.h"
 
 #include <algorithm>
 #include <cmath>
@@ -7,14 +7,14 @@
 
 #include <glm/gtc/constants.hpp>
 
-namespace engine::debug {
+namespace pathtracer::debug {
 
 namespace {
 
-using engine::gfx::HdrImage;
-using engine::scene::ThreadPool;
+using pathtracer::gfx::HdrImage;
+using pathtracer::scene::ThreadPool;
 
-// Single-channel Rec.709 luminance, the shared input to Sobel and Gabor. Materialised once rather than recomputed per tap: Sobel reads 8 neighbours per pixel and Gabor 25, so the shader's per-tap dot product is up to 25x redundant work that one intermediate plane removes. The shader cannot do this -- a fragment has nowhere to put it -- which is why this is not simply a transcription.
+// Single-channel Rec.709 luminance, shared by Sobel and Gabor. Materialised once: Sobel reads 8 neighbours per pixel and Gabor 25.
 [[nodiscard]] std::vector<float> luminancePlane(const HdrImage& beauty, ThreadPool& threadPool) {
     std::vector<float> plane(static_cast<std::size_t>(beauty.width) * static_cast<std::size_t>(beauty.height));
     threadPool.parallelFor(beauty.height, [&](int y) {
@@ -42,7 +42,7 @@ using engine::scene::ThreadPool;
                     std::vector<float>(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4, 0.0F)};
 }
 
-// Writes one scalar to RGB with alpha 1, the broadcast convention every other AOV uses (gbuffer_shading.h's writeTexel), so a single-channel AOV still goes straight through HdrImage's fixed 4-floats/texel layout.
+// Writes one scalar to RGB with alpha 1, the broadcast convention every AOV uses, so it goes straight through HdrImage to the GPU.
 void writeScalar(HdrImage& out, std::size_t pixel, float value) {
     const std::size_t texel = pixel * 4;
     out.rgba[texel] = value;
@@ -53,13 +53,13 @@ void writeScalar(HdrImage& out, std::size_t pixel, float value) {
 
 }  // namespace
 
-std::array<float, kGaborOrientations * kGaborTaps> buildGaborKernel() {
+std::array<float, kGaborKernelSize> buildGaborKernel() {
     constexpr float kSigma = 1.4F;
     constexpr float kLambda = 4.0F;
     constexpr float kGamma = 0.5F;
     constexpr std::array<float, kGaborOrientations> kOrientationsDeg = {0.0F, 45.0F, 90.0F, 135.0F};
 
-    std::array<float, kGaborOrientations * kGaborTaps> kernel{};
+    std::array<float, kGaborKernelSize> kernel{};
     for (int o = 0; o < kGaborOrientations; ++o) {
         const float theta = glm::radians(kOrientationsDeg[static_cast<std::size_t>(o)]);
         int tapIndex = 0;
@@ -119,8 +119,8 @@ HdrImage sobelAov(const HdrImage& beauty, ThreadPool& threadPool) {
 }
 
 HdrImage gaborAov(const HdrImage& beauty, ThreadPool& threadPool) {
-    // Built once per process, not per call: the bank depends on nothing but its own compile-time parameters, and the viewer pays the same 100 transcendentals once at shader setup.
-    static const std::array<float, kGaborOrientations * kGaborTaps> kernel = buildGaborKernel();
+    // Built once per process, not per call: the bank depends only on its compile-time parameters, as at shader setup.
+    static const std::array<float, kGaborKernelSize> kernel = buildGaborKernel();
 
     const std::vector<float> plane = luminancePlane(beauty, threadPool);
     HdrImage out = makeBroadcastImage(beauty.width, beauty.height);
@@ -163,7 +163,7 @@ HdrImage hsvAov(const HdrImage& beauty, ThreadPool& threadPool) {
             const float b = beauty.rgba[texel + 2];
             const float value = std::max({r, g, b});
             const float chroma = value - std::min({r, g, b});
-            // Exact degenerate branches rather than the shader's 1e-10 denominator guard: hue is undefined on the achromatic axis and saturation on black, and the convention is 0 for both (Smith 1978). An epsilon only approximates that, and biases every near-grey pixel.
+            // Exact branches, not the shader's 1e-10 guard: hue is undefined on the achromatic axis, saturation on black (Smith 1978).
             const float saturation = value > 0.0F ? chroma / value : 0.0F;
             float hue = 0.0F;
             if (chroma > 0.0F) {
@@ -189,4 +189,4 @@ HdrImage hsvAov(const HdrImage& beauty, ThreadPool& threadPool) {
     return out;
 }
 
-}  // namespace engine::debug
+}  // namespace pathtracer::debug

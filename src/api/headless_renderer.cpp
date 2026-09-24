@@ -1,4 +1,4 @@
-#include "engine/api/headless_renderer.h"
+#include "pathtracer/api/headless_renderer.h"
 
 #include <algorithm>
 #include <atomic>
@@ -9,31 +9,31 @@
 
 #include <glm/gtc/matrix_transform.hpp>
 
-#include "engine/debug/aov_filters.h"
-#include "engine/debug/aov_routing.h"
-#include "engine/debug/render_stats.h"
-#include "engine/scene/material_binding.h"
+#include "pathtracer/debug/aov_filters.h"
+#include "pathtracer/debug/aov_routing.h"
+#include "pathtracer/debug/render_stats.h"
+#include "pathtracer/scene/material_binding.h"
 
-namespace engine::api {
+namespace pathtracer::api {
 
 namespace {
 
-using engine::debug::AovId;
-using engine::debug::AovSource;
-using engine::gfx::HdrImage;
+using pathtracer::debug::AovId;
+using pathtracer::debug::AovSource;
+using pathtracer::gfx::HdrImage;
 
-// Scene-level placement, order X,Y,Z -- must stay identical to main.cpp's and render_beauty's composition or a headless render places the scene differently from the viewer.
-[[nodiscard]] glm::mat4 rootTransformOf(const engine::config::SceneConfig& scene) {
+// Scene-level placement, order X,Y,Z -- identical to main.cpp's and render_beauty's, or headless places the scene differently.
+[[nodiscard]] glm::mat4 rootTransformOf(const pathtracer::config::SceneConfig& scene) {
     return glm::translate(glm::mat4(1.0F), scene.model.position) *
            glm::rotate(glm::mat4(1.0F), glm::radians(scene.model.rotation.z), glm::vec3(0.0F, 0.0F, 1.0F)) *
            glm::rotate(glm::mat4(1.0F), glm::radians(scene.model.rotation.y), glm::vec3(0.0F, 1.0F, 0.0F)) *
            glm::rotate(glm::mat4(1.0F), glm::radians(scene.model.rotation.x), glm::vec3(1.0F, 0.0F, 0.0F));
 }
 
-// samplesPerPixel is 1 here and convergence comes from accumulating passes, which is how the progressive driver and render_beauty both drive the integrator; the field is left in PathTraceSettings for the viewer's single-shot mode.
-[[nodiscard]] engine::scene::PathTraceSettings baseSettingsOf(const engine::config::ProfileConfig& profile,
-                                                               const engine::config::MaterialConfig& material) {
-    return engine::scene::PathTraceSettings{
+// samplesPerPixel is 1 here; convergence comes from accumulating passes, as the driver and render_beauty both drive the integrator.
+[[nodiscard]] pathtracer::scene::PathTraceSettings baseSettingsOf(const pathtracer::config::ProfileConfig& profile,
+                                                               const pathtracer::config::MaterialConfig& material) {
+    return pathtracer::scene::PathTraceSettings{
         .samplesPerPixel = 1,
         .maxBounces = profile.pathTracer.maxBounces,
         .russianRouletteStartBounce = profile.pathTracer.russianRouletteStartBounce,
@@ -55,18 +55,18 @@ using engine::gfx::HdrImage;
     };
 }
 
-// profile.json names a film-back preset; assets/config/camera.json supplies its dimensions. Resolved exactly as main.cpp's initializeApp and render_beauty do.
-[[nodiscard]] std::optional<engine::scene::Camera> resolveCamera(const std::string& assetRoot,
-                                                                 const engine::config::ProfileConfig& profile,
+// profile.json names a film-back preset, assets/config/camera.json supplies its dimensions. Resolved as initializeApp does.
+[[nodiscard]] std::optional<pathtracer::scene::Camera> resolveCamera(const std::string& assetRoot,
+                                                                 const pathtracer::config::ProfileConfig& profile,
                                                                  std::string& error) {
-    const std::optional<std::vector<engine::scene::Camera::FilmBackPreset>> presets =
-        engine::config::loadFilmBackPresets(assetRoot + "/config/camera.json");
+    const std::optional<std::vector<pathtracer::scene::Camera::FilmBackPreset>> presets =
+        pathtracer::config::loadFilmBackPresets(assetRoot + "/config/camera.json");
     if (!presets) {
         error = "failed to load " + assetRoot + "/config/camera.json";
         return std::nullopt;
     }
     const auto preset = std::find_if(presets->begin(), presets->end(),
-                                      [&](const engine::scene::Camera::FilmBackPreset& candidate) {
+                                      [&](const pathtracer::scene::Camera::FilmBackPreset& candidate) {
                                           return candidate.name == profile.camera.defaultFilmBackPresetName;
                                       });
     if (preset == presets->end()) {
@@ -74,15 +74,15 @@ using engine::gfx::HdrImage;
                 "\" not found in camera.json";
         return std::nullopt;
     }
-    const engine::config::CameraConfig& camera = profile.camera;
-    return engine::scene::Camera(camera.position, camera.yawDegrees, camera.pitchDegrees, preset->filmBack,
+    const pathtracer::config::CameraConfig& camera = profile.camera;
+    return pathtracer::scene::Camera(camera.position, camera.yawDegrees, camera.pitchDegrees, preset->filmBack,
                                   camera.focalLengthMm, camera.nearClip, camera.farClip, camera.aperture,
                                   camera.shutterSeconds, camera.iso);
 }
 
-// Gathers `channels` of each texel out of HdrImage's fixed RGBA layout into a tightly packed destination. The one copy the boundary costs: a scalar AOV is stored broadcast to three channels, and a consumer reading the data wants the one that carries it.
+// Gathers `channels` of each texel out of HdrImage's fixed RGBA into a packed destination: the one copy the boundary costs.
 void packChannels(const HdrImage& source, int channels, float* destination,
-                  engine::scene::ThreadPool& threadPool) {
+                  pathtracer::scene::ThreadPool& threadPool) {
     const int width = source.width;
     threadPool.parallelFor(source.height, [&](int y) {
         const std::size_t row = static_cast<std::size_t>(y) * static_cast<std::size_t>(width);
@@ -101,25 +101,25 @@ void packChannels(const HdrImage& source, int channels, float* destination,
 std::unique_ptr<HeadlessRenderer> HeadlessRenderer::open(const std::string& assetRoot,
                                                           const std::string& scenePath,
                                                           std::string& error) {
-    const std::optional<engine::config::ProfileConfig> profile =
-        engine::config::loadProfileConfig(assetRoot + "/config/profile.json");
+    const std::optional<pathtracer::config::ProfileConfig> profile =
+        pathtracer::config::loadProfileConfig(assetRoot + "/config/profile.json");
     if (!profile) {
         error = "failed to load " + assetRoot + "/config/profile.json";
         return nullptr;
     }
-    const std::optional<engine::config::SceneConfig> scene =
-        engine::config::loadSceneConfig(assetRoot + "/" + scenePath);
+    const std::optional<pathtracer::config::SceneConfig> scene =
+        pathtracer::config::loadSceneConfig(assetRoot + "/" + scenePath);
     if (!scene) {
         error = "failed to load scene " + assetRoot + "/" + scenePath;
         return nullptr;
     }
-    const std::optional<engine::config::MaterialConfig> material =
-        engine::config::loadMaterialConfig(assetRoot + "/" + scene->materialPath);
+    const std::optional<pathtracer::config::MaterialConfig> material =
+        pathtracer::config::loadMaterialConfig(assetRoot + "/" + scene->materialPath);
     if (!material) {
         error = "failed to load material " + assetRoot + "/" + scene->materialPath;
         return nullptr;
     }
-    std::optional<engine::gfx::ImageTexture> environmentImage = engine::gfx::loadImageTexture(
+    std::optional<pathtracer::gfx::ImageTexture> environmentImage = pathtracer::gfx::loadImageTexture(
         assetRoot + "/" + scene->environment.hdriPath, profile->render.textureType);
     if (!environmentImage) {
         error = "failed to load environment " + assetRoot + "/" + scene->environment.hdriPath;
@@ -127,7 +127,7 @@ std::unique_ptr<HeadlessRenderer> HeadlessRenderer::open(const std::string& asse
     }
 
     const glm::mat4 rootTransform = rootTransformOf(*scene);
-    std::optional<engine::scene::LoadedModel> model = engine::scene::loadGltf(
+    std::optional<pathtracer::scene::LoadedModel> model = pathtracer::scene::loadGltf(
         assetRoot + "/" + scene->model.gltfPath, profile->render.textureType, rootTransform,
         scene->model.texturePath.empty() ? "" : assetRoot + "/" + scene->model.texturePath);
     if (!model) {
@@ -136,26 +136,26 @@ std::unique_ptr<HeadlessRenderer> HeadlessRenderer::open(const std::string& asse
     }
 
     std::vector<int> instanceLightIndex(model->instances.size(), -1);
-    std::vector<engine::scene::QuadLight> quadLights =
-        engine::scene::buildQuadLights(scene->lights, rootTransform);
-    engine::scene::appendQuadLights(*model, quadLights, instanceLightIndex);
+    std::vector<pathtracer::scene::QuadLight> quadLights =
+        pathtracer::scene::buildQuadLights(scene->lights, rootTransform);
+    pathtracer::scene::appendQuadLights(*model, quadLights, instanceLightIndex);
 
-    std::optional<engine::scene::Camera> camera = resolveCamera(assetRoot, *profile, error);
+    std::optional<pathtracer::scene::Camera> camera = resolveCamera(assetRoot, *profile, error);
     if (!camera) {
         return nullptr;
     }
 
-    const engine::scene::PathTraceSettings baseSettings = baseSettingsOf(*profile, *material);
-    std::optional<std::vector<engine::scene::PathTraceSettings>> perInstanceSettings =
-        engine::scene::resolvePerInstanceSettings(baseSettings, model->instances,
+    const pathtracer::scene::PathTraceSettings baseSettings = baseSettingsOf(*profile, *material);
+    std::optional<std::vector<pathtracer::scene::PathTraceSettings>> perInstanceSettings =
+        pathtracer::scene::resolvePerInstanceSettings(baseSettings, model->instances,
                                                    scene->materialOverrides, assetRoot);
     if (!perInstanceSettings) {
         error = "failed to resolve per-instance material overrides";
         return nullptr;
     }
 
-    std::optional<engine::scene::EmbreeAccel> accel =
-        engine::scene::EmbreeAccel::build(std::move(model->worldTriangles));
+    std::optional<pathtracer::scene::EmbreeAccel> accel =
+        pathtracer::scene::EmbreeAccel::build(std::move(model->worldTriangles));
     if (!accel) {
         error = "Embree scene build failed";
         return nullptr;
@@ -167,21 +167,21 @@ std::unique_ptr<HeadlessRenderer> HeadlessRenderer::open(const std::string& asse
         scene->environment.lightEnabled, *camera));
 }
 
-HeadlessRenderer::HeadlessRenderer(engine::config::ProfileConfig profile,
-                                    engine::scene::LoadedModel model,
-                                    std::vector<engine::scene::QuadLight> quadLights,
+HeadlessRenderer::HeadlessRenderer(pathtracer::config::ProfileConfig profile,
+                                    pathtracer::scene::LoadedModel model,
+                                    std::vector<pathtracer::scene::QuadLight> quadLights,
                                     std::vector<int> instanceLightIndex,
-                                    std::vector<engine::scene::PathTraceSettings> perInstanceSettings,
-                                    engine::scene::PathTraceSettings baseSettings,
-                                    engine::scene::EmbreeAccel accel,
-                                    engine::gfx::ImageTexture environmentImage, bool envLightEnabled,
-                                    engine::scene::Camera defaultCamera)
+                                    std::vector<pathtracer::scene::PathTraceSettings> perInstanceSettings,
+                                    pathtracer::scene::PathTraceSettings baseSettings,
+                                    pathtracer::scene::EmbreeAccel accel,
+                                    pathtracer::gfx::ImageTexture environmentImage, bool envLightEnabled,
+                                    const pathtracer::scene::Camera& defaultCamera)
     : profile_(std::move(profile)),
       model_(std::move(model)),
       instanceLightIndex_(std::move(instanceLightIndex)),
       perInstanceSettings_(std::move(perInstanceSettings)),
       baseSettings_(baseSettings),
-      instanceBounds_(engine::scene::computeInstanceBounds(model_.shadingTriangles, static_cast<int>(model_.instances.size()))),
+      instanceBounds_(pathtracer::scene::computeInstanceBounds(model_.shadingTriangles, static_cast<int>(model_.instances.size()))),
       accel_(std::move(accel)),
       environmentMap_(std::move(environmentImage)),
       quadLights_(std::move(quadLights)),
@@ -196,22 +196,22 @@ void HeadlessRenderer::resizeBuffers(int width, int height) {
     if (bufferWidth_ == width && bufferHeight_ == height) {
         return;
     }
-    pathTraced_ = engine::scene::makePathTraceResult(width, height);
-    // renderRasterGBuffer reallocates its own 14 images when the size changes and clears them per row otherwise; resetting the generation stamp is what tells it this buffer holds nothing yet.
-    gbuffer_ = engine::scene::RasterGBuffer{};
+    pathTraced_ = pathtracer::scene::makePathTraceResult(width, height);
+    // renderRasterGBuffer reallocates on a size change and clears per row otherwise; resetting the stamp says this buffer holds nothing.
+    gbuffer_ = pathtracer::scene::RasterGBuffer{};
     accumulators_.clear();
     bufferWidth_ = width;
     bufferHeight_ = height;
 }
 
-const engine::gfx::HdrImage& HeadlessRenderer::lastImage(AovId aov) const {
-    switch (engine::debug::aovSource(aov)) {
+const pathtracer::gfx::HdrImage& HeadlessRenderer::lastImage(AovId aov) const {
+    switch (pathtracer::debug::aovSource(aov)) {
         case AovSource::PathTraced: {
             const auto it = std::find(accumulatedAovs_.begin(), accumulatedAovs_.end(), aov);
             return accumulators_[static_cast<std::size_t>(it - accumulatedAovs_.begin())];
         }
         case AovSource::GBuffer:
-            return gbuffer_.*engine::debug::gbufferLane(aov);
+            return gbuffer_.*pathtracer::debug::gbufferLane(aov);
         case AovSource::BeautyFilter: {
             const auto it = std::find(filteredAovs_.begin(), filteredAovs_.end(), aov);
             return filtered_[static_cast<std::size_t>(it - filteredAovs_.begin())];
@@ -230,7 +230,7 @@ bool HeadlessRenderer::render(const Request& request, std::span<float* const> ou
         return false;
     }
     for (std::size_t i = 0; i < request.aovs.size(); ++i) {
-        packChannels(lastImage(request.aovs[i]), engine::debug::aovChannels(request.aovs[i]), outputs[i],
+        packChannels(lastImage(request.aovs[i]), pathtracer::debug::aovChannels(request.aovs[i]), outputs[i],
                      threadPool_);
     }
     return true;
@@ -252,16 +252,16 @@ bool HeadlessRenderer::render(const Request& request, std::string& error) {
     resizeBuffers(request.width, request.height);
 
     const bool wantsFilter = std::any_of(request.aovs.begin(), request.aovs.end(), [](AovId aov) {
-        return engine::debug::aovSource(aov) == AovSource::BeautyFilter;
+        return pathtracer::debug::aovSource(aov) == AovSource::BeautyFilter;
     });
     const bool wantsGBuffer = std::any_of(request.aovs.begin(), request.aovs.end(), [](AovId aov) {
-        return engine::debug::aovSource(aov) == AovSource::GBuffer;
+        return pathtracer::debug::aovSource(aov) == AovSource::GBuffer;
     });
 
-    // The path-traced lanes this request needs summed. Beauty joins the set whenever a filter is asked for, because every filter reads the accumulated Beauty rather than a per-pass one.
+    // The path-traced lanes this request needs. Beauty joins whenever a filter is asked for, every filter reading accumulated Beauty.
     accumulatedAovs_.clear();
     for (const AovId aov : request.aovs) {
-        if (engine::debug::aovSource(aov) == AovSource::PathTraced &&
+        if (pathtracer::debug::aovSource(aov) == AovSource::PathTraced &&
             std::find(accumulatedAovs_.begin(), accumulatedAovs_.end(), aov) == accumulatedAovs_.end()) {
             accumulatedAovs_.push_back(aov);
         }
@@ -274,24 +274,24 @@ bool HeadlessRenderer::render(const Request& request, std::string& error) {
     stats_.passMilliseconds.clear();
     stats_.rasterMilliseconds = 0.0;
     stats_.filterMilliseconds = 0.0;
-    stats_.rays = engine::debug::RayCounts{};
+    stats_.rays = pathtracer::debug::RayCounts{};
     if (!accumulatedAovs_.empty()) {
         accumulators_.assign(accumulatedAovs_.size(),
-                              engine::gfx::HdrImage{request.width, request.height,
+                              pathtracer::gfx::HdrImage{request.width, request.height,
                                                      std::vector<float>(static_cast<std::size_t>(request.width) *
                                                                             static_cast<std::size_t>(request.height) * 4,
                                                                         0.0F)});
-        // A direct synchronous caller does not use PathTraceDriver's cooperative cancellation, so generation is held at the value requestedGeneration asks for and never goes stale.
+        // A synchronous caller uses no cooperative cancellation, so generation stays where requestedGeneration asks and never goes stale.
         const std::atomic<std::uint64_t> generation{1};
-        engine::debug::PassStats stats;
-        const engine::scene::LightSet& lights =
+        pathtracer::debug::PassStats stats;
+        const pathtracer::scene::LightSet& lights =
             request.envLightEnabled.value_or(defaultEnvLightEnabled_) ? lights_ : lightsEnvOff_;
         stats_.passMilliseconds.reserve(static_cast<std::size_t>(request.samples));
         for (int pass = 0; pass < request.samples; ++pass) {
             // Only the trace is timed: the accumulation below it is O(pixels) and identical across revisions.
             const auto passStart = std::chrono::steady_clock::now();
-            // scrambleSeed fixed, sampleBase advancing: the pair that keeps the accumulated samples an Owen-scrambled Sobol sequence stratified against each other rather than independent draws (sampler.h).
-            engine::scene::renderPathTraced(request.camera, accel_, model_.shadingTriangles, model_.instances,
+            // scrambleSeed fixed, sampleBase advancing: the pair that keeps accumulated samples stratified rather than N independent draws.
+            pathtracer::scene::renderPathTraced(request.camera, accel_, model_.shadingTriangles, model_.instances,
                                              instanceLightIndex_, lights, request.width, request.height,
                                              /*showSky=*/true, baseSettings_, perInstanceSettings_,
                                              request.scrambleSeed, /*sampleBase=*/pass,
@@ -300,7 +300,7 @@ bool HeadlessRenderer::render(const Request& request, std::string& error) {
             stats_.passMilliseconds.push_back(
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - passStart).count());
             for (std::size_t lane = 0; lane < accumulatedAovs_.size(); ++lane) {
-                const engine::debug::PathTracedLane member = engine::debug::pathTracedLane(accumulatedAovs_[lane]);
+                const pathtracer::debug::PathTracedLane member = pathtracer::debug::pathTracedLane(accumulatedAovs_[lane]);
                 const std::vector<float>& source = (pathTraced_.*member).rgba;
                 std::vector<float>& sum = accumulators_[lane].rgba;
                 for (std::size_t i = 0; i < sum.size(); ++i) {
@@ -310,7 +310,7 @@ bool HeadlessRenderer::render(const Request& request, std::string& error) {
         }
         stats_.rays = stats.rays();
         const auto passes = static_cast<float>(request.samples);
-        for (engine::gfx::HdrImage& accumulator : accumulators_) {
+        for (pathtracer::gfx::HdrImage& accumulator : accumulators_) {
             for (float& value : accumulator.rgba) {
                 value /= passes;
             }
@@ -319,30 +319,30 @@ bool HeadlessRenderer::render(const Request& request, std::string& error) {
 
     if (wantsGBuffer) {
         const auto rasterStart = std::chrono::steady_clock::now();
-        engine::scene::renderRasterGBuffer(request.camera, model_.shadingTriangles, model_.instances,
+        pathtracer::scene::renderRasterGBuffer(request.camera, model_.shadingTriangles, model_.instances,
                                             perInstanceSettings_, instanceBounds_, request.width,
                                             request.height, threadPool_, gbuffer_);
         stats_.rasterMilliseconds =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - rasterStart).count();
     }
 
-    // Filters read the accumulated Beauty, so they run after the accumulation loop, and each distinct one is evaluated once however many AOVs ask for it.
+    // Filters read accumulated Beauty, so they run after the loop, each distinct one evaluated once however many AOVs ask for it.
     filteredAovs_.clear();
     filtered_.clear();
     if (wantsFilter) {
         const auto filterStart = std::chrono::steady_clock::now();
-        const engine::gfx::HdrImage& beauty = lastImage(AovId::Beauty);
+        const pathtracer::gfx::HdrImage& beauty = lastImage(AovId::Beauty);
         for (const AovId aov : request.aovs) {
-            if (engine::debug::aovSource(aov) != AovSource::BeautyFilter ||
+            if (pathtracer::debug::aovSource(aov) != AovSource::BeautyFilter ||
                 std::find(filteredAovs_.begin(), filteredAovs_.end(), aov) != filteredAovs_.end()) {
                 continue;
             }
             filteredAovs_.push_back(aov);
             switch (aov) {
-                case AovId::Luminance: filtered_.push_back(engine::debug::luminanceAov(beauty, threadPool_)); break;
-                case AovId::Sobel:     filtered_.push_back(engine::debug::sobelAov(beauty, threadPool_)); break;
-                case AovId::Gabor:     filtered_.push_back(engine::debug::gaborAov(beauty, threadPool_)); break;
-                default:               filtered_.push_back(engine::debug::hsvAov(beauty, threadPool_)); break;
+                case AovId::Luminance: filtered_.push_back(pathtracer::debug::luminanceAov(beauty, threadPool_)); break;
+                case AovId::Sobel:     filtered_.push_back(pathtracer::debug::sobelAov(beauty, threadPool_)); break;
+                case AovId::Gabor:     filtered_.push_back(pathtracer::debug::gaborAov(beauty, threadPool_)); break;
+                default:               filtered_.push_back(pathtracer::debug::hsvAov(beauty, threadPool_)); break;
             }
         }
         stats_.filterMilliseconds =
@@ -352,4 +352,4 @@ bool HeadlessRenderer::render(const Request& request, std::string& error) {
     return true;
 }
 
-}  // namespace engine::api
+}  // namespace pathtracer::api

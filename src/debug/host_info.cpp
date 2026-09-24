@@ -1,4 +1,4 @@
-#include "engine/debug/system_info.h"
+#include "pathtracer/debug/system_info.h"
 
 #include <mach-o/dyld.h>
 #include <mach-o/loader.h>
@@ -9,12 +9,12 @@
 #include <cstdio>
 #include <cstring>
 
-#include "engine_git_sha.h"
+#include "pathtracer_git_sha.h"
 
-namespace engine::debug {
+namespace pathtracer::debug {
 
 namespace {
-// sysctlbyname is a system boundary: a key can be absent (hw.perflevel1.* on a uniform-core machine) or report an unexpected width, so both are surfaced as an empty/zero result rather than leaving the destination uninitialized.
+// sysctlbyname is a system boundary: a key can be absent or report an unexpected width, so both surface as empty rather than asserted.
 std::string sysctlString(const char* name) {
     std::size_t size = 0;
     if (sysctlbyname(name, nullptr, &size, nullptr, 0) != 0 || size == 0) {
@@ -28,7 +28,7 @@ std::string sysctlString(const char* name) {
     return value;
 }
 
-// Reads a 32- or 64-bit integer key. The width is not fixed across keys (hw.logicalcpu is 32-bit, hw.perflevel0.l2cachesize 64-bit), so it is taken from the size sysctl itself reports rather than assumed.
+// Reads a 32- or 64-bit integer key; the width varies by key, so it is taken from the size sysctl itself reports.
 std::uint64_t sysctlUint(const char* name) {
     std::uint64_t value = 0;
     std::size_t size = sizeof(value);
@@ -60,7 +60,7 @@ HostInfo queryHostInfo() {
 }
 
 BuildInfo buildInfo() {
-    return BuildInfo{__VERSION__, ENGINE_BUILD_TYPE, ENGINE_GIT_SHA, ENGINE_MARCH, ENGINE_IPO != 0};
+    return BuildInfo{__VERSION__, PATHTRACER_BUILD_TYPE, PATHTRACER_GIT_SHA, PATHTRACER_MARCH, PATHTRACER_IPO != 0};
 }
 
 std::string executableUuid() {
@@ -82,4 +82,4 @@ std::string executableUuid() {
     return {};
 }
 
-}  // namespace engine::debug
+}  // namespace pathtracer::debug

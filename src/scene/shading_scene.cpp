@@ -1,8 +1,8 @@
-#include "engine/scene/shading_scene.h"
+#include "pathtracer/scene/shading_scene.h"
 
 #include <limits>
 
-namespace engine::scene {
+namespace pathtracer::scene {
 
 bool isEmpty(const AabbBounds& box) {
     return box.min.x > box.max.x || box.min.y > box.max.y || box.min.z > box.max.z;
@@ -59,4 +59,4 @@ glm::vec3 shadowTerminatorOffset(const ShadingTriangle& tri, float u, float v, b
     return (w * p0) + (u * p1) + (v * p2);
 }
 
-}  // namespace engine::scene
+}  // namespace pathtracer::scene

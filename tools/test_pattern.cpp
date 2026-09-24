@@ -20,7 +20,7 @@ struct Rgb {
     float b;
 };
 
-// Column-uniform by design: identical across every row, so it stays immune to an undetected vertical flip on the read side regardless of future changes to EXR/OpenGL row-orientation handling.
+// Column-uniform by design: identical across every row, so it stays immune to an undetected vertical flip in EXR/OpenGL row handling.
 Rgb colorForColumn(int x) {
     const int patch = x / kPatchWidth;
     switch (patch) {

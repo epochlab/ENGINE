@@ -1,12 +1,4 @@
-// Offline generator for the blue-noise dither mask baked into src/scene/blue_noise_mask.inc, which sampler.cpp uses as
-// the per-pixel Cranley-Patterson shift of Georgiev & Fajardo's blue-noise dithered sampling (SIGGRAPH 2016 Talks).
-// The algorithm is Ulichney's void-and-cluster method, "The void-and-cluster method for dither array generation", Proc.
-// SPIE 1913 (1993), transcribed from the author's own paper -- filter, generator and all three ranking phases below name
-// the section they come from. It is in-repo and deterministic rather than a lifted third-party tile precisely so the
-// provenance is an algorithm that can be re-run and checked, not a binary blob whose construction cannot be audited.
-// Same standalone-CLI convention as the other tools: no test framework, non-zero exit on failure. Not in the ctest loop
-// -- like gltf_tangent this produces a committed artifact, it does not check one; src/scene/blue_noise_mask.inc is the
-// output and sampler_validate is what holds it to account.
+// Offline generator for src/scene/blue_noise_mask.inc by Ulichney's void-and-cluster method (Proc. SPIE 1913, 1993), transcribed.
 
 #include <algorithm>
 #include <array>
@@ -21,35 +13,25 @@
 #include <string>
 #include <vector>
 
-#include "engine/gfx/hdr_image.h"
+#include "pathtracer/gfx/hdr_image.h"
 
 namespace {
 
-// 128^2, the size Georgiev & Fajardo used for the images in the paper ("we plot matrices of size 64^2, but we used size
-// 128^2 to render our images"). Must match kMaskSize in sampler.cpp.
+// 128^2, the size Georgiev & Fajardo (SIGGRAPH 2016 Talks) used for their rendered images. Must match kMaskSize in sampler.cpp.
 constexpr int kSize = 128;
 constexpr int kPixels = kSize * kSize;
 
-// Ulichney Sec. 2: the filter is a Gaussian whose "sigma in terms of pixel spacing produced the best results" at 1.5.
-// Not truncated to a radius -- a cutoff would be a free parameter, and the wrap-around form below is what makes the
-// resulting array tileable, which is the property sampler.cpp depends on when it indexes the mask modulo kSize.
+// Ulichney Sec. 2: a Gaussian at sigma 1.5, untruncated, the wrap-around form being what makes the array tileable.
 constexpr double kSigma = 1.5;
 
-// Ulichney Sec. 3: the initial binary pattern starts from white noise whose 1s are a small minority (his Fig. 3 uses
-// 26 of 256, ~10%); the void-and-cluster loop then rearranges them into a well-formed blue-noise pattern, so this
-// governs how much rearranging is needed, not the quality of the result.
+// Ulichney Sec. 3: the initial pattern starts from white noise whose 1s are ~10%, governing how much rearranging is needed, not quality.
 constexpr int kInitialOnes = kPixels / 10;
 
-// Energy field of a set of marked cells: the pattern convolved with the Gaussian above. "Tightest cluster" is the marked
-// cell sitting in the most energy, "largest void" the unmarked cell sitting in the least -- Ulichney's two primitives,
-// and every phase below is a loop over them.
-// Both phases I/II (marked = the 1s) and phase III (marked = the 0s) are the same search over a different marked set, so
-// there is one class here rather than a second inverted copy of it.
+// Energy field of a set of marked cells. One class, not two: phases I/II mark the 1s and phase III the 0s, the same search either way.
 class EnergyField {
 public:
     EnergyField() {
-        // Indexed by wrapped offset, so insert/erase is a shifted read of one table rather than a per-cell exp().
-        // Ulichney Sec. 2's wrap-around convolution: the offset that counts is the minimum-image one on the torus.
+        // Indexed by wrapped offset, so insert/erase is a shifted read rather than a per-cell exp(); Ulichney Sec. 2's wrap-around form.
         for (int dy = 0; dy < kSize; ++dy) {
             const int wy = std::min(dy, kSize - dy);
             for (int dx = 0; dx < kSize; ++dx) {
@@ -61,8 +43,7 @@ public:
         }
     }
 
-    // Rebuilt from the pattern rather than rewound by undoing inserts: phases I and II both restart from the initial
-    // binary pattern, and recomputing costs one pass where rewinding would carry every phase's rounding into the next.
+    // Rebuilt from the pattern, not rewound: recomputing costs one pass where rewinding would carry each phase's rounding into the next.
     void reset(const std::array<std::uint8_t, kPixels>& marked) {
         marked_ = marked;
         markedCount_ = 0;
@@ -93,8 +74,7 @@ public:
     [[nodiscard]] const std::array<std::uint8_t, kPixels>& marked() const { return marked_; }
 
 private:
-    // Adds `sign` times the kernel centred on i. The x offset is advanced and wrapped rather than recomputed with a
-    // modulo per cell: same value, and the modulo is the dominant cost of the whole generator otherwise.
+    // Adds `sign` times the kernel centred on i. The x offset is advanced and wrapped, the modulo being the generator's dominant cost.
     void splat(int i, double sign) {
         const int iy = i / kSize;
         const int ix = i % kSize;
@@ -110,8 +90,7 @@ private:
         }
     }
 
-    // Ties resolve to the lowest index, which is what makes the whole generator reproducible: the search order is the
-    // only thing distinguishing two cells at exactly equal energy.
+    // Ties resolve to the lowest index, which is what makes the generator reproducible at exactly equal energy.
     [[nodiscard]] int extremum(std::uint8_t state, bool wantMax) const {
         int best = -1;
         double bestEnergy = 0.0;
@@ -134,12 +113,7 @@ private:
     int markedCount_ = 0;
 };
 
-// Ulichney Sec. 3 / Fig. 2. White noise in, then: remove the tightest cluster, find the largest void, and stop when
-// removing that 1 is what created the largest void -- the fixed point where no 1 can be moved anywhere better. The
-// result is the "initial binary pattern" all three ranking phases start from.
-// The shuffle is written out rather than taken from <algorithm>/<random>'s distributions because only mt19937's raw
-// output is specified exactly by the standard; std::shuffle and uniform_int_distribution are free to vary between
-// implementations, and a mask that regenerates differently on another compiler is not a re-derivable committed artifact.
+// Ulichney Sec. 3 / Fig. 2. The shuffle is written out because only mt19937's raw output is specified exactly by the standard.
 std::array<std::uint8_t, kPixels> initialBinaryPattern(std::uint32_t seed, EnergyField& field) {
     std::array<int, kPixels> order{};
     std::iota(order.begin(), order.end(), 0);
@@ -167,10 +141,6 @@ std::array<std::uint8_t, kPixels> initialBinaryPattern(std::uint32_t seed, Energ
 }
 
 // Ulichney Sec. 4's three phases, which between them assign every cell a distinct rank in [0, kPixels).
-// I: from the initial pattern, remove tightest clusters, ranking each by the count of 1s left after it goes.
-// II: from the initial pattern again, fill largest voids, ranking each by the count of 1s before it arrives.
-// III: past half density the 0s are the minority, so the roles swap -- fill the tightest cluster of 0s instead, which is
-// the same search over the complement and is why EnergyField is written in terms of a marked set.
 std::array<std::uint16_t, kPixels> rankPattern(const std::array<std::uint8_t, kPixels>& initial, EnergyField& field) {
     std::array<std::uint16_t, kPixels> ranks{};
 
@@ -203,8 +173,7 @@ std::array<std::uint16_t, kPixels> rankPattern(const std::array<std::uint8_t, kP
     return ranks;
 }
 
-// The one property the rest of the system assumes: the mask is a bijection onto [0, kPixels), so its values are exactly
-// the uniform grid the toroidal shift needs. Checked here so a malformed table can never reach the committed .inc.
+// The one property the rest of the system assumes: the mask is a bijection onto [0, kPixels), checked before the .inc is written.
 bool isPermutation(const std::array<std::uint16_t, kPixels>& ranks) {
     std::array<std::uint8_t, kPixels> seen{};
     for (const std::uint16_t rank : ranks) {
@@ -235,17 +204,16 @@ bool writeInc(const std::string& path, const std::array<std::uint16_t, kPixels>&
     return out.good();
 }
 
-// Greyscale dump of the normalised mask, for looking at. The radial spectrum in sampler_validate is the actual gate --
-// this catches the structural failures an angular average hides, like a directional streak or a residual tile seam.
+// Greyscale dump for looking at. The radial spectrum in sampler_validate is the gate; this catches streaks and tile seams it hides.
 bool writePreview(const std::string& path, const std::array<std::uint16_t, kPixels>& ranks) {
-    engine::gfx::HdrImage image{kSize, kSize, std::vector<float>(static_cast<std::size_t>(kPixels) * 4, 1.0F)};
+    pathtracer::gfx::HdrImage image{kSize, kSize, std::vector<float>(static_cast<std::size_t>(kPixels) * 4, 1.0F)};
     for (int i = 0; i < kPixels; ++i) {
         const auto value = static_cast<float>((ranks[static_cast<std::size_t>(i)] + 0.5) / kPixels);
         for (int c = 0; c < 3; ++c) {
             image.rgba[(static_cast<std::size_t>(i) * 4) + static_cast<std::size_t>(c)] = value;
         }
     }
-    return engine::gfx::writeExr(path, image);
+    return pathtracer::gfx::writeExr(path, image);
 }
 
 }  // namespace

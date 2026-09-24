@@ -1,16 +1,14 @@
-#include "engine/scene/sampler.h"
+#include "pathtracer/scene/sampler.h"
 
 #include <algorithm>
 #include <array>
 #include <bit>
 
-namespace engine::scene {
+namespace pathtracer::scene {
 
 namespace {
 
-// SplitMix64 finalizer (Vigna) -- decorrelates nearby (dimension set, run seed) inputs into unrelated seeds.
-// Deliberately NOT a function of the pixel: see the dither mask below. Every pixel draws the same randomized sequence,
-// and what separates them is the toroidal shift, not the scramble.
+// SplitMix64 finalizer (Vigna). Deliberately not a function of the pixel: the toroidal shift, not the scramble, separates pixels.
 std::uint64_t hashSeed(int extra, std::uint32_t runSeed) {
     std::uint64_t h = static_cast<std::uint64_t>(static_cast<std::uint32_t>(extra)) * 0x165667B19E3779F9ULL;
     h ^= static_cast<std::uint64_t>(runSeed);
@@ -22,9 +20,7 @@ std::uint64_t hashSeed(int extra, std::uint32_t runSeed) {
     return h;
 }
 
-// Only two Sobol dimensions exist here, and that is the whole point of padding (see sampler.h): every draw reuses this
-// one perfectly stratified pair under a fresh randomization instead of walking into the sequence's weaker high
-// dimensions. Raising this means adding a jointly-stratified next3D/next4D and regenerating the seed table wider.
+// Only two Sobol dimensions exist, which is the point of padding: every draw reuses this stratified pair under a fresh randomization.
 constexpr int kSobolDimensions = 2;
 constexpr int kSobolBits = 32;  // direction vectors are scaled by 2^32, so a 32-bit index spans the sequence's period
 
@@ -40,12 +36,7 @@ constexpr std::array<SobolPolynomial, kSobolDimensions - 1> kSobolPolynomials = 
 #include "sobol_direction_seeds.inc"
 }};
 
-// Direction vectors V, scaled by 2^32, derived from the seeds above by the recurrence in Joe & Kuo's own reference
-// implementation (sobol.cc, https://web.maths.unsw.edu.au/~fkuo/sobol/), which is ACM Algorithm 659 (Bratley & Fox
-// 1988). Published V is 1-indexed with V[i] scaled by 2^(32-i); this table is 0-indexed by bit position, so index b
-// holds published V[b+1] and the recurrence's shape carries over unchanged.
-// Derived at static init rather than checked in, matching path_tracer.cpp's buildFilterTable(): it keeps the committed
-// data to the published seed rows and puts the recurrence in the source where it can be checked against the paper.
+// Direction vectors V from Joe & Kuo (ACM Alg. 659), derived at static init. See docs/DERIVATIONS.md "Sobol padding and net quality".
 using SobolDirections = std::array<std::array<std::uint32_t, kSobolBits>, kSobolDimensions>;
 
 SobolDirections buildSobolDirections() {
@@ -92,14 +83,7 @@ std::uint32_t reverseBits(std::uint32_t x) {
     return ((x & 0xAAAAAAAAU) >> 1) | ((x & 0x55555555U) << 1);
 }
 
-// Base-2 Owen scrambling of a bit-reversed integer. Owen (1995) defines the scramble as a random permutation of each
-// node of the value's binary digit tree, which preserves the sequence's net properties exactly while decorrelating it;
-// Burley (2020, JCGT 9(4)) showed a cheap integer hash reproduces that structure without building the tree, since in
-// bit-reversed order a hash's carry propagation touches exactly the ancestors of each digit.
-// Constants are Vegdahl's improved Laine-Karras hash as shipped by Cycles (intern/cycles/kernel/sample/util.h), not
-// Burley's original: same construction, measurably better tree-permutation quality per
-// https://psychopath.io/post/2021_01_30_building_a_better_lk_hash. Transcribed from that source, never hand-derived --
-// these are permutation constants, and a mistyped digit degrades the scramble in ways no image inspection would catch.
+// Base-2 Owen scrambling (Owen 1995; Burley 2020) via Vegdahl's Laine-Karras hash as shipped by Cycles: transcribed, never derived.
 std::uint32_t reversedBitOwen(std::uint32_t n, std::uint32_t seed) {
     n ^= n * 0x3D20ADEAU;
     n += seed;
@@ -113,13 +97,7 @@ std::uint32_t nestedUniformScramble(std::uint32_t x, std::uint32_t seed) {
     return reverseBits(reversedBitOwen(reverseBits(x), seed));
 }
 
-// Sobol point for one dimension: XOR the direction vectors selected by the set bits of the index (Sobol 1967, in the
-// direct random-access form -- not the Gray-code recurrence sobol.cc uses to walk indices in order, which this sampler
-// cannot use because it addresses an arbitrary sample index per pixel with no sequential state).
-// Dimension 1 is not looped at all. Its direction vectors are V[b] = 1 << (31 - b), so XOR-ing the ones the index's set
-// bits select is by definition that index's bit reversal -- an identity, not an approximation, and one RBIT rather than
-// a loop iteration per set bit. Cycles carries the same fast path for the same reason. Measured over next2D: 62 -> 48
-// ns/draw from this alone, and 14 ns once the index mask below bounds dimension 2's remaining loop.
+// Sobol point for one dimension (Sobol 1967), random-access form. Dimension 1 is a bit reversal by identity: 62 -> 48 ns/draw.
 std::uint32_t sobolPoint(std::uint32_t index, int dimension) {
     if (dimension == 0) {
         return reverseBits(index);
@@ -131,49 +109,20 @@ std::uint32_t sobolPoint(std::uint32_t index, int dimension) {
     return x;
 }
 
-// Blue-noise dithered sampling (Georgiev & Fajardo 2016, "Blue-noise Dithered Sampling", SIGGRAPH Talks): every pixel
-// uses the SAME point set, toroidally shifted by an offset looked up in a blue-noise matrix tiled over the image rather
-// than chosen randomly per pixel. Random per-pixel offsets -- equivalently, the per-pixel Owen scramble this replaced --
-// are the white-noise special case of the same construction, and leave each pixel's error independent of its
-// neighbours'. Correlating the offsets instead pushes the error field's power out of the low frequencies the eye and any
-// subsequent filter integrate over, without changing how much error there is: the paper's own claim is that "numerical
-// error is roughly the same", so this buys apparent cleanliness, not convergence.
-// For d = 1 the paper's matrix "is identical to a dither mask", and the mask here is Ulichney's void-and-cluster array
-// (1993) -- see tools/bluenoise_mask.cpp, which generates the table below.
+// Blue-noise dithering (Georgiev & Fajardo 2016): one point set, toroidally shifted per pixel. Apparent cleanliness, not convergence.
 constexpr int kMaskSize = 128;  // the size Georgiev & Fajardo used for their rendered images
 constexpr int kMaskPixels = kMaskSize * kMaskSize;
 constexpr std::array<std::uint16_t, kMaskPixels> kBlueNoiseRanks = {{
 #include "blue_noise_mask.inc"
 }};
 
-// R2, the 2D low-discrepancy sequence of Roberts (2018), "The Unreasonable Effectiveness of Quasirandom Sequences":
-// point c is frac(c * (1/phi2, 1/phi2^2)) where phi2 = 1.324717957244746 is the plastic number, the real root of
-// x^3 = x + 1. Constants are 2^32 / phi2 and 2^32 / phi2^2, so the fixed-point multiply below wraps to the same frac().
-// A hash was tried here first and is not sufficient: hashed offsets are free to land close together, and two channels
-// within the mask's correlation radius are correlated -- measured at |r| = 0.14 between channels 8 and 23, which
-// sampler_validate's checkChannelsAreDecorrelated now fails on. R2 spreads them by construction: the minimum toroidal
-// separation over the 146 channels a 12-bounce path reaches is 8.1 px, where the sigma = 1.5 filter is ~1e-6.
+// R2 (Roberts 2018): frac(c * (1/phi2, 1/phi2^2)). A hash lands offsets too close, measured |r| = 0.14 between channels 8 and 23.
 constexpr std::uint32_t kR2AlphaX = 0xC13FA9A9U;
 constexpr std::uint32_t kR2AlphaY = 0x91E10DA6U;
 // Keeps the top log2(kMaskSize) bits of the fixed-point fraction, so the offset follows kMaskSize rather than a literal.
 constexpr int kR2Shift = 32 - std::countr_zero(static_cast<unsigned>(kMaskSize));
 
-// The shift in the sampler's own 24-bit output space, so applying it is one add and one mask and the wraparound IS the
-// toroidal wrap. MN = 2^14 divides 2^24 exactly, so the mask's (rank + 0.5)/MN lands on rank * 1024 + 512 with no
-// rounding at all -- the shift is exactly representable, which is what lets sampler_validate invert it and keep
-// asserting the net properties with zero tolerance.
-// Each dimension set reads the SAME mask under its own toroidal translation of the lookup, and that translation is
-// load-bearing rather than decorative. Giving every set one shared shift was measured and is wrong: it puts a pixel's
-// whole d-dimensional sample on the diagonal of the d-torus, so averaging over a neighbourhood of pixels integrates the
-// path integrand along a line instead of over the torus and does not converge to it. The leftover, varying slowly across
-// the image, IS low-frequency error -- measured at 199x white noise in the lowest octave, the opposite of the intent.
-// Translating instead makes the components mutually decorrelated (a blue-noise mask's autocorrelation is near-delta, so
-// two different lags are effectively independent) while each component stays exactly the same blue-noise field in screen
-// space. That is a cheap stand-in for the paper's Sec. 3 annealed d-vector matrix, which remains the principled upgrade.
-// Channels are numbered as hashSeed's `extra` already is -- each dimension set owns 2*set and 2*set+1 -- so a 1D draw
-// and either half of a 2D draw can never land on the same translation.
-// The tile wraps by masking rather than by modulo: kMaskSize is a power of two, so this is also correct for the negative
-// pixel coordinates a filter footprint can reach past the image edge.
+// The shift in the sampler's 24-bit output space, exactly representable, which lets sampler_validate invert it at zero tolerance.
 std::uint32_t ditherFixed(int pixelX, int pixelY, int ditherChannel) {
     const auto channel = static_cast<std::uint32_t>(ditherChannel);
     const auto x = (static_cast<std::uint32_t>(pixelX) + ((channel * kR2AlphaX) >> kR2Shift)) & (kMaskSize - 1U);
@@ -192,13 +141,7 @@ float blueNoiseDither(int pixelX, int pixelY, int ditherChannel) {
     return static_cast<float>(ditherFixed(pixelX, pixelY, ditherChannel)) * 0x1.0p-24F;
 }
 
-// The index mask bounds the sequence to the length actually drawn from. Without it the per-set shuffle spreads a small
-// sample index across all 32 bits, and sobolPoint's loop then runs once per set bit -- about 16 iterations rather than
-// at most log2(sampleCount). Measured over next2D at 128 samples: 62 ns/draw unmasked, 14 ns masked.
-// The floor at sampleIndex + 1 is a correctness guard, not a tuning knob: a caller understating sampleCount would
-// otherwise mask two distinct sample indices onto the same sequence point, drawing one point twice and biasing the
-// estimate with nothing to signal it. sampleCount <= 0 means an unbounded accumulation, which takes the full 32-bit
-// sequence -- Cycles' documented "safe default, least performant" case.
+// The index mask bounds the sequence to the length drawn: 62 ns/draw unmasked, 14 masked, at 128 samples. sampleCount <= 0 = unbounded.
 Sampler::Sampler(int pixelX, int pixelY, int sampleIndex, int sampleCount, std::uint32_t scrambleSeed)
     : pixelX_(pixelX),
       pixelY_(pixelY),
@@ -208,16 +151,11 @@ Sampler::Sampler(int pixelX, int pixelY, int sampleIndex, int sampleCount, std::
       scrambleSeed_(scrambleSeed) {}
 
 float Sampler::next1D() {
-    // Two independent seeds per set, taken as the halves of one avalanched hash rather than from separate magic salts:
-    // hashSeed's SplitMix64 finalizer already decorrelates its halves, which is the same argument kAoSeedOffset rests on
-    // in path_tracer.cpp. Distinct `extra` values are what separate one dimension set from the next.
+    // Two seeds per set from the halves of one avalanched hash: SplitMix64 already decorrelates them, as kAoSeedOffset also rests on.
     const int set = dimensionSet_;
     const std::uint64_t setHash = hashSeed(2 * set, scrambleSeed_);
     ++dimensionSet_;
-    // Shuffling the index per set (Burley 2020 Sec. 5.2) is what decorrelates sets from one another: without it every
-    // set would visit the sequence in the same order and the sets would share one point ordering. Owen-scrambling the
-    // index permutes its digit tree, so a power-of-two prefix stays a stratified point set rather than becoming an
-    // arbitrary subset -- sampler_validate's net checks are what hold this claim to account.
+    // Shuffling the index per set (Burley 2020 Sec. 5.2) decorrelates sets; Owen-scrambling it keeps a power-of-two prefix stratified.
     const auto indexSeed = static_cast<std::uint32_t>(setHash);
     const auto scramble = static_cast<std::uint32_t>(setHash >> 32U);
     const std::uint32_t shuffled = nestedUniformScramble(sampleIndex_, indexSeed) & indexMask_;
@@ -226,9 +164,7 @@ float Sampler::next1D() {
 }
 
 glm::vec2 Sampler::next2D() {
-    // Both coordinates share one shuffled index -- they are the two components of a single point of the 2D sequence, so
-    // shuffling them apart would destroy the joint stratification that makes next2D worth using over two next1D calls.
-    // Their Owen scrambles differ, which is Owen's own per-dimension independence requirement (1995).
+    // Both coordinates share one shuffled index, being one 2D point; their Owen scrambles differ, per Owen's independence rule (1995).
     const int set = dimensionSet_;
     const std::uint64_t setHash = hashSeed(2 * set, scrambleSeed_);
     const std::uint64_t scrambleHash = hashSeed((2 * set) + 1, scrambleSeed_);
@@ -243,4 +179,4 @@ glm::vec2 Sampler::next2D() {
                                ditherFixed(pixelX_, pixelY_, (2 * set) + 1))};
 }
 
-}  // namespace engine::scene
+}  // namespace pathtracer::scene

@@ -1,4 +1,4 @@
-#include "engine/scene/path_trace_driver.h"
+#include "pathtracer/scene/path_trace_driver.h"
 
 #include <algorithm>
 #include <array>
@@ -8,22 +8,22 @@
 #include <utility>
 #include <vector>
 
-namespace engine::scene {
+namespace pathtracer::scene {
 
 namespace {
 
 constexpr std::chrono::milliseconds kIdlePollInterval{5};
 
-// Incremental running mean, out of place: newMean = previousMean + (sample - previousMean)/n, computed in the freshly rendered pass buffer so the published set is only ever READ. That is what lets the publish below be a pointer assignment instead of the whole-image copy it used to hold resultMutex_ for, and what keeps a render thread holding the previous set from seeing a half-updated image. Running mean rather than a running sum: no separate sum buffer, and the result is always already display-ready with no final division. Row-parallel over the same pool the pass just finished with, which is otherwise idle at this moment.
+// Incremental running mean computed in the fresh pass buffer, so the published set is only read and publish is a pointer swap.
 void accumulateMean(PathTraceResult& sample, const PathTraceResult& previousMean, int n,
                      ThreadPool& threadPool) {
-    // Index-aligned with `sources` below, and every PathTraceResult image must appear: unlike rasterizer.cpp's aovImages() there is no compile-time guard here, so a missing entry silently publishes that image's last pass instead of the running mean.
-    const std::array<engine::gfx::HdrImage*, 10> destinations{
+    // Index-aligned with `sources` below; no compile-time guard here, so a missing entry silently publishes an un-averaged lane.
+    const std::array<pathtracer::gfx::HdrImage*, 10> destinations{
         &sample.beauty,          &sample.bounceHeatmap,    &sample.ao,
         &sample.shadow,          &sample.directDiffuse,    &sample.indirectDiffuse,
         &sample.directSpecular,  &sample.indirectSpecular, &sample.refraction,
         &sample.fresnel};
-    const std::array<const engine::gfx::HdrImage*, 10> sources{
+    const std::array<const pathtracer::gfx::HdrImage*, 10> sources{
         &previousMean.beauty,          &previousMean.bounceHeatmap,
         &previousMean.ao,              &previousMean.shadow,
         &previousMean.directDiffuse,   &previousMean.indirectDiffuse,
@@ -43,12 +43,10 @@ void accumulateMean(PathTraceResult& sample, const PathTraceResult& previousMean
     });
 }
 
-// Reduces the published mean's beauty to OverRangeStats on the driver's own pool -- the same walk the render thread used to do serially, on the thread that just wrote these texels and still holds them in cache. Row-chunked with per-chunk private accumulators folded serially afterwards, following buildSubTriangles (rasterizer.cpp): a histogram bin is far too contended for one atomic increment per texel.
-// One chunk per worker rather than buildSubTriangles' four: every texel costs the same, so there is no imbalance for finer granularity to absorb, and each extra chunk is another kOverRangeBinCount-entry array to zero and fold.
-// A separate pass over beauty rather than a fold into accumulateMean's inner loop, which would save the re-read: accumulateMean is skipped on the first pass of every generation (`if (passIndex > 1)` below), which is exactly the interactive case, so fusing would need a conditional duplicate of this code on that path.
+// Reduces the published mean's beauty on the thread that just wrote those texels, still in cache; one chunk per worker.
 void reduceOverRange(PathTraceResult& pass, std::vector<OverRangeHistogram>& histograms,
                       std::vector<float>& peaks, ThreadPool& threadPool) {
-    const engine::gfx::HdrImage& beauty = pass.beauty;
+    const pathtracer::gfx::HdrImage& beauty = pass.beauty;
     const int chunkCount =
         std::max(1, std::min(beauty.height, static_cast<int>(threadPool.threadCount())));
     const int chunkRows = (beauty.height + chunkCount - 1) / chunkCount;
@@ -62,7 +60,7 @@ void reduceOverRange(PathTraceResult& pass, std::vector<OverRangeHistogram>& his
         const std::size_t end =
             static_cast<std::size_t>(std::min((chunk + 1) * chunkRows, beauty.height)) * rowFloats;
         const float* rgba = beauty.rgba.data();
-        // Peak kept in a register and stored once at the end: `peaks` is the only array adjacent chunks could false-share, since each chunk's bin writes stay inside its own histogram.
+        // Peak kept in a register and stored once: `peaks` is the only array adjacent chunks could false-share.
         float peak = 0.0F;
         for (std::size_t i = begin; i < end; i += 4) {
             const float maxChannel = std::max({rgba[i], rgba[i + 1], rgba[i + 2]});
@@ -74,7 +72,7 @@ void reduceOverRange(PathTraceResult& pass, std::vector<OverRangeHistogram>& his
 
     OverRangeStats& out = pass.overRange;
     out.rawPeak = *std::max_element(peaks.begin(), peaks.end());
-    // Summed chunk-major, then turned into a suffix sum in place: both walks are sequential over one array, where folding straight into the complementary CDF would stride across every chunk's histogram per bin.
+    // Summed chunk-major then suffix-summed in place: both walks are sequential, where folding direct would stride across chunks.
     std::fill(out.aboveBin.begin(), out.aboveBin.end(), 0U);
     for (const OverRangeHistogram& bins : histograms) {
         for (std::size_t bin = 0; bin < bins.size(); ++bin) {
@@ -125,7 +123,7 @@ std::shared_ptr<const PathTraceResult> PathTraceDriver::latestResult() const {
     return result_;
 }
 
-// Driver-thread-only. Hands back the first pool slot nothing else still holds, reallocating it only if the requested dimensions changed, so a steady-state pass allocates nothing at all. use_count() == 1 means the pool's own reference is the last one: the render thread has released both the frame-local snapshot and the display texture's owner ref. Returns nullptr in the rare window where all four are still pinned, which the caller waits out rather than allocating a set it would immediately throw away.
+// Driver-thread-only. Hands back the first pool slot nothing else holds, reallocating only on a size change.
 std::shared_ptr<PathTraceResult> PathTraceDriver::acquireFreeBuffer(int width, int height) {
     for (std::shared_ptr<PathTraceResult>& slot : bufferPool_) {
         if (slot != nullptr && slot.use_count() > 1) {
@@ -139,18 +137,18 @@ std::shared_ptr<PathTraceResult> PathTraceDriver::acquireFreeBuffer(int width, i
     return nullptr;
 }
 
-// Runs until destruction (jthread's stop token), picking up the latest requested state whenever its generation changes and otherwise repeatedly re-tracing the same request, accumulating each pass into a running mean that converges over time. A pass superseded mid-flight (renderPathTraced's own generation check, polled once per row) is discarded whole, never partially merged.
-engine::debug::PassRecord PathTraceDriver::lastPassRecord() const {
+// Runs until destruction on jthread's stop token, picking up the latest request whenever its generation changes.
+pathtracer::debug::PassRecord PathTraceDriver::lastPassRecord() const {
     const std::lock_guard<std::mutex> lock(statsMutex_);
     return lastPass_;
 }
 
-// Driver-thread-only. passStats_ is read here rather than inside driverLoop so both the completed and the cancelled call site share one definition of what a PassRecord contains.
+// Driver-thread-only. passStats_ is read here so the completed and cancelled call sites share one definition of a PassRecord.
 void PathTraceDriver::publishPassRecord(std::uint64_t generation, int passIndex, int width,
                                          int height, double traceMs, double accumulateMs,
                                          double overRangeMs, double publishMs, double passMs,
                                          bool cancelled) {
-    const engine::debug::PassRecord record{generation,
+    const pathtracer::debug::PassRecord record{generation,
                                             passIndex,
                                             width,
                                             height,
@@ -168,7 +166,8 @@ void PathTraceDriver::publishPassRecord(std::uint64_t generation, int passIndex,
 }
 
 void PathTraceDriver::driverLoop(std::stop_token stopToken) {
-    std::shared_ptr<PathTraceResult> currentMean;  // the pool slot holding the last published mean of the active generation -- read as the previous mean by the next pass, never written again
+    // The pool slot holding the last published mean of the active generation: read as the previous mean, never written again.
+    std::shared_ptr<PathTraceResult> currentMean;
     std::optional<Request> activeRequest;
     std::uint64_t activeGeneration = 0;  // 0 == no request handled yet; requestTrace's first bump makes generation_ 1
     int accumulated = 0;  // passes in currentMean; driver-thread-only, readers see it only as the published result's samples
@@ -183,17 +182,16 @@ void PathTraceDriver::driverLoop(std::stop_token stopToken) {
         if (requestedGeneration != activeGeneration) {
             {
                 const std::lock_guard<std::mutex> lock(requestMutex_);
-                activeRequest = pendingRequest_;  // guaranteed engaged: requestedGeneration != 0 implies at least one requestTrace() call has completed
+                // Guaranteed engaged: requestedGeneration != 0 implies a requestTrace() call has completed.
+                activeRequest = pendingRequest_;
             }
             activeGeneration = requestedGeneration;
             accumulated = 0;
         }
 
-        // NOLINTBEGIN(bugprone-unchecked-optional-access) -- activeRequest is engaged for every line below, by the
-        // invariant stated where it is assigned: the loop reaches here only when requestedGeneration != 0, and
-        // generation_ goes non-zero only inside requestTrace(), under the same lock that sets pendingRequest_. The
-        // analyser cannot see across that lock, and guarding a value that is always present would be dead branches
-        // asserting a condition this thread has already established. tools/driver_validate.cpp pins it behaviourally.
+        // activeRequest is engaged for every line below: requestedGeneration goes non-zero only inside requestTrace(), under one lock.
+
+        // NOLINTBEGIN(bugprone-unchecked-optional-access)
         if (activeRequest->width <= 0 || activeRequest->height <= 0) {
             std::this_thread::sleep_for(kIdlePollInterval);
             continue;
@@ -211,16 +209,12 @@ void PathTraceDriver::driverLoop(std::stop_token stopToken) {
             continue;  // every buffer still referenced by the render thread -- retry rather than allocate
         }
 
-        // Two distinct roles, deliberately not one value (see sampler.h). sampleBase is how many samples this image has
-        // already accumulated, so the sampler continues its Sobol sequence where the previous pass stopped instead of
-        // re-drawing the same point under a new randomization; passIndex is the same count 1-based, this pass's weight 1/passIndex in the mean.
+        // Two roles (sampler.h): sampleBase continues the Sobol sequence, passIndex is that count 1-based, so this pass weighs 1/passIndex.
         const int sampleBase = accumulated;
         const int passIndex = sampleBase + 1;
         const auto passStart = std::chrono::steady_clock::now();
         passStats_.reset();
-        // Built fresh each pass from this request's env state -- cheap (holds references/scalars, no
-        // copies) -- rather than stored, so the HUD's environment-light toggle takes effect on the
-        // very next pass with no separate invalidation path.
+        // Built fresh each pass from this request's env state, holding references not copies, so the HUD toggle needs no invalidation path.
         const LightSet lights(activeRequest->envLightEnabled ? &environmentMap_ : nullptr,
                                activeRequest->envRotationRadians, activeRequest->envExposure,
                                quadLights_);
@@ -228,10 +222,7 @@ void PathTraceDriver::driverLoop(std::stop_token stopToken) {
         renderPathTraced(activeRequest->camera, accel_, shadingTriangles_, instances_,
                           instanceLightIndex_, lights, activeRequest->width, activeRequest->height,
                           activeRequest->showSky, activeRequest->settings, perInstanceSettings_,
-                          // The generation IS the scramble seed: it is fixed for every pass of one accumulation and
-                          // changes exactly when the image restarts (camera move, setting change), which is precisely
-                          // the lifetime a randomized-QMC scramble must have. Passed raw rather than pre-hashed --
-                          // Sampler's own SplitMix64 avalanches it, so a small monotonic counter is sufficient input.
+                          // The generation is the scramble seed: fixed per accumulation, changing exactly when the image restarts.
                           static_cast<std::uint32_t>(activeGeneration), sampleBase, activeRequest->maxSamples,
                           generation_, activeGeneration,
                           threadPool_, passStats_, *pass);
@@ -239,21 +230,21 @@ void PathTraceDriver::driverLoop(std::stop_token stopToken) {
         const double traceMs = millisecondsSince(traceStart);
 
         if (generation_.load(std::memory_order_relaxed) != activeGeneration) {
-            // Published before the discard, not skipped: a camera drag cancels passes continuously, and rays traced for a discarded pass were still paid for. Reporting only completed passes would show an idle tracer during exactly the interaction that loads it hardest.
+            // Published before the discard, not skipped: a camera drag cancels passes continuously, and their rays were still paid for.
             publishPassRecord(activeGeneration, passIndex, pass->beauty.width, pass->beauty.height,
                                traceMs, 0.0, 0.0, 0.0, millisecondsSince(passStart),
                                /*cancelled=*/true);
             continue;  // superseded mid-pass -- discard, next iteration picks up the new request
         }
 
-        // passIndex == 1 leaves the pass exactly as rendered: the running mean of one sample is that sample, and it is also the only case with no previous mean of this generation to read.
+        // passIndex == 1 leaves the pass as rendered: the running mean of one sample is that sample, and no previous mean exists.
         const auto accumulateStart = std::chrono::steady_clock::now();
         if (passIndex > 1) {
             accumulateMean(*pass, *currentMean, passIndex, threadPool_);
         }
         const double accumulateMs = millisecondsSince(accumulateStart);
 
-        // After the mean, before the publish: the statistics must describe the image that is about to go on screen, and the render thread must never see a result whose two are stale.
+        // After the mean, before the publish: the statistics must describe the image about to go on screen.
         const auto overRangeStart = std::chrono::steady_clock::now();
         reduceOverRange(*pass, overRangeHistograms_, overRangePeaks_, threadPool_);
         const double overRangeMs = millisecondsSince(overRangeStart);
@@ -275,4 +266,4 @@ void PathTraceDriver::driverLoop(std::stop_token stopToken) {
     }
 }
 
-}  // namespace engine::scene
+}  // namespace pathtracer::scene

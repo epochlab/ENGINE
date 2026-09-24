@@ -4,15 +4,10 @@
 #include <cmath>
 #include <complex>
 
-// Double-precision conductor Fresnel references shared by tools: bsdf_validate's oracles against bsdf.cpp, and metal_fit's spectral fit. Never include src/scene/bsdf.* here (fixtures.h's oracle-independence rule).
+// Double-precision conductor Fresnel references shared by tools. Never include src/scene/bsdf.* here: the oracle-independence rule.
 namespace tools::reference {
 
-// Gulbrandsen 2014 eq 12 and eq 2 exactly as the paper's Appendix A prints them -- the LITERAL k^2, not
-// the factored form bsdf.cpp ships -- followed by the textbook complex-arithmetic Fresnel, all in double.
-// Deliberately the other implementation of both departures: bsdf.cpp uses (nMax-n)(n-nLow) for k^2 and the
-// real-arithmetic unpolarized form, so one comparison against this reference tests both at once. Double is
-// what makes the literal k^2 usable here; it is what fails in float32 near r=1, which is why bsdf.cpp
-// factors it.
+// Gulbrandsen 2014 eq 12 and 2 as printed, the LITERAL k^2 rather than bsdf.cpp's factored form, then textbook complex Fresnel in double.
 inline std::complex<double> referenceConductorIor(double r, double g) {
     r = std::clamp(r, 1e-4, 0.9999);   // matches bsdf.cpp's kMinReflectivity/kMaxReflectivity
     g = std::clamp(g, 0.0, 1.0);
@@ -36,8 +31,7 @@ inline double referenceConductorFresnel(double r, double g, double cosTheta) {
     return referenceConductorFresnelAt(referenceConductorIor(r, g), cosTheta);
 }
 
-// Cosine-weighted average Fresnel, 2*int_0^1 F(mu)*mu dmu, by composite Simpson. The integrand is analytic on [0,1] for every (n, k) the Gulbrandsen domain reaches, so the O(h^4) error at this width is ~1e-13 -- ten orders under the tolerances it is used to police, and doubling the panel count moves no printed digit.
-// The mu=0 endpoint contributes nothing (the mu weight kills it) whatever F does there, which is what keeps the rule insensitive to the grazing limit both Fresnels approach differently.
+// Cosine-weighted average Fresnel by composite Simpson: the integrand is analytic on [0,1], so the O(h^4) error here is ~1e-13.
 template <typename Fresnel>
 double cosineAverageFresnel(Fresnel fresnel) {
     constexpr int kPanels = 4000;   // even, for Simpson

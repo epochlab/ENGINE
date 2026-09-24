@@ -1,6 +1,4 @@
-// Timing harness for engine::scene::renderRasterGBuffer (rasterizer.h), the synchronous per-frame render-thread work behind the 14 primary-hit AOVs. Synthetic dependency-free scene (no glTF/EXR asset, constant-color 1x1 textures), same standalone-CLI convention as rasterizer_validate.cpp: no test framework, non-zero exit on bad input. Deliberately NOT an add_test: a benchmark is not a correctness gate, and the rasterizer's correctness gate is rasterizer_validate.
-// Synthetic rather than asset-driven so the two variables the rasterizer's cost is actually a function of are independently controllable: --triangles sweeps the sub-triangle array past cache (the shipped scene is 20561 triangles = 1.81 MB, resident; the 5M-triangle tier is 440 MB, not), and --layers sweeps depth complexity, which is what a depth prepass is a function of. Neither is adjustable in a fixed asset.
-// Reports best-of-N, not the mean: run-to-run spread on this hardware is +/-10%, wide enough to hide a single change. --bench-log records the raw frames; bench_compare run makes the A/B.
+// Timing harness for renderRasterGBuffer, not a correctness gate. See docs/DERIVATIONS.md "Rasterizer benchmark design".
 
 #include <algorithm>
 #include <array>
@@ -17,18 +15,18 @@
 
 #include <glm/glm.hpp>
 
-#include "engine/debug/bench_log.h"
-#include "engine/gfx/hdr_image.h"
-#include "engine/scene/camera.h"
-#include "engine/scene/gltf_loader.h"
-#include "engine/scene/path_tracer.h"
-#include "engine/scene/rasterizer.h"
-#include "engine/scene/shading_scene.h"
-#include "engine/scene/thread_pool.h"
+#include "pathtracer/debug/bench_log.h"
+#include "pathtracer/gfx/hdr_image.h"
+#include "pathtracer/scene/camera.h"
+#include "pathtracer/scene/gltf_loader.h"
+#include "pathtracer/scene/path_tracer.h"
+#include "pathtracer/scene/rasterizer.h"
+#include "pathtracer/scene/shading_scene.h"
+#include "pathtracer/scene/thread_pool.h"
 
 namespace {
 
-using namespace engine::scene;  // NOLINT(google-build-using-namespace) -- tool-local convenience, mirrors rasterizer_validate.cpp
+using namespace pathtracer::scene;  // NOLINT(google-build-using-namespace) -- tool-local convenience, mirrors rasterizer_validate.cpp
 
 constexpr int kMaterialCount = 4;
 constexpr float kNearestLayerZ = 4.0F;   // world units in front of the camera; > nearClip so no layer is clipped away
@@ -46,7 +44,7 @@ struct Options {
     std::string benchLogPath;  // appends the run to this JSON Lines benchmark log (bench_log.h); empty = no log
 };
 
-engine::gfx::ImageTexture constantTexture(glm::vec4 color) {
+pathtracer::gfx::ImageTexture constantTexture(glm::vec4 color) {
     return {1, 1, std::vector<float>{color.r, color.g, color.b, color.a}};
 }
 
@@ -57,7 +55,7 @@ Material makeMaterial(glm::vec3 baseColor, float roughness) {
     material.bumpTexture = constantTexture(glm::vec4(0.5F));
     material.roughnessTexture = constantTexture(glm::vec4(roughness));
     material.specularTexture = constantTexture(glm::vec4(0.04F));
-    material.aoTexture = constantTexture(glm::vec4(1.0F));  // unread since AO became path-traced; kept a valid 1x1 so every slot matches makeDefaultMaterial
+    material.aoTexture = constantTexture(glm::vec4(1.0F));  // unread since AO became path-traced; a valid 1x1 matches makeDefaultMaterial
     return material;
 }
 
@@ -66,8 +64,7 @@ glm::vec4 tangentFor(const glm::vec3& normal) {
     return glm::vec4(glm::normalize(glm::cross(up, normal)), 1.0F);
 }
 
-// `layers` screen-filling shells, each holding an equal share of the triangle budget. Per-shell triangle radius is derived from that shell's frustum cross-section so every shell covers the screen once regardless of triangle count: raising --triangles shrinks triangles rather than piling up overdraw, keeping the two axes independent.
-// Emitted furthest shell first, so every shell improves the depth record and a pixel accumulates `layers` of them -- the quantity a depth prepass trades against. Submission order, not shell count, is what decides that: nearest-first would have every deeper shell rejected on arrival by the z-test, leaving one record per pixel however high --layers goes. This is therefore the worst case; an unsorted real scene averages the harmonic number of records (~2.7 at 8 shells), and a front-to-back one none at all.
+// `layers` screen-filling shells sharing the triangle budget, emitted furthest first, so a pixel accumulates `layers` depth records.
 std::vector<ShadingTriangle> makeLayeredTriangles(const Options& options, const Camera& camera) {
     const float aspect = static_cast<float>(options.width) / static_cast<float>(options.height);
     const Camera::ViewBasis basis = camera.viewBasis(aspect);
@@ -82,9 +79,9 @@ std::vector<ShadingTriangle> makeLayeredTriangles(const Options& options, const 
         const float depth = kNearestLayerZ + (static_cast<float>(layer) * kLayerSpacing);
         const float halfWidth = depth * basis.halfWidth * kLayerCoverage;
         const float halfHeight = depth * basis.halfHeight * kLayerCoverage;
-        // Circumradius giving `perLayer` triangles a combined area of ~1.3x the cross-section: an equilateral triangle of circumradius r has area (3*sqrt(3)/4)r^2.
+        // Circumradius for perLayer triangles at ~1.3x the cross-section, from the equilateral area (3*sqrt(3)/4)r^2.
         const float radius = std::sqrt((4.0F * halfWidth * halfHeight) / static_cast<float>(perLayer));
-        // The furthest shell (layer layers-1, emitted first) absorbs the integer-division remainder so the total matches --triangles exactly.
+        // Furthest shell (layer layers-1, emitted first) absorbs the integer-division remainder so the total matches --triangles exactly.
         const int count = layer == options.layers - 1
                               ? options.triangleCount - (perLayer * (options.layers - 1))
                               : perLayer;
@@ -94,7 +91,7 @@ std::vector<ShadingTriangle> makeLayeredTriangles(const Options& options, const 
             std::array<glm::vec3, 3> p{};
             for (int k = 0; k < 3; ++k) {
                 const float angle = kVertexAngleStep * static_cast<float>(k);
-                // Per-vertex depth jitter tilts each triangle off screen-parallel, so perspective-correct interpolation and the z-test do real work.
+                // Per-vertex depth jitter tilts triangles off screen-parallel, so perspective interpolation and the z-test do real work.
                 p[static_cast<std::size_t>(k)] =
                     center + glm::vec3(radius * std::cos(angle), radius * std::sin(angle), unit(rng) * radius * 0.25F);
             }
@@ -114,7 +111,7 @@ std::vector<ShadingTriangle> makeLayeredTriangles(const Options& options, const 
     return triangles;
 }
 
-// Returns nullopt on an unrecognized flag, a missing value, or a value outside its usable range -- argv is a system boundary, so a bad value is surfaced rather than clamped around.
+// nullopt on an unrecognized flag, missing value, or out-of-range value: argv is a boundary, so a bad value surfaces rather than clamps.
 std::optional<Options> parseOptions(int argc, char** argv) {
     Options options;
     for (int i = 1; i < argc; ++i) {
@@ -130,7 +127,7 @@ std::optional<Options> parseOptions(int argc, char** argv) {
         }
         char* end = nullptr;
         const long value = std::strtol(text, &end, 10);
-        // strtol reports non-numeric input as 0 and stops at the first bad character, so the terminator check is what makes "--seed foo" an error rather than a silent seed of 0.
+        // strtol reports non-numeric input as 0, so the terminator check is what makes "--seed foo" an error not a silent seed of 0.
         if (end == text || *end != '\0') {
             std::cerr << "raster_bench: " << flag << " expects an integer, got " << text << '\n';
             return std::nullopt;
@@ -202,14 +199,14 @@ int main(int argc, char** argv) {
     settings.metallicFactor = 0.2F;
     settings.roughnessFactor = 1.0F;
     const std::vector<PathTraceSettings> perInstanceSettings(instances.size(), settings);
-    // Once, outside the timed loop, as the app does at load -- the per-frame cost this measures is projecting and rasterizing the boxes, not deriving them.
+    // Once outside the timed loop, as the app does at load: the measured cost is projecting and rasterizing the boxes, not deriving them.
     const std::vector<AabbBounds> instanceBounds =
         computeInstanceBounds(shadingTriangles, static_cast<int>(instances.size()));
 
     ThreadPool threadPool;
-    // One buffer for the whole run, matching how the app owns it: renderRasterGBuffer reuses it in place, so the timed frames measure steady-state cost with no allocation in them.
+    // One buffer for the whole run as the app owns it: renderRasterGBuffer reuses it in place, so timed frames measure steady state.
     RasterGBuffer gbuffer;
-    // Discarded warm-up pass, absorbing the costs that happen once rather than per frame: spinning up and parking the pool's workers, and the buffer's only allocation.
+    // Discarded warm-up pass absorbing the once-only costs: spinning up and parking the pool's workers, and the buffer's only allocation.
     renderRasterGBuffer(camera, shadingTriangles, instances, perInstanceSettings, instanceBounds,
                          options->width, options->height, threadPool, gbuffer);
     if (gbuffer.depth.width != options->width) {
@@ -244,7 +241,7 @@ int main(int argc, char** argv) {
               << ", worst " << *worst << ")\n";
 
     if (!options->benchLogPath.empty()) {
-        const engine::debug::BenchRecord record{
+        const pathtracer::debug::BenchRecord record{
             .tool = "raster_bench",
             .argv = std::vector<std::string>(argv, argv + argc),
             .config = {{"triangles", options->triangleCount},
@@ -255,9 +252,9 @@ int main(int argc, char** argv) {
                        {"seed", options->seed}},
             .samples = {{"frame_ms", milliseconds}},
             .work = {{"triangles_emitted", shadingTriangles.size()},
-                     {"crc32", engine::debug::floatCrc32(gbuffer.depth.rgba)}},
+                     {"crc32", pathtracer::debug::floatCrc32(gbuffer.depth.rgba)}},
         };
-        if (!engine::debug::appendBenchRecord(options->benchLogPath, record)) {
+        if (!pathtracer::debug::appendBenchRecord(options->benchLogPath, record)) {
             return EXIT_FAILURE;
         }
     }

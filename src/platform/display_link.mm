@@ -1,4 +1,4 @@
-#include "engine/platform/display_link.h"
+#include "pathtracer/platform/display_link.h"
 
 #include <chrono>
 #include <cmath>
@@ -17,10 +17,10 @@
 #include <GLFW/glfw3.h>
 #include <GLFW/glfw3native.h>
 
-#include "engine/platform/window.h"
+#include "pathtracer/platform/window.h"
 
 // Times are CACurrentMediaTime seconds, the timebase CADisplayLink reports in.
-struct engine::platform::DisplayLink::State {
+struct pathtracer::platform::DisplayLink::State {
     std::mutex mutex;
     std::condition_variable vblank;
     std::uint64_t ticks = 0;     // vblanks delivered by the link
@@ -34,15 +34,15 @@ struct engine::platform::DisplayLink::State {
 };
 
 @interface EngineDisplayLinkTarget : NSObject
-- (instancetype)initWithState:(engine::platform::DisplayLink::State*)state;
+- (instancetype)initWithState:(pathtracer::platform::DisplayLink::State*)state;
 - (void)vblank:(CADisplayLink*)link;
 @end
 
 @implementation EngineDisplayLinkTarget {
-    engine::platform::DisplayLink::State* state_;
+    pathtracer::platform::DisplayLink::State* state_;
 }
 
-- (instancetype)initWithState:(engine::platform::DisplayLink::State*)state {
+- (instancetype)initWithState:(pathtracer::platform::DisplayLink::State*)state {
     if ((self = [super init])) {
         state_ = state;
     }
@@ -61,7 +61,7 @@ struct engine::platform::DisplayLink::State {
 
 @end
 
-namespace engine::platform {
+namespace pathtracer::platform {
 
 DisplayLink::DisplayLink(const Window& window) : state_(std::make_unique<State>()) {
     NSView* view = glfwGetCocoaView(window.nativeHandle());
@@ -71,11 +71,11 @@ DisplayLink::DisplayLink(const Window& window) : state_(std::make_unique<State>(
     // The link retains its target; the target borrows state_, which outlives the link thread (joined in the destructor).
     state_->link = [view displayLinkWithTarget:[[EngineDisplayLinkTarget alloc] initWithState:state_.get()]
                                       selector:@selector(vblank:)];
-    // A run loop of its own, so ticks arrive while the render thread is blocked in waitForNextVblank rather than only inside glfwPollEvents.
+    // A run loop of its own, so ticks arrive while the render thread is blocked in waitForNextVblank, not only inside glfwPollEvents.
     std::promise<CFRunLoopRef> started;
     std::future<CFRunLoopRef> runLoop = started.get_future();
     state_->thread = std::thread([state = state_.get(), &started] {
-        // User-interactive, as for any display-timed work: at default QoS the trace threads delay tick delivery, and with it the render thread's wake, by milliseconds.
+        // User-interactive, as for any display-timed work: at default QoS the trace threads delay tick delivery by milliseconds.
         pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
         @autoreleasepool {
             [state->link addToRunLoop:NSRunLoop.currentRunLoop forMode:NSDefaultRunLoopMode];
@@ -102,7 +102,7 @@ void DisplayLink::waitForNextVblank() {
     std::unique_lock lock(s.mutex);
     if (s.ticks == s.consumed) {
         const double now = CACurrentMediaTime();
-        // Unpaused: the pending vblank counts as missed once a full period passes without it. Paused: the next point on the grid it left off.
+        // Unpaused: the pending vblank counts as missed once a full period passes. Paused: the next point on the grid it left off.
         const double deadline = s.paused ? s.nextVblank + std::ceil((now - s.nextVblank) / s.period) * s.period
                                          : s.nextVblank + s.period;
         const auto until = std::chrono::steady_clock::now() +
@@ -123,4 +123,4 @@ double DisplayLink::refreshPeriodSeconds() const {
     return state_->period;
 }
 
-}  // namespace engine::platform
+}  // namespace pathtracer::platform

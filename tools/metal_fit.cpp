@@ -9,18 +9,18 @@
 #include <limits>
 
 #include "conductor_reference.h"
-#include "engine/scene/cie.h"
+#include "pathtracer/scene/cie.h"
 
 namespace tools::metal_fit {
 
 namespace {
 
-namespace cie = engine::scene::cie;
+namespace cie = pathtracer::scene::cie;
 using tools::reference::cosineAverageFresnel;
 using tools::reference::referenceConductorFresnel;
 using tools::reference::referenceConductorFresnelAt;
 
-// Gulbrandsen's r domain as bsdf.cpp clamps it (kMinReflectivity/kMaxReflectivity); a target outside it would be silently clamped at render time.
+// Gulbrandsen's r domain as bsdf.cpp clamps it (kMin/kMaxReflectivity); a target outside it is silently clamped at render time.
 constexpr double kMinReflectivity = 1e-4;
 constexpr double kMaxReflectivity = 0.9999;
 

@@ -1,19 +1,19 @@
-#include "engine/config/profile_config.h"
+#include "pathtracer/config/profile_config.h"
 
 #include <fstream>
 #include <iostream>
 
 #include <nlohmann/json.hpp>
 
-#include "engine/debug/aov.h"
+#include "pathtracer/debug/aov.h"
 #include "json_glm.h"
 
-namespace engine::config {
+namespace pathtracer::config {
 
 namespace {
 
-std::optional<engine::gfx::OcioDisplayTransform::Lut> parseLut(const std::string& name) {
-    using Lut = engine::gfx::OcioDisplayTransform::Lut;
+std::optional<pathtracer::gfx::OcioDisplayTransform::Lut> parseLut(const std::string& name) {
+    using Lut = pathtracer::gfx::OcioDisplayTransform::Lut;
     if (name == "sRGB") {
         return Lut::SRGB;
     }
@@ -27,8 +27,8 @@ std::optional<engine::gfx::OcioDisplayTransform::Lut> parseLut(const std::string
 }
 
 // Integer-typed first: get<int>() would silently truncate 16.5 to 16.
-std::optional<engine::gfx::ScalarType> parseBitDepth(const nlohmann::json& bitDepth) {
-    return bitDepth.is_number_integer() ? engine::gfx::scalarTypeFromBitDepth(bitDepth.get<int>()) : std::nullopt;
+std::optional<pathtracer::gfx::ScalarType> parseBitDepth(const nlohmann::json& bitDepth) {
+    return bitDepth.is_number_integer() ? pathtracer::gfx::scalarTypeFromBitDepth(bitDepth.get<int>()) : std::nullopt;
 }
 
 }  // namespace
@@ -51,7 +51,7 @@ std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
         const nlohmann::json& pathTracer = j.at("pathTracer");
 
         const std::string defaultLutName = render.at("defaultLUT").get<std::string>();
-        const std::optional<engine::gfx::OcioDisplayTransform::Lut> defaultLut =
+        const std::optional<pathtracer::gfx::OcioDisplayTransform::Lut> defaultLut =
             parseLut(defaultLutName);
         if (!defaultLut.has_value()) {
             std::cerr << "loadProfileConfig: " << path << " has an unrecognised defaultLUT \""
@@ -61,8 +61,8 @@ std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
 
         const nlohmann::json& displayBitDepth = render.at("displayBitDepth");
         const nlohmann::json& textureBitDepth = render.at("textureBitDepth");
-        const std::optional<engine::gfx::ScalarType> displayFormat = parseBitDepth(displayBitDepth);
-        const std::optional<engine::gfx::ScalarType> textureType = parseBitDepth(textureBitDepth);
+        const std::optional<pathtracer::gfx::ScalarType> displayFormat = parseBitDepth(displayBitDepth);
+        const std::optional<pathtracer::gfx::ScalarType> textureType = parseBitDepth(textureBitDepth);
         if (!displayFormat.has_value() || !textureType.has_value()) {
             std::cerr << "loadProfileConfig: " << path << " has displayBitDepth " << displayBitDepth.dump()
                        << ", textureBitDepth " << textureBitDepth.dump() << ", each expected 16 or 32\n";
@@ -94,31 +94,31 @@ std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
         const float aoMaxDistance = pathTracer.at("aoMaxDistance").get<float>();
         const float lookaheadDistance = pathTracer.at("lookaheadDistance").get<float>();
 
-        // These feed Camera::verticalFovRadians()/ev100() as denominators or bases of a physically meaningful quantity -- a zero/negative value would silently produce inf/NaN there instead of failing at this asset-load boundary. filmBack itself is validated by loadFilmBackPresets, not here -- this function never loads that file.
+        // Denominators in verticalFovRadians() and ev100(): a non-positive value gives inf or NaN, not a wrong-but-finite render.
         if (focalLengthMm <= 0.0F || aperture <= 0.0F || shutterSeconds <= 0.0F || iso <= 0.0F) {
             std::cerr << "loadProfileConfig: " << path
                        << " has a non-positive focalLengthMm/aperture/shutterSeconds/iso\n";
             return std::nullopt;
         }
-        // Bounded at (0,1] rather than merely positive: above 1 would render above the framebuffer and hand the display blit a downscale it has no filter for, and at or below 0 the render target collapses.
+        // Bounded at (0,1], not merely positive: above 1 renders past the framebuffer, at or below 0 the render target has no pixels.
         if (renderScale <= 0.0F || renderScale > 1.0F || interactiveRenderScale <= 0.0F ||
             interactiveRenderScale > 1.0F) {
             std::cerr << "loadProfileConfig: " << path
                        << " has a renderScale/interactiveRenderScale outside (0,1]\n";
             return std::nullopt;
         }
-        // A raw index into kAovNames, dereferenced unchecked by main.cpp's startup spec block and cast to AovId by the HUD, so an out-of-range value here is an out-of-bounds read rather than a wrong picture. Checked at the load boundary like every other field, not trusted as an internal invariant.
-        if (defaultAov < 0 || defaultAov >= static_cast<int>(engine::debug::AovId::Count)) {
+        // A raw index into kAovNames, dereferenced unchecked by the spec block, so out of range is an out-of-bounds read.
+        if (defaultAov < 0 || defaultAov >= static_cast<int>(pathtracer::debug::AovId::Count)) {
             std::cerr << "loadProfileConfig: " << path << " has a defaultAOV outside [0, "
-                       << static_cast<int>(engine::debug::AovId::Count) - 1 << "]\n";
+                       << static_cast<int>(pathtracer::debug::AovId::Count) - 1 << "]\n";
             return std::nullopt;
         }
-        // AO ray tfar. At or below zero every occlusion ray is degenerate (tfar < tnear), Embree reports no hit, and the AO AOV reads a uniform 1.0 -- the inert white this feature exists to replace.
+        // AO ray tfar. At or below zero every occlusion ray is degenerate and the AO lane reads a uniform 1.0: inert white, not an error.
         if (aoMaxDistance <= 0.0F) {
             std::cerr << "loadProfileConfig: " << path << " has a non-positive aoMaxDistance\n";
             return std::nullopt;
         }
-        // The Lookahead AOV's ramp divisor: at or below zero every covered pixel divides by it, so the lane is inf/NaN rather than the [0,1] gradient it is defined to be.
+        // The Lookahead ramp divisor: at or below zero every covered pixel divides by it, giving inf or NaN, not the [0,1] gradient.
         if (lookaheadDistance <= 0.0F) {
             std::cerr << "loadProfileConfig: " << path << " has a non-positive lookaheadDistance\n";
             return std::nullopt;
@@ -169,7 +169,7 @@ std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
     }
 }
 
-std::optional<std::vector<engine::scene::Camera::FilmBackPreset>> loadFilmBackPresets(
+std::optional<std::vector<pathtracer::scene::Camera::FilmBackPreset>> loadFilmBackPresets(
     const std::string& path) {
     std::ifstream file(path, std::ios::binary);
     if (!file) {
@@ -181,19 +181,19 @@ std::optional<std::vector<engine::scene::Camera::FilmBackPreset>> loadFilmBackPr
         nlohmann::json j;
         file >> j;
 
-        std::vector<engine::scene::Camera::FilmBackPreset> presets;
+        std::vector<pathtracer::scene::Camera::FilmBackPreset> presets;
         presets.reserve(j.size());
         for (const nlohmann::json& presetJson : j) {
             std::string name = presetJson.at("name").get<std::string>();
             const float widthMm = presetJson.at("widthMm").get<float>();
             const float heightMm = presetJson.at("heightMm").get<float>();
-            // widthMm/heightMm are physical sensor dimensions -- feed Camera::verticalFovRadians() and the HUD's aspect-ratio display as denominators, so a non-positive value must fail here rather than surface as inf/NaN later.
+            // Physical sensor dimensions feeding verticalFovRadians() and the HUD aspect as denominators: non-positive is inf or NaN.
             if (widthMm <= 0.0F || heightMm <= 0.0F) {
                 std::cerr << "loadFilmBackPresets: " << path << " has a non-positive filmBack for \""
                            << name << "\"\n";
                 return std::nullopt;
             }
-            presets.push_back({std::move(name), engine::scene::Camera::FilmBack{widthMm, heightMm}});
+            presets.push_back({std::move(name), pathtracer::scene::Camera::FilmBack{widthMm, heightMm}});
         }
         return presets;
     } catch (const nlohmann::json::exception& e) {
@@ -202,4 +202,4 @@ std::optional<std::vector<engine::scene::Camera::FilmBackPreset>> loadFilmBackPr
     }
 }
 
-}  // namespace engine::config
+}  // namespace pathtracer::config

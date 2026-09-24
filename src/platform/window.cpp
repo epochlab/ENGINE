@@ -1,18 +1,18 @@
-#include "engine/platform/window.h"
+#include "pathtracer/platform/window.h"
 
 #include <cstdlib>
 #include <iostream>
 
 #include <GLFW/glfw3.h>
 
-namespace engine::platform {
+namespace pathtracer::platform {
 
 Window::Window(int width, int height, const std::string& title) {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
     glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);  // mandatory on macOS
-    // Deliberately NOT setting GLFW_SRGB_CAPABLE -- display encoding must happen only in the OCIO shader, never via a driver-level sRGB framebuffer conversion.
+    // Deliberately not GLFW_SRGB_CAPABLE: display encoding happens only in the OCIO shader, never in a driver-level conversion.
 
     window_ = glfwCreateWindow(width, height, title.c_str(), nullptr, nullptr);
     if (window_ == nullptr) {
@@ -124,4 +124,4 @@ void Window::mouseButtonCallback(GLFWwindow* window, int button, int action, int
     }
 }
 
-}  // namespace engine::platform
+}  // namespace pathtracer::platform

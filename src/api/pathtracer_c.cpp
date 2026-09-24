@@ -1,20 +1,21 @@
-#include "engine/api/pathtracer_c.h"
+#include "pathtracer/api/pathtracer_c.h"
 
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
 
-#include "engine/api/headless_renderer.h"
-#include "engine/debug/aov.h"
+#include "pathtracer/api/headless_renderer.h"
+#include "pathtracer/debug/aov.h"
 
 namespace {
 
-using engine::api::HeadlessRenderer;
-using engine::debug::AovId;
+using pathtracer::api::HeadlessRenderer;
+using pathtracer::debug::AovId;
 
-// Every entry point is noexcept at the boundary: an exception crossing into ctypes is undefined behaviour, so each one is caught here and reported through the same err/return convention as an ordinary failure.
+// Every entry point is noexcept at the boundary: an exception crossing into ctypes is UB, so each is caught and reported through err.
 void writeError(char* err, int errCap, const std::string& message) {
     if (err == nullptr || errCap <= 0) {
         return;
@@ -28,12 +29,12 @@ void writeError(char* err, int errCap, const std::string& message) {
     return aov >= 0 && aov < static_cast<int>(AovId::Count);
 }
 
-[[nodiscard]] engine::scene::Camera toCamera(const PtCamera& camera) {
-    return engine::scene::Camera{
+[[nodiscard]] pathtracer::scene::Camera toCamera(const PtCamera& camera) {
+    return pathtracer::scene::Camera{
         glm::vec3(camera.position[0], camera.position[1], camera.position[2]),
         camera.yaw_degrees,
         camera.pitch_degrees,
-        engine::scene::Camera::FilmBack{camera.film_back_mm[0], camera.film_back_mm[1]},
+        pathtracer::scene::Camera::FilmBack{camera.film_back_mm[0], camera.film_back_mm[1]},
         camera.focal_length_mm,
         camera.near_clip,
         camera.far_clip,
@@ -70,39 +71,42 @@ PtRenderer* pt_renderer_open(const char* asset_root, const char* scene_path, cha
 }
 
 void pt_renderer_close(PtRenderer* renderer) {
+    // Raw delete is the C ABI's ownership contract: pt_renderer_open released a unique_ptr into the caller's hands.
+
+    // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
     delete reinterpret_cast<HeadlessRenderer*>(renderer);
 }
 
 int pt_aov_count(void) { return static_cast<int>(AovId::Count); }
 
 const char* pt_aov_name(int aov) {
-    return validAov(aov) ? engine::debug::kAovNames[aov] : nullptr;
+    return validAov(aov) ? pathtracer::debug::kAovNames[aov] : nullptr;
 }
 
 int pt_aov_id(const char* name) {
     if (name == nullptr) {
         return -1;
     }
-    const AovId aov = engine::debug::aovIdFromName(name);
+    const AovId aov = pathtracer::debug::aovIdFromName(name);
     return aov == AovId::Count ? -1 : static_cast<int>(aov);
 }
 
 int pt_aov_channels(int aov) {
-    return validAov(aov) ? engine::debug::aovChannels(static_cast<AovId>(aov)) : -1;
+    return validAov(aov) ? pathtracer::debug::aovChannels(static_cast<AovId>(aov)) : -1;
 }
 
 int pt_aov_needs_samples(int aov) {
-    return validAov(aov) && engine::debug::aovNeedsLightTransport(static_cast<AovId>(aov)) ? 1 : 0;
+    return validAov(aov) && pathtracer::debug::aovNeedsLightTransport(static_cast<AovId>(aov)) ? 1 : 0;
 }
 
 void pt_renderer_default_camera(const PtRenderer* renderer, PtCamera* out) {
     if (renderer == nullptr || out == nullptr) {
         return;
     }
-    const engine::scene::Camera& camera =
+    const pathtracer::scene::Camera& camera =
         reinterpret_cast<const HeadlessRenderer*>(renderer)->defaultCamera();
     const glm::vec3 position = camera.position();
-    const engine::scene::Camera::FilmBack filmBack = camera.filmBack();
+    const pathtracer::scene::Camera::FilmBack filmBack = camera.filmBack();
     out->position[0] = position.x;
     out->position[1] = position.y;
     out->position[2] = position.z;
@@ -153,6 +157,8 @@ int pt_render(PtRenderer* renderer, const PtRenderRequest* request, float* const
             .samples = request->samples,
             .scrambleSeed = request->seed,
             .aovs = std::move(aovs),
+            // No env-light override on the C ABI: nullopt keeps the scene's authored environment.lightEnabled.
+            .envLightEnabled = std::nullopt,
         };
         for (int i = 0; i < request->aov_count; ++i) {
             if (out[i] == nullptr) {

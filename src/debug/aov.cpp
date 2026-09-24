@@ -1,12 +1,12 @@
-#include "engine/debug/aov.h"
+#include "pathtracer/debug/aov.h"
 
-#include "engine/debug/aov_routing.h"
+#include "pathtracer/debug/aov_routing.h"
 
 #include <cctype>
 #include <string>
 #include <string_view>
 
-namespace engine::debug {
+namespace pathtracer::debug {
 
 AovSource aovSource(AovId aov) {
     switch (aov) {
@@ -30,7 +30,7 @@ AovSource aovSource(AovId aov) {
         case AovId::Gabor:
             return AovSource::BeautyFilter;
 
-        // The 14 primary-hit lanes renderRasterGBuffer scan-converts. No default: a new AovId must be classified here, and -Werror makes forgetting a compile error rather than a silent misroute.
+        // The 14 primary-hit lanes renderRasterGBuffer scan-converts. No default: -Werror makes an unclassified AovId a compile error.
         case AovId::Wireframe:
         case AovId::Alpha:
         case AovId::Depth:
@@ -72,7 +72,7 @@ int aovChannels(AovId aov) {
         case AovId::UV:
             return 2;
 
-        // Radiance triples, world-space vectors, and the two deliberately false-coloured lanes (ObjectID's per-instance hue, Wireframe's edge/box colours), all of which need all three channels.
+        // Radiance triples, world-space vectors and the two false-coloured lanes, all needing three channels, not a broadcast scalar.
         case AovId::Beauty:
         case AovId::HSV:
         case AovId::WorldPos:
@@ -95,7 +95,7 @@ int aovChannels(AovId aov) {
 }
 
 PathTracedLane pathTracedLane(AovId aov) {
-    using Result = engine::scene::PathTraceResult;
+    using Result = pathtracer::scene::PathTraceResult;
     switch (aov) {
         case AovId::Beauty:           return &Result::beauty;
         case AovId::BounceCount:      return &Result::bounceHeatmap;
@@ -112,7 +112,7 @@ PathTracedLane pathTracedLane(AovId aov) {
 }
 
 GBufferLane gbufferLane(AovId aov) {
-    using GBuffer = engine::scene::RasterGBuffer;
+    using GBuffer = pathtracer::scene::RasterGBuffer;
     switch (aov) {
         case AovId::IOR:        return &GBuffer::iorAov;
         case AovId::Depth:      return &GBuffer::depth;
@@ -159,4 +159,4 @@ AovId aovIdFromName(std::string_view name) {
     return AovId::Count;
 }
 
-}  // namespace engine::debug
+}  // namespace pathtracer::debug

@@ -16,7 +16,7 @@ _ERROR_CAPACITY = 512
 
 
 class PtCamera(ctypes.Structure):
-    """Mirrors ``PtCamera`` in include/engine/api/pathtracer_c.h, field for field and in order."""
+    """Mirrors ``PtCamera`` in include/pathtracer/api/pathtracer_c.h, field for field and in order."""
 
     _fields_ = [
         ("position", ctypes.c_float * 3),

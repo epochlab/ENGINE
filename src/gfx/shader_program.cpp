@@ -1,4 +1,4 @@
-#include "engine/gfx/shader_program.h"
+#include "pathtracer/gfx/shader_program.h"
 
 #include <cstddef>
 #include <fstream>
@@ -8,9 +8,9 @@
 
 #include <GL/glew.h>
 
-#include "engine/gfx/gl_debug.h"
+#include "pathtracer/gfx/gl_debug.h"
 
-namespace engine::gfx {
+namespace pathtracer::gfx {
 
 namespace {
 
@@ -37,7 +37,7 @@ std::optional<unsigned int> compileStage(GLenum stage, const std::string& source
     if (compiled == GL_FALSE) {
         GLint logLength = 0;
         glGetShaderiv(shader, GL_INFO_LOG_LENGTH, &logLength);
-        // std::string::data() is always a valid, non-null, null-terminated pointer (even for an empty string), unlike std::vector<char>'s data() when logLength is 0: a driver returning an empty log is otherwise a null-pointer stream insertion.
+        // std::string::data() is valid, non-null and null-terminated even when empty, unlike std::vector<char>::data() at length 0.
         std::string log(static_cast<std::size_t>(logLength), '\0');
         glGetShaderInfoLog(shader, logLength, nullptr, log.data());
         std::cerr << "ShaderProgram: shader compile failed:\n" << log << '\n';
@@ -135,4 +135,4 @@ int ShaderProgram::uniformLocation(const std::string& name) const {
     return location;
 }
 
-}  // namespace engine::gfx
+}  // namespace pathtracer::gfx

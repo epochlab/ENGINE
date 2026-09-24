@@ -23,43 +23,43 @@
 
 #include <OpenColorIO/OpenColorIO.h>
 
-#include "engine/config/profile_config.h"
-#include "engine/config/scene_config.h"
-#include "engine/debug/aov.h"
-#include "engine/debug/aov_routing.h"
-#include "engine/debug/aov_filters.h"
-#include "engine/debug/bench_log.h"
-#include "engine/debug/colormap.h"
-#include "engine/debug/frame_stats.h"
-#include "engine/debug/gpu_timer.h"
-#include "engine/debug/histogram.h"
-#include "engine/debug/perf_dashboard.h"
-#include "engine/debug/render_stats.h"
-#include "engine/debug/spec_report.h"
-#include "engine/debug/hud_overlay.h"
-#include "engine/debug/memory_tracker.h"
-#include "engine/debug/scene_stats.h"
-#include "engine/debug/system_info.h"
-#include "engine/gfx/gl_debug.h"
-#include "engine/gfx/hdr_image.h"
-#include "engine/gfx/ocio_display_transform.h"
-#include "engine/gfx/post_process_pass.h"
-#include "engine/gfx/shader_program.h"
-#include "engine/gfx/texture.h"
-#include "engine/platform/display_link.h"
-#include "engine/platform/window.h"
-#include "engine/scene/camera.h"
-#include "engine/scene/debug_camera_controller.h"
-#include "engine/scene/embree_accel.h"
-#include "engine/scene/environment_map.h"
-#include "engine/scene/false_color.h"
-#include "engine/scene/gltf_loader.h"
-#include "engine/scene/light.h"
-#include "engine/scene/material_binding.h"
-#include "engine/scene/path_trace_driver.h"
-#include "engine/scene/path_tracer.h"
-#include "engine/scene/rasterizer.h"
-#include "engine/scene/thread_pool.h"
+#include "pathtracer/config/profile_config.h"
+#include "pathtracer/config/scene_config.h"
+#include "pathtracer/debug/aov.h"
+#include "pathtracer/debug/aov_routing.h"
+#include "pathtracer/debug/aov_filters.h"
+#include "pathtracer/debug/bench_log.h"
+#include "pathtracer/debug/colormap.h"
+#include "pathtracer/debug/frame_stats.h"
+#include "pathtracer/debug/gpu_timer.h"
+#include "pathtracer/debug/histogram.h"
+#include "pathtracer/debug/perf_dashboard.h"
+#include "pathtracer/debug/render_stats.h"
+#include "pathtracer/debug/spec_report.h"
+#include "pathtracer/debug/hud_overlay.h"
+#include "pathtracer/debug/memory_tracker.h"
+#include "pathtracer/debug/scene_stats.h"
+#include "pathtracer/debug/system_info.h"
+#include "pathtracer/gfx/gl_debug.h"
+#include "pathtracer/gfx/hdr_image.h"
+#include "pathtracer/gfx/ocio_display_transform.h"
+#include "pathtracer/gfx/post_process_pass.h"
+#include "pathtracer/gfx/shader_program.h"
+#include "pathtracer/gfx/texture.h"
+#include "pathtracer/platform/display_link.h"
+#include "pathtracer/platform/window.h"
+#include "pathtracer/scene/camera.h"
+#include "pathtracer/scene/debug_camera_controller.h"
+#include "pathtracer/scene/embree_accel.h"
+#include "pathtracer/scene/environment_map.h"
+#include "pathtracer/scene/false_color.h"
+#include "pathtracer/scene/gltf_loader.h"
+#include "pathtracer/scene/light.h"
+#include "pathtracer/scene/material_binding.h"
+#include "pathtracer/scene/path_trace_driver.h"
+#include "pathtracer/scene/path_tracer.h"
+#include "pathtracer/scene/rasterizer.h"
+#include "pathtracer/scene/thread_pool.h"
 
 namespace OCIO = OCIO_NAMESPACE;
 
@@ -69,18 +69,18 @@ void glfwErrorCallback(int error, const char* description) {
     std::cerr << "GLFW error " << error << ": " << description << '\n';
 }
 
-const char* lutName(engine::gfx::OcioDisplayTransform::Lut lut) {
-    using Lut = engine::gfx::OcioDisplayTransform::Lut;
+const char* lutName(pathtracer::gfx::OcioDisplayTransform::Lut lut) {
+    using Lut = pathtracer::gfx::OcioDisplayTransform::Lut;
     return lut == Lut::SRGB ? "sRGB" : lut == Lut::Rec709 ? "Rec709" : "Raw";
 }
 
-// Camera and framebuffer geometry: the whole of what renderRasterGBuffer's output depends on (rasterizer.h takes no environment argument), and the leading part of what renderPathTraced's does. Factored out rather than duplicated so the two producers compare the same fields without either being able to drift from the other. fbWidth/fbHeight default to 0, a size no real framebuffer has, so the very first comparison of either producer always mismatches and both render on the first frame with no separate startup call.
+// Camera and framebuffer geometry, all renderRasterGBuffer's output depends on: factored so the two producers compare the same fields.
 struct ViewInputState {
     glm::vec3 cameraPosition{0.0F};
     float cameraYawDegrees = 0.0F;
     float cameraPitchDegrees = 0.0F;
     float focalLengthMm = 0.0F;
-    // The only FilmBack component that actually feeds the render (Camera::verticalFovRadians()) -- widthMm is display-only (HUD text/aspect-ratio readout), so tracking it here would trigger retraces for a change with no visible effect on the image.
+    // The only FilmBack component feeding the render; widthMm is display-only, so tracking it would retrace for no visible effect.
     float filmBackHeightMm = 0.0F;
     int fbWidth = 0;
     int fbHeight = 0;
@@ -88,8 +88,7 @@ struct ViewInputState {
     bool operator==(const ViewInputState&) const = default;
 };
 
-// Snapshot of every input renderPathTraced's result actually depends on except the resolution it renders at -- compared frame to frame (see requestPathTraceIfTriggerChanged) to decide whether to hand PathTraceDriver a fresh request.
-// The selected AOV is deliberately NOT here: one pass writes all of PathTraceResult's images, so which one is displayed cannot change what the driver has to compute. Keying on it restarted a converged accumulation on every AOV switch -- including between two of its own lanes, and including into the four GPU post-filters, which only ever re-read beauty.
+// Every input renderPathTraced depends on bar the resolution, compared frame to frame. See docs/DERIVATIONS.md "Retrace trigger state".
 struct PathTraceInputState {
     ViewInputState view;
     int envRotationDegrees = 0;
@@ -100,7 +99,7 @@ struct PathTraceInputState {
     bool operator==(const PathTraceInputState&) const = default;
 };
 
-// The inputs plus the scale they are currently being rendered at. Split in two because renderScale is *derived* from whether the inputs changed (requestPathTraceIfTriggerChanged): folding it into one struct would make the settle-time promotion to full resolution read as fresh interaction on the next frame, re-arming the timer it just satisfied and pinning the renderer at the interactive scale forever. The outer comparison is still what dispatches, so promoting the scale re-requests through the existing generation mechanism with no separate path.
+// The inputs plus the scale they render at. Split, because folding renderScale in would make the settle promotion read as fresh input.
 struct PathTraceTriggerState {
     PathTraceInputState input;
     float renderScale = 0.0F;  // sentinel, never a real value: profile_config.h bounds it to (0,1]
@@ -108,7 +107,7 @@ struct PathTraceTriggerState {
     bool operator==(const PathTraceTriggerState&) const = default;
 };
 
-// The rasterizer's own last-rendered state, compared the same way and at the same scale. Separate from PathTraceTriggerState because the two producers now refresh independently: an environment change must retrace without re-rasterizing a G-buffer that does not depend on it, and selecting a rasterizer AOV whose G-buffer is already current for this view must cost nothing at all.
+// The rasterizer's own last-rendered state: separate because an environment change must retrace without re-rasterizing a G-buffer.
 struct RasterTriggerState {
     ViewInputState view;
     float renderScale = 0.0F;  // same sentinel, same bound
@@ -116,10 +115,10 @@ struct RasterTriggerState {
     bool operator==(const RasterTriggerState&) const = default;
 };
 
-// Seconds of no input change before the renderer promotes itself back to full renderScale -- long enough that the momentary gaps between mouse-drag events during an orbit do not each trigger a full-resolution restart, short enough to feel immediate when the camera actually stops.
+// Seconds of no input before promoting back to full renderScale: longer than the gaps between drag events, short enough to feel immediate.
 constexpr double kInteractiveSettleSeconds = 0.25;
 
-// max(1) so a non-empty framebuffer never scales to a zero-pixel render target; a genuinely empty one (minimized window) stays 0 and is skipped by the caller's own guard, exactly as before.
+// max(1) so a non-empty framebuffer never scales to a zero-pixel target; a genuinely empty one stays 0 for the caller's own guard.
 int scaledExtent(int framebufferExtent, float scale) {
     if (framebufferExtent <= 0) {
         return 0;
@@ -127,10 +126,7 @@ int scaledExtent(int framebufferExtent, float scale) {
     return std::max(1, static_cast<int>(std::lround(static_cast<float>(framebufferExtent) * scale)));
 }
 
-// Everything the render loop touches every frame, plus the one-time-computed state (cached uniform locations, Embree scene) that must stay alive for the run's duration. A pure aggregate (no user-declared constructors) so initializeApp can return it by value via designated initializers -- each RAII member's own move constructor (already verified elsewhere to correctly transfer GL handles/tracked byte counts) handles the actual transfer.
-// -bench: raw frame and pass columns appended to the benchmark log at exit.
-// Stage 0 is the warm-up and is never measured: it carries process startup, the interactive-scale throwaway accumulation and the settle promotion, so restart() clears every column while it runs and the capture that survives it is one fixed workload -- the settled full-resolution convergence to maxSamples, exactly what a run with no schedule logs.
-// With -bench-aovs, each later stage is timed from the frame that SELECTS its AOV to the frame that AOV's producer has nothing left to do (stageComplete); the request itself goes out on the next frame, a constant one-frame lead present in every stage of every build and so cancelling in a before/after ratio. Those are the switch costs stage_wall_ms reports, each measured from an already-converged image.
+// Everything the loop touches each frame plus state outliving the run. -bench appends raw columns at exit; stage 0 is the warm-up.
 struct BenchCapture {
     std::string logPath;
     std::vector<std::string> argv;
@@ -139,11 +135,11 @@ struct BenchCapture {
     std::chrono::steady_clock::time_point stageStart;
     std::vector<float> stageWallMs;  // one entry per measured stage, so stages 1..aovs.size()-1
     std::uint64_t generation = 0;  // requestTrace's generation for the accumulation being captured
-    std::vector<engine::debug::PassRecord> passes;
-    std::vector<engine::debug::FrameStageTimes> frames;
+    std::vector<pathtracer::debug::PassRecord> passes;
+    std::vector<pathtracer::debug::FrameStageTimes> frames;
     std::vector<float> frameMs;
     std::vector<float> presentGpuMs;
-    // Per frame, not in config: it is a MEASUREMENT of the display link's period (renderFrame), so it lands on a different double from run to run, and config's contract is exact equality between comparable records.
+    // Per frame, not in config: a measurement of the display link's period, so it differs run to run, where config demands equality.
     std::vector<float> refreshHz;
     std::vector<float> uploadMs;  // one entry per display-texture upload, not per frame
     bool complete = false;
@@ -163,32 +159,32 @@ struct BenchCapture {
 };
 
 struct AppResources {
-    engine::gfx::ShaderProgram edgeFilterShader;
-    engine::gfx::ShaderProgram hsvDisplayShader;
-    engine::gfx::OcioDisplayTransform ocioTransform;
-    engine::scene::EmbreeAccel sceneAccel;     // path tracer scene intersection
+    pathtracer::gfx::ShaderProgram edgeFilterShader;
+    pathtracer::gfx::ShaderProgram hsvDisplayShader;
+    pathtracer::gfx::OcioDisplayTransform ocioTransform;
+    pathtracer::scene::EmbreeAccel sceneAccel;     // path tracer scene intersection
     // stumpModel.shadingTriangles indexes sceneAccel's triangles 1:1, no separate field needed.
-    engine::scene::EnvironmentMap environmentMap;
-    engine::scene::LoadedModel stumpModel;
-    // Parallel to stumpModel.instances: -1 for ordinary geometry, else the index into quadLights this instance's two triangles emit as (see light.h, path_tracer.cpp's tracePath). Entries for the scene's own geometry are all -1; appendQuadLights appends one entry per authored light (cornell.json authors one).
+    pathtracer::scene::EnvironmentMap environmentMap;
+    pathtracer::scene::LoadedModel stumpModel;
+    // Parallel to stumpModel.instances: -1 for ordinary geometry, else the index into quadLights this instance's triangles emit as.
     std::vector<int> instanceLightIndex;
-    std::vector<engine::scene::QuadLight> quadLights;
+    std::vector<pathtracer::scene::QuadLight> quadLights;
     int totalTriangles;
     int totalPoints;
 
-    engine::gfx::PostProcessPass postProcess;
-    engine::debug::HudOverlay hud;
-    engine::debug::FrameStats frameStats;
-    engine::debug::GpuTimer postTimer;
-    engine::debug::Histogram histogram;
+    pathtracer::gfx::PostProcessPass postProcess;
+    pathtracer::debug::HudOverlay hud;
+    pathtracer::debug::FrameStats frameStats;
+    pathtracer::debug::GpuTimer postTimer;
+    pathtracer::debug::Histogram histogram;
     // Zeroed at the top of every frame -- see FrameStageTimes.
-    engine::debug::FrameStageTimes stages;
-    engine::debug::PerfDashboard dashboard;
-    // Companion to histogram, computed separately (see updateOverRangeStats) since Histogram bins the post-display-transform, post-8-bit-clamp framebuffer and cannot tell 1.01 from 100.0 -- both saturate bin 255 identically.
+    pathtracer::debug::FrameStageTimes stages;
+    pathtracer::debug::PerfDashboard dashboard;
+    // Companion to histogram: that bins the post-transform, post-clamp framebuffer and cannot tell 1.01 from 100.0, both saturating 255.
     float overRangeFraction = 0.0F;
     float overRangePeakMultiple = 0.0F;
-    engine::scene::DebugCameraController debugCamera;
-    engine::debug::GpuInfo gpuInfo;
+    pathtracer::scene::DebugCameraController debugCamera;
+    pathtracer::debug::GpuInfo gpuInfo;
 
     int uFilterModeLoc;
     int uEdgeChannelViewLoc;
@@ -200,59 +196,58 @@ struct AppResources {
 
     // HUD-editable UI/run state.
     int aov;
-    // Film-back preset catalogue (assets/config/camera.json), loaded once at startup; filmBackPresetNames is index-parallel .c_str() pointers into filmBackPresets, built once for ImGui::Combo (same shape as aov/kAovNames). filmBackPresetIndex is the HUD dropdown's bound selection.
-    std::vector<engine::scene::Camera::FilmBackPreset> filmBackPresets;
+    // Film-back preset catalogue, loaded once at startup; filmBackPresetNames is index-parallel .c_str() pointers built for ImGui::Combo.
+    std::vector<pathtracer::scene::Camera::FilmBackPreset> filmBackPresets;
     std::vector<const char*> filmBackPresetNames;
     int filmBackPresetIndex;
     int channelView;
-    engine::gfx::OcioDisplayTransform::Lut userLut;
-    engine::debug::FramingOverlayState framingState;
+    pathtracer::gfx::OcioDisplayTransform::Lut userLut;
+    pathtracer::debug::FramingOverlayState framingState;
     bool showSky;
-    // Whether the environment is in LightSet's light set at all (NEE, MIS, miss radiance) -- distinct
-    // from showSky, which only ever gates the camera ray's own miss. Off is what makes the classic
-    // Goral 1984 Cornell (light-panel-only, no IBL) reachable interactively. Initialised from the
-    // scene's own environment.lightEnabled (scene_config.h) in initializeApp.
+    // Whether the environment is in LightSet at all, unlike showSky. Off is what makes the classic Goral 1984 Cornell reachable.
     bool envLightEnabled;
     int envRotationDegrees;
     float envExposureStops;  // stops, not a multiplier; requestPathTrace does exp2()
     bool invert;   // 1.0 - colour, applied to the final display-referred image -- the 'I' debug toggle
     bool statsEnabled;  // -stats: the live terminal dashboard. The instrumentation behind it always runs; this only gates the drawing.
-    bool showHud;  // 'H' toggle; gates HudOverlay::draw only -- beginFrame/render stay unconditional so ImGui's frame pairing is never broken
+    // 'H' toggle; gates HudOverlay::draw only -- beginFrame/render stay unconditional so ImGui's frame pairing holds.
+    bool showHud;
     bool vsync;  // profile.json: pace each frame to the vblank, or run uncapped
     // Chromatic aberration strength (0 = off), radial UV offset passed to OcioDisplayTransform::setAberration -- HUD slider only.
     float aberrationStrength;
-    // The rasterizer runs only on a trigger change into one of its AOVs, so its cost is not a per-frame stage: kept across frames and reported as a last-actual-cost plus duty cycle rather than averaged away.
+    // The rasterizer runs only on a trigger change, so its cost is a last-actual plus duty cycle rather than a per-frame average.
     float lastRasterMs;
 
-    // Async path-traced view, selected via the `aov` field (engine::debug::AovId, the HUD's AOV dropdown). pathTraceDriver runs continuously on its own background thread once constructed (main() constructs it after initializeApp() returns -- see path_trace_driver.h's constructor precondition on reference stability); requestTrace() is called only from renderFrame's requestPathTraceIfTriggerChanged, whenever lastPathTraceTrigger detects the camera/scene state renderPathTraced depends on has changed -- no manual trigger. unique_ptr, not a by-value optional: PathTraceDriver holds reference members and an owned std::jthread/std::mutex, so it's neither copyable nor movable -- a by-value optional<T> member would make that non-movability propagate to AppResources itself (optional<T>'s move ctor is only available when T's is), which would break initializeApp's return-by-value/RVO pattern every other member here relies on. A unique_ptr's own move just transfers ownership of the pointee's address, never touching PathTraceDriver's reference members, so AppResources stays movable and PathTraceDriver itself is never relocated in memory once constructed.
-    engine::scene::PathTraceSettings pathTraceSettings;
-    // Per-instance material fields, parallel-indexed with stumpModel.instances (ShadingTriangle::instanceIndex resolves into this) -- pathTraceSettings's 11 material fields copied per instance, overridden from sceneConfig.materialOverrides by MeshInstance::name where present. Renderer-only fields (samplesPerPixel/maxBounces/RR) are never read from these entries; see resolveBsdfParams/buildShadingFrame call sites in path_tracer.cpp/rasterizer.cpp.
-    std::vector<engine::scene::PathTraceSettings> perInstanceSettings;
-    // World-space AABB per instance, parallel-indexed with stumpModel.instances. Static geometry, so computed once at startup and read every rasterizer call for the Wireframe AOV's per-object box edges (rasterizer.h).
-    std::vector<engine::scene::AabbBounds> instanceBounds;
+    // Async path-traced view, selected by `aov`; requestTrace() is called only from requestPathTraceIfTriggerChanged. See docs/DERIVATIONS.
+    pathtracer::scene::PathTraceSettings pathTraceSettings;
+    // Per-instance material fields, parallel to stumpModel.instances, overridden by name. Renderer-only fields stay scene-wide.
+    std::vector<pathtracer::scene::PathTraceSettings> perInstanceSettings;
+    // World-space AABB per instance, parallel to stumpModel.instances. Static geometry, so computed once and read for the Wireframe AOV.
+    std::vector<pathtracer::scene::AabbBounds> instanceBounds;
     int maxSamples;  // accumulated-pass cap for PathTraceDriver; 0 = unbounded
-    engine::gfx::ScalarType displayFormat;  // pathTraceDisplayTexture's component type (profile.json displayBitDepth)
-    engine::gfx::ScalarType textureType;    // scene textures' storage (profile.json textureBitDepth), recorded in -bench configs
-    std::unique_ptr<engine::scene::PathTraceDriver> pathTraceDriver;
-    std::optional<engine::gfx::Texture> pathTraceDisplayTexture;
-    // Which image pathTraceDisplayTexture currently holds -- the image, not the AovId that selected it, so every AOV reading the same buffer shares one upload: Beauty and the four GPU post-filters over it (presentFrame) all pass &PathTraceResult::beauty. An interior pointer into pathTraceDisplayedOwner below, which is what keeps it valid and ABA-free.
-    const engine::gfx::HdrImage* pathTraceDisplayedImage;  // nullptr = nothing uploaded yet
-    // Max raw Depth value seen in the last rebuilt pathTraceDisplayTexture -- see ensurePathTraceDisplayTexture; only meaningful/updated when aov==Depth.
+    pathtracer::gfx::ScalarType displayFormat;  // pathTraceDisplayTexture's component type (profile.json displayBitDepth)
+    pathtracer::gfx::ScalarType textureType;    // scene textures' storage (profile.json textureBitDepth), recorded in -bench configs
+    std::unique_ptr<pathtracer::scene::PathTraceDriver> pathTraceDriver;
+    std::optional<pathtracer::gfx::Texture> pathTraceDisplayTexture;
+    // Which image the texture holds, not the AovId that selected it, so AOVs sharing a buffer share one upload.
+    const pathtracer::gfx::HdrImage* pathTraceDisplayedImage;  // nullptr = nothing uploaded yet
+    // Max raw Depth in the last rebuilt pathTraceDisplayTexture; only meaningful when aov==Depth.
     float pathTraceDisplayedDepthMax;
-    std::uint64_t pathTraceDisplayedGeneration;  // which RasterGBuffer generation the texture holds; 0 when it was built from a PathTraceResult instead
-    // Strong ref (kept alive, not just an identity pointer) to whichever published object -- PathTraceResult or RasterGBuffer -- pathTraceDisplayTexture currently reflects; see ensurePathTraceDisplayTexture.
+    // Which RasterGBuffer generation the texture holds; 0 when it was built from a PathTraceResult instead.
+    std::uint64_t pathTraceDisplayedGeneration;
+    // Strong ref, not just an identity pointer, to whichever published object pathTraceDisplayTexture currently reflects.
     std::shared_ptr<const void> pathTraceDisplayedOwner;
     PathTraceTriggerState lastPathTraceTrigger;  // sentinel-initialized, see its own doc comment
     RasterTriggerState lastRasterTrigger;        // the same, for the rasterizer's independent refresh
-    // Render resolution as a fraction of the framebuffer: renderScale once settled, interactiveRenderScale while any input is changing (profile_config.h). lastInputChange is the timer the promotion between them is measured against.
+    // Render resolution as a fraction of the framebuffer: renderScale settled, interactiveRenderScale while input changes.
     float renderScale;
     float interactiveRenderScale;
     std::chrono::steady_clock::time_point lastInputChange;
 
-    // Synchronous per-frame CPU rasterizer for the 14 primary-hit-only G-buffer AOVs (rasterizer.h) -- their only producer, decoupled from PathTraceDriver's async convergence loop. unique_ptr for the same reason as pathTraceDriver: ThreadPool's copy/move are deleted (owns worker threads), so a by-value member would break AppResources's movability.
-    std::unique_ptr<engine::scene::ThreadPool> rasterThreadPool;
-    // Allocated once and rendered into in place (rasterizer.h), never republished -- its `generation` field, not its address, is what tells one render from the next. Refreshed synchronously in requestPathTraceIfTriggerChanged whenever a rasterizer-backed AOV is selected and lastRasterTrigger shows this view has not been rasterized yet; generation stays 0 while only light-transport AOVs are ever shown, because then it never runs at all.
-    std::shared_ptr<engine::scene::RasterGBuffer> rasterGBuffer;
+    // Synchronous CPU rasterizer for the 14 primary-hit AOVs, their only producer. unique_ptr: ThreadPool owns threads and cannot move.
+    std::unique_ptr<pathtracer::scene::ThreadPool> rasterThreadPool;
+    // Allocated once and rendered into in place, never republished: its `generation`, not its address, tells one render from the next.
+    std::shared_ptr<pathtracer::scene::RasterGBuffer> rasterGBuffer;
     // Scene file's basename, for the dashboard's one-line SCENE row -- the full path is in the spec block, and the row has no space for it.
     std::string sceneName;
 
@@ -272,21 +267,21 @@ struct AppResources {
 };
 
 struct RequiredShaders {
-    engine::gfx::ShaderProgram edgeFilterShader;
-    engine::gfx::ShaderProgram hsvDisplayShader;
-    engine::gfx::OcioDisplayTransform ocioTransform;
+    pathtracer::gfx::ShaderProgram edgeFilterShader;
+    pathtracer::gfx::ShaderProgram hsvDisplayShader;
+    pathtracer::gfx::OcioDisplayTransform ocioTransform;
 };
 
-// All shader/OCIO loading in one place so initializeApp has one all-or-nothing check, matching how it already treats model/environment loading as a single startup gate.
+// All shader and OCIO loading in one place, so initializeApp has one all-or-nothing check, as it already has for model and environment.
 std::optional<RequiredShaders> loadShaders() {
-    // HSV/Sobel/Gabor AOV display passes -- see hsv_display.frag/edge_filter.frag; both run over the path tracer's Beauty image via the shared fullscreen-triangle post-process pass.
-    std::optional<engine::gfx::ShaderProgram> edgeFilterShader =
-        engine::gfx::ShaderProgram::loadFromFiles(ASSET_ROOT_DIR "/shaders/fullscreen_triangle.vert",
+    // HSV/Sobel/Gabor display passes; both run over the path tracer's Beauty image through the shared fullscreen-triangle pass.
+    std::optional<pathtracer::gfx::ShaderProgram> edgeFilterShader =
+        pathtracer::gfx::ShaderProgram::loadFromFiles(ASSET_ROOT_DIR "/shaders/fullscreen_triangle.vert",
                                                    ASSET_ROOT_DIR "/shaders/edge_filter.frag");
-    std::optional<engine::gfx::ShaderProgram> hsvDisplayShader = engine::gfx::ShaderProgram::loadFromFiles(
+    std::optional<pathtracer::gfx::ShaderProgram> hsvDisplayShader = pathtracer::gfx::ShaderProgram::loadFromFiles(
         ASSET_ROOT_DIR "/shaders/fullscreen_triangle.vert", ASSET_ROOT_DIR "/shaders/hsv_display.frag");
-    std::optional<engine::gfx::OcioDisplayTransform> ocioTransform =
-        engine::gfx::OcioDisplayTransform::create();
+    std::optional<pathtracer::gfx::OcioDisplayTransform> ocioTransform =
+        pathtracer::gfx::OcioDisplayTransform::create();
 
     if (!edgeFilterShader || !hsvDisplayShader || !ocioTransform) {
         return std::nullopt;
@@ -306,12 +301,12 @@ struct EdgeFilterUniforms {
     int invert;
 };
 
-// Sobel/Gabor's second pass (see edge_filter.frag): uHdrColor's texture unit and the Gabor kernel weights are both fixed for the whole run, set once here.
-EdgeFilterUniforms setupEdgeFilterShader(const engine::gfx::ShaderProgram& edgeFilterShader) {
+// Sobel/Gabor's second pass: uHdrColor's texture unit and the Gabor weights are fixed for the whole run, so they are set once here.
+EdgeFilterUniforms setupEdgeFilterShader(const pathtracer::gfx::ShaderProgram& edgeFilterShader) {
     edgeFilterShader.use();
     GL_CALL(glUniform1i(edgeFilterShader.uniformLocation("uHdrColor"), 0));
-    const std::array<float, engine::debug::kGaborOrientations * engine::debug::kGaborTaps> gaborKernel =
-        engine::debug::buildGaborKernel();
+    const std::array<float, pathtracer::debug::kGaborKernelSize> gaborKernel =
+        pathtracer::debug::buildGaborKernel();
     GL_CALL(glUniform1fv(edgeFilterShader.uniformLocation("uGaborKernel"),
                           static_cast<GLsizei>(gaborKernel.size()), gaborKernel.data()));
     return EdgeFilterUniforms{edgeFilterShader.uniformLocation("uFilterMode"),
@@ -328,7 +323,7 @@ struct HsvDisplayUniforms {
 };
 
 // hsv_display.frag's uHdrColor texture unit is fixed for the whole run, same convention as setupEdgeFilterShader above.
-HsvDisplayUniforms setupHsvDisplayShader(const engine::gfx::ShaderProgram& hsvDisplayShader) {
+HsvDisplayUniforms setupHsvDisplayShader(const pathtracer::gfx::ShaderProgram& hsvDisplayShader) {
     hsvDisplayShader.use();
     GL_CALL(glUniform1i(hsvDisplayShader.uniformLocation("uHdrColor"), 0));
     return HsvDisplayUniforms{hsvDisplayShader.uniformLocation("uChannelView"),
@@ -336,24 +331,24 @@ HsvDisplayUniforms setupHsvDisplayShader(const engine::gfx::ShaderProgram& hsvDi
                                hsvDisplayShader.uniformLocation("uInvert")};
 }
 
-// All one-time startup work: camera/model/shader/environment loading (nullopt on any failure -- matches the shader/model/OCIO all-or-nothing gate this replaces), Embree scene build, and cached uniform-location lookups for the shared edge-filter/HSV shaders. Doesn't wire input callbacks -- those capture a stable AppResources& and must be set up by the caller only after this returns (see main()), since a callback capturing a reference into an AppResources that's still about to be moved into its final std::optional storage would dangle.
-std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sceneConfig,
-                                           const engine::config::ProfileConfig& profileConfig,
-                                           const engine::platform::Window& window,
+// All one-time startup work: camera, model, shader and environment loading, the Embree build, and cached uniform lookups.
+std::optional<AppResources> initializeApp(const pathtracer::config::SceneConfig& sceneConfig,
+                                           const pathtracer::config::ProfileConfig& profileConfig,
+                                           const pathtracer::platform::Window& window,
                                            const std::string& scenePath, bool statsEnabled,
                                            double refreshHz) {
-    const engine::debug::GpuInfo gpuInfo = engine::debug::queryGpuInfo();
+    const pathtracer::debug::GpuInfo gpuInfo = pathtracer::debug::queryGpuInfo();
 
-    // Loaded separately from profile.json (not gated on window size, unlike profile.json itself), then resolved by name against profileConfig.camera.defaultFilmBackPresetName -- mirrors loadMaterialConfig's "standalone JSON file" precedent below.
-    std::optional<std::vector<engine::scene::Camera::FilmBackPreset>> filmBackPresets =
-        engine::config::loadFilmBackPresets(ASSET_ROOT_DIR "/config/camera.json");
+    // Loaded separately from profile.json, then resolved by name against defaultFilmBackPresetName, as loadMaterialConfig already does.
+    std::optional<std::vector<pathtracer::scene::Camera::FilmBackPreset>> filmBackPresets =
+        pathtracer::config::loadFilmBackPresets(ASSET_ROOT_DIR "/config/camera.json");
     if (!filmBackPresets) {
         std::cerr << "main: film back preset load failed, aborting startup\n";
         return std::nullopt;
     }
     const auto filmBackPresetIt =
         std::find_if(filmBackPresets->begin(), filmBackPresets->end(),
-                     [&](const engine::scene::Camera::FilmBackPreset& preset) {
+                     [&](const pathtracer::scene::Camera::FilmBackPreset& preset) {
                          return preset.name == profileConfig.camera.defaultFilmBackPresetName;
                      });
     if (filmBackPresetIt == filmBackPresets->end()) {
@@ -363,15 +358,15 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
     }
     const int filmBackPresetIndex =
         static_cast<int>(std::distance(filmBackPresets->begin(), filmBackPresetIt));
-    // Computed before filmBackPresets is moved into AppResources below: vector's move is a buffer-ownership transfer (element addresses, hence these c_str() pointers, stay valid across it), but building this from an already-moved-from vector would not be.
+    // Computed before filmBackPresets is moved: the move keeps element addresses valid, but a moved-from vector would give none.
     std::vector<const char*> filmBackPresetNames;
     filmBackPresetNames.reserve(filmBackPresets->size());
-    for (const engine::scene::Camera::FilmBackPreset& preset : *filmBackPresets) {
+    for (const pathtracer::scene::Camera::FilmBackPreset& preset : *filmBackPresets) {
         filmBackPresetNames.push_back(preset.name.c_str());
     }
 
-    // ev100() is logged but not render-path-consumed directly: DebugCameraController::relativeExposureEv() derives the display-stage multiplier from it (OcioDisplayTransform), not this log line.
-    engine::scene::DebugCameraController debugCamera(
+    // ev100() is logged, not consumed: relativeExposureEv() derives the display-stage multiplier, not this log line.
+    pathtracer::scene::DebugCameraController debugCamera(
         profileConfig.camera.position, profileConfig.camera.yawDegrees,
         profileConfig.camera.pitchDegrees, filmBackPresetIt->filmBack,
         profileConfig.camera.focalLengthMm, profileConfig.camera.nearClip,
@@ -387,7 +382,7 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         glm::rotate(glm::mat4(1.0F), glm::radians(sceneConfig.model.rotation.x), glm::vec3(1.0F, 0.0F, 0.0F));
 
     const auto loadStart = std::chrono::steady_clock::now();
-    std::optional<engine::scene::LoadedModel> stumpModel = engine::scene::loadGltf(
+    std::optional<pathtracer::scene::LoadedModel> stumpModel = pathtracer::scene::loadGltf(
         std::string(ASSET_ROOT_DIR) + "/" + sceneConfig.model.gltfPath, profileConfig.render.textureType, sceneTransform,
         std::string(ASSET_ROOT_DIR) + "/" + sceneConfig.model.texturePath);
     const double loadMs =
@@ -395,11 +390,11 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
             .count();
     int totalTriangles = 0;
     std::vector<int> instanceLightIndex;
-    std::vector<engine::scene::QuadLight> quadLights;
+    std::vector<pathtracer::scene::QuadLight> quadLights;
     if (stumpModel) {
         instanceLightIndex.assign(stumpModel->instances.size(), -1);
-        quadLights = engine::scene::buildQuadLights(sceneConfig.lights, sceneTransform);
-        engine::scene::appendQuadLights(*stumpModel, quadLights, instanceLightIndex);
+        quadLights = pathtracer::scene::buildQuadLights(sceneConfig.lights, sceneTransform);
+        pathtracer::scene::appendQuadLights(*stumpModel, quadLights, instanceLightIndex);
 
         totalTriangles = static_cast<int>(stumpModel->worldTriangles.size());
     }
@@ -407,10 +402,10 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
     const int totalPoints = totalTriangles * 3;
 
     std::optional<RequiredShaders> shaders = loadShaders();
-    // Decoded once here (not via a texture-upload helper): the path tracer is the only consumer, sampling this CPU ImageTexture directly, with no GPU upload step in between.
-    std::optional<engine::gfx::ImageTexture> environmentImage = engine::gfx::loadImageTexture(
+    // Decoded once here, not through a texture-upload helper: the path tracer samples this CPU ImageTexture directly, with no GPU upload.
+    std::optional<pathtracer::gfx::ImageTexture> environmentImage = pathtracer::gfx::loadImageTexture(
         std::string(ASSET_ROOT_DIR) + "/" + sceneConfig.environment.hdriPath, profileConfig.render.textureType);
-    std::optional<engine::config::MaterialConfig> materialConfig = engine::config::loadMaterialConfig(
+    std::optional<pathtracer::config::MaterialConfig> materialConfig = pathtracer::config::loadMaterialConfig(
         std::string(ASSET_ROOT_DIR) + "/" + sceneConfig.materialPath);
 
     if (!shaders || !stumpModel || !environmentImage || !materialConfig) {
@@ -419,17 +414,17 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         return std::nullopt;
     }
 
-    engine::gfx::PostProcessPass postProcess;
-    engine::debug::HudOverlay hud(window.nativeHandle());
-    engine::debug::FrameStats frameStats;
-    engine::debug::GpuTimer postTimer;
-    engine::debug::Histogram histogram;
+    pathtracer::gfx::PostProcessPass postProcess;
+    pathtracer::debug::HudOverlay hud(window.nativeHandle());
+    pathtracer::debug::FrameStats frameStats;
+    pathtracer::debug::GpuTimer postTimer;
+    pathtracer::debug::Histogram histogram;
 
-    engine::scene::EnvironmentMap environmentMap(std::move(*environmentImage));
+    pathtracer::scene::EnvironmentMap environmentMap(std::move(*environmentImage));
 
     const auto accelBuildStart = std::chrono::steady_clock::now();
-    std::optional<engine::scene::EmbreeAccel> sceneAccel =
-        engine::scene::EmbreeAccel::build(std::move(stumpModel->worldTriangles));
+    std::optional<pathtracer::scene::EmbreeAccel> sceneAccel =
+        pathtracer::scene::EmbreeAccel::build(std::move(stumpModel->worldTriangles));
     if (!sceneAccel) {
         std::cerr << "main: Embree scene build failed, aborting startup\n";
         return std::nullopt;
@@ -442,7 +437,7 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
     const EdgeFilterUniforms edgeFilterUniforms = setupEdgeFilterShader(shaders->edgeFilterShader);
     const HsvDisplayUniforms hsvUniforms = setupHsvDisplayShader(shaders->hsvDisplayShader);
 
-    const engine::scene::PathTraceSettings basePathTraceSettings{
+    const pathtracer::scene::PathTraceSettings basePathTraceSettings{
         .samplesPerPixel = profileConfig.pathTracer.samplesPerPixel,
         .maxBounces = profileConfig.pathTracer.maxBounces,
         .russianRouletteStartBounce = profileConfig.pathTracer.russianRouletteStartBounce,
@@ -463,8 +458,8 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         .edgeTint = materialConfig->edgeTint,
     };
 
-    std::optional<std::vector<engine::scene::PathTraceSettings>> perInstanceSettings =
-        engine::scene::resolvePerInstanceSettings(basePathTraceSettings, stumpModel->instances,
+    std::optional<std::vector<pathtracer::scene::PathTraceSettings>> perInstanceSettings =
+        pathtracer::scene::resolvePerInstanceSettings(basePathTraceSettings, stumpModel->instances,
                                                    sceneConfig.materialOverrides, ASSET_ROOT_DIR);
     if (!perInstanceSettings) {
         std::cerr << "main: material override resolution failed, aborting startup\n";
@@ -472,14 +467,14 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
     }
 
     // After appendQuadLights, so the light panels' own instances are bounded too.
-    std::vector<engine::scene::AabbBounds> instanceBounds = engine::scene::computeInstanceBounds(
+    std::vector<pathtracer::scene::AabbBounds> instanceBounds = pathtracer::scene::computeInstanceBounds(
         stumpModel->shadingTriangles, static_cast<int>(stumpModel->instances.size()));
 
-    // Printed here, at the end of startup, rather than at the six points these values become known: every number in the block is real by now (the GL context exists, the scene has loaded, the BVH is built and has reported its memory), and one contiguous block survives being piped to a log where six scattered lines interleave with everything else.
-    const engine::debug::EngineSpec spec{
+    // Printed at the end of startup, not where each value becomes known: every number is real by now, and one block survives being piped.
+    const pathtracer::debug::EngineSpec spec{
         scenePath.c_str(),
         sceneConfig.environment.hdriPath.c_str(),
-        engine::debug::kAovNames[profileConfig.render.defaultAov],
+        pathtracer::debug::kAovNames[profileConfig.render.defaultAov],
         profileConfig.window.width,
         profileConfig.window.height,
         profileConfig.render.renderScale,
@@ -489,21 +484,21 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         basePathTraceSettings.russianRouletteStartBounce,
         profileConfig.pathTracer.maxSamples,
         basePathTraceSettings.aoMaxDistance,
-        // Both pools take ThreadPool's default; PathTraceDriver owns its own and is not constructed until main() has AppResources at its final address, so neither can be queried from here.
-        engine::scene::ThreadPool::defaultThreadCount(),
-        engine::scene::ThreadPool::defaultThreadCount(),
-        engine::scene::kPathTraceTileSize,
+        // Both pools take ThreadPool's default; PathTraceDriver owns its own, unconstructed until AppResources is at its final address.
+        pathtracer::scene::ThreadPool::defaultThreadCount(),
+        pathtracer::scene::ThreadPool::defaultThreadCount(),
+        pathtracer::scene::kPathTraceTileSize,
         static_cast<int>(stumpModel->instances.size()),
         static_cast<int>(quadLights.size()),
         totalTriangles,
         loadMs,
         accelBuildMs,
-        engine::scene::embreeAllocatedBytes(),
-        engine::gfx::khrDebugAvailable(),
-        engine::debug::gpuTimerQueryAvailable(),
+        pathtracer::scene::embreeAllocatedBytes(),
+        pathtracer::gfx::khrDebugAvailable(),
+        pathtracer::debug::gpuTimerQueryAvailable(),
         refreshHz,
     };
-    engine::debug::printSpec(spec, gpuInfo);
+    pathtracer::debug::printSpec(spec, gpuInfo);
 
     return AppResources{
         .edgeFilterShader = std::move(shaders->edgeFilterShader),
@@ -532,19 +527,19 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         .uHsvExposureLoc = hsvUniforms.exposure,
         .uEdgeInvertLoc = edgeFilterUniforms.invert,
         .uHsvInvertLoc = hsvUniforms.invert,
-        // aov selects which AOV the path tracer's snapshot supplies (see selectPathTracedImage); channelView isolates one R/G/B channel of whatever aov currently shows. userLut is the LUT 'L' cycles through -- kept separate from OcioDisplayTransform's active LUT because non-Beauty AOVs force Raw (see the LUT-select comment in presentFrame) and must not clobber the user's actual choice. Both aov and userLut start from profile.json rather than a fixed literal.
+        // aov selects which lane the snapshot supplies; userLut stays separate because non-Beauty AOVs force Raw and must not overwrite it.
         .aov = profileConfig.render.defaultAov,
         .filmBackPresets = std::move(*filmBackPresets),
         .filmBackPresetNames = std::move(filmBackPresetNames),
         .filmBackPresetIndex = filmBackPresetIndex,
         .channelView = 0,
         .userLut = profileConfig.render.defaultLut,
-        .framingState = engine::debug::FramingOverlayState{},
+        .framingState = pathtracer::debug::FramingOverlayState{},
         // "Show/Hide Background" HDRI-section checkbox -- off by default; only takes visible effect for the Beauty AOV, see presentFrame.
         .showSky = false,
-        // The scene's own authored default (scene_config.h's environment.lightEnabled), not a separate runtime default -- the HUD checkbox then edits this in place.
+        // The scene's own authored default, not a separate runtime one -- the HUD checkbox edits this in place.
         .envLightEnabled = sceneConfig.environment.lightEnabled,
-        // HDR environment's Y-axis (world up) rotation, degrees [0,359] -- affects both the background and the environment's contribution to lighting (see environment_map.h), rotated at query time rather than re-baked.
+        // HDR environment Y rotation in degrees, affecting background and lighting alike, rotated at query time rather than re-baked.
         .envRotationDegrees = 0,
         // HDRI Exposure slider, stops. requestPathTrace does exp2() -> path_tracer.cpp miss-ray sampleDirection.
         .envExposureStops = 0.0F,
@@ -560,7 +555,7 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         .maxSamples = profileConfig.pathTracer.maxSamples,
         .displayFormat = profileConfig.render.displayFormat,
         .textureType = profileConfig.render.textureType,
-        // Constructed in main() right after initializeApp() returns -- see path_trace_driver.h's constructor precondition (its reference members must bind to sceneAccel/environmentMap/stumpModel at their final, permanent address, which this designated-initializer expression, still local-variable-based and one AppResources move away from that address, cannot yet guarantee).
+        // Constructed in main() right after initializeApp(): its reference members must bind to objects at their final address.
         .pathTraceDriver = nullptr,
         .pathTraceDisplayTexture = std::nullopt,
         .pathTraceDisplayedImage = nullptr,
@@ -572,19 +567,19 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
         .renderScale = profileConfig.render.renderScale,
         .interactiveRenderScale = profileConfig.render.interactiveRenderScale,
         .lastInputChange = std::chrono::steady_clock::time_point{},
-        .rasterThreadPool = std::make_unique<engine::scene::ThreadPool>(),
-        .rasterGBuffer = std::make_shared<engine::scene::RasterGBuffer>(),
+        .rasterThreadPool = std::make_unique<pathtracer::scene::ThreadPool>(),
+        .rasterGBuffer = std::make_shared<pathtracer::scene::RasterGBuffer>(),
         .sceneName = std::filesystem::path(scenePath).filename().string(),
         .orbitPickRequested = false,
         .lastCursorX = 0.0,
         .lastCursorY = 0.0,
-        // task_info() is a real syscall; the HUD is read by human eyes, not per-frame logic, so re-sampling RAM 4x/sec instead of every frame drops one source of frame-time jitter for free.
-        .ramBytes = engine::debug::residentSetBytes(),
+        // task_info() is a real syscall and the HUD is read by eyes, so sampling 4x/sec rather than per frame drops jitter for free.
+        .ramBytes = pathtracer::debug::residentSetBytes(),
         // Embree has finished building by now, so its device counter is final.
-        .bvhBytes = engine::scene::embreeAllocatedBytes(),
-        .systemAvailableBytes = engine::debug::availableSystemBytes(),
+        .bvhBytes = pathtracer::scene::embreeAllocatedBytes(),
+        .systemAvailableBytes = pathtracer::debug::availableSystemBytes(),
         // Fixed for the machine, unlike the other two -- queried once here rather than resampled alongside them.
-        .systemTotalBytes = engine::debug::totalSystemBytes(),
+        .systemTotalBytes = pathtracer::debug::totalSystemBytes(),
         .lastRamSample = std::chrono::steady_clock::now(),
         .lastFrameTime = std::chrono::steady_clock::now(),
         .bench = std::nullopt,
@@ -593,13 +588,13 @@ std::optional<AppResources> initializeApp(const engine::config::SceneConfig& sce
     };
 }
 
-// Debug-only: 'L' cycles the viewer LUT (sRGB -> Rec709 -> Raw -> sRGB -> ...), Raw being a genuine no-display-encode passthrough for direct encoded-vs-unencoded comparison. 'R'/'G'/'B' toggle isolating a channel of the active AOV (pressing the active one again turns it back off) -- reset moved to '0' to free these back up. 'I' inverts the final display-referred colour. 'H' toggles the HUD. 'ESC' quits. No general input-mapping system for these few keys is needed: WASD/QE need continuous per-frame state (Window::isKeyDown) rather than this edge-triggered callback, so this single slot still covers everything that's actually event-shaped. Wired up here, not inside initializeApp: every callback captures a reference into app, which must already be at its final, stable address (main()'s local, unwrapped from the optional initializeApp returned) -- capturing a reference during initializeApp would dangle the moment that AppResources is moved into its optional's storage.
-void wireCallbacks(engine::platform::Window& window, AppResources& app) {
+// Debug-only: 'L' cycles the viewer LUT (sRGB -> Rec709 -> Raw); 'R'/'G'/'B' isolate a channel, pressing the active one again clearing it.
+void wireCallbacks(pathtracer::platform::Window& window, AppResources& app) {
     window.setKeyCallback([&app, &window](int key, int action) {
         if (action != GLFW_PRESS) {
             return;
         }
-        using Lut = engine::gfx::OcioDisplayTransform::Lut;
+        using Lut = pathtracer::gfx::OcioDisplayTransform::Lut;
         if (key == GLFW_KEY_L) {
             app.userLut = app.userLut == Lut::SRGB     ? Lut::Rec709
                           : app.userLut == Lut::Rec709 ? Lut::Raw
@@ -621,7 +616,7 @@ void wireCallbacks(engine::platform::Window& window, AppResources& app) {
         }
     });
 
-    // LMB begins/ends an orbit -- gated on the HUD not wanting the click (dragging a HUD widget shouldn't also tumble the camera underneath it). The release always ends an in-progress orbit regardless of where the cursor ended up, so a drag that finishes over the HUD still releases cleanly.
+    // LMB begins and ends an orbit, gated on the HUD not wanting the click; the release always ends one wherever the cursor is.
     window.setMouseButtonCallback([&app, &window](int button, int action) {
         if (button != GLFW_MOUSE_BUTTON_LEFT) {
             return;
@@ -637,7 +632,7 @@ void wireCallbacks(engine::platform::Window& window, AppResources& app) {
     });
 }
 
-engine::scene::Camera updateCamera(const engine::platform::Window& window, AppResources& app,
+pathtracer::scene::Camera updateCamera(const pathtracer::platform::Window& window, AppResources& app,
                                     float dtSeconds) {
     if (app.debugCamera.isOrbiting()) {
         const auto [cursorX, cursorY] = window.cursorPosition();
@@ -652,31 +647,31 @@ engine::scene::Camera updateCamera(const engine::platform::Window& window, AppRe
 }
 
 // Direct texel read, no bilinear -- gbuffer AOVs are per-pixel snapshots.
-glm::vec3 sampleTexel(const engine::gfx::HdrImage& image, int x, int y) {
+glm::vec3 sampleTexel(const pathtracer::gfx::HdrImage& image, int x, int y) {
     const std::size_t idx = ((static_cast<std::size_t>(y) * static_cast<std::size_t>(image.width)) +
                               static_cast<std::size_t>(x)) *
                              4;
     return {image.rgba[idx + 0], image.rgba[idx + 1], image.rgba[idx + 2]};
 }
 
-// Cached CPU OCIO processors for the Beauty pixel probe -- built once, on first use, not per probe update: OCIO::Config::CreateFromBuiltinConfig/getProcessor parse the builtin config's colorspace graph, the same one-time cost OcioDisplayTransform::create() already pays for the GPU shaders at startup. Same four constants (ocio_display_transform.h) as that GPU build and as tools/render_beauty.cpp's CPU reference encode, so this reproduces the exact viewer transform rather than a second definition of it.
-const OCIO::ConstCPUProcessorRcPtr& ocioCpuProcessor(engine::gfx::OcioDisplayTransform::Lut lut) {
+// Cached CPU OCIO processors for the Beauty probe, built once: getProcessor parses the builtin config, as the GPU shaders do at startup.
+const OCIO::ConstCPUProcessorRcPtr& ocioCpuProcessor(pathtracer::gfx::OcioDisplayTransform::Lut lut) {
     static const OCIO::ConstConfigRcPtr config =
-        OCIO::Config::CreateFromBuiltinConfig(engine::gfx::kOcioConfigName);
+        OCIO::Config::CreateFromBuiltinConfig(pathtracer::gfx::kOcioConfigName);
     static const OCIO::ConstCPUProcessorRcPtr srgbProcessor =
         config
-            ->getProcessor(engine::gfx::kOcioSceneColorSpace, engine::gfx::kOcioSrgbDisplay,
-                            engine::gfx::kOcioView, OCIO::TRANSFORM_DIR_FORWARD)
+            ->getProcessor(pathtracer::gfx::kOcioSceneColorSpace, pathtracer::gfx::kOcioSrgbDisplay,
+                            pathtracer::gfx::kOcioView, OCIO::TRANSFORM_DIR_FORWARD)
             ->getDefaultCPUProcessor();
     static const OCIO::ConstCPUProcessorRcPtr rec709Processor =
         config
-            ->getProcessor(engine::gfx::kOcioSceneColorSpace, engine::gfx::kOcioRec709Display,
-                            engine::gfx::kOcioView, OCIO::TRANSFORM_DIR_FORWARD)
+            ->getProcessor(pathtracer::gfx::kOcioSceneColorSpace, pathtracer::gfx::kOcioRec709Display,
+                            pathtracer::gfx::kOcioView, OCIO::TRANSFORM_DIR_FORWARD)
             ->getDefaultCPUProcessor();
-    return lut == engine::gfx::OcioDisplayTransform::Lut::Rec709 ? rec709Processor : srgbProcessor;
+    return lut == pathtracer::gfx::OcioDisplayTransform::Lut::Rec709 ? rec709Processor : srgbProcessor;
 }
 
-// Beauty pixel probe's display transform, evaluated for one texel on the CPU instead of the whole framebuffer on the GPU: channel isolation -> exposure -> OCIO display curve (skipped in Raw mode, matching buildRawFragmentSource's passthrough) -> invert -- the same order OcioDisplayTransform's fragment shaders run (ocio_display_transform.cpp), minus the aberration UV-shift and dither, which are display artifacts rather than scene data and are intentionally not reproduced here. No clamp, no 8-bit quantize -- the point is a ground-truth readout of what's on screen, not a copy of its framebuffer precision loss.
+// The Beauty probe's display transform on one texel: channel isolation, exposure, the OCIO curve, then invert -- the shaders' own order.
 glm::vec3 applyBeautyDisplayTransform(glm::vec3 hdrColor, const AppResources& app) {
     if (app.channelView == 1) {
         hdrColor = glm::vec3(hdrColor.r);
@@ -686,7 +681,7 @@ glm::vec3 applyBeautyDisplayTransform(glm::vec3 hdrColor, const AppResources& ap
         hdrColor = glm::vec3(hdrColor.b);
     }
     glm::vec3 displayColor = hdrColor * std::pow(2.0F, app.debugCamera.relativeExposureEv());
-    if (app.userLut != engine::gfx::OcioDisplayTransform::Lut::Raw) {
+    if (app.userLut != pathtracer::gfx::OcioDisplayTransform::Lut::Raw) {
         std::array<float, 3> pixel{displayColor.r, displayColor.g, displayColor.b};
         ocioCpuProcessor(app.userLut)->applyRGB(pixel.data());
         displayColor = {pixel[0], pixel[1], pixel[2]};
@@ -697,18 +692,18 @@ glm::vec3 applyBeautyDisplayTransform(glm::vec3 hdrColor, const AppResources& ap
     return displayColor;
 }
 
-// Orbit pivot picked with a single Embree ray down the view centre. Previously this read worldPos/alpha at the centre texel of the rasterizer's G-buffer, which is what forced that rasterization to run unconditionally -- two million pixels shaded to read one. A ray is also the more accurate instrument: no fill rule, no z-precision, no dependence on the resolution the G-buffer happened to be rendered at. Falls back to a fixed forward-offset pivot when the centre ray misses all geometry.
-void resolveOrbitPick(engine::platform::Window& window, AppResources& app,
-                       const engine::scene::Camera& camera) {
+// Orbit pivot from a single Embree ray down the view centre. Reading the G-buffer centre texel instead forced a full rasterization.
+void resolveOrbitPick(pathtracer::platform::Window& window, AppResources& app,
+                       const pathtracer::scene::Camera& camera) {
     if (!app.orbitPickRequested) {
         return;
     }
     app.orbitPickRequested = false;
 
-    // primaryRay at ndc (0,0) reduces to exactly the camera's forward axis -- both ndc terms vanish -- so the centre ray needs no aspect ratio and no projection.
-    const engine::scene::Ray ray{camera.position(), camera.forward(), camera.nearClip(),
+    // primaryRay at ndc (0,0) reduces to the camera's forward axis, both terms vanishing, so it needs no aspect and no projection.
+    const pathtracer::scene::Ray ray{camera.position(), camera.forward(), camera.nearClip(),
                                   camera.farClip()};
-    const std::optional<engine::scene::Hit> hit = app.sceneAccel.intersect(ray);
+    const std::optional<pathtracer::scene::Hit> hit = app.sceneAccel.intersect(ray);
     const glm::vec3 pivot =
         hit ? ray.origin + (hit->t * ray.dir) : camera.position() + (3.0F * camera.forward());
 
@@ -719,42 +714,38 @@ void resolveOrbitPick(engine::platform::Window& window, AppResources& app,
     app.lastCursorY = cursorY;
 }
 
-// Bundles the HdrImage a given AOV should display with a type-erased strong ref to whichever published object -- the driver's PathTraceResult or the synchronous RasterGBuffer -- actually owns it. That ref both keeps the owning object alive and gives ensurePathTraceDisplayTexture an ABA-safe cache-key identity: a raw pointer to it could, in principle, be freed and have a later unrelated shared_ptr allocation reuse the same address; holding a real shared_ptr can't.
+// Bundles the HdrImage an AOV displays with a type-erased strong ref to its owner, which is also an ABA-safe cache key.
 struct PathTracedAovSource {
-    const engine::gfx::HdrImage* image = nullptr;
+    const pathtracer::gfx::HdrImage* image = nullptr;
     std::shared_ptr<const void> owner;
-    // RasterGBuffer's render counter for the 14 rasterizer-backed AOVs, 0 for the path-traced ones. The rasterizer's buffer is now reused in place, so its address is constant and `owner` alone can no longer tell one render from the next; a PathTraceResult is still a fresh object per pass and needs no counter.
+    // RasterGBuffer's render counter, 0 for path-traced AOVs: that buffer is reused in place, so its address cannot tell renders apart.
     std::uint64_t generation = 0;
 };
 
-// Returns a default (null image) if the specific source an AOV needs hasn't published yet -- callers show black instead. The 14 primary-hit-only AOVs read rasterGBuffer (refreshed synchronously when one of them is selected and this view has not been rasterized yet, requestPathTraceIfTriggerChanged); Beauty and the light-transport AOVs read the driver's asynchronously published PathTraceResult. The four Beauty filters own no buffer and fall through to a null image, which presentFrame handles before reaching here.
-// Routed through aov_routing.h's lane tables rather than a switch restating them: that switch was a third copy of the AovId-to-buffer mapping aov.cpp already holds and headless_renderer.cpp already consumes, so a new AOV had to be added in two places or the viewer silently showed black.
+// Null image if the AOV's source has not published, so callers show black. Routed through aov_routing.h rather than a third copy of it.
 PathTracedAovSource selectPathTracedImage(
-    const std::shared_ptr<const engine::scene::PathTraceResult>& snapshot,
-    const std::shared_ptr<engine::scene::RasterGBuffer>& rasterGBuffer,
-    engine::debug::AovId aov) {
-    if (const engine::debug::GBufferLane lane = engine::debug::gbufferLane(aov)) {
+    const std::shared_ptr<const pathtracer::scene::PathTraceResult>& snapshot,
+    const std::shared_ptr<pathtracer::scene::RasterGBuffer>& rasterGBuffer,
+    pathtracer::debug::AovId aov) {
+    if (const pathtracer::debug::GBufferLane lane = pathtracer::debug::gbufferLane(aov)) {
         // The buffer is allocated for the process's life now, so a null check no longer distinguishes "no render yet" -- generation 0 does.
         return rasterGBuffer->generation == 0
                    ? PathTracedAovSource{}
                    : PathTracedAovSource{&(*rasterGBuffer.*lane), rasterGBuffer, rasterGBuffer->generation};
     }
-    if (const engine::debug::PathTracedLane lane = engine::debug::pathTracedLane(aov)) {
+    if (const pathtracer::debug::PathTracedLane lane = pathtracer::debug::pathTracedLane(aov)) {
         return snapshot ? PathTracedAovSource{&(*snapshot.*lane), snapshot} : PathTracedAovSource{};
     }
     return {};
 }
 
-// Bottom-right HUD probe: the post-filter AOVs (HSV/Luminance/Sobel/Gabor, which have no independent buffer of their own, see presentFrame's isPostFilterAov) are GPU-only shader filters over Beauty with no CPU-side equivalent to sample, so they read back the literal composited, OCIO-display-transformed pixel from framebuffer 0, since that is the value being shown.
-// Every other AOV samples its own raw HdrImage texel directly (sampleTexel, full float precision, no 8-bit-quantization involved) so the readout is in that AOV's native units (metres for Depth, bounce count for BounceCount, etc.) regardless of how it's displayed. Beauty samples its raw texel the same way but then runs it through applyBeautyDisplayTransform -- the viewer's own exposure/LUT/invert pipeline evaluated for one pixel on the CPU -- so the probe matches what's on screen without framebuffer 0's clamp/quantize (the histogram's over-range stats, updateOverRangeStats, hit the identical clamp and are fixed the same way: off the pre-quantization float value).
-// cursorPosition()/windowSize() are screen points; the framebuffer path scales by framebufferSize() (not windowSize() directly, wrong by DPI factor on Retina) and flips Y (GL's origin is bottom-left, cursor's is top-left).
-// The raw-texel path instead scales by the sampled image's own resolution (robust to a resize race, same precedent as resolveOrbitPick) and needs no flip: HdrImage row 0 is documented top, already matching cursor space's top-left origin.
-engine::debug::PixelProbeSample samplePixelProbe(
-    const engine::platform::Window& window,
-    const std::shared_ptr<const engine::scene::PathTraceResult>& pathTraceSnapshot,
-    const AppResources& app, engine::debug::AovId aovId, float& probeMs) {
-    // Timed here rather than at the call site so updateHud stays one screen. For the post-filter AOVs this reads one pixel back from framebuffer 0, a genuine synchronous GPU stall -- the one place the render thread blocks on the GPU, and worth its own row for that reason.
-    const engine::debug::ScopedCpuTimer probeTimer(probeMs);
+// Bottom-right HUD probe: post-filter AOVs read back the composited framebuffer texel, every other AOV its own raw HdrImage texel.
+pathtracer::debug::PixelProbeSample samplePixelProbe(
+    const pathtracer::platform::Window& window,
+    const std::shared_ptr<const pathtracer::scene::PathTraceResult>& pathTraceSnapshot,
+    const AppResources& app, pathtracer::debug::AovId aovId, float& probeMs) {
+    // Timed here so updateHud stays one screen. For the post-filter AOVs this is a synchronous GPU stall, the one place the thread blocks.
+    const pathtracer::debug::ScopedCpuTimer probeTimer(probeMs);
     const auto [windowWidth, windowHeight] = window.windowSize();
     if (windowWidth <= 0 || windowHeight <= 0) {
         return {};
@@ -765,8 +756,8 @@ engine::debug::PixelProbeSample samplePixelProbe(
     }
 
     const bool isPostFilterAov =
-        aovId == engine::debug::AovId::HSV || aovId == engine::debug::AovId::Luminance ||
-        aovId == engine::debug::AovId::Sobel || aovId == engine::debug::AovId::Gabor;
+        aovId == pathtracer::debug::AovId::HSV || aovId == pathtracer::debug::AovId::Luminance ||
+        aovId == pathtracer::debug::AovId::Sobel || aovId == pathtracer::debug::AovId::Gabor;
     if (!isPostFilterAov) {
         const PathTracedAovSource source =
             selectPathTracedImage(pathTraceSnapshot, app.rasterGBuffer, aovId);
@@ -779,7 +770,7 @@ engine::debug::PixelProbeSample samplePixelProbe(
                                    static_cast<int>(cursorY / windowHeight * source.image->height));
         const glm::vec3 texel = sampleTexel(*source.image, imgX, imgY);
         const glm::vec3 color =
-            aovId == engine::debug::AovId::Beauty ? applyBeautyDisplayTransform(texel, app) : texel;
+            aovId == pathtracer::debug::AovId::Beauty ? applyBeautyDisplayTransform(texel, app) : texel;
         return {true, glm::vec4(color, 1.0F)};
     }
 
@@ -797,40 +788,34 @@ engine::debug::PixelProbeSample samplePixelProbe(
     return {true, glm::vec4(pixel[0], pixel[1], pixel[2], pixel[3]) / 255.0F};
 }
 
-// Re-uploads pathTraceDisplayTexture only when the selected AOV or the published object that owns the image actually changed: re-sending 33MB over PCIe every frame just to redisplay texels the GPU already holds would violate this codebase's no-work-per-frame-without-a-reason convention.
-// The upload itself no longer destroys and recreates the texture object (Texture::upload).
-// The driver publishes a fresh result object every completed pass, though, so while it's actively converging this does rebuild the texture up to once per rendered frame; that per-frame cap (not a lower one) is deliberate, it is what makes newly-accumulated samples visible at all.
-// Channel view is deliberately absent from that key: it is a shader uniform now, so isolating a channel changes nothing about the texels and must not force a rebuild. The selected AOV is absent for the same reason -- what the GPU must hold is the image, and the four post-filter AOVs are shader passes over Beauty's own texels (presentFrame), so cycling through them re-uploads nothing.
-// owner: a strong ref to whichever published object actually owns `image` (see PathTracedAovSource), comparing shared_ptr identity, not a raw pointer, since a raw pointer to a previous frame's already-freed result could in principle have its address reused by a later allocation (ABA); holding a real shared_ptr in app.pathTraceDisplayedOwner rules that out.
-// For Depth specifically, also rescans `image` for its own max value into app.pathTraceDisplayedDepthMax on every rebuild: presentFrame uses that as an auto-ranging display-exposure bound instead of Camera::farClip(), since farClip is a conservative ray tMax bound, not a proxy for the actual visible scene's depth extent.
+// Re-uploads only when the owning published object changed: 33MB a frame for texels the GPU holds is work without a reason.
 void ensurePathTraceDisplayTexture(AppResources& app, const std::shared_ptr<const void>& owner,
-                                    const engine::gfx::HdrImage& image, std::uint64_t generation) {
+                                    const pathtracer::gfx::HdrImage& image, std::uint64_t generation) {
     if (app.pathTraceDisplayTexture.has_value() && app.pathTraceDisplayedImage == &image &&
         app.pathTraceDisplayedOwner == owner && app.pathTraceDisplayedGeneration == generation) {
         return;
     }
-    // Started after the cache-key check, never before it: on a cache hit this function does nothing and must report 0, not the cost of the last real upload.
-    const engine::debug::ScopedCpuTimer uploadTimer(app.stages.uploadMs);
+    // Started after the cache-key check, never before: on a hit this does nothing and must report 0, not the last real upload's cost.
+    const pathtracer::debug::ScopedCpuTimer uploadTimer(app.stages.uploadMs);
     app.stages.uploaded = true;
-    if (app.aov == static_cast<int>(engine::debug::AovId::Depth)) {
+    if (app.aov == static_cast<int>(pathtracer::debug::AovId::Depth)) {
         float maxDepth = 0.0F;
         for (int i = 0; i < image.width * image.height; ++i) {
             maxDepth = std::max(maxDepth, image.rgba[static_cast<std::size_t>(i) * 4]);
         }
         app.pathTraceDisplayedDepthMax = maxDepth;
     }
-    // BounceCount is a mean-termination-depth scalar (R==G==B, see path_tracer.cpp's writeTexel call), not a colour, mapped through Turbo here, on the CPU, before upload, rather than as a display-shader uniform.
-    // This function already only runs once per rebuilt pass (see the cache-key check above), so the map costs nothing extra per frame and needs no new uniform/texture unit.
-    if (app.aov == static_cast<int>(engine::debug::AovId::BounceCount)) {
+    // BounceCount is a scalar mapped through Turbo on the CPU before upload; it runs once per rebuilt pass, so it costs nothing per frame.
+    if (app.aov == static_cast<int>(pathtracer::debug::AovId::BounceCount)) {
         const float maxBounceCount = static_cast<float>(app.pathTraceSettings.maxBounces) + 1.0F;
-        engine::gfx::HdrImage mapped;
+        pathtracer::gfx::HdrImage mapped;
         mapped.width = image.width;
         mapped.height = image.height;
         mapped.rgba.resize(image.rgba.size());
         for (int i = 0; i < image.width * image.height; ++i) {
             const std::size_t idx = static_cast<std::size_t>(i) * 4;
             const float t = image.rgba[idx] / maxBounceCount;
-            const glm::vec3 mappedColor = engine::debug::turbo(t);
+            const glm::vec3 mappedColor = pathtracer::debug::turbo(t);
             mapped.rgba[idx + 0] = mappedColor.r;
             mapped.rgba[idx + 1] = mappedColor.g;
             mapped.rgba[idx + 2] = mappedColor.b;
@@ -839,7 +824,7 @@ void ensurePathTraceDisplayTexture(AppResources& app, const std::shared_ptr<cons
         if (app.pathTraceDisplayTexture.has_value()) {
             app.pathTraceDisplayTexture->upload(mapped.width, mapped.height, mapped.rgba.data());
         } else {
-            app.pathTraceDisplayTexture = engine::gfx::Texture::createFromFloatPixels(
+            app.pathTraceDisplayTexture = pathtracer::gfx::Texture::createFromFloatPixels(
                 mapped.width, mapped.height, mapped.rgba.data(), app.displayFormat);
         }
         app.pathTraceDisplayedImage = &image;
@@ -847,12 +832,12 @@ void ensurePathTraceDisplayTexture(AppResources& app, const std::shared_ptr<cons
         app.pathTraceDisplayedGeneration = generation;
         return;
     }
-    // Uploaded straight from the HdrImage: no row-reversed scratch copy, and no texture object churn -- fullscreen_triangle.vert now resolves the row-order convention, and Texture::upload reallocates only if the render resolution actually changed.
+    // Uploaded straight from the HdrImage: the vertex shader resolves row order, and upload reallocates only on a resolution change.
     if (app.pathTraceDisplayTexture.has_value()) {
         app.pathTraceDisplayTexture->upload(image.width, image.height, image.rgba.data());
     } else {
         app.pathTraceDisplayTexture =
-            engine::gfx::Texture::createFromFloatPixels(image.width, image.height, image.rgba.data(),
+            pathtracer::gfx::Texture::createFromFloatPixels(image.width, image.height, image.rgba.data(),
                                                          app.displayFormat);
     }
     app.pathTraceDisplayedImage = &image;
@@ -860,7 +845,7 @@ void ensurePathTraceDisplayTexture(AppResources& app, const std::shared_ptr<cons
     app.pathTraceDisplayedGeneration = generation;
 }
 
-// Nothing to show yet (no path-trace pass has published) or the selected AOV has no buffer -- clears the default framebuffer instead of leaving stale contents on screen.
+// Nothing to show yet, or the selected AOV has no buffer: clear the framebuffer rather than leave stale contents on screen.
 void clearToBlack(int winWidth, int winHeight) {
     GL_CALL(glBindFramebuffer(GL_FRAMEBUFFER, 0));
     GL_CALL(glViewport(0, 0, winWidth, winHeight));
@@ -868,40 +853,40 @@ void clearToBlack(int winWidth, int winHeight) {
     GL_CALL(glClear(GL_COLOR_BUFFER_BIT));
 }
 
-// Blits the path-traced buffer for the selected AOV through the shared OCIO/post-process path -- Beauty uses the user's LUT, everything else forces Raw (not scene-referred radiance, a display curve would distort them). Depth additionally gets an exposure-based normalization since its raw range exceeds the default framebuffer's fixed-point [0,1] clamp -- see the exposureEv branch below. BounceCount is already mapped into displayable [0,1] RGB (Turbo) by ensurePathTraceDisplayTexture, so it takes the unscaled passthrough case here, same as everything else.
+// Blits the selected AOV through the shared OCIO path. Beauty uses the user's LUT; everything else forces Raw, not being radiance.
 void presentFrame(AppResources& app,
-                   const std::shared_ptr<const engine::scene::PathTraceResult>& pathTraceSnapshot,
+                   const std::shared_ptr<const pathtracer::scene::PathTraceResult>& pathTraceSnapshot,
                    int winWidth, int winHeight) {
-    const auto aovId = static_cast<engine::debug::AovId>(app.aov);
+    const auto aovId = static_cast<pathtracer::debug::AovId>(app.aov);
 
     const bool isPostFilterAov =
-        aovId == engine::debug::AovId::HSV || aovId == engine::debug::AovId::Luminance ||
-        aovId == engine::debug::AovId::Sobel || aovId == engine::debug::AovId::Gabor;
+        aovId == pathtracer::debug::AovId::HSV || aovId == pathtracer::debug::AovId::Luminance ||
+        aovId == pathtracer::debug::AovId::Sobel || aovId == pathtracer::debug::AovId::Gabor;
     if (isPostFilterAov) {
-        // These are 2D image filters of the beauty image, not independent per-AOV buffers -- always read path-traced Beauty regardless of which of the four is selected. Needs a completed path-trace pass (unlike the rasterizer-backed AOVs below) since Beauty itself is light-transport output.
+        // 2D filters of the beauty image, not per-AOV buffers: all four read path-traced Beauty, so they need a completed pass.
         if (!pathTraceSnapshot) {
             clearToBlack(winWidth, winHeight);
             return;
         }
-        const bool isHsv = aovId == engine::debug::AovId::HSV;
+        const bool isHsv = aovId == pathtracer::debug::AovId::HSV;
         ensurePathTraceDisplayTexture(app, pathTraceSnapshot, pathTraceSnapshot->beauty, 0);
-        app.ocioTransform.setActiveLut(engine::gfx::OcioDisplayTransform::Lut::Raw);
-        // Same multiplier Beauty itself displays at (OcioDisplayTransform::bind) -- these four AOVs previously bypassed OCIO entirely and stayed frozen at unity gain regardless of the exposure slider.
+        app.ocioTransform.setActiveLut(pathtracer::gfx::OcioDisplayTransform::Lut::Raw);
+        // The same multiplier Beauty displays at. These four previously bypassed OCIO and stayed frozen at unity gain.
         const float exposure = std::pow(2.0F, app.debugCamera.relativeExposureEv());
         if (isHsv) {
             app.hsvDisplayShader.use();
             GL_CALL(glUniform1i(app.uHsvChannelViewLoc, app.channelView));
             GL_CALL(glUniform1f(app.uHsvExposureLoc, exposure));
             GL_CALL(glUniform1i(app.uHsvInvertLoc, app.invert ? 1 : 0));
-            // Engaged by the ensurePathTraceDisplayTexture call above, which either uploads into the existing
-            // texture or creates one on every path; the analyser cannot carry that through the call.
+            // Engaged by the ensurePathTraceDisplayTexture call above, which the analyser cannot carry through the call.
+
             // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
             app.postProcess.draw(app.pathTraceDisplayTexture->id(), app.hsvDisplayShader,
                                   {winWidth, winHeight});
         } else {
             app.edgeFilterShader.use();
-            const int filterMode = aovId == engine::debug::AovId::Gabor ? 1
-                                    : aovId == engine::debug::AovId::Sobel ? 0
+            const int filterMode = aovId == pathtracer::debug::AovId::Gabor ? 1
+                                    : aovId == pathtracer::debug::AovId::Sobel ? 0
                                                                             : 2;  // Luminance passthrough
             GL_CALL(glUniform1i(app.uFilterModeLoc, filterMode));
             GL_CALL(glUniform1i(app.uEdgeChannelViewLoc, app.channelView));
@@ -918,15 +903,14 @@ void presentFrame(AppResources& app,
     if (pathTracedSource.image != nullptr) {
         ensurePathTraceDisplayTexture(app, pathTracedSource.owner, *pathTracedSource.image,
                                        pathTracedSource.generation);
-        const bool isBeauty = aovId == engine::debug::AovId::Beauty;
+        const bool isBeauty = aovId == pathtracer::debug::AovId::Beauty;
         app.ocioTransform.setActiveLut(isBeauty ? app.userLut
-                                                 : engine::gfx::OcioDisplayTransform::Lut::Raw);
-        // Beauty: photographic exposure. Depth: auto-ranged to the actual max depth visible in the current buffer (see ensurePathTraceDisplayTexture); farClip is a conservative ray tMax bound, not a proxy for the scene's real depth extent, and normalizing by it left real scenes (a small fraction of farClip) reading as black.
-        // This exists because the default framebuffer is fixed-point and clamps any raw value >=1 to white otherwise. Everything else (including BounceCount, already colormapped into [0,1] RGB): unscaled passthrough.
+                                                 : pathtracer::gfx::OcioDisplayTransform::Lut::Raw);
+        // Beauty gets photographic exposure; Depth is auto-ranged to the buffer's own max, farClip being a tMax, not a scene extent.
         float exposureEv = 0.0F;
         if (isBeauty) {
             exposureEv = app.debugCamera.relativeExposureEv();
-        } else if (aovId == engine::debug::AovId::Depth) {
+        } else if (aovId == pathtracer::debug::AovId::Depth) {
             exposureEv = -std::log2(std::max(app.pathTraceDisplayedDepthMax, 1e-4F));
         }
         app.ocioTransform.setExposureEv(exposureEv);
@@ -943,22 +927,17 @@ void presentFrame(AppResources& app,
     clearToBlack(winWidth, winHeight);
 }
 
-// Non-blocking: hands a fresh request to the background PathTraceDriver, which restarts progressive accumulation at this camera pose/window size (superseding whatever it was accumulating before) and converges over subsequent passes on its own thread. Called only from renderFrame, whenever PathTraceTriggerState detects camera/scene state renderPathTraced depends on has changed. Returns the request's generation, which labels its passes.
-std::uint64_t requestPathTrace(AppResources& app, const engine::scene::Camera& camera, int winWidth,
+// Non-blocking: hands a fresh request to PathTraceDriver, which restarts accumulation at this pose and size on its own thread.
+std::uint64_t requestPathTrace(AppResources& app, const pathtracer::scene::Camera& camera, int winWidth,
                                int winHeight) {
-    return app.pathTraceDriver->requestTrace(engine::scene::PathTraceDriver::Request{
+    return app.pathTraceDriver->requestTrace(pathtracer::scene::PathTraceDriver::Request{
         camera, winWidth, winHeight, glm::radians(static_cast<float>(app.envRotationDegrees)),
         app.showSky, app.envLightEnabled, std::exp2(app.envExposureStops), app.pathTraceSettings,
         app.maxSamples});
 }
 
-// Called once per rendered frame. Re-traces on any input that would actually change the image, not a fixed timer, so the path-traced view stays live without retracing every frame the camera happens to sit still.
-// Because DebugCameraController's fly/orbit controls update every frame a key/mouse-drag is held, a fresh (progressive-accumulation-reset) request fires on almost every frame during camera interaction; accepted, since async execution (PathTraceDriver) keeps that from blocking the UI, it just converges more slowly while the camera moves, matching how every interactive path tracer (Cycles' viewport, Brigade) behaves.
-// Each producer is refreshed on its own inputs, independently: the path tracer on camera/environment/resolution, the rasterizer on camera/resolution alone (rasterizer.h takes no environment argument). Neither is keyed on the selected AOV, because one call of either writes every image it owns -- so switching AOV changes what is displayed, never what has to be computed.
-// Both run at renderScale/interactiveRenderScale of the framebuffer rather than at the framebuffer itself (profile_config.h), dropping to the interactive scale on any input change and promoting back kInteractiveSettleSeconds after the last one. The promotion needs no separate code path: it changes the trigger, and a changed trigger is already what dispatches.
-// The display blit upscales for free: glViewport targets the framebuffer and the display texture samples GL_LINEAR, so nothing downstream is aware of the resolution the image arrived at.
-// The rasterizer runs synchronously on the calling (render) thread, unlike the path-traced request, since the point of it is a same-frame update for its AOVs (rasterizer.h); it is not cheap (a full-screen shade, measured at ~150ms per call at 2048x1152), so it stays gated on one of its own AOVs being selected. Together with the lazy comparison below, that means selecting a rasterizer AOV whose G-buffer is already current for this view costs nothing at all.
-void requestPathTraceIfTriggerChanged(AppResources& app, const engine::scene::Camera& camera,
+// Once per frame, re-tracing on any input that changes the image. The rasterizer is synchronous, ~150ms at 2048x1152, so it stays gated.
+void requestPathTraceIfTriggerChanged(AppResources& app, const pathtracer::scene::Camera& camera,
                                        int fbWidth, int fbHeight,
                                        std::chrono::steady_clock::time_point now) {
     const ViewInputState view{camera.position(),
@@ -971,7 +950,7 @@ void requestPathTraceIfTriggerChanged(AppResources& app, const engine::scene::Ca
     const PathTraceInputState input{view, app.envRotationDegrees, app.showSky, app.envLightEnabled,
                                      app.envExposureStops};
 
-    // Interaction is a change in anything the image depends on other than the resolution it renders at -- compared against the inputs alone, so the scale promotion below cannot re-arm the timer that produced it.
+    // Interaction is a change in anything but resolution, compared against the inputs alone so the scale promotion cannot re-arm the timer.
     if (input != app.lastPathTraceTrigger.input) {
         app.lastInputChange = now;
     }
@@ -980,9 +959,9 @@ void requestPathTraceIfTriggerChanged(AppResources& app, const engine::scene::Ca
     const float renderScale = settled ? app.renderScale : app.interactiveRenderScale;
     const int renderWidth = scaledExtent(fbWidth, renderScale);
     const int renderHeight = scaledExtent(fbHeight, renderScale);
-    const bool needsLightTransport = aovNeedsLightTransport(static_cast<engine::debug::AovId>(app.aov));
+    const bool needsLightTransport = aovNeedsLightTransport(static_cast<pathtracer::debug::AovId>(app.aov));
 
-    // Park the driver whenever the selected AOV is one it does not produce. Without this it keeps accumulating passes of an image no longer on screen, on every core, for as long as a rasterizer AOV stays selected -- competing with the rasterizer the render thread is running synchronously right here. Non-destructive (path_trace_driver.h), so the accumulation it parks is still there to continue on the way back.
+    // Park the driver when the selected AOV is not its own: otherwise it accumulates an off-screen image on every core.
     app.pathTraceDriver->setSuspended(!needsLightTransport);
 
     const PathTraceTriggerState pathTrace{input, renderScale};
@@ -999,8 +978,8 @@ void requestPathTraceIfTriggerChanged(AppResources& app, const engine::scene::Ca
         return;
     }
     {
-        const engine::debug::ScopedCpuTimer rasterTimer(app.stages.rasterMs);
-        engine::scene::renderRasterGBuffer(camera, app.stumpModel.shadingTriangles,
+        const pathtracer::debug::ScopedCpuTimer rasterTimer(app.stages.rasterMs);
+        pathtracer::scene::renderRasterGBuffer(camera, app.stumpModel.shadingTriangles,
                                             app.stumpModel.instances, app.perInstanceSettings,
                                             app.instanceBounds,
                                             renderWidth, renderHeight, *app.rasterThreadPool,
@@ -1009,51 +988,50 @@ void requestPathTraceIfTriggerChanged(AppResources& app, const engine::scene::Ca
     app.lastRasterTrigger = raster;
 }
 
-// Fraction of texels that would clip at the display encode, plus the peak such value as a multiple of display range -- e.g. "3.2%, peak 47.8x". Read from the pre-display-transform beauty rather than the composited framebuffer Histogram reads, since B1's colorimetric-only display transform means anything above 1.0 clips with no tone-mapped rolloff to cushion it, and the on-screen histogram alone cannot distinguish "just barely over" from "wildly over" -- both pin bin 255 identically.
-// The per-texel walk that produced these lives on the driver thread now (PathTraceResult::overRange), leaving exposure -- the readout's only non-pixel input -- to be applied here: exactly for the peak, and by reading the published histogram's complementary CDF at 1/exposure for the fraction. Both therefore track the exposure slider live on a converged image that will never retrace, which a driver-side count at a fixed threshold could not do, and cheaply enough that the frame gate the old scan needed is gone.
+// Fraction of texels clipping at the display encode plus that peak, from pre-transform beauty rather than the framebuffer Histogram reads.
 void updateOverRangeStats(AppResources& app,
-                           const std::shared_ptr<const engine::scene::PathTraceResult>& pathTraceSnapshot) {
-    const engine::debug::ScopedCpuTimer overRangeTimer(app.stages.overRangeMs);
+                           const std::shared_ptr<const pathtracer::scene::PathTraceResult>& pathTraceSnapshot) {
+    const pathtracer::debug::ScopedCpuTimer overRangeTimer(app.stages.overRangeMs);
     if (!pathTraceSnapshot) {
         app.overRangeFraction = 0.0F;
         app.overRangePeakMultiple = 0.0F;
         return;
     }
-    const engine::scene::OverRangeStats& stats = pathTraceSnapshot->overRange;
+    const pathtracer::scene::OverRangeStats& stats = pathTraceSnapshot->overRange;
     const float exposure = std::pow(2.0F, app.debugCamera.relativeExposureEv());
     app.overRangePeakMultiple = exposure * stats.rawPeak;
-    // Texels binned strictly above the one holding 1/exposure: an exact count above that bin's upper edge, so the only approximation is the threshold, quantised to at most 1/1024 of a stop (see kOverRangeSubBinBits).
-    const auto bin = static_cast<std::size_t>(engine::scene::overRangeBin(1.0F / exposure));
+    // Texels binned strictly above the one holding 1/exposure: exact above that edge, the threshold quantised to 1/1024 of a stop.
+    const auto bin = static_cast<std::size_t>(pathtracer::scene::overRangeBin(1.0F / exposure));
     const std::uint32_t texelCount = stats.aboveBin.front();
     app.overRangeFraction =
         texelCount > 0 ? static_cast<float>(stats.aboveBin[bin + 1]) / static_cast<float>(texelCount)
                         : 0.0F;
 }
 
-void updateHud(AppResources& app, const engine::platform::Window& window,
-               const engine::scene::Camera& camera,
-               const std::shared_ptr<const engine::scene::PathTraceResult>& pathTraceSnapshot,
+void updateHud(AppResources& app, const pathtracer::platform::Window& window,
+               const pathtracer::scene::Camera& camera,
+               const std::shared_ptr<const pathtracer::scene::PathTraceResult>& pathTraceSnapshot,
                int winWidth,
                int winHeight) {
-    const engine::debug::PathTracedStatus pathTracedStatus{
+    const pathtracer::debug::PathTracedStatus pathTracedStatus{
         pathTraceSnapshot != nullptr,
         // PassRecord is the single source of truth for pass timing now; the HUD wants seconds, the record carries milliseconds.
         app.pathTraceDriver != nullptr ? app.pathTraceDriver->lastPassRecord().passMs / 1000.0 : 0.0,
         pathTraceSnapshot != nullptr ? pathTraceSnapshot->samples : 0, app.maxSamples};
-    const engine::debug::SceneStats sceneStats{
+    const pathtracer::debug::SceneStats sceneStats{
         static_cast<int>(app.stumpModel.instances.size()),
         app.totalTriangles,
         app.totalPoints,
         winWidth,
         winHeight,
     };
-    const engine::debug::HudFrameData hudFrameData{
+    const pathtracer::debug::HudFrameData hudFrameData{
         app.gpuInfo,
         app.refreshHz,
         app.frameStats,
         app.postTimer.millisecondsElapsed(),
         app.ramBytes,
-        engine::debug::gpuAllocatedBytes(),
+        pathtracer::debug::gpuAllocatedBytes(),
         app.systemAvailableBytes,
         app.systemTotalBytes,
         app.channelView,
@@ -1069,16 +1047,16 @@ void updateHud(AppResources& app, const engine::platform::Window& window,
         app.overRangePeakMultiple,
         app.vsync,
     };
-    // Round-tripped through locals so the HUD's sliders can bind plain float&s, same as aov -- DebugCameraController is the authoritative owner, read before draw() and written back after.
+    // Round-tripped through locals so the sliders can bind plain float&s; DebugCameraController stays the authoritative owner.
     float focalLengthMm = app.debugCamera.focalLengthMm();
     float aperture = app.debugCamera.aperture();
     float shutterSeconds = app.debugCamera.shutterSeconds();
     float iso = app.debugCamera.iso();
     int filmBackPresetIndex = app.filmBackPresetIndex;
-    const engine::debug::PixelProbeSample pixelProbe =
+    const pathtracer::debug::PixelProbeSample pixelProbe =
         samplePixelProbe(window, pathTraceSnapshot, app,
-                          static_cast<engine::debug::AovId>(app.aov), app.stages.probeMs);
-    const engine::debug::ScopedCpuTimer hudTimer(app.stages.hudMs);
+                          static_cast<pathtracer::debug::AovId>(app.aov), app.stages.probeMs);
+    const pathtracer::debug::ScopedCpuTimer hudTimer(app.stages.hudMs);
     if (app.showHud) {
         app.hud.draw(hudFrameData, app.aov, focalLengthMm, aperture, shutterSeconds, iso,
                      filmBackPresetIndex, app.filmBackPresetNames, app.showSky, app.envLightEnabled,
@@ -1093,17 +1071,17 @@ void updateHud(AppResources& app, const engine::platform::Window& window,
     app.debugCamera.setFilmBack(
         app.filmBackPresets[static_cast<std::size_t>(filmBackPresetIndex)].filmBack);
     {
-        const engine::debug::ScopedCpuTimer hudRenderTimer(app.stages.hudRenderMs);
+        const pathtracer::debug::ScopedCpuTimer hudRenderTimer(app.stages.hudRenderMs);
         app.hud.render();
     }
 }
 
-// The per-frame read-back/sampling steps, run after the composited image lands in the default framebuffer and before the HUD draws over it: histogram capture, the over-range readout, and the rate-limited RAM resample. Only the histogram actually reads the framebuffer and so requires that placement; the other two are grouped with it because they feed the same HUD panel from the same frame, not because they share the constraint.
+// The per-frame read-backs after the composited image lands and before the HUD draws: only the histogram reads the framebuffer.
 void sampleDisplayedFrame(AppResources& app,
-                           const std::shared_ptr<const engine::scene::PathTraceResult>& pathTraceSnapshot,
+                           const std::shared_ptr<const pathtracer::scene::PathTraceResult>& pathTraceSnapshot,
                            int winWidth, int winHeight) {
     {
-        const engine::debug::ScopedCpuTimer histogramTimer(app.stages.histogramMs);
+        const pathtracer::debug::ScopedCpuTimer histogramTimer(app.stages.histogramMs);
         app.histogram.update(winWidth, winHeight);
     }
     updateOverRangeStats(app, pathTraceSnapshot);
@@ -1111,21 +1089,21 @@ void sampleDisplayedFrame(AppResources& app,
     // task_info() is a real syscall; nothing per-frame reads these, so 4Hz keeps one source of frame-time jitter out of the loop.
     const auto now = std::chrono::steady_clock::now();
     if (now - app.lastRamSample >= std::chrono::milliseconds(250)) {
-        app.ramBytes = engine::debug::residentSetBytes();
-        app.systemAvailableBytes = engine::debug::availableSystemBytes();
+        app.ramBytes = pathtracer::debug::residentSetBytes();
+        app.systemAvailableBytes = pathtracer::debug::availableSystemBytes();
         app.lastRamSample = now;
     }
 }
 
-// Assembles one DashboardFrame and hands it to the dashboard, which decides on its own whether this frame is a redraw. Split out of renderFrame so that function stays a readable sequence of stages rather than half a screen of field initialisation.
+// Assembles one DashboardFrame and hands it over; the dashboard decides whether to redraw. Split so renderFrame stays readable.
 void updateDashboard(AppResources& app,
-                     const std::shared_ptr<const engine::scene::PathTraceResult>& pathTraceSnapshot, float frameMs,
+                     const std::shared_ptr<const pathtracer::scene::PathTraceResult>& pathTraceSnapshot, float frameMs,
                      int winWidth, int winHeight) {
-    const engine::debug::PassRecord pass =
+    const pathtracer::debug::PassRecord pass =
         app.pathTraceDriver != nullptr ? app.pathTraceDriver->lastPassRecord()
-                                        : engine::debug::PassRecord{};
+                                        : pathtracer::debug::PassRecord{};
     const bool interactive = app.lastPathTraceTrigger.renderScale == app.interactiveRenderScale;
-    const engine::debug::DashboardFrame frame{
+    const pathtracer::debug::DashboardFrame frame{
         app.frameStats,
         app.stages,
         pass,
@@ -1133,13 +1111,13 @@ void updateDashboard(AppResources& app,
         app.postTimer.millisecondsElapsed(),
         pathTraceSnapshot != nullptr ? pathTraceSnapshot->samples : 0,
         app.maxSamples,
-        !aovNeedsLightTransport(static_cast<engine::debug::AovId>(app.aov)),
+        !aovNeedsLightTransport(static_cast<pathtracer::debug::AovId>(app.aov)),
         app.ramBytes,
-        engine::debug::gpuAllocatedBytes(),
+        pathtracer::debug::gpuAllocatedBytes(),
         app.bvhBytes,
         app.systemAvailableBytes,
         app.systemTotalBytes,
-        engine::debug::kAovNames[app.aov],
+        pathtracer::debug::kAovNames[app.aov],
         app.sceneName.c_str(),
         static_cast<int>(app.stumpModel.instances.size()),
         static_cast<int>(app.quadLights.size()),
@@ -1156,22 +1134,22 @@ void updateDashboard(AppResources& app,
     app.dashboard.update(frame);
 }
 
-// True once the selected AOV's producer has nothing left to do for it. A rasterizer AOV is finished as soon as a G-buffer exists: the rasterizer runs synchronously on the frame the AOV is selected, so there is no convergence to wait for. A light-transport AOV is finished when the final PassRecord of the captured accumulation has been appended -- read off the column rather than the snapshot because the driver publishes a result BEFORE its record, so requiring the record guarantees both that the displayed image is final and that its record is in `passes`, which is what finishBench's contiguity check needs.
+// True once the selected AOV's producer has nothing left to do: a rasterizer AOV is finished as soon as a G-buffer exists.
 bool stageComplete(const AppResources& app, const BenchCapture& bench) {
-    if (!aovNeedsLightTransport(static_cast<engine::debug::AovId>(app.aov))) {
+    if (!aovNeedsLightTransport(static_cast<pathtracer::debug::AovId>(app.aov))) {
         return app.rasterGBuffer->generation != 0;
     }
     return !bench.passes.empty() && bench.passes.back().generation == bench.generation &&
            bench.passes.back().passIndex == app.maxSamples;
 }
 
-// Appends this frame's stage times and any newly finished pass of the captured accumulation, then advances the -bench-aovs schedule, closing the window once its last stage finishes. `pass` was read before this frame's snapshot: the driver publishes a pass's record after its result, so a final record there means this frame presented the final image.
-void captureBenchFrame(engine::platform::Window& window, AppResources& app, BenchCapture& bench,
-                       const engine::debug::PassRecord& pass,
-                       const std::shared_ptr<const engine::scene::PathTraceResult>& snapshot, float frameMs,
+// Appends this frame's stage times and any newly finished pass. `pass` was read before this frame's snapshot, the driver publishing first.
+void captureBenchFrame(pathtracer::platform::Window& window, AppResources& app, BenchCapture& bench,
+                       const pathtracer::debug::PassRecord& pass,
+                       const std::shared_ptr<const pathtracer::scene::PathTraceResult>& snapshot, float frameMs,
                        std::chrono::steady_clock::time_point now) {
     const bool ours = pass.generation == bench.generation && !pass.cancelled;
-    // Keyed on the generation too, not the index alone: consecutive generations both number their passes from 1, so an index-only comparison would drop the first pass of every restart after one that was cancelled at the same index.
+    // Keyed on the generation too: consecutive generations both number passes from 1, so an index-only test would drop a restart's first.
     const bool unseen = bench.passes.empty() || bench.passes.back().generation != pass.generation ||
                         bench.passes.back().passIndex != pass.passIndex;
     if (ours && unseen) {
@@ -1181,8 +1159,8 @@ void captureBenchFrame(engine::platform::Window& window, AppResources& app, Benc
     bench.frameMs.push_back(frameMs);
     bench.presentGpuMs.push_back(app.postTimer.millisecondsElapsed());
     bench.refreshHz.push_back(static_cast<float>(app.refreshHz));
-    // Only uploads the displayed AOV's own producer issued: a superseded request's in-flight pass can still publish after a restart, and a rasterizer AOV's upload is never the driver's at all.
-    const bool ourUpload = !aovNeedsLightTransport(static_cast<engine::debug::AovId>(app.aov)) ||
+    // Only uploads the displayed AOV's producer issued: a superseded request can still publish, and a raster upload is never the driver's.
+    const bool ourUpload = !aovNeedsLightTransport(static_cast<pathtracer::debug::AovId>(app.aov)) ||
                            (snapshot != nullptr && snapshot->generation == bench.generation);
     if (app.stages.uploaded && ourUpload) {
         bench.uploadMs.push_back(app.stages.uploadMs);
@@ -1207,11 +1185,11 @@ void captureBenchFrame(engine::platform::Window& window, AppResources& app, Benc
 
 // Everything the captured workload's cost depends on; two engine records are comparable iff these are equal.
 nlohmann::json benchConfig(const AppResources& app, const BenchCapture& bench) {
-    const engine::scene::Camera camera = app.debugCamera.snapshot();
+    const pathtracer::scene::Camera camera = app.debugCamera.snapshot();
     std::vector<std::string> schedule;
     schedule.reserve(bench.aovs.size());
     for (const int aov : bench.aovs) {
-        schedule.emplace_back(engine::debug::kAovNames[aov]);
+        schedule.emplace_back(pathtracer::debug::kAovNames[aov]);
     }
     nlohmann::json config = {{"scene", app.sceneName},
             {"width", bench.passes.back().width},
@@ -1221,7 +1199,7 @@ nlohmann::json benchConfig(const AppResources& app, const BenchCapture& bench) {
             {"max_bounces", app.pathTraceSettings.maxBounces},
             {"rr_start_bounce", app.pathTraceSettings.russianRouletteStartBounce},
             {"ao_max_distance", app.pathTraceSettings.aoMaxDistance},
-            {"aov", engine::debug::kAovNames[app.aov]},
+            {"aov", pathtracer::debug::kAovNames[app.aov]},
             {"camera", {{"position", {camera.position().x, camera.position().y, camera.position().z}},
                         {"yaw", app.debugCamera.yawDegrees()},
                         {"pitch", app.debugCamera.pitchDegrees()},
@@ -1231,35 +1209,35 @@ nlohmann::json benchConfig(const AppResources& app, const BenchCapture& bench) {
                      {"light", app.envLightEnabled}, {"show_sky", app.showSky}}},
             {"hud", app.showHud},
             {"vsync", app.vsync},
-            {"display_type", engine::gfx::scalarTypeName(app.displayFormat)},
-            {"texture_type", engine::gfx::scalarTypeName(app.textureType)}};
-    // Only with -bench-aovs, so a single-stage record stays comparable with every one logged before this existed. The whole switch sequence, not just the AOV left selected at exit: it IS the workload, and bench_compare run refuses to pair records whose configs differ.
+            {"display_type", pathtracer::gfx::scalarTypeName(app.displayFormat)},
+            {"texture_type", pathtracer::gfx::scalarTypeName(app.textureType)}};
+    // Only with -bench-aovs, so a single-stage record stays comparable with every one logged before this existed.
     if (!schedule.empty()) {
         config["aov_schedule"] = schedule;
     }
     return config;
 }
 
-// Raw columns, one entry per event of their own: per captured frame for render-thread stages, per upload for upload_ms, per pass for driver phases.
+// Raw columns, one entry per event: per captured frame for render stages, per upload for upload_ms, per pass for driver phases.
 nlohmann::json benchSamples(const BenchCapture& bench) {
-    const auto frameColumn = [&](float engine::debug::FrameStageTimes::*stage) {
+    const auto frameColumn = [&](float pathtracer::debug::FrameStageTimes::*stage) {
         std::vector<float> column;
         column.reserve(bench.frames.size());
-        for (const engine::debug::FrameStageTimes& frame : bench.frames) {
+        for (const pathtracer::debug::FrameStageTimes& frame : bench.frames) {
             column.push_back(frame.*stage);
         }
         return column;
     };
-    const auto passColumn = [&](double engine::debug::PassRecord::*phase) {
+    const auto passColumn = [&](double pathtracer::debug::PassRecord::*phase) {
         std::vector<double> column;
         column.reserve(bench.passes.size());
-        for (const engine::debug::PassRecord& pass : bench.passes) {
+        for (const pathtracer::debug::PassRecord& pass : bench.passes) {
             column.push_back(pass.*phase);
         }
         return column;
     };
-    using Stages = engine::debug::FrameStageTimes;
-    using Pass = engine::debug::PassRecord;
+    using Stages = pathtracer::debug::FrameStageTimes;
+    using Pass = pathtracer::debug::PassRecord;
     nlohmann::json samples = {{"frame_ms", bench.frameMs},
             {"fence_ms", frameColumn(&Stages::fenceMs)},
             {"pace_ms", frameColumn(&Stages::paceMs)},
@@ -1288,16 +1266,16 @@ nlohmann::json benchSamples(const BenchCapture& bench) {
     return samples;
 }
 
-// Writes the captured accumulation as one benchmark-log record. Refuses an incomplete capture -- closed early, or a pass whose record was overwritten before a frame read it -- rather than logging a workload that differs from its config.
+// Writes the captured accumulation as one record. Refuses an incomplete capture rather than log a workload differing from its config.
 bool finishBench(const AppResources& app, const BenchCapture& bench) {
     if (!bench.complete) {
         std::cerr << "pathtracer: -bench closed before the schedule finished; nothing logged\n";
         return false;
     }
-    // Contiguous from 1 within each generation rather than across the whole column: a schedule spans several accumulations, and each restart numbers its own passes from 1. A gap still means a PassRecord was overwritten before a frame read it, so the capture would not describe its config.
+    // Contiguous from 1 within each generation, not across the column: each restart numbers its own. A gap means a record went unread.
     std::uint64_t generation = 0;
     int expected = 0;
-    for (const engine::debug::PassRecord& pass : bench.passes) {
+    for (const pathtracer::debug::PassRecord& pass : bench.passes) {
         if (pass.generation != generation) {
             generation = pass.generation;
             expected = 0;
@@ -1307,22 +1285,22 @@ bool finishBench(const AppResources& app, const BenchCapture& bench) {
             return false;
         }
     }
-    engine::debug::RayCounts rays;
-    for (const engine::debug::PassRecord& pass : bench.passes) {
+    pathtracer::debug::RayCounts rays;
+    for (const pathtracer::debug::PassRecord& pass : bench.passes) {
         rays.add(pass.rays);
     }
-    const engine::debug::BenchRecord record{
+    const pathtracer::debug::BenchRecord record{
         .tool = "pathtracer",
         .argv = bench.argv,
         .config = benchConfig(app, bench),
         .samples = benchSamples(bench),
         .work = {{"rays", {{"primary", rays.primary}, {"bounce", rays.bounce}, {"ao", rays.ao}, {"shadow", rays.shadow}}},
-                 {"crc32", engine::debug::floatCrc32(app.pathTraceDriver->latestResult()->beauty.rgba)}},
+                 {"crc32", pathtracer::debug::floatCrc32(app.pathTraceDriver->latestResult()->beauty.rgba)}},
     };
-    return engine::debug::appendBenchRecord(bench.logPath, record);
+    return pathtracer::debug::appendBenchRecord(bench.logPath, record);
 }
 
-// Bounds GPU work to one frame in flight: at swap interval 0 flushBuffer waits on neither the vblank nor the GPU (only on a synchronous WindowServer query), so nothing else stops the command queue outgrowing the GPU.
+// Bounds GPU work to one frame in flight: at swap interval 0 nothing else stops the command queue outgrowing the GPU.
 void waitForPreviousFrame(AppResources& app) {
     if (app.frameFence == nullptr) {
         return;
@@ -1332,25 +1310,25 @@ void waitForPreviousFrame(AppResources& app) {
     app.frameFence = nullptr;
 }
 
-// One frame: vblank -> previous frame's GPU completion -> poll -> update camera -> request a fresh path trace if input changed -> orbit-pick from the path tracer's own G-buffer -> post-process blit to the default framebuffer -> swap.
-void renderFrame(engine::platform::Window& window, engine::platform::DisplayLink& displayLink, AppResources& app) {
-    // Every stage zeroed first: a stage that does not run this frame must read 0, or the dashboard reports the last time it did run as if it were still happening.
+// One frame: vblank -> previous GPU completion -> poll -> camera -> retrace if changed -> orbit-pick -> blit -> swap.
+void renderFrame(pathtracer::platform::Window& window, pathtracer::platform::DisplayLink& displayLink, AppResources& app) {
+    // Every stage zeroed first: one that does not run must read 0, or the dashboard reports the last time it did as if it still were.
     app.stages = {};
     {
-        // Before the poll, so input is sampled right after the vblank this frame will be latched against. Timed either way, so an uncapped frame logs its pace as 0 rather than as absent.
-        const engine::debug::ScopedCpuTimer paceTimer(app.stages.paceMs);
+        // Before the poll, so input is sampled right after the vblank. Timed either way, so an uncapped frame logs 0 rather than absent.
+        const pathtracer::debug::ScopedCpuTimer paceTimer(app.stages.paceMs);
         if (app.vsync) {
             displayLink.waitForNextVblank();
         }
     }
     {
         // After the vblank wait, which the GPU drains the previous frame during, so this is non-zero only for a GPU-bound frame.
-        const engine::debug::ScopedCpuTimer fenceTimer(app.stages.fenceMs);
+        const pathtracer::debug::ScopedCpuTimer fenceTimer(app.stages.fenceMs);
         waitForPreviousFrame(app);
     }
     app.refreshHz = 1.0 / displayLink.refreshPeriodSeconds();
     {
-        const engine::debug::ScopedCpuTimer pollTimer(app.stages.pollMs);
+        const pathtracer::debug::ScopedCpuTimer pollTimer(app.stages.pollMs);
         window.pollEvents();
         app.hud.beginFrame();
     }
@@ -1360,8 +1338,8 @@ void renderFrame(engine::platform::Window& window, engine::platform::DisplayLink
     const float dtSeconds = std::chrono::duration<float>(frameNow - app.lastFrameTime).count();
     app.lastFrameTime = frameNow;
 
-    const engine::scene::Camera camera = [&] {
-        const engine::debug::ScopedCpuTimer cameraTimer(app.stages.cameraMs);
+    const pathtracer::scene::Camera camera = [&] {
+        const pathtracer::debug::ScopedCpuTimer cameraTimer(app.stages.cameraMs);
         return updateCamera(window, app, dtSeconds);
     }();
     const auto [winWidth, winHeight] = window.framebufferSize();
@@ -1369,18 +1347,18 @@ void renderFrame(engine::platform::Window& window, engine::platform::DisplayLink
     requestPathTraceIfTriggerChanged(app, camera, winWidth, winHeight, frameNow);
 
     // Read before the snapshot so a final record guarantees the snapshot holds the final image -- see captureBenchFrame.
-    const engine::debug::PassRecord benchPass =
-        app.bench ? app.pathTraceDriver->lastPassRecord() : engine::debug::PassRecord{};
-    // Held for the rest of this frame so the images behind it stay valid even if the driver publishes a newer result mid-frame -- a strong ref, not a raw fetch. Null until the first pass of the app's life completes.
-    const std::shared_ptr<const engine::scene::PathTraceResult> pathTraceSnapshot =
+    const pathtracer::debug::PassRecord benchPass =
+        app.bench ? app.pathTraceDriver->lastPassRecord() : pathtracer::debug::PassRecord{};
+    // Held for the rest of the frame so the images stay valid if the driver publishes mid-frame. Null until the first pass completes.
+    const std::shared_ptr<const pathtracer::scene::PathTraceResult> pathTraceSnapshot =
         app.pathTraceDriver != nullptr ? app.pathTraceDriver->latestResult() : nullptr;
 
     resolveOrbitPick(window, app, camera);
 
     app.postTimer.begin();
     {
-        // Inclusive of the display-texture upload inside it; the blit's own cost is the difference, which the dashboard subtracts rather than measuring twice.
-        const engine::debug::ScopedCpuTimer presentTimer(app.stages.presentMs);
+        // Inclusive of the display-texture upload inside it; the blit's own cost is the difference, which the dashboard subtracts.
+        const pathtracer::debug::ScopedCpuTimer presentTimer(app.stages.presentMs);
         presentFrame(app, pathTraceSnapshot, winWidth, winHeight);
     }
     app.postTimer.end();
@@ -1391,13 +1369,13 @@ void renderFrame(engine::platform::Window& window, engine::platform::DisplayLink
     updateHud(app, window, camera, pathTraceSnapshot, winWidth, winHeight);
 
     {
-        const engine::debug::ScopedCpuTimer swapTimer(app.stages.swapMs);
+        const pathtracer::debug::ScopedCpuTimer swapTimer(app.stages.swapMs);
         window.swapBuffers();
     }
     GL_CALL(app.frameFence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0));
 
     if (app.statsEnabled) {
-        // After swapBuffers, so the dashboard's own write(2) lands in the frame's slack rather than ahead of the present. It times its own draw internally -- a timer here could never be observed, since the stages it would write to are zeroed before the next frame accumulates them.
+        // After swapBuffers, so the dashboard's write(2) lands in the frame's slack. It times its own draw, the stages being zeroed first.
         updateDashboard(app, pathTraceSnapshot, dtSeconds * 1000.0F, winWidth, winHeight);
     }
     if (app.bench) {
@@ -1407,7 +1385,7 @@ void renderFrame(engine::platform::Window& window, engine::platform::DisplayLink
 
 struct Options {
     std::string scenePath = ASSET_ROOT_DIR "/scenes/cornell.json";
-    // Off by default: the live dashboard redraws in place, which is right for a session a human is watching and wrong for anything scripted. The instrumentation behind it is always compiled in, so -stats measures the exact binary that ships rather than a differently-built one.
+    // Off by default: the live dashboard redraws in place, wrong for anything scripted. Always compiled in, so -stats measures what ships.
     bool stats = false;
     // -bench PATH: run one accumulation to profile.json's maxSamples, append it to this benchmark log (bench_log.h), exit.
     std::string benchLogPath;
@@ -1415,24 +1393,24 @@ struct Options {
     std::vector<int> benchAovs;
 };
 
-// Resolves a comma-separated AOV list against kAovNames, so -bench-aovs and the HUD dropdown name the same 28 AOVs identically. Nullopt on an unknown name, which parseOptions surfaces rather than defaulting around.
+// Resolves a comma-separated AOV list against kAovNames, so -bench-aovs and the HUD name the same 28 AOVs. nullopt on an unknown name.
 std::optional<std::vector<int>> parseAovList(const char* list) {
     std::vector<int> aovs;
     const std::string text(list);
     for (std::size_t begin = 0; begin <= text.size();) {
         const std::size_t comma = text.find(',', begin);
         const std::string name = text.substr(begin, comma - begin);
-        const auto* match = std::find_if(std::begin(engine::debug::kAovNames), std::end(engine::debug::kAovNames),
+        const auto* match = std::find_if(std::begin(pathtracer::debug::kAovNames), std::end(pathtracer::debug::kAovNames),
                                           [&name](const char* candidate) { return name == candidate; });
-        if (match == std::end(engine::debug::kAovNames)) {
+        if (match == std::end(pathtracer::debug::kAovNames)) {
             std::cerr << "pathtracer: -bench-aovs has no AOV named '" << name << "'; valid names are";
-            for (const char* candidate : engine::debug::kAovNames) {
+            for (const char* candidate : pathtracer::debug::kAovNames) {
                 std::cerr << " '" << candidate << "'";
             }
             std::cerr << '\n';
             return std::nullopt;
         }
-        aovs.push_back(static_cast<int>(match - std::begin(engine::debug::kAovNames)));
+        aovs.push_back(static_cast<int>(match - std::begin(pathtracer::debug::kAovNames)));
         if (comma == std::string::npos) {
             break;
         }
@@ -1441,8 +1419,7 @@ std::optional<std::vector<int>> parseAovList(const char* list) {
     return aovs;
 }
 
-// Returns nullopt on an unrecognized flag or a missing value -- argv is a system
-// boundary, so a bad value is surfaced rather than defaulted around.
+// nullopt on an unrecognized flag or a missing value: argv is a system boundary, so a bad value is surfaced, not defaulted around.
 std::optional<Options> parseOptions(int argc, char** argv) {
     Options options;
     for (int i = 1; i < argc; ++i) {
@@ -1496,11 +1473,11 @@ int main(int argc, char** argv) {
 
     int exitCode = EXIT_SUCCESS;
     {
-        // Config is pure file I/O with no GL dependency, but profile.json's window size must be known before Window is constructed, so it's loaded first, before any GLFW/GL object exists. Both files hard-fail identically on missing or malformed: this is user-editable input where a load failure is a real, expected-to-happen event, not an internal invariant, so it's surfaced immediately rather than defaulted around -- matching the shader/model/OCIO all-or-nothing gate inside initializeApp.
-        std::optional<engine::config::SceneConfig> sceneConfig =
-            engine::config::loadSceneConfig(options->scenePath);
-        std::optional<engine::config::ProfileConfig> profileConfig =
-            engine::config::loadProfileConfig(ASSET_ROOT_DIR "/config/profile.json");
+        // profile.json's window size must be known before Window is constructed, so config loads first, before any GL object exists.
+        std::optional<pathtracer::config::SceneConfig> sceneConfig =
+            pathtracer::config::loadSceneConfig(options->scenePath);
+        std::optional<pathtracer::config::ProfileConfig> profileConfig =
+            pathtracer::config::loadProfileConfig(ASSET_ROOT_DIR "/config/profile.json");
 
         if (!sceneConfig || !profileConfig) {
             std::cerr << "main: scene/profile config load failed, aborting startup\n";
@@ -1510,15 +1487,15 @@ int main(int argc, char** argv) {
             exitCode = EXIT_FAILURE;
         } else if (!options->benchLogPath.empty() &&
                    (profileConfig->pathTracer.maxSamples <= 0 ||
-                    !aovNeedsLightTransport(static_cast<engine::debug::AovId>(
+                    !aovNeedsLightTransport(static_cast<pathtracer::debug::AovId>(
                         options->benchAovs.empty() ? profileConfig->render.defaultAov
                                                    : options->benchAovs.front())))) {
-            // An unbounded accumulation never ends, and a rasterizer AOV parks the driver, so neither is a benchmark workload. The first stage is the warm-up every later one is measured from, so it is the one that has to converge.
+            // An unbounded accumulation never ends and a rasterizer AOV parks the driver, so neither is a benchmark workload.
             std::cerr << "main: -bench needs profile.json maxSamples > 0 and a path-traced first AOV\n";
             exitCode = EXIT_FAILURE;
         } else {
-            // Window construction creates the GL 4.1 core/fwd-compat context and makes it current; fatal failure inside it exits the process directly (see window.cpp) since nothing recoverable exists yet.
-            engine::platform::Window window(profileConfig->window.width, profileConfig->window.height,
+            // Window construction creates the GL 4.1 core context and makes it current; a fatal failure inside exits the process.
+            pathtracer::platform::Window window(profileConfig->window.width, profileConfig->window.height,
                                              "PATHTRACER");
 
             glewExperimental = GL_TRUE;
@@ -1532,9 +1509,9 @@ int main(int argc, char** argv) {
                           << reinterpret_cast<const char*>(glewGetErrorString(glewStatus)) << '\n';
                 exitCode = EXIT_FAILURE;
             } else {
-                // Off: NSGL's interval lets two swaps through per refresh on current macOS, and while it is non-zero GLFW paces an occluded window with a fixed 60 Hz usleep. DisplayLink paces to the real vblank and the frame fence bounds the GPU queue instead.
+                // Off: NSGL's interval lets two swaps through per refresh, and paces an occluded window at a fixed 60 Hz usleep.
                 glfwSwapInterval(0);
-                engine::platform::DisplayLink displayLink(window);
+                pathtracer::platform::DisplayLink displayLink(window);
 
                 std::optional<AppResources> app =
                     initializeApp(*sceneConfig, *profileConfig, window, options->scenePath,
@@ -1542,8 +1519,8 @@ int main(int argc, char** argv) {
                 if (!app) {
                     exitCode = EXIT_FAILURE;
                 } else {
-                    // Constructed here, not as part of AppResources's designated-initializer list: app (this std::optional<AppResources> local) is where sceneAccel/environmentMap/stumpModel/perInstanceSettings first reach their final, permanent address (initializeApp's own return-type conversion to std::optional<AppResources> move-constructs once en route), so this is the first point at which PathTraceDriver's reference members can safely bind to them -- see path_trace_driver.h's constructor comment.
-                    app->pathTraceDriver = std::make_unique<engine::scene::PathTraceDriver>(
+                    // Constructed here, not in the initializer list: this local is where the scene objects reach their final address.
+                    app->pathTraceDriver = std::make_unique<pathtracer::scene::PathTraceDriver>(
                         app->sceneAccel, app->stumpModel.shadingTriangles, app->stumpModel.instances,
                         app->instanceLightIndex, app->environmentMap, app->quadLights,
                         app->perInstanceSettings);

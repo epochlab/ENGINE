@@ -1,4 +1,4 @@
-#include "engine/scene/rasterizer.h"
+#include "pathtracer/scene/rasterizer.h"
 
 #include <algorithm>
 #include <array>
@@ -9,42 +9,43 @@
 #include <limits>
 #include <tuple>
 
-#include "engine/scene/bsdf.h"
-#include "engine/scene/false_color.h"
-#include "engine/scene/gbuffer_shading.h"
+#include "pathtracer/scene/bsdf.h"
+#include "pathtracer/scene/false_color.h"
+#include "pathtracer/scene/gbuffer_shading.h"
 
-namespace engine::scene {
+namespace pathtracer::scene {
 
 namespace {
 
-// View-space (right, up, forward) position plus barycentric weights on the ORIGINAL (unclipped) triangle's v1/v2 (Hit's Moller-Trumbore convention), so a clipped sub-triangle still resolves via interpolateShading(originalTriangle, ...); barycentrics are affine in position, so lerping this tuple along a clip edge is exact.
+// View-space position plus barycentrics on the ORIGINAL unclipped triangle, so a clipped sub-triangle still resolves shading.
 struct ClipVertex {
     glm::vec3 view;
     float origU;
     float origV;
-    bool meshEdge;  // the polygon edge from this vertex to the next lies on the original triangle, not on a clip plane -- only those draw as wireframe
+    // The polygon edge from this vertex to the next lies on the original triangle, not a clip plane: only those draw.
+    bool meshEdge;
 };
 
-// A view-space point projected to screen space -- sx/sy are pixel coordinates (row 0 = top, HdrImage's convention), invZ is 1/viewZ for perspective-correct interpolation.
+// A view-space point projected to screen: sx/sy are pixels with row 0 at the top, and invZ is 1/viewZ for perspective correction.
 struct ScreenVertex {
     float sx;
     float sy;
     float invZ;
 };
 
-// Fixed-point vertex grid, derived per frame: the most sub-pixel bits for which every edge function stays exact in int64. Hardware fixes 8 (D3D11 16.8, Vulkan subPixelPrecisionBits) for gate cost; here exactness is the only bound, and the finer grid keeps silhouettes on the true geometry the path tracer's primary hit sees.
+// Fixed-point vertex grid, derived per frame: the most sub-pixel bits for which every edge function stays exact in int64.
 struct SubPixelGrid {
     int bits;
     float scale;  // 2^bits sub-pixels per pixel
 };
 
-// Frustum clipping bounds coordinates to [0, max(W,H)] px, so max(W,H) << bits < 2^30 keeps differences below 2^30, products below 2^60 and edge functions below 2^61.
+// Clipping bounds coordinates to [0, max(W,H)] px, so max(W,H) << bits < 2^30 keeps products below 2^60 and edges below 2^61.
 SubPixelGrid subPixelGrid(int width, int height) {
     const int bits = 30 - std::bit_width(static_cast<unsigned>(std::max(width, height)));
     return SubPixelGrid{bits, std::ldexp(1.0F, bits)};
 }
 
-// A clipped vertex snapped to the fixed-point grid -- integer x/y make every edge function exact, which is what makes rasterization watertight: a shared edge evaluates to exactly opposite values in its two triangles, so no pixel centre can fail both.
+// A clipped vertex snapped to the grid: integer x/y make edge functions exact, so a shared edge gives exactly opposite values.
 struct RasterVertex {
     std::int32_t x;
     std::int32_t y;
@@ -58,7 +59,8 @@ struct RasterSubTriangle {
     RasterVertex v0;
     RasterVertex v1;
     RasterVertex v2;
-    std::array<std::int8_t, 3> bias;  // top-left fill rule per edge (w0, w1, w2): 0 keeps a centre exactly on the edge, -1 leaves it to the neighbour sharing that edge
+    // Top-left fill rule per edge: 0 keeps a centre exactly on the edge, -1 leaves it to the neighbour sharing it.
+    std::array<std::int8_t, 3> bias;
     std::uint8_t meshEdges;           // bit i: the edge opposite v_i (w_i's edge) is an original mesh edge rather than a clip or fan edge
     float invArea;
     int minX;
@@ -68,7 +70,7 @@ struct RasterSubTriangle {
     int triangleIndex;  // indexes shadingTriangles -- resolves material/instance and the original triangle for interpolateShading
 };
 
-// One clipped, screen-projected bounding-box edge ready for line rasterization -- see appendBoxEdges. color is its instance's falseColorForId hue, resolved once per box rather than per covered pixel.
+// One clipped, projected bounding-box edge ready for line rasterization; color is resolved once per box, not per pixel.
 struct RasterLineSegment {
     glm::vec2 p0;
     glm::vec2 p1;
@@ -81,7 +83,7 @@ struct RasterLineSegment {
     glm::vec3 color;
 };
 
-// The cube's 12 edges as corner-index pairs, matching appendBoxEdges' 8-corner ordering: the 4 of the min-z face, the 4 of the max-z face, then the 4 pillars joining them.
+// The cube's 12 edges as corner-index pairs: the 4 of the min-z face, the 4 of the max-z face, then the 4 pillars.
 constexpr std::array<std::array<int, 2>, 12> kBoxEdges{
     {{0, 1}, {1, 2}, {2, 3}, {3, 0}, {4, 5}, {5, 6}, {6, 7}, {7, 4}, {0, 4}, {1, 5}, {2, 6}, {3, 7}}};
 constexpr std::size_t kBoxEdgeCount = kBoxEdges.size();
@@ -96,12 +98,12 @@ std::int64_t pixelCenter(int i, const SubPixelGrid& grid) {
     return (static_cast<std::int64_t>(i) << grid.bits) + (std::int64_t{1} << (grid.bits - 1));
 }
 
-// 2D cross product (b-a) x (p-a), the Pineda 1988 edge function, exact in integers -- positive when p is right of directed edge a->b on the y-down screen.
+// 2D cross product (b-a) x (p-a), the Pineda 1988 edge function, exact in integers: positive right of a->b on a y-down screen.
 std::int64_t edgeFunction(const RasterVertex& a, const RasterVertex& b, std::int64_t px, std::int64_t py) {
     return (static_cast<std::int64_t>(b.x - a.x) * (py - a.y)) - (static_cast<std::int64_t>(b.y - a.y) * (px - a.x));
 }
 
-// Top-left fill rule (D3D11.3 functional spec §3.4; Giesen 2013) for positive-area winding on the y-down screen: a centre exactly on a top (horizontal, interior below) or left (interior to its right) edge is covered. Reversing an edge flips the predicate, so of two triangles sharing an edge exactly one claims its centres, and coverage partitions the plane.
+// Top-left fill rule (D3D11.3 spec 3.4; Giesen 2013): a centre on a top or left edge is covered, so one triangle claims it.
 std::int8_t topLeftBias(const RasterVertex& a, const RasterVertex& b) {
     const std::int32_t dx = b.x - a.x;
     const std::int32_t dy = b.y - a.y;
@@ -120,14 +122,14 @@ EdgeWeights edgeWeights(const RasterSubTriangle& st, std::int64_t px, std::int64
                        edgeFunction(st.v0, st.v1, px, py)};
 }
 
-// d(w)/d(px) for edge a->b is a.y - b.y; one pixel is 2^bits grid units. Exact, so stepping reproduces edgeWeights bit for bit (Pineda 1988's incremental evaluation).
+// d(w)/d(px) for edge a->b is a.y - b.y, one pixel being 2^bits units. Exact, so stepping reproduces edgeWeights bit for bit.
 EdgeWeights edgeStepX(const RasterSubTriangle& st, const SubPixelGrid& grid) {
     return EdgeWeights{static_cast<std::int64_t>(st.v1.y - st.v2.y) << grid.bits,
                        static_cast<std::int64_t>(st.v2.y - st.v0.y) << grid.bits,
                        static_cast<std::int64_t>(st.v0.y - st.v1.y) << grid.bits};
 }
 
-// Barycentric coverage from exact edge weights, shared by the depth and shading passes so a winner's barycentrics are the ones it was chosen on.
+// Barycentric coverage from exact edge weights, shared by the depth and shading passes so a winner keeps the ones it won on.
 struct Coverage {
     bool covered;
     float b0;
@@ -169,7 +171,7 @@ unsigned outcode(const glm::vec3& v, const FrustumPlanes& planes) {
     return code;
 }
 
-// Edge-plane intersection computed from the lexicographically smaller endpoint, so the two triangles sharing an edge (which traverse it in opposite directions) produce bitwise-identical clip vertices -- otherwise their clipped shared edges differ by rounding and crack.
+// Intersection computed from the lexicographically smaller endpoint, so the two triangles sharing an edge agree bitwise.
 ClipVertex intersectPlane(const ClipVertex& a, const ClipVertex& b, const glm::vec4& plane) {
     const bool bFirst = std::tie(b.view.x, b.view.y, b.view.z) < std::tie(a.view.x, a.view.y, a.view.z);
     const ClipVertex& p = bFirst ? b : a;
@@ -200,7 +202,7 @@ int clipAgainstPlane(const ClipPolygon& in, int count, const glm::vec4& plane, C
     return outCount;
 }
 
-// Clips the triangle in poly[0..2] to the view frustum in place; returns the vertex count (0 if culled). Frustum rather than near-only clipping is what bounds snapped coordinates to the viewport. A triangle that needs any clip is clipped against all 5 planes in fixed order, so two neighbours apply the identical plane sequence to their shared edge whatever their other vertices do.
+// Clips poly[0..2] to the frustum in place, returning the vertex count, 0 if culled. Frustum, not near-only, bounds the snap.
 int clipToFrustum(ClipPolygon& poly, const FrustumPlanes& planes) {
     const unsigned c0 = outcode(poly[0].view, planes);
     const unsigned c1 = outcode(poly[1].view, planes);
@@ -223,7 +225,7 @@ int clipToFrustum(ClipPolygon& poly, const FrustumPlanes& planes) {
     return count;
 }
 
-// Two-vertex near-plane clip for box edges -- simpler than clipToFrustum (no polygon): 0 output vertices if both endpoints are behind the near plane, otherwise exactly 2.
+// Two-vertex near-plane clip for box edges: 0 output vertices if both endpoints are behind the near plane, otherwise exactly 2.
 int clipSegmentNearPlane(const glm::vec3& a, const glm::vec3& b, const glm::vec3& camPos,
                           const glm::vec3& forward, float nearClip, glm::vec3& outA, glm::vec3& outB) {
     const float za = glm::dot(a - camPos, forward);
@@ -245,13 +247,13 @@ int clipSegmentNearPlane(const glm::vec3& a, const glm::vec3& b, const glm::vec3
     return 2;
 }
 
-// World to view space (right, up, forward components relative to the camera) -- the basis is orthonormal, so these are Camera::primaryRay's ndc weights scaled by viewZ.
+// World to view space. The basis is orthonormal, so these are Camera::primaryRay's ndc weights scaled by viewZ.
 glm::vec3 toView(const glm::vec3& world, const glm::vec3& camPos, const Camera::ViewBasis& basis) {
     const glm::vec3 d = world - camPos;
     return {glm::dot(d, basis.right), glm::dot(d, basis.up), glm::dot(d, basis.forward)};
 }
 
-// Inverts Camera::primaryRay's ndcX/ndcY->direction math, then maps ndc to pixel coordinates by renderRasterGBuffer's own pixel-center convention.
+// Inverts Camera::primaryRay's ndc-to-direction math, then maps ndc to pixels by renderRasterGBuffer's pixel-centre convention.
 ScreenVertex projectToScreen(const glm::vec3& view, const Camera::ViewBasis& basis, int width, int height) {
     const float ndcX = view.x / (view.z * basis.halfWidth);
     const float ndcY = view.y / (view.z * basis.halfHeight);
@@ -267,7 +269,7 @@ RasterVertex snapToGrid(const ClipVertex& v, const Camera::ViewBasis& basis, int
                         static_cast<std::int32_t>(std::lrint(s.sy * grid.scale)), s.invZ, v.origU, v.origV};
 }
 
-// Normalizes winding to positive area (glTF mirrored-scale nodes and Embree's double-sided intersection mean input winding isn't fixed), bounds the pixel centres it can cover, appends to `out` -- no-op if exactly degenerate on the snapped grid or covering no pixel centre.
+// Normalizes winding to positive area -- mirrored-scale nodes mean input winding is not fixed -- and bounds the centres covered.
 void pushSubTriangle(RasterVertex v0, RasterVertex v1, RasterVertex v2, std::array<bool, 3> meshEdge,
                       int triangleIndex, int width, int height, const SubPixelGrid& grid,
                       std::vector<RasterSubTriangle>& out) {
@@ -280,7 +282,7 @@ void pushSubTriangle(RasterVertex v0, RasterVertex v1, RasterVertex v2, std::arr
         std::swap(meshEdge[1], meshEdge[2]);
         area = -area;
     }
-    // First/last pixel whose centre lies inside the snapped extent: ceil/floor of (extent - half) / pixel, as arithmetic shifts (floor division for negatives since C++20).
+    // First and last pixel whose centre lies inside the snapped extent, as arithmetic shifts: floor division for negatives since C++20.
     const std::int32_t half = std::int32_t{1} << (grid.bits - 1);
     const std::int32_t roundUp = (std::int32_t{1} << grid.bits) - 1;
     const int minX = std::max(0, (std::min({v0.x, v1.x, v2.x}) - half + roundUp) >> grid.bits);
@@ -297,7 +299,7 @@ void pushSubTriangle(RasterVertex v0, RasterVertex v1, RasterVertex v2, std::arr
                                     triangleIndex});
 }
 
-// Clips/snaps/winding-normalizes every triangle once per call, in parallel over chunks of the triangle list -- cheap per-triangle math, but at a few million triangles doing it on one thread is a frame-rate ceiling by itself. Each chunk appends to its own vector, so the appends need no synchronization, and the chunks are concatenated in order afterwards: the result is the identical sequence a sequential build produces, which matters because the z-test below is first-writer-wins at exactly equal depth.
+// Clips, snaps and winding-normalizes every triangle once per call, in parallel: on one thread it is a frame-rate ceiling itself.
 std::vector<RasterSubTriangle> buildSubTriangles(const Camera& camera,
                                                   const std::vector<ShadingTriangle>& shadingTriangles,
                                                   int width, int height, const SubPixelGrid& grid,
@@ -307,7 +309,7 @@ std::vector<RasterSubTriangle> buildSubTriangles(const Camera& camera,
     const FrustumPlanes planes = frustumPlanes(camera.nearClip(), basis);
 
     const int triangleCount = static_cast<int>(shadingTriangles.size());
-    // Four chunks per worker, not one: parallelFor hands them out on demand, so the extra granularity absorbs the imbalance between a chunk that is entirely behind the camera and one that is entirely on screen.
+    // Four chunks per worker, not one: handed out on demand, so the granularity absorbs imbalance between off-screen and on-screen chunks.
     const int chunkCount =
         std::max(1, std::min(triangleCount, static_cast<int>(threadPool.threadCount()) * 4));
     const int chunkSize = (triangleCount + chunkCount - 1) / chunkCount;
@@ -333,13 +335,13 @@ std::vector<RasterSubTriangle> buildSubTriangles(const Camera& camera,
                 snapped[static_cast<std::size_t>(k)] =
                     snapToGrid(poly[static_cast<std::size_t>(k)], basis, width, height, grid);
             }
-            // Fan over the convex clipped polygon; its internal diagonals join already-snapped vertices, so they are watertight too, and are never mesh edges.
+            // Fan over the convex clipped polygon; its diagonals join snapped vertices, so they are watertight and never mesh edges.
             for (int k = 1; k + 1 < count; ++k) {
                 const std::array<bool, 3> meshEdge{poly[static_cast<std::size_t>(k)].meshEdge,
                                                    k + 2 == count && poly[static_cast<std::size_t>(count - 1)].meshEdge,
                                                    k == 1 && poly[0].meshEdge};
                 pushSubTriangle(snapped[0], snapped[static_cast<std::size_t>(k)],
-                                snapped[static_cast<std::size_t>(k + 1)], meshEdge, i, width, height, grid, out);
+                                snapped[static_cast<std::size_t>(k) + 1], meshEdge, i, width, height, grid, out);
             }
         }
     });
@@ -356,15 +358,14 @@ std::vector<RasterSubTriangle> buildSubTriangles(const Camera& camera,
     return subTriangles;
 }
 
-// Per-row lists of the sub-triangles whose bounding box covers that row, so renderRow visits only those instead of rejecting the whole array one triangle at a time. Flat CSR (count, prefix sum, fill) rather than a vector per row, which would be `height` heap allocations per frame.
-// The cost this removes is memory bandwidth, not comparisons: RasterSubTriangle is 88 bytes and the scan is linear, so every row streamed the entire array. That is invisible while the array fits in cache -- at the 20561-triangle scene it is 1.8 MB and the scan costs nothing measurable -- and dominant once it does not: at 5M triangles it is 440 MB, read 1152 times per frame.
-// Memory is O(sum of row spans), so a scene of few very large triangles can need more of it than the sub-triangle array itself. That is the opposite regime from the one this exists for, where triangles are small and each spans a handful of rows.
+// Per-row lists of the sub-triangles covering that row, flat CSR. What it removes is bandwidth, not comparisons: 88 bytes each.
 struct RowBuckets {
     std::vector<std::size_t> offsets;  // height+1 entries, offsets[y]..offsets[y+1] is row y's range in `indices`
-    std::vector<int> indices;          // indexes the bucketed span array; int since a clip splits at most one triangle into two, bounding this by 2x the scene's triangle count
+    // Indexes the bucketed span array; int because a clip splits at most one triangle in two, bounding this by 2x the triangle count.
+    std::vector<int> indices;
 };
 
-// Templated over the element rather than duplicated: sub-triangles and box edges both carry minY/maxY and both need the same per-row lists, so one body serves both and the two cannot drift apart.
+// Templated over the element rather than duplicated: sub-triangles and box edges both carry minY/maxY and need the same lists.
 template <typename Span>
 RowBuckets buildRowBuckets(const std::vector<Span>& spans, int height) {
     RowBuckets buckets;
@@ -380,7 +381,7 @@ RowBuckets buildRowBuckets(const std::vector<Span>& spans, int height) {
     }
     buckets.indices.resize(buckets.offsets[static_cast<std::size_t>(height)]);
 
-    // Per-row write cursor. Filing in increasing sub-triangle index leaves each row's list in the same relative order the old full-array scan visited them in, so the z-test's tie-break at exactly equal depth is unchanged.
+    // Per-row write cursor. Filing in increasing index leaves each row in the old scan's order, so the z-test tie-break is unchanged.
     std::vector<std::size_t> cursor(buckets.offsets.begin(), buckets.offsets.end() - 1);
     for (std::size_t i = 0; i < spans.size(); ++i) {
         const Span& st = spans[i];
@@ -391,7 +392,7 @@ RowBuckets buildRowBuckets(const std::vector<Span>& spans, int height) {
     return buckets;
 }
 
-// Appends one AABB's 12 edges (8-corner topology), near-clipped and projected -- mirrors buildSubTriangles' role for 12 segments instead of the scene's triangle list. Appends rather than returns so the per-instance loop concatenates into one array without a vector per box.
+// Appends one AABB's 12 edges, near-clipped and projected. Appends rather than returns, so the loop needs no vector per box.
 void appendBoxEdges(const Camera& camera, const AabbBounds& box, const glm::vec3& color, int width,
                      int height, std::vector<RasterLineSegment>& out) {
     const glm::vec3 camPos = camera.position();
@@ -423,7 +424,7 @@ void appendBoxEdges(const Camera& camera, const AabbBounds& box, const glm::vec3
     }
 }
 
-// Resolves and writes every G-buffer field for one covered, z-winning pixel -- same sampling calls tracePath's bounce-0 block makes (gbuffer_shading.h), never a lighting/BSDF evaluation. origU/origV are the perspective-correct barycentric coordinates on the ORIGINAL (unclipped) triangle. wireframe is a screen-space distance-to-edge test against the sub-triangle's original mesh edges (clip-plane and fan edges excluded), sharing nearLineSegmentPx with the box edges -- evaluated only at this already-z-tested pixel, so hidden-line removal is free.
+// Resolves every G-buffer field for one covered, z-winning pixel: tracePath's bounce-0 sampling calls, never lighting or BSDF.
 void shadePixel(RasterGBuffer& result, int x, int y, float viewZ, float origU, float origV,
                  const ShadingTriangle& triangle, const Material& material,
                  const PathTraceSettings& settings, const RasterSubTriangle& st,
@@ -458,8 +459,7 @@ void shadePixel(RasterGBuffer& result, int x, int y, float viewZ, float origU, f
     writeTexel(result.iorAov, x, y, glm::vec3(settings.ior));
 }
 
-// Pass one of two: resolves visibility for the row without shading anything, recording each pixel's depth and the sub-triangle index that owns it. Splitting this out is what bounds shading to one evaluation per visible pixel -- the single-pass form shaded on every depth improvement, so a pixel behind N nearer-in-list surfaces paid N full shades (8 bilinear fetches, a shading frame and 14 texel writes each) to keep one.
-// Keeps the single-pass tie-break exactly: `>=` rejects equal depth, so the first sub-triangle in row order still wins a tie, and row order is the sub-triangle list order buildRowBuckets preserves.
+// Pass one: resolves visibility without shading, bounding shading to one evaluation per visible pixel; `>=` lets row order win ties.
 void depthPassRow(int y, const std::vector<RasterSubTriangle>& subTriangles,
                    const RowBuckets& rowBuckets, const SubPixelGrid& grid, float* zRow, int* winnerRow) {
     const std::int64_t py = pixelCenter(y, grid);
@@ -488,8 +488,7 @@ void depthPassRow(int y, const std::vector<RasterSubTriangle>& subTriangles,
     }
 }
 
-// Pass two of two: shades each covered pixel exactly once from the winner the depth pass recorded. Walks the row in x order rather than in triangle order, so the 14 AOV writes advance linearly through each image instead of scattering across it.
-// viewZ is read back from the depth buffer rather than recomputed: it is the value this same winner stored, so reading it is both cheaper and exact where a recomputation would only be exact by argument.
+// Pass two: shades each covered pixel once from the recorded winner, in x order. viewZ is read back, so it is exact and cheaper.
 void shadeRow(RasterGBuffer& result, int y, int width, const std::vector<RasterSubTriangle>& subTriangles,
                const std::vector<ShadingTriangle>& shadingTriangles,
                const std::vector<MeshInstance>& instances,
@@ -517,8 +516,7 @@ void shadeRow(RasterGBuffer& result, int y, int width, const std::vector<RasterS
     }
 }
 
-// Bounding-box edges: real line segments z-tested against the row's now-finalized depth (real geometry occludes them) but never written back to it, so box edges never occlude each other -- every edge shows unless real mesh blocks it, including where two instances' boxes overlap. Drawn into the same wireframe AOV as the mesh edges, in the instance's own false colour, taking precedence over white where both apply.
-// Bucketed by row for the same reason the sub-triangles are: the segment count is 12 per instance, so a full-array scan per row would grow with the scene's object count.
+// Box edges z-tested against the finalized depth but never written back, so geometry occludes them and they never occlude each other.
 void drawBoxEdgesRow(RasterGBuffer& result, int y, const std::vector<RasterLineSegment>& boxEdges,
                       const RowBuckets& rowBuckets, const float* zRow) {
     const std::size_t rowEnd = rowBuckets.offsets[static_cast<std::size_t>(y) + 1];
@@ -538,8 +536,8 @@ void drawBoxEdgesRow(RasterGBuffer& result, int y, const std::vector<RasterLineS
     }
 }
 
-// Every AOV image in one place, so the reallocation and the per-row clear below cannot disagree about which fields exist -- adding an AOV to RasterGBuffer without adding it here leaves it uncleared, which this array's fixed size catches at compile time.
-std::array<engine::gfx::HdrImage*, 14> aovImages(RasterGBuffer& g) {
+// Every AOV image in one place: the fixed size catches an AOV added to RasterGBuffer but not here, which would go uncleared.
+std::array<pathtracer::gfx::HdrImage*, 14> aovImages(RasterGBuffer& g) {
     return {&g.iorAov, &g.depth,    &g.lookahead, &g.worldPos, &g.uv,      &g.normal,
             &g.geomNormal, &g.albedo, &g.metallic, &g.roughness, &g.tangent,
             &g.objectId, &g.alpha,  &g.wireframe};
@@ -552,10 +550,10 @@ void renderRasterGBuffer(const Camera& camera, const std::vector<ShadingTriangle
                           const std::vector<PathTraceSettings>& perInstanceSettings,
                           const std::vector<AabbBounds>& instanceBounds, int width, int height,
                           ThreadPool& threadPool, RasterGBuffer& result) {
-    const std::array<engine::gfx::HdrImage*, 14> images = aovImages(result);
-    // Reallocated only on a resolution change; every other call reuses the storage and relies on renderRow's clear. makeImage's own zeroing is redundant against that clear but runs once per resize, not once per frame.
+    const std::array<pathtracer::gfx::HdrImage*, 14> images = aovImages(result);
+    // Reallocated only on a resolution change; every other call reuses the storage and relies on renderRow's per-row clear.
     if (result.depth.width != width || result.depth.height != height) {
-        for (engine::gfx::HdrImage* image : images) {
+        for (pathtracer::gfx::HdrImage* image : images) {
             *image = makeImage(width, height);
         }
     }
@@ -565,7 +563,7 @@ void renderRasterGBuffer(const Camera& camera, const std::vector<ShadingTriangle
     const std::vector<RasterSubTriangle> subTriangles =
         buildSubTriangles(camera, shadingTriangles, width, height, grid, threadPool);
     const RowBuckets rowBuckets = buildRowBuckets(subTriangles, height);
-    // One box per instance, in the instance's ObjectID false colour. An instance that contributed no triangles has an empty box and no edges to draw.
+    // One box per instance in its ObjectID false colour; an instance that contributed no triangles has an empty box and no edges.
     std::vector<RasterLineSegment> boxEdges;
     boxEdges.reserve(instanceBounds.size() * kBoxEdgeCount);
     for (std::size_t i = 0; i < instanceBounds.size(); ++i) {
@@ -578,13 +576,13 @@ void renderRasterGBuffer(const Camera& camera, const std::vector<ShadingTriangle
     const RowBuckets boxRowBuckets = buildRowBuckets(boxEdges, height);
     const std::size_t pixelCount = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
     std::vector<float> zbuffer(pixelCount);
-    // The depth pass's other output: which sub-triangle owns each pixel, -1 for uncovered. 4 bytes per pixel, sized like the z-buffer because both are written by whichever worker owns the row.
+    // The depth pass's other output: which sub-triangle owns each pixel, -1 for uncovered. Sized like the z-buffer, same row owner.
     std::vector<int> winners(pixelCount);
 
     const auto renderRow = [&](int y) {
-        // Clearing this row of every AOV is what makes the buffers reusable across calls: the worker that is about to overwrite the row zeroes it first, in parallel and while it is already cache-warm, instead of 14 sequential full-image memsets before the dispatch. An uncovered pixel therefore still reads back zero (alpha 0, the miss test every consumer uses) exactly as a freshly allocated image did.
+        // Clearing this row of every AOV is what makes the buffers reusable: zeroed while cache-warm, so an uncovered pixel reads zero.
         const std::size_t rowStart = static_cast<std::size_t>(y) * static_cast<std::size_t>(width);
-        for (engine::gfx::HdrImage* image : images) {
+        for (pathtracer::gfx::HdrImage* image : images) {
             float* row = image->rgba.data() + (rowStart * 4);
             std::fill(row, row + (static_cast<std::size_t>(width) * 4), 0.0F);
         }
@@ -605,4 +603,4 @@ void renderRasterGBuffer(const Camera& camera, const std::vector<ShadingTriangle
     threadPool.parallelFor(height, renderRow);
 }
 
-}  // namespace engine::scene
+}  // namespace pathtracer::scene

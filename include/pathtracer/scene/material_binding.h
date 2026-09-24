@@ -1,0 +1,25 @@
+#pragma once
+
+#include <map>
+#include <optional>
+#include <string>
+#include <vector>
+
+#include <glm/glm.hpp>
+
+#include "pathtracer/config/scene_config.h"
+#include "pathtracer/scene/gltf_loader.h"
+#include "pathtracer/scene/path_tracer.h"
+
+namespace pathtracer::scene {
+
+// One PathTraceSettings per instance from the scene's material overrides, parallel to `instances`. nullopt on a bad file or unknown key.
+[[nodiscard]] std::optional<std::vector<PathTraceSettings>> resolvePerInstanceSettings(
+    const PathTraceSettings& base, const std::vector<MeshInstance>& instances,
+    const std::map<std::string, std::string>& materialOverrides, const std::string& assetRoot);
+
+// Transforms authored quad lights into world space: origin as a point, edge0/edge1 as displacements. sceneTransform must be rigid.
+[[nodiscard]] std::vector<QuadLight> buildQuadLights(
+    const std::vector<pathtracer::config::QuadLightConfig>& lights, const glm::mat4& sceneTransform);
+
+}  // namespace pathtracer::scene

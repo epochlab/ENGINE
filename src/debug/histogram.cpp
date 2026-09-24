@@ -1,13 +1,13 @@
-#include "engine/debug/histogram.h"
+#include "pathtracer/debug/histogram.h"
 
 #include <utility>
 
 #include <GL/glew.h>
 
-#include "engine/debug/memory_tracker.h"
-#include "engine/gfx/gl_debug.h"
+#include "pathtracer/debug/memory_tracker.h"
+#include "pathtracer/gfx/gl_debug.h"
 
-namespace engine::debug {
+namespace pathtracer::debug {
 
 Histogram::Histogram() {
     GL_CALL(glGenFramebuffers(1, &downsampleFbo_));
@@ -105,7 +105,7 @@ void Histogram::update(int windowWidth, int windowHeight) {
     GL_CALL(glBindBuffer(GL_PIXEL_PACK_BUFFER, pbos_[currentPbo_]));
     GL_CALL(glReadPixels(0, 0, kWidth, kHeight, GL_RGB, GL_UNSIGNED_BYTE, nullptr));
 
-    // Bin the *other* PBO's contents -- written a full capture interval ago, so its transfer has long since completed and mapping it here never stalls on this frame's GPU work.
+    // Bin the other PBO, written a capture interval ago, so its transfer has completed and mapping never stalls on this frame.
     const int readyPbo = 1 - currentPbo_;
     if (pboWritten_[readyPbo]) {
         GL_CALL(glBindBuffer(GL_PIXEL_PACK_BUFFER, pbos_[readyPbo]));
@@ -134,4 +134,4 @@ void Histogram::update(int windowWidth, int windowHeight) {
     GL_CALL(glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0));
 }
 
-}  // namespace engine::debug
+}  // namespace pathtracer::debug

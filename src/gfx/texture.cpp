@@ -1,14 +1,14 @@
-#include "engine/gfx/texture.h"
+#include "pathtracer/gfx/texture.h"
 
 #include <cstddef>
 #include <utility>
 
 #include <GL/glew.h>
 
-#include "engine/debug/memory_tracker.h"
-#include "engine/gfx/gl_debug.h"
+#include "pathtracer/debug/memory_tracker.h"
+#include "pathtracer/gfx/gl_debug.h"
 
-namespace engine::gfx {
+namespace pathtracer::gfx {
 
 namespace {
 
@@ -29,7 +29,7 @@ Texture::Texture(unsigned int id, ScalarType format) : id_(id), format_(format) 
 
 Texture::~Texture() {
     if (id_ != 0) {
-        engine::debug::trackGpuFree(byteSize_);
+        pathtracer::debug::trackGpuFree(byteSize_);
         glDeleteTextures(1, &id_);
     }
 }
@@ -44,7 +44,7 @@ Texture::Texture(Texture&& other) noexcept
 Texture& Texture::operator=(Texture&& other) noexcept {
     if (this != &other) {
         if (id_ != 0) {
-            engine::debug::trackGpuFree(byteSize_);
+            pathtracer::debug::trackGpuFree(byteSize_);
             glDeleteTextures(1, &id_);
         }
         id_ = std::exchange(other.id_, 0);
@@ -73,7 +73,7 @@ Texture Texture::createFromFloatPixels(int width, int height, const float* rgba,
     return texture;
 }
 
-// Not wrapped in GL_CALL on the in-place path: runs every frame the displayed image changes, and glGetError is a driver sync point -- same convention as bind() below. The resize path is rare enough to check.
+// Not wrapped in GL_CALL on the in-place path: it runs every frame the image changes and glGetError is a driver sync point.
 void Texture::upload(int width, int height, const float* rgba) {
     // GL_UNPACK_ALIGNMENT untouched: RGBA float rows are always a multiple of the default 4-byte alignment.
     if (width == width_ && height == height_) {
@@ -85,10 +85,10 @@ void Texture::upload(int width, int height, const float* rgba) {
     GL_CALL(glTexImage2D(GL_TEXTURE_2D, 0, glInternalFormat(format_), width, height, 0, GL_RGBA, GL_FLOAT, rgba));
     width_ = width;
     height_ = height;
-    engine::debug::trackGpuFree(byteSize_);
+    pathtracer::debug::trackGpuFree(byteSize_);
     // No mip chain, so no ~1/3 addition -- the HUD's GPU memory readout reports what is actually allocated.
     byteSize_ = static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4 * scalarBytes(format_);
-    engine::debug::trackGpuAlloc(byteSize_);
+    pathtracer::debug::trackGpuAlloc(byteSize_);
 }
 
 // Not wrapped in GL_CALL: runs every frame.
@@ -97,4 +97,4 @@ void Texture::bind(unsigned int unit) const {
     glBindTexture(GL_TEXTURE_2D, id_);
 }
 
-}  // namespace engine::gfx
+}  // namespace pathtracer::gfx

@@ -1,4 +1,4 @@
-#include "engine/scene/debug_camera_controller.h"
+#include "pathtracer/scene/debug_camera_controller.h"
 
 #include <cmath>
 
@@ -6,9 +6,9 @@
 
 #include <glm/gtc/matrix_transform.hpp>
 
-#include "engine/platform/window.h"
+#include "pathtracer/platform/window.h"
 
-namespace engine::scene {
+namespace pathtracer::scene {
 
 namespace {
 
@@ -46,7 +46,7 @@ Camera DebugCameraController::snapshot() const {
                   farClip_, aperture_, shutterSeconds_, iso_);
 }
 
-void DebugCameraController::applyFlyInput(const engine::platform::Window& window,
+void DebugCameraController::applyFlyInput(const pathtracer::platform::Window& window,
                                            float dtSeconds) {
     if (orbiting_) {
         return;
@@ -93,7 +93,7 @@ void DebugCameraController::applyOrbitDelta(float dxPixels, float dyPixels) {
     offset = glm::vec3(glm::rotate(glm::mat4(1.0F), glm::radians(yawDeltaDegrees), kWorldUp) *
                         glm::vec4(offset, 0.0F));
 
-    // Outer guard (0.999) only prevents cross(kWorldUp, offset)/normalize from degenerating into a NaN at the exact pole. Acceptance of the rotated result is re-checked below at the original 0.99 tolerance against the candidate, not this pre-rotation offset -- gating on the pre-rotation value alone would let one large dyPixels rotate past the pole in a single step and then permanently reject every subsequent delta, locking pitch input for the rest of the orbit.
+    // The outer guard only stops cross(kWorldUp, offset) degenerating into a NaN at the pole; acceptance is re-checked below.
     const float offsetLength = glm::length(offset);
     if (offsetLength > 1e-5F && std::abs(offset.y / offsetLength) < 0.999F) {
         const float pitchDeltaDegrees = -dyPixels * orbitSensitivityDegPerPixel_;
@@ -108,7 +108,7 @@ void DebugCameraController::applyOrbitDelta(float dxPixels, float dyPixels) {
 
     position_ = pivot_ + offset;
 
-    // Re-derive yaw/pitch from the new look direction (inverse of camera.cpp's forwardFromEuler) so resuming WASD fly after orbit is seamless.
+    // Re-derive yaw and pitch from the new look direction, the inverse of forwardFromEuler, so WASD fly resumes seamlessly.
     const glm::vec3 lookDir = glm::normalize(pivot_ - position_);
     yawDegrees_ = glm::degrees(std::atan2(-lookDir.x, -lookDir.z));
     pitchDegrees_ = glm::clamp(glm::degrees(std::asin(glm::clamp(lookDir.y, -1.0F, 1.0F))),
@@ -126,4 +126,4 @@ void DebugCameraController::resetToDefault() {
     orbiting_ = false;
 }
 
-}  // namespace engine::scene
+}  // namespace pathtracer::scene

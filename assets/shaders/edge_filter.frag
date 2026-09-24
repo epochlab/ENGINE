@@ -5,14 +5,13 @@ in vec2 vUv;
 uniform sampler2D uHdrColor;  // the path tracer's Beauty image (real RGB)
 uniform int uFilterMode;      // 0=Sobel 1=Gabor 2=Luminance passthrough (no neighborhood filter -- see main())
 uniform float uGaborKernel[100];  // 4 orientations x 5x5 taps, see main.cpp's buildGaborKernel
-uniform int uChannelView;     // 0=off 1=R 2=G 3=B -- isolation was previously baked into the uploaded texels by a CPU copy of the whole image; as a uniform, toggling it costs nothing and needs no re-upload
-uniform float uExposure;     // pow(2, relativeExposureEv()) -- same multiplier Beauty itself displays at (OcioDisplayTransform::bind); applied per-tap in sampleLuminance so Sobel/Gabor's gradient of an already-exposed signal scales by the same factor as Beauty, rather than staying frozen at unity gain
+uniform int uChannelView;     // 0=off 1=R 2=G 3=B; a uniform, not a CPU texel bake, so toggling needs no re-upload
+uniform float uExposure;     // pow(2, relativeExposureEv()), Beauty's own multiplier, applied per-tap so gradients scale with it
 uniform bool uInvert;        // 1.0 - value, applied to the final output colour -- the 'I' debug toggle
 
 out vec4 fragColor;
 
-// Rec.709 luminance. Not just texture(...).r: uHdrColor is real RGB, where .r alone would isolate the red channel, not luminance.
-// Channel isolation applies here, before the dot, exactly where the CPU-side bake used to sit in the pipeline. Isolating broadcasts the channel to grey and the Rec.709 weights sum to 1, so the dot then returns that channel unchanged -- the previous behaviour reproduced exactly, not approximated.
+// Rec.709 luminance, not texture(...).r: isolation broadcasts the channel to grey and the weights sum to 1, so the dot is exact.
 float sampleLuminance(vec2 uv, vec2 texel, vec2 offset) {
     vec3 color = texture(uHdrColor, uv + offset * texel).rgb * uExposure;
     if (uChannelView == 1) {
@@ -41,7 +40,7 @@ float sobel(vec2 texel) {
     return length(vec2(gx, gy));
 }
 
-// 4-orientation Gabor bank (0/45/90/135 degrees), max |response| across orientations. Each of the 25 neighborhood texels is fetched once and reused across all 4 orientations -- uGaborKernel's weights already bake in the per-orientation envelope*carrier, computed once on the CPU (main.cpp) rather than re-derived per-fragment.
+// 4-orientation Gabor bank (0/45/90/135 deg), max |response|. Each of the 25 texels is fetched once; uGaborKernel bakes the envelope.
 float gabor(vec2 texel) {
     float response[4] = float[4](0.0, 0.0, 0.0, 0.0);
     int tapIndex = 0;
@@ -62,7 +61,7 @@ float gabor(vec2 texel) {
 
 void main() {
     vec2 texel = 1.0 / vec2(textureSize(uHdrColor, 0));
-    // Mode 2 (Luminance): the path tracer has no per-AOV Luminance buffer -- reusing this shader's existing uHdrColor/sampleLuminance plumbing for a plain center-tap read is cheaper than a whole new ShaderProgram just to broadcast one dot product.
+    // Mode 2 (Luminance): reuses this shader's uHdrColor/sampleLuminance plumbing rather than a whole ShaderProgram for one dot product.
     float value = uFilterMode == 2   ? sampleLuminance(vUv, texel, vec2(0.0))
                   : uFilterMode == 1 ? gabor(texel)
                                      : sobel(texel);
