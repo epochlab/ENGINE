@@ -1,10 +1,14 @@
-// Standalone correctness check for path_tracer.cpp's integrator (renderPathTraced/tracePath), distinct from bsdf_validate.cpp/nee_validate.cpp which exercise the BSDF and MIS weighting in isolation and never run a real trace. Same standalone-CLI convention: no test framework, non-zero exit on failure.
-// Reference configuration: one large unoccluded quad under a uniform-radiance (L0=1) environment. Nothing else is in the scene, so every ray leaving the surface reaches the environment directly (no indirect light), and the converged radiance is exactly the single-scatter direct lighting, Lo(wo) = integral over the hemisphere of evaluateBsdf(wo,wi)*cos(wi) dwi, the same quantity nee_validate.cpp's referenceLo computes.
+// Standalone correctness check for path_tracer.cpp's integrator (renderPathTraced/tracePath), distinct from
+// bsdf_validate and nee_validate, which test the BSDF and the light sampling underneath it.
+// Reference configuration: one large unoccluded quad under a uniform-radiance (L0=1) environment. Nothing else is in
+// the scene, so every ray leaving the surface reaches the environment and the answer is analytic.
 // Two invariants follow, catching different integrator bugs than a BSDF-level furnace test can:
-//   1. Depth invariance: with no indirect light, maxBounces=0 and maxBounces=1 must produce the same image. A depth cap dropping the terminal BSDF-sampled ray breaks this: at maxBounces=0 the ray built at bounce 0 is never intersected, so NEE's MIS weight (lightPdf^2/(lightPdf^2+bsdfPdf^2)) is never complemented by the BSDF-sampling half and the surface renders too dark, while maxBounces=1 traces that ray at bounce 1 and is complete; the gap is exactly bsdfPdf^2/(bsdfPdf^2+lightPdf^2) of the direct lighting, large on a glossy surface.
+//   1. Depth invariance: with no indirect light, maxBounces=0 and maxBounces=1 must produce the same image. A depth
+//      cap dropping the terminal BSDF-sampled contribution shows up here and nowhere else.
 //   2. Absolute agreement with the analytic reference, which no self-consistency check between two renderer settings can give on its own.
-// Russian roulette is exercised as a third case: it reweights by 1/p on survival, so an RR-enabled render must return the same answer as an RR-disabled one; RR lives in tracePath, so this is the only place it can be tested.
-// Material/MeshInstance are plain data (six ImageTexture members and a mat4) and need no GL context: an earlier comment in nee_validate.cpp claimed otherwise, which is why this suite had no integrator-level test until now.
+// Russian roulette is exercised as a third case: it reweights by 1/p on survival, so an RR-enabled render must
+// return the same answer as an RR-disabled one, within noise.
+// Material and MeshInstance are plain data -- six ImageTexture members and a mat4 -- and need no GL context.
 
 #include <array>
 #include <atomic>
@@ -73,13 +77,16 @@ void finish(tools::check::Context& ctx, bool ok, const char* what) {
     PT_EXPECT(ctx, ok, what);
 }
 
-// Quad half-extent: large enough that every primary ray in the narrow test FOV lands on it, so no pixel sees the environment directly and the measured value is purely surface radiance.
+// Quad half-extent: large enough that every primary ray in the narrow test FOV lands on it, so no pixel sees the
+// environment directly and the measurement is of the surface alone.
 constexpr float kQuadExtent = 1000.0F;
-// Sphere test geometry, shared by the two checks that use it so their tessellations cannot drift apart -- checkBeerLambert's expected transmittance is a function of the chord, so the two must agree on the radius.
+// Sphere test geometry, shared by the two checks that use it so their tessellations cannot drift apart:
+// checkBeerLambert's expected transmittance depends on the chord length through this exact mesh.
 constexpr float kSphereRadius = 1.0F;
 constexpr int kSphereSlices = 64;
 constexpr int kSphereStacks = 32;
-// Narrow FOV (200mm on a 36x24 gate, ~6.9 degrees vertical) so every pixel's view direction is within a fraction of a degree of the quad normal -- lets one analytic reference at wo = the normal stand for the whole probed region.
+// Narrow FOV (200mm on a 36x24 gate, ~6.9 degrees vertical) so every pixel view direction is within a fraction of a
+// degree of the quad normal, letting one analytic value stand for the whole block.
 constexpr float kFocalLengthMm = 200.0F;
 constexpr int kImageSize = 16;
 constexpr int kSamplesPerPixel = 512;
@@ -90,7 +97,7 @@ struct TestScene {
     std::vector<MeshInstance> instances;
 };
 
-// One quad in the z=0 plane facing +Z, wound counter-clockwise as seen from +Z so geometricNormalOf gives (0,0,1). The camera sits at +Z looking down -Z (yaw=0/pitch=0, this codebase's default orientation), so the centre pixel's view direction is exactly the surface normal.
+// One quad in the z=0 plane facing +Z, wound counter-clockwise as seen from +Z so geometricNormalOf gives (0,0,1).
 TestScene makeQuadScene(float roughness, glm::vec3 f0) {
     const glm::vec3 normal(0.0F, 0.0F, 1.0F);
     const glm::vec4 tangent(1.0F, 0.0F, 0.0F, 1.0F);
@@ -110,7 +117,8 @@ TestScene makeQuadScene(float roughness, glm::vec3 f0) {
     return scene;
 }
 
-// Two parallel quads with opposing geometric normals: the front facing the camera at +Z, the back facing away at -Z. A camera ray enters at the front face (woLocal.z>0) and leaves at the back (woLocal.z<0), the only configuration that exercises bsdf.cpp's exiting side and the far-side NEE guard. A single quad cannot: it is entered from the front and every hit reads as entering.
+// Two parallel quads with opposing geometric normals: the front facing the camera at +Z, the back facing away at -Z,
+// so a camera ray enters at the front and exits at the back.
 TestScene makeSlabScene(float roughness, glm::vec3 f0, float thickness) {
     const glm::vec4 tangent(1.0F, 0.0F, 0.0F, 1.0F);
     const auto vertex = [&](float x, float y, float z, float nz) {
@@ -138,8 +146,10 @@ TestScene makeSlabScene(float roughness, glm::vec3 f0, float thickness) {
     return scene;
 }
 
-// The quad above plus an opaque wall at x=wallX facing -X, the only scene here where a non-transmissive path reaches a second surface: the wall sits outside the narrow view frustum (primary rays land within |x|<0.31 at z=0) so it is never primary-visible, but it catches the floor's +X-going bounce rays, and NEE fires there at bounce>=1, the only way anything reaches the Indirect buckets.
-// wallX defaults to the transport checks' original 1, and the AO checks push it out to kAoWallDistance -- see there for why that distance is load-bearing for them and irrelevant here.
+// The quad above plus an opaque wall at x=wallX facing -X, the only scene here where a non-transmissive path reaches
+// a second surface.
+// wallX defaults to the transport checks' original 1; the AO checks push it out to kAoWallDistance, where that
+// distance is load-bearing.
 TestScene makeCornerScene(float roughness, glm::vec3 f0, float wallX = 1.0F) {
     TestScene scene = makeQuadScene(roughness, f0);
     const glm::vec3 wallNormal(-1.0F, 0.0F, 0.0F);
@@ -160,9 +170,12 @@ TestScene makeCornerScene(float roughness, glm::vec3 f0, float wallX = 1.0F) {
     return scene;
 }
 
-// UV sphere at the origin, poles on Y so the camera (at +Z looking down -Z) reads the well-tessellated equator rather than the degenerate pole fan. Vertex normals are the exact analytic outward normals and the tangent is d(position)/d(theta), non-degenerate everywhere including the poles.
-// THE POINT IS THE CURVATURE. Every other scene here is flat quads, whose coplanar vertex normals make transmissionOffsetEpsilon's curvature factor exactly zero and shadowTerminatorOffset a no-op -- so the two integrator bugs those two mechanisms actually had (a far-side NEE shadow ray on the flat kRayEpsilon, and the shadow-terminator projection pushing an inward-going ray back out through the interface and desynchronising the medium stack) were invisible to all four suites while plainly visible in a cornell render. Here both are non-zero.
-// The tessellation sets the offset epsilon (max edge length * sin of the vertex-normal divergence, both taken across the quad's diagonal), which backs each ray origin that much into the medium and so shortens every measured in-medium segment. At 64x32 on a unit sphere that is 1.93e-2. Coarse enough that the curvature terms are firmly non-zero, fine enough that checkBeerLambert's analytic chord stays accurate; the detection strength this costs was measured, not assumed, by re-running the checks at 24x12 (528 triangles, cornell's own tessellation), where they behave the same.
+// UV sphere at the origin, poles on Y so the camera at +Z reads the well-tessellated equator rather than the
+// degenerate pole fan.
+// The point is the curvature. Every other scene here is flat quads, whose coplanar vertex normals make
+// transmissionOffsetEpsilon's curvature factor exactly zero, so they cannot exercise it at all.
+// The tessellation sets the offset epsilon -- max edge length times the sine of the vertex-normal divergence, both
+// across the diagonal -- so changing the resolution changes what is being tested.
 TestScene makeSphereScene(float roughness, glm::vec3 f0) {
     const auto vertexAt = [&](int stack, int slice) {
         const float phi = kPi * static_cast<float>(stack) / static_cast<float>(kSphereStacks);
@@ -180,7 +193,8 @@ TestScene makeSphereScene(float roughness, glm::vec3 f0) {
             const ShadingVertex v10 = vertexAt(stack + 1, slice);
             const ShadingVertex v11 = vertexAt(stack + 1, slice + 1);
             const ShadingVertex v01 = vertexAt(stack, slice + 1);
-            // Wound so geometricNormalOf points outward. Each pole row contributes one triangle, not two: the half-quad whose two vertices collapse onto the pole is dropped rather than emitted with zero area, which would normalize(0) to NaN in geometricNormalOf. Guarding the wrong half of each row leaves an annular hole at both poles (measured: 128 zero-area triangles, surface area 12.4808 against 4*pi) and silently unseals the medium.
+            // Wound so geometricNormalOf points outward. Each pole row contributes one triangle, not two: the
+            // half-quad whose two vertices collapse onto the pole is degenerate.
             if (stack + 1 < kSphereStacks) {
                 scene.worldTriangles.push_back(Triangle{v00.position, v10.position, v11.position});
                 scene.shadingTriangles.push_back(ShadingTriangle{v00, v10, v11, 0});
@@ -195,8 +209,10 @@ TestScene makeSphereScene(float roughness, glm::vec3 f0) {
     return scene;
 }
 
-// Two coplanar quads meeting at x=0, each its OWN MeshInstance, so shadingTriangles carry instanceIndex 0 on the left and 1 on the right. The only scene here with more than one instance, and therefore the only one where perInstanceSettings is indexed by anything but 0 -- see checkPerInstanceMaterials.
-// Both instances get the identical Material, so nothing distinguishes them except which perInstanceSettings entry the integrator resolves for their triangles.
+// Two coplanar quads meeting at x=0, each its own MeshInstance, so shadingTriangles carry instanceIndex 0 on the
+// left and 1 on the right.
+// Both instances get the identical Material, so nothing distinguishes them except which perInstanceSettings entry
+// the integrator resolves for their triangles.
 TestScene makeTwoInstanceScene(float roughness, glm::vec3 f0) {
     const glm::vec3 normal(0.0F, 0.0F, 1.0F);
     const glm::vec4 tangent(1.0F, 0.0F, 0.0F, 1.0F);
@@ -223,7 +239,8 @@ TestScene makeTwoInstanceScene(float roughness, glm::vec3 f0) {
     return scene;
 }
 
-// Only `metallic` travels through PathTraceSettings; roughness and f0 reach the renderer through the material's 1x1 roughness and specular textures, which resolveBsdfParams samples (gbuffer_shading.cpp).
+// Only `metallic` travels through PathTraceSettings; roughness and f0 reach the renderer through the material's 1x1
+// textures, which are shared.
 PathTraceSettings makeSettings(int maxBounces, int rrStartBounce, float metallic,
                                float transmission = 0.0F) {
     PathTraceSettings settings{};
@@ -263,13 +280,15 @@ glm::vec3 regionMean(const pathtracer::gfx::HdrImage& image, int x0, int y0, int
     return sum / static_cast<float>(count);
 }
 
-// Mean radiance over the centre 4x4 block -- averaging several pixels tightens the estimate without widening the view-direction spread enough to matter at this FOV.
+// Mean radiance over the centre 4x4 block -- averaging several pixels tightens the estimate without widening the
+// view-direction spread enough to matter.
 glm::vec3 centreMean(const pathtracer::gfx::HdrImage& image) {
     return regionMean(image, (kImageSize / 2) - 2, (kImageSize / 2) - 2, (kImageSize / 2) + 2,
                        (kImageSize / 2) + 2);
 }
 
-// Runs one full renderPathTraced pass with an explicit per-instance settings vector, the only way to give two instances different materials. showSky gates only the primary ray's own miss, so turning it off zeroes the background term the transport buckets deliberately exclude.
+// Runs one full renderPathTraced pass with an explicit per-instance settings vector, the only way to give two
+// instances different materials.
 pathtracer::scene::PathTraceResult renderPassPerInstance(
     const TestScene& scene, const EnvironmentMap& env, const PathTraceSettings& settings,
     const std::vector<PathTraceSettings>& perInstanceSettings, EmbreeAccel& accel,
@@ -315,7 +334,8 @@ struct Case {
 };
 
 PT_CHECK(depth_and_russian_roulette_invariance, Slow, Statistical) {
-    // Roughness restricted to values where the uniform-hemisphere reference converges (same limitation nee_validate.cpp documents for its own tight two-sided check); a sharp low-roughness lobe biases the reference low and would produce false failures.
+    // Roughness restricted to values where the uniform-hemisphere reference converges, the same limitation
+    // nee_validate documents for its own tight tolerance.
     const std::array<Case, 4> cases{{
         {"diffuse (metallic 0, rough 1.0)", 1.0F, 0.0F, glm::vec3(0.04F)},
         {"glossy dielectric (rough 0.35)", 0.35F, 0.0F, glm::vec3(0.04F)},
@@ -323,7 +343,8 @@ PT_CHECK(depth_and_russian_roulette_invariance, Slow, Statistical) {
         {"rough conductor (rough 0.25)", 0.25F, 1.0F, glm::vec3(1.0F)},
     }};
 
-    // Depth invariance is exact up to Monte Carlo noise, so it gets the tighter bound. Absolute agreement is looser: the uniform-hemisphere reference converges slowly, and single-scatter GGX legitimately loses energy at high roughness (Heitz et al. 2016), which the renderer reproduces faithfully and the reference does not correct for -- both sides compute the same single-scatter BSDF, so they agree, but only to within the reference's own noise.
+    // Depth invariance is exact up to Monte Carlo noise, so it gets the tighter bound. Absolute agreement is looser,
+    // the uniform-hemisphere reference being the noisier of the two estimators.
     constexpr float kDepthInvarianceTolerance = 0.02F;
     constexpr float kReferenceTolerance = 0.06F;
     constexpr int kReferenceSamples = 400000;
@@ -345,7 +366,8 @@ PT_CHECK(depth_and_russian_roulette_invariance, Slow, Statistical) {
             return;
         }
 
-        // rrStartBounce far above maxBounces disables Russian roulette for the first two renders, so depth invariance is measured without RR's extra variance folded in.
+        // rrStartBounce far above maxBounces disables Russian roulette for the first two renders, so depth
+        // invariance is measured without its extra variance.
         const float loDepth0 = renderCentre(
             scene, env, makeSettings(0, 999, testCase.metallic),
             *accel, pool);
@@ -396,11 +418,16 @@ PT_CHECK(depth_and_russian_roulette_invariance, Slow, Statistical) {
     return;
 }
 
-// A white, non-absorbing dielectric slab in a uniform L0=1 environment is invisible: every photon entering the front face leaves somewhere, and the non-symmetric eta^2 radiance compression applied on entering is undone on exiting.
-// This is the only case in the suite that reaches a transmissive exiting vertex, gating the far-side NEE guard against the miss branch's MIS weight: weighting a rough transmission sample at 1.0 (correct only for a delta lobe) while NEE also evaluates the transmission lobe double-counts their overlap.
-// Held to the BSDF-only walk (fixtures::slabWalkLo) rather than to 1.0, so it measures what the integrator adds and nothing else: the BSDF's own energy closure is bsdf_validate's transmissive_slab_walk, and a table error would otherwise read here as an integrator bias.
-// Both sides are replicated over independent scramble seeds and compared as the difference of two estimators (Welch). The whole image is averaged: the slab is infinite and every view within 3.5 degrees of normal, where the walk's normal-incidence value holds to well inside the band.
-// The centre-4x4, single-seed reading this replaced carried ~3% standard error against a hand-set 0.03 tolerance -- what read as "2.7% over" at roughness 1 was that noise, and the unbiased reading was below 1.
+// A white, non-absorbing dielectric slab in a uniform L0=1 environment is invisible: every photon entering the front
+// face leaves somewhere, so the block reads exactly the environment behind it.
+// The only case in the suite reaching a transmissive exiting vertex, gating the far-side NEE guard against the miss
+// branch's MIS weight.
+// Held to the BSDF-only walk (fixtures::slabWalkLo) rather than to 1.0, so it measures what the integrator adds and
+// nothing else: the BSDF's own residual is already bounded by bsdf_validate.
+// Both sides are replicated over independent scramble seeds and compared as the difference of two estimators
+// (Welch), the whole image averaged, so the band is the run's own interval rather than a hand-set tolerance.
+// The centre-4x4, single-seed reading this replaced carried ~3% standard error against a hand-set 0.03 tolerance,
+// so what read as a real excess was within its own noise.
 PT_CHECK(transmissive_slab_energy, Slow, Statistical) {
     // Enough depth for internally reflected paths to converge; truncation only ever darkens.
     constexpr int kSlabBounces = 12;
@@ -452,13 +479,16 @@ PT_CHECK(transmissive_slab_energy, Slow, Statistical) {
     }
 }
 
-// The curved counterpart of checkTransmissiveSlab, on the same invariant for the same reason: a white, non-absorbing dielectric under a uniform L0=1 environment is invisible WHATEVER ITS SHAPE, since every photon entering leaves again and the eta^2 radiance compression cancels over the round trip. Only the geometry changes, and the geometry is the whole point -- this is the suite's only case where a transmissive vertex sees non-zero curvature, so it is the only one that can see a bug in transmissionOffsetEpsilon or in shadowTerminatorOffset's projection side (see makeSphereScene).
-// A sphere traps far more light than a slab: past the critical angle every internal hit totally internally reflects, so paths ring around the inside for many bounces. Truncation only ever darkens, which is why the depth is well above the slab's and the band is two-sided.
+// The curved counterpart of checkTransmissiveSlab, on the same invariant for the same reason: a white,
+// non-absorbing dielectric under a uniform environment must be invisible whatever its shape.
+// A sphere traps far more light than a slab: past the critical angle every internal hit totally internally reflects,
+// so paths ring around the inside and the bounce budget matters.
 PT_CHECK(transmissive_sphere_energy, Slow, Statistical) {
     // Measured convergence point, not a guess: 32 and 96 bounces are bit-identical to this, and 12 is not.
     constexpr int kSphereBounces = 16;
     constexpr float kTolerance = 0.03F;
-    // 0.02 is below bsdf.cpp's smooth-roughness threshold, so it takes the delta transmission path; the rest take the Walter lobe, where far-side NEE is the estimator that actually lights the far side.
+    // 0.02 is below bsdf.cpp's smooth-roughness threshold, so it takes the delta transmission path; the rest take
+    // the Walter lobe, where far-side NEE is live.
     const std::array<float, 4> roughnesses = {0.02F, 0.2F, 0.4F, 0.7F};
 
     const EnvironmentMap env = makeUniformEnvironment();
@@ -539,15 +569,18 @@ PT_CHECK(transmissive_sphere_energy, Slow, Statistical) {
     return;
 }
 
-// Beer-Lambert volumetric absorption -- the newest thing in the pipeline and, until now, the only part of the transmissive path with no coverage at all: both slabs above are white and non-absorbing, so sigmaAFromTransmission and tracePath's medium attenuation were never once evaluated by this suite.
-// Asserts the documented contract rather than restating its formula: transmissionDepth is "the distance at which transmittance reaches transmissionColor" (scene_config.h), so setting transmissionDepth to the actual traversal distance makes the expected reading exactly transmissionColor, with no exp() written in the test at all. Halving transmissionDepth squares it, which is what separates a true exponential from anything linear in distance -- a test at one depth cannot tell the two apart.
-// ior 1.0 is what makes this exact rather than approximate, and it is a physically real configuration (an index-matched pure absorber), not a test-only dodge. The interface neither bends the ray -- so the traversal distance is the slab thickness or the sphere chord, both known in closed form -- nor reflects any of it, since fresnelDielectric is identically zero at eta 1. The delta transmission lobe contributes nothing through NEE either. Absorption is then the only mechanism left that can move the reading off 1.0.
+// Beer-Lambert volumetric absorption, until now the only part of the transmissive path with no coverage at all.
+// Asserts the documented contract rather than restating its formula: transmissionDepth is the distance at which
+// transmittance reaches transmissionColor, so that identity is the specification.
+// ior 1.0 is what makes this exact rather than approximate, and it is a physically real configuration -- an
+// index-matched pure absorber -- not a test-only contrivance: the ray travels a known straight chord.
 // Per-channel colour, distinct in every channel: a swapped or luminance-collapsed sigmaA passes a grey test and fails this one.
 PT_CHECK(beer_lambert_absorption, Slow, Statistical) {
     constexpr int kBounces = 8;
     constexpr float kSlabThickness = 0.5F;
     // Relative, since the squared row's green channel is 0.0625 and an absolute band would be vacuous there.
-    // The flat rows are exact to 3e-4 relative. The sphere row reads systematically HIGH, from two named biases that both shorten its path and so under-absorb: the offset epsilon backs the origin 1.93e-2 into the medium (see makeSphereScene), and the probed block's outermost ray has an impact parameter of 0.075 rather than 0, a chord of 1.9944 rather than 2.0. Measured 0.89/1.82/0.35% across the three channels, which divided by each channel's own sigma_a give the same 0.025 path deficit -- one shortened path, matching the 0.019+0.006 predicted, and not a per-channel error. Worst row is therefore 1.8% against this band.
+    // The flat rows are exact to 3e-4 relative. The sphere row reads systematically high, from two named biases that
+    // both shorten its path: the tessellated chord is shorter than the true one, and the offset epsilon trims more.
     constexpr float kRelativeTolerance = 0.03F;
     const glm::vec3 colour(0.5F, 0.25F, 0.75F);
 
@@ -619,14 +652,19 @@ PT_CHECK(beer_lambert_absorption, Slow, Statistical) {
     return;
 }
 
-// The other half of the transmission-tint convention: transmissionDepth == 0 means there is no interior medium at all, and transmissionColor is a constant on-surface tint instead -- OpenPBR, "if zero, acts as a constant (on-surface) transmission tint"; Arnold renders it as a flat filter colour.
-// Complementary to checkBeerLambert above rather than a restatement of it. That one authors a colour at depth > 0 and requires exactly transmissionColor after one traversal, so an on-surface tint leaking into the volumetric regime would read colour^3 there; this one authors depth 0 and requires exactly transmissionColor^2, one factor per interface crossed, entering and exiting.
-// A flat slab and a sphere, whose traversal distances differ by construction: an on-surface tint is a property of the interface, so it must read the SAME square on both, which is exactly what distinguishes it from absorption. checkBeerLambert's sphere row reads systematically high because the offset epsilon shortens its in-medium path; no reading here depends on distance, so that bias cannot appear at all.
-// ior 1.0 for the same reason as checkBeerLambert: an index-matched interface neither bends nor reflects the ray, and the delta transmission lobe contributes nothing through NEE, so the tint is the only mechanism left that can move the reading off 1.0.
+// The other half of the transmission-tint convention: transmissionDepth == 0 means there is no interior medium at
+// all, and transmissionColor is then the on-surface tint applied once per crossing.
+// Complementary to checkBeerLambert rather than a restatement: that one authors a colour at depth > 0 and requires
+// exactly transmissionColor at that distance; this one requires distance not to matter at all.
+// A flat slab and a sphere, whose traversal distances differ by construction: an on-surface tint is a property of
+// the interface, so both must read the same value.
+// ior 1.0 for the same reason as checkBeerLambert: an index-matched interface neither bends nor reflects the ray, so
+// only the tint remains.
 PT_CHECK(on_surface_transmission_tint, Slow, Statistical) {
     constexpr int kBounces = 8;
     constexpr float kSlabThickness = 0.5F;
-    // Relative, and tight: with no absorption and no refraction there is no distance-dependent bias, so both rows carry only the estimator's own residual -- measured at 3.3e-4 in every channel of both, the same residual checkBeerLambert's flat rows show. 6x headroom on that, not a band wide enough to hide a leaked factor.
+    // Relative, and tight: with no absorption and no refraction there is no distance-dependent bias, so both rows
+    // carry only the estimator's own noise.
     constexpr float kRelativeTolerance = 0.002F;
     const glm::vec3 colour(0.5F, 0.25F, 0.75F);
     const glm::vec3 expected = colour * colour;   // two interfaces crossed, one factor each
@@ -681,9 +719,12 @@ PT_CHECK(on_surface_transmission_tint, Slow, Statistical) {
     return;
 }
 
-// Per-instance material binding, integrator side: nothing asserted that ShadingTriangle::instanceIndex resolves into the RIGHT perInstanceSettings entry. Every other scene in this suite has exactly one instance, so every lookup is index 0 and any mis-indexing is invisible; in a real scene it renders plausibly and silently, which is the whole failure mode.
-// Two coplanar quads, one instance each, identical Materials, distinguished only by a per-instance diffuseColour -- red on the left of x=0, blue on the right. Under a white uniform environment the left block must read red-dominant and the right blue-dominant, and swapping the two vector entries must swap the two readings. The first assertion catches an off-by-one or a constant index; the second catches a reading that happens to come from anywhere other than this vector's order.
-// Probed columns stay 2px clear of the x=0 seam at the image centre, wider than the 1.5px reconstruction filter, so neither block contains a pixel the other instance splatted into.
+// Per-instance material binding, integrator side: nothing asserted that ShadingTriangle::instanceIndex resolves into
+// the right perInstanceSettings entry.
+// Two coplanar quads, one instance each, identical Materials, distinguished only by a per-instance diffuseColour --
+// red on the left of x=0, blue on the right.
+// Probed columns stay 2px clear of the x=0 seam, wider than the 1.5px reconstruction filter, so neither block
+// contains a pixel any sample from the other side could splat into.
 PT_CHECK(per_instance_materials, Slow, Statistical) {
     constexpr float kRoughness = 1.0F;
     constexpr float kDominance = 4.0F;   // the off-channel is the white specular coat, not zero, so this is a ratio test rather than an equality one
@@ -731,7 +772,8 @@ PT_CHECK(per_instance_materials, Slow, Statistical) {
                      "perInstanceSettings entry; a swap or a constant index lands here.\n";
         ok = false;
     }
-    // Swapping the vector must swap the picture. Compares each block against the OTHER assignment's opposite block, so it fails if the reading is driven by geometry, by triangle order, or by anything but this vector's order.
+    // Swapping the vector must swap the picture. Each block is compared against the other assignment's opposite
+    // block, so it fails if the reading is insensitive to the swap.
     if (std::fabs(leftRed.x - rightRed.x) > kSwapTolerance ||
         std::fabs(rightBlue.z - leftBlue.z) > kSwapTolerance) {
         std::cerr << "integrator_validate: FAILED per-instance material binding under swap -- "
@@ -744,9 +786,12 @@ PT_CHECK(per_instance_materials, Slow, Statistical) {
     return;
 }
 
-// Per-instance material binding, resolution side: resolvePerInstanceSettings maps each materialOverrides key (a glTF node NAME) onto the instance of that name, leaving every other instance on the scene-wide material, and refuses the whole scene if a key matches nothing.
-// No validator constructs a scene config, so this entire path was uncovered -- all five exit 0 on a build where it is broken, which is exactly what made a one-character typo in cornell.json render a 41% different image with no diagnostic before the unmatched-key gate landed. The bit-identical render that gated that change cannot see it either: a render only exercises the keys that already match.
-// Compared against loadMaterialConfig's own reading of the same file rather than against literals copied out of it, so editing assets/materials/glass.json cannot silently defeat this. The material files are shipped assets, not fixtures, which is the point: this asserts the binding the real scenes use.
+// Per-instance material binding, resolution side: resolvePerInstanceSettings maps each materialOverrides key, a
+// glTF node name, onto the instance carrying that name.
+// No validator constructs a scene config, so this path was uncovered: all five binaries exit 0 on a build where it
+// is broken.
+// Compared against loadMaterialConfig's own reading of the same file rather than against literals copied out of it,
+// so editing the asset cannot silently invalidate the check.
 PT_CHECK(material_binding_resolution, Fast, Exact) {
     const std::string assetRoot = ASSET_ROOT_DIR;
     const std::optional<pathtracer::config::MaterialConfig> glass =
@@ -757,7 +802,8 @@ PT_CHECK(material_binding_resolution, Fast, Exact) {
         return;
     }
 
-    // How many of the 13 fields resolvePerInstanceSettings copies currently match the material file. A count rather than a bool so the base settings below can be required to match ZERO of them, which is what makes each individual copy observable. Exact equality is right: this is a copy, not a computation.
+    // How many of the 13 fields resolvePerInstanceSettings copies currently match the material file. A count rather
+    // than a bool, so a base setting that happens to coincide does not read as a successful override.
     const auto matchingFields = [](const PathTraceSettings& s,
                                     const pathtracer::config::MaterialConfig& m) {
         return static_cast<int>(s.bumpStrength == m.bumpStrength) +
@@ -780,7 +826,8 @@ PT_CHECK(material_binding_resolution, Fast, Exact) {
         MeshInstance{makeMaterial(1.0F, glm::vec3(0.04F)), glm::mat4(1.0F), "alpha"},
         MeshInstance{makeMaterial(1.0F, glm::vec3(0.04F)), glm::mat4(1.0F), "beta"},
         MeshInstance{makeMaterial(1.0F, glm::vec3(0.04F)), glm::mat4(1.0F), "gamma"}};
-    // Sentinel values, deliberately unlike glass.json in EVERY field -- nothing here is rendered, so these need not be plausible, only distinguishable. makeSettings' own defaults would not do: they happen to agree with glass.json on bumpStrength, roughnessMax, diffuseColour, ior, metallicFactor, diffuseRoughness and edgeTint, so a dropped copy of any of those seven would leave the resolved value equal to the base, which equals glass, and pass unnoticed.
+    // Sentinel values, deliberately unlike glass.json in every field: nothing here is rendered, so they need not be
+    // plausible, only distinguishable.
     PathTraceSettings base = makeSettings(1, 999, /*metallic=*/1.0F);
     base.bumpStrength = 0.25F;
     base.roughnessMin = 0.2F;
