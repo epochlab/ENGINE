@@ -1,10 +1,10 @@
-#include "engine/scene/sampler.h"
+#include "pathtracer/scene/sampler.h"
 
 #include <algorithm>
 #include <array>
 #include <bit>
 
-namespace engine::scene {
+namespace pathtracer::scene {
 
 namespace {
 
@@ -243,4 +243,4 @@ glm::vec2 Sampler::next2D() {
                                ditherFixed(pixelX_, pixelY_, (2 * set) + 1))};
 }
 
-}  // namespace engine::scene
+}  // namespace pathtracer::scene

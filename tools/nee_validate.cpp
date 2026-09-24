@@ -17,24 +17,24 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/constants.hpp>
 
-#include "engine/gfx/hdr_image.h"
+#include "pathtracer/gfx/hdr_image.h"
 #include "check.h"
 #include "fixtures.h"
 #include "stats.h"
-#include "engine/scene/bsdf.h"
-#include "engine/scene/environment_map.h"
-#include "engine/scene/light.h"
-#include "engine/scene/sampler.h"
+#include "pathtracer/scene/bsdf.h"
+#include "pathtracer/scene/environment_map.h"
+#include "pathtracer/scene/light.h"
+#include "pathtracer/scene/sampler.h"
 
 namespace {
 
-using engine::scene::BsdfParams;
-using engine::scene::EnvironmentMap;
-using engine::scene::LightSample;
-using engine::scene::LightSet;
-using engine::scene::LobeType;
-using engine::scene::QuadLight;
-using engine::scene::Sampler;
+using pathtracer::scene::BsdfParams;
+using pathtracer::scene::EnvironmentMap;
+using pathtracer::scene::LightSample;
+using pathtracer::scene::LightSet;
+using pathtracer::scene::LobeType;
+using pathtracer::scene::QuadLight;
+using pathtracer::scene::Sampler;
 
 using tools::fixtures::kPi;
 using tools::fixtures::makeUniformEnvironment;
@@ -46,14 +46,14 @@ BsdfParams makeParams(float roughness, float metallic) {
     const glm::vec3 f0 = glm::mix(glm::vec3(0.04F), baseColor, metallic);
     return BsdfParams{baseColor,   metallic, roughness, f0, /*edgeTint=*/glm::vec3(1.0F),
                        /*ior=*/1.5F, /*transmissionFactor=*/0.0F, /*diffuseRoughness=*/0.0F,
-                       engine::scene::eonAlbedoInversion(baseColor, 0.0F),
+                       pathtracer::scene::eonAlbedoInversion(baseColor, 0.0F),
                        /*transmissionTint=*/glm::vec3(1.0F)};
 }
 
 // Structured environment: a dim background with one small bright patch, so the luminance CDF has real
 // structure to invert (a uniform map makes both marginal and conditional CDFs linear, which would let a
 // mis-scaled Jacobian or an off-by-one bin lookup pass unnoticed).
-EnvironmentMap makeStructuredEnvironment(engine::gfx::ScalarType type) {
+EnvironmentMap makeStructuredEnvironment(pathtracer::gfx::ScalarType type) {
     constexpr int kWidth = 64;
     constexpr int kHeight = 32;
     std::vector<float> rgba(static_cast<std::size_t>(kWidth) * kHeight * 4, 0.05F);
@@ -72,16 +72,16 @@ EnvironmentMap makeStructuredEnvironment(engine::gfx::ScalarType type) {
 // independently recovers that density from a direction. MIS divides by the first and weights by the
 // second, so any disagreement between them silently corrupts every MIS weight in the renderer while
 // leaving each function looking individually reasonable. Nothing tested this before.
-ENGINE_CHECK(environment_pdf_consistency, Fast, Exact) {
+PT_CHECK(environment_pdf_consistency, Fast, Exact) {
     constexpr int kSampleCount = 20000;
     constexpr float kTolerance = 1e-3F;
     // Non-zero rotation: the sample path rotates by +angle and the query path by -angle, so a sign slip
     // between them cancels at 0 and only shows up here.
     constexpr float kRotation = 0.7F;
-    constexpr std::array<engine::gfx::ScalarType, 2> kTypes = {engine::gfx::ScalarType::Float32,
-                                                               engine::gfx::ScalarType::Float16};
+    constexpr std::array<pathtracer::gfx::ScalarType, 2> kTypes = {pathtracer::gfx::ScalarType::Float32,
+                                                               pathtracer::gfx::ScalarType::Float16};
     ctx.plan(static_cast<int>(kTypes.size()));
-    for (const engine::gfx::ScalarType type : kTypes) {
+    for (const pathtracer::gfx::ScalarType type : kTypes) {
         const EnvironmentMap env = makeStructuredEnvironment(type);
         std::mt19937 rng(static_cast<std::mt19937::result_type>(ctx.seed()));
         std::uniform_real_distribution<float> unit(0.0F, 1.0F);
@@ -102,19 +102,19 @@ ENGINE_CHECK(environment_pdf_consistency, Fast, Exact) {
         char detail[224];
         std::snprintf(detail, sizeof(detail),
                       "%s: worst relative mismatch %.3e at sample %d, between importanceSampleDirection's own pdf and pdf()",
-                      engine::gfx::scalarTypeName(type), static_cast<double>(worstRelative), worstIndex);
-        ENGINE_EXPECT(ctx, worstRelative <= kTolerance, detail);
+                      pathtracer::gfx::scalarTypeName(type), static_cast<double>(worstRelative), worstIndex);
+        PT_EXPECT(ctx, worstRelative <= kTolerance, detail);
     }
 }
 
 // The CDFs must be built from the values the map returns, not the source they were rounded from, or the sampling density stops being proportional to the radiance it weights. Background 1.0 and one texel at 1 + 2^-11, the exact binary16 midpoint above 1.0: round-to-nearest-even stores it as 1.0, so at Float16 the pdf ratio must sit nearer the stored luminance ratio (1) than the source ratio (1 + 2^-11), and at Float32 the reverse. Discriminating by nearest hypothesis needs no tolerance.
-ENGINE_CHECK(environment_pdf_tracks_stored_luminance, Fast, Exact) {
+PT_CHECK(environment_pdf_tracks_stored_luminance, Fast, Exact) {
     constexpr int kWidth = 64;
     constexpr int kHeight = 32;
     constexpr int kPatchX = 20;
     constexpr int kPatchY = 16;
     constexpr int kBackgroundX = 40;
-    const float midpoint = 1.0F + engine::gfx::kHalfUnitRoundoff;
+    const float midpoint = 1.0F + pathtracer::gfx::kHalfUnitRoundoff;
     std::vector<float> rgba(static_cast<std::size_t>(kWidth) * kHeight * 4, 1.0F);
     const std::size_t patch = ((static_cast<std::size_t>(kPatchY) * kWidth) + kPatchX) * 4;
     rgba[patch + 0] = midpoint;
@@ -128,21 +128,21 @@ ENGINE_CHECK(environment_pdf_tracks_stored_luminance, Fast, Exact) {
         return glm::vec3(std::sin(theta) * std::sin(phi), std::cos(theta), std::sin(theta) * std::cos(phi));
     };
     ctx.plan(2);
-    for (const engine::gfx::ScalarType type : {engine::gfx::ScalarType::Float16, engine::gfx::ScalarType::Float32}) {
-        const engine::gfx::ImageTexture image = tools::fixtures::makeImageTexture(kWidth, kHeight, rgba, type);
+    for (const pathtracer::gfx::ScalarType type : {pathtracer::gfx::ScalarType::Float16, pathtracer::gfx::ScalarType::Float32}) {
+        const pathtracer::gfx::ImageTexture image = tools::fixtures::makeImageTexture(kWidth, kHeight, rgba, type);
         const float storedRatio = image.texel(kPatchX, kPatchY).g / image.texel(kBackgroundX, kPatchY).g;
         const float sourceRatio = midpoint;
         const EnvironmentMap env(image);
         // Same row, so sin(theta) cancels and the solid-angle pdf ratio is the luminance ratio.
         const float pdfRatio = env.pdf(centre(kPatchX, kPatchY), 0.0F) / env.pdf(centre(kBackgroundX, kPatchY), 0.0F);
-        const bool tracksStored = type == engine::gfx::ScalarType::Float16
+        const bool tracksStored = type == pathtracer::gfx::ScalarType::Float16
                                       ? std::fabs(pdfRatio - storedRatio) < std::fabs(pdfRatio - sourceRatio)
                                       : std::fabs(pdfRatio - sourceRatio) < std::fabs(pdfRatio - 1.0F);
         char detail[224];
         std::snprintf(detail, sizeof(detail), "%s: pdf ratio %.9g, stored luminance ratio %.9g, source ratio %.9g",
-                      engine::gfx::scalarTypeName(type), static_cast<double>(pdfRatio),
+                      pathtracer::gfx::scalarTypeName(type), static_cast<double>(pdfRatio),
                       static_cast<double>(storedRatio), static_cast<double>(sourceRatio));
-        ENGINE_EXPECT(ctx, tracksStored, detail);
+        PT_EXPECT(ctx, tracksStored, detail);
     }
 }
 
@@ -157,8 +157,8 @@ float misCombinedLo(const BsdfParams& params, const glm::vec3& wo, const Environ
         const EnvironmentMap::EnvSample lightSample =
             env.importanceSampleDirection(sampler.next2D(), 0.0F);
         if (lightSample.direction.z > 0.0F) {
-            const glm::vec3 bsdfValue = engine::scene::evaluateBsdf(params, wo, lightSample.direction);
-            const float bsdfPdf = engine::scene::pdfBsdf(params, wo, lightSample.direction);
+            const glm::vec3 bsdfValue = pathtracer::scene::evaluateBsdf(params, wo, lightSample.direction);
+            const float bsdfPdf = pathtracer::scene::pdfBsdf(params, wo, lightSample.direction);
             if (bsdfPdf > 0.0F && (bsdfValue.x > 0.0F || bsdfValue.y > 0.0F || bsdfValue.z > 0.0F)) {
                 const float lightPdf2 = lightSample.pdf * lightSample.pdf;
                 const float bsdfPdf2 = bsdfPdf * bsdfPdf;
@@ -168,9 +168,9 @@ float misCombinedLo(const BsdfParams& params, const glm::vec3& wo, const Environ
         }
 
         // BSDF-sampled.
-        const std::optional<engine::scene::BsdfSample> sample = engine::scene::sampleBsdf(params, wo, sampler);
+        const std::optional<pathtracer::scene::BsdfSample> sample = pathtracer::scene::sampleBsdf(params, wo, sampler);
         if (sample.has_value() && sample->type != LobeType::Transmission) {
-            const float bsdfPdf = engine::scene::pdfBsdf(params, wo, sample->wiLocal);
+            const float bsdfPdf = pathtracer::scene::pdfBsdf(params, wo, sample->wiLocal);
             const float lightPdf = env.pdf(sample->wiLocal, 0.0F);
             const float bsdfPdf2 = bsdfPdf * bsdfPdf;
             const float lightPdf2 = lightPdf * lightPdf;
@@ -188,7 +188,7 @@ float misCombinedLo(const BsdfParams& params, const glm::vec3& wo, const Environ
 // with std::mt19937 and is genuinely iid, so its replicates are iid trivially; the MIS side is Sampler-driven and is
 // replicated over independent scramble seeds, which is what makes ITS replicate means iid (see stats.h kReplicates).
 // Total sample budget is unchanged -- the same count, redistributed across replicates.
-ENGINE_CHECK(mis_agreement_environment, Slow, Statistical) {
+PT_CHECK(mis_agreement_environment, Slow, Statistical) {
     constexpr int kTotalSamples = 100000;
     constexpr int kPerReplicate = kTotalSamples / tools::stats::kReplicates;
     // Excludes low roughness (e.g. 0.05): uniform-hemisphere sampling under-samples a sharp GGX peak there (the same
@@ -227,7 +227,7 @@ ENGINE_CHECK(mis_agreement_environment, Slow, Statistical) {
                 std::snprintf(detail, sizeof(detail),
                               "%s: reference %.5f, MIS %.5f, difference %+.3e vs +/-%.3e", label,
                               reference.mean(), combined.mean(), difference, band.halfWidth());
-                ENGINE_EXPECT(ctx, band.contains(difference), detail);
+                PT_EXPECT(ctx, band.contains(difference), detail);
             }
         }
     }
@@ -269,15 +269,15 @@ bool directionHitsQuad(const QuadLight& quad, const glm::vec3& p, const glm::vec
 // shares no code with the analytic formula -- and every direction SphericalRectangle::sample() itself
 // draws checked against the same oracle, which catches a bug in the xu/yv inversion even if the scalar
 // solid angle above happens to come out right.
-ENGINE_CHECK(quad_light_solid_angle, Slow, Statistical) {
+PT_CHECK(quad_light_solid_angle, Slow, Statistical) {
     const QuadLight quad{glm::vec3(-0.5F, 1.0F, -0.5F), glm::vec3(1.0F, 0.0F, 0.0F),
                           glm::vec3(0.0F, 0.0F, 1.0F), glm::vec3(1.0F), false};
     const glm::vec3 p(0.0F, 0.0F, 0.0F);
-    const std::optional<engine::scene::SphericalRectangle> rect =
-        engine::scene::buildSphericalRectangle(quad, p);
+    const std::optional<pathtracer::scene::SphericalRectangle> rect =
+        pathtracer::scene::buildSphericalRectangle(quad, p);
     ctx.plan(3);
     if (!rect.has_value()) {
-        ENGINE_EXPECT(ctx, false, "buildSphericalRectangle returned nullopt for a valid configuration");
+        PT_EXPECT(ctx, false, "buildSphericalRectangle returned nullopt for a valid configuration");
         ctx.plan(1);
         return;
     }
@@ -296,7 +296,7 @@ ENGINE_CHECK(quad_light_solid_angle, Slow, Statistical) {
     char detail[224];
     std::snprintf(detail, sizeof(detail), "analytic %.6f vs Monte Carlo interval [%.6f, %.6f] from %lld/%d hits",
                   static_cast<double>(rect->solidAngle), solidAngle.lo, solidAngle.hi, hits, kSampleCount);
-    ENGINE_EXPECT(ctx, solidAngle.contains(static_cast<double>(rect->solidAngle)), detail);
+    PT_EXPECT(ctx, solidAngle.contains(static_cast<double>(rect->solidAngle)), detail);
 
     // Every direction sample() draws must land on the rectangle: an exact assertion on the xu/yv inversion, which the
     // scalar solid angle above could be right about while the mapping is wrong.
@@ -317,8 +317,8 @@ ENGINE_CHECK(quad_light_solid_angle, Slow, Statistical) {
     char missDetail[192];
     std::snprintf(missDetail, sizeof(missDetail), "%d of %d sample() directions missed the rectangle (first at u=%g,%g)",
                   misses, kDrawCount, static_cast<double>(firstMiss.x), static_cast<double>(firstMiss.y));
-    ENGINE_EXPECT(ctx, misses == 0, missDetail);
-    ENGINE_EXPECT(ctx, rect->solidAngle > 0.0F, "a valid rectangle must subtend positive solid angle");
+    PT_EXPECT(ctx, misses == 0, missDetail);
+    PT_EXPECT(ctx, rect->solidAngle > 0.0F, "a valid rectangle must subtend positive solid angle");
 }
 
 // Same brute-force reference method as referenceLo, restricted to the hemisphere directions the quad
@@ -332,7 +332,7 @@ float referenceLoQuad(const BsdfParams& params, const glm::vec3& wo, const QuadL
     for (int i = 0; i < sampleCount; ++i) {
         const glm::vec3 wi = sampleUniformHemisphere(rng);
         if (directionHitsQuad(quad, p, wi)) {
-            accum += engine::scene::evaluateBsdf(params, wo, wi) * wi.z * quad.radiance / kUniformPdf;
+            accum += pathtracer::scene::evaluateBsdf(params, wo, wi) * wi.z * quad.radiance / kUniformPdf;
         }
     }
     return std::max({accum.x, accum.y, accum.z}) / static_cast<float>(sampleCount);
@@ -352,8 +352,8 @@ float misCombinedLoQuad(const BsdfParams& params, const glm::vec3& wo, const Qua
         // NEE.
         const std::optional<LightSample> lightSample = lights.sample(p, sampler);
         if (lightSample.has_value() && lightSample->direction.z > 0.0F) {
-            const glm::vec3 bsdfValue = engine::scene::evaluateBsdf(params, wo, lightSample->direction);
-            const float bsdfPdf = engine::scene::pdfBsdf(params, wo, lightSample->direction);
+            const glm::vec3 bsdfValue = pathtracer::scene::evaluateBsdf(params, wo, lightSample->direction);
+            const float bsdfPdf = pathtracer::scene::pdfBsdf(params, wo, lightSample->direction);
             if (bsdfPdf > 0.0F && (bsdfValue.x > 0.0F || bsdfValue.y > 0.0F || bsdfValue.z > 0.0F)) {
                 const float lightPdf2 = lightSample->pdf * lightSample->pdf;
                 const float bsdfPdf2 = bsdfPdf * bsdfPdf;
@@ -364,11 +364,11 @@ float misCombinedLoQuad(const BsdfParams& params, const glm::vec3& wo, const Qua
         }
 
         // BSDF-sampled.
-        const std::optional<engine::scene::BsdfSample> sample =
-            engine::scene::sampleBsdf(params, wo, sampler);
+        const std::optional<pathtracer::scene::BsdfSample> sample =
+            pathtracer::scene::sampleBsdf(params, wo, sampler);
         if (sample.has_value() && sample->type != LobeType::Transmission &&
             directionHitsQuad(quad, p, sample->wiLocal)) {
-            const float bsdfPdf = engine::scene::pdfBsdf(params, wo, sample->wiLocal);
+            const float bsdfPdf = pathtracer::scene::pdfBsdf(params, wo, sample->wiLocal);
             const float lightPdf = lights.pdfQuad(0, p);
             const float bsdfPdf2 = bsdfPdf * bsdfPdf;
             const float lightPdf2 = lightPdf * lightPdf;
@@ -381,7 +381,7 @@ float misCombinedLoQuad(const BsdfParams& params, const glm::vec3& wo, const Qua
 
 // Same identity as mis_agreement_environment, against an area light rather than the environment, and converted the
 // same way and for the same reason: both sides are estimators, so their variances add.
-ENGINE_CHECK(mis_agreement_quad_light, Slow, Statistical) {
+PT_CHECK(mis_agreement_quad_light, Slow, Statistical) {
     constexpr int kTotalSamples = 200000;
     constexpr int kPerReplicate = kTotalSamples / tools::stats::kReplicates;
     const std::array<float, 3> roughnesses = {0.25F, 0.5F, 1.0F};
@@ -421,7 +421,7 @@ ENGINE_CHECK(mis_agreement_quad_light, Slow, Statistical) {
                 std::snprintf(detail, sizeof(detail),
                               "%s: reference %.5f, MIS %.5f, difference %+.3e vs +/-%.3e", label,
                               reference.mean(), combined.mean(), difference, band.halfWidth());
-                ENGINE_EXPECT(ctx, band.contains(difference), detail);
+                PT_EXPECT(ctx, band.contains(difference), detail);
             }
         }
     }
@@ -429,4 +429,4 @@ ENGINE_CHECK(mis_agreement_quad_light, Slow, Statistical) {
 
 }  // namespace
 
-ENGINE_CHECK_MAIN("nee")
+PT_CHECK_MAIN("nee")

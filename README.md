@@ -26,6 +26,27 @@ cmake -B build
 cmake --build build
 ```
 
+`cmake --build build` builds everything: the `pathtracer` viewer, the `pathtracer_c` shared library the
+Python binding loads, twelve validators that `ctest` discovers, four offline codegen/asset tools
+(`albedo_table`, `bluenoise_mask`, `metal_fit`, `gltf_tangent`), two image utilities (`test_pattern`,
+`downsample`) and three instruments (`render_beauty`, `raster_bench`, `bench_compare`). Name a target to
+build just one.
+
+Third-party dependencies and how they are vendored: [`third_party/README.md`](third_party/README.md).
+
+### Static analysis
+
+`-Wall -Wextra -Werror` everywhere, plus clang-tidy on the three shipping targets as a per-compile gate
+(non-fatal, so pre-existing debt does not block a build) and cppcheck as its own target:
+
+```
+cmake --build build --target cppcheck
+```
+
+Both are no-ops if the tool is absent, so a fresh checkout without them still configures and builds.
+Vendored sources are exempt from both. Suppressions are documented one-by-one with their reason in
+`.cppcheck-suppressions`; anything not listed there is expected to be fixed rather than silenced.
+
 ## Run
 
 ```
@@ -34,7 +55,7 @@ cmake --build build
 
 ## Python
 
-Every AOV is reachable headlessly from Python as a numpy array. The renderer is a plain C ABI (`include/engine/api/pathtracer_c.h`) loaded with `ctypes`; no build-time Python dependency and one library serves every interpreter.
+Every AOV is reachable headlessly from Python as a numpy array. The renderer is a plain C ABI (`include/pathtracer/api/pathtracer_c.h`) loaded with `ctypes`; no build-time Python dependency and one library serves every interpreter.
 
 ```
 cmake --build build --target pathtracer_c

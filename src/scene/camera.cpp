@@ -1,8 +1,8 @@
-#include "engine/scene/camera.h"
+#include "pathtracer/scene/camera.h"
 
 #include <cmath>
 
-namespace engine::scene {
+namespace pathtracer::scene {
 
 namespace {
 
@@ -66,4 +66,4 @@ float Camera::ev100(float aperture, float shutterSeconds, float iso) {
     return std::log2((aperture * aperture) / shutterSeconds * (100.0F / iso));
 }
 
-}  // namespace engine::scene
+}  // namespace pathtracer::scene

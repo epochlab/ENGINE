@@ -1,4 +1,4 @@
-#include "engine/gfx/shader_program.h"
+#include "pathtracer/gfx/shader_program.h"
 
 #include <cstddef>
 #include <fstream>
@@ -8,9 +8,9 @@
 
 #include <GL/glew.h>
 
-#include "engine/gfx/gl_debug.h"
+#include "pathtracer/gfx/gl_debug.h"
 
-namespace engine::gfx {
+namespace pathtracer::gfx {
 
 namespace {
 
@@ -135,4 +135,4 @@ int ShaderProgram::uniformLocation(const std::string& name) const {
     return location;
 }
 
-}  // namespace engine::gfx
+}  // namespace pathtracer::gfx

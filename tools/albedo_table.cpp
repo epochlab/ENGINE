@@ -29,13 +29,13 @@
 
 #include <glm/glm.hpp>
 
-#include "engine/scene/fresnel_dielectric.h"
+#include "pathtracer/scene/fresnel_dielectric.h"
 
 namespace {
 
 // The shading path's own dielectric interface, so the table is baked against exactly what reads it.
-using engine::scene::cos2Transmitted;
-using engine::scene::fresnelDielectric;
+using pathtracer::scene::cos2Transmitted;
+using pathtracer::scene::fresnelDielectric;
 
 constexpr double kPi = 3.14159265358979323846;
 

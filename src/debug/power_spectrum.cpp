@@ -1,4 +1,4 @@
-#include "engine/debug/power_spectrum.h"
+#include "pathtracer/debug/power_spectrum.h"
 
 #include <algorithm>
 #include <cmath>
@@ -6,7 +6,7 @@
 #include <numbers>
 #include <numeric>
 
-namespace engine::debug {
+namespace pathtracer::debug {
 
 namespace {
 
@@ -120,4 +120,4 @@ std::array<double, kSpectrumBands> whiteNoiseBandShare(int width, int height) {
     return shares;
 }
 
-}  // namespace engine::debug
+}  // namespace pathtracer::debug

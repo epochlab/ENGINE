@@ -1,4 +1,4 @@
-// Reads the JSON Lines benchmark log (engine/debug/bench_log.h) and states, with a distribution-free confidence interval, whether one build is faster than another.
+// Reads the JSON Lines benchmark log (pathtracer/debug/bench_log.h) and states, with a distribution-free confidence interval, whether one build is faster than another.
 // run: Randomized Multiple Interleaved Trials (Abedi & Brecht 2017) -- each round runs A and B back to back in a random order, so slow drift (thermal, background load) cancels in the paired log-ratio.
 // compare/history: unpaired analysis of records already in the log; weaker than run, since drift between the two groups is not controlled.
 // The unit of replication is the process invocation (Kalibera & Jones 2013); each invocation is summarised by its column's mean per event, since every column holds one entry per event of its own (frame, upload, pass) and only some event counts are fixed by config: frame count scales with run duration.
@@ -26,7 +26,7 @@
 
 #include <nlohmann/json.hpp>
 
-#include "engine/debug/bench_log.h"
+#include "pathtracer/debug/bench_log.h"
 #include "stats.h"
 
 extern char** environ;  // NOLINT(readability-redundant-declaration) -- POSIX leaves it undeclared in <unistd.h> on Darwin
@@ -50,7 +50,7 @@ struct Options {
 
 constexpr const char* kUsage =
     "usage: bench_compare run --a BIN --b BIN --rounds N --log PATH [--metric M] [--alpha A] [--seed S] -- ARGS...\n"
-    "         ARGS must make the child append to PATH (render_beauty/raster_bench --bench-log PATH, engine -bench PATH)\n"
+    "         ARGS must make the child append to PATH (render_beauty/raster_bench --bench-log PATH, pathtracer -bench PATH)\n"
     "       bench_compare compare --log PATH --a ID --b ID [--metric M] [--alpha A]\n"
     "       bench_compare history --log PATH --tool T [--metric M] [--alpha A]\n"
     "  ID: a build uuid prefix or git SHA; M: a samples column or rusage field (default: the only samples column)\n";
@@ -139,10 +139,10 @@ std::optional<std::vector<json>> loadLog(const std::string& path) {
             return std::all_of(record["rusage"].begin(), record["rusage"].end(), [](const json& v) { return v.is_number(); });
         };
         // is_object() before value(): nlohmann's value() throws on a non-object, and a bare `null` or `[]` line parses fine.
-        if (record.is_discarded() || !record.is_object() || record.value("schema", 0) != engine::debug::kBenchLogSchema || !hasObjects() ||
+        if (record.is_discarded() || !record.is_object() || record.value("schema", 0) != pathtracer::debug::kBenchLogSchema || !hasObjects() ||
             !record.contains("tool") || !record.contains("pid") || !numericColumns()) {
             std::cerr << "bench_compare: " << path << ':' << lineNumber << " is not a schema-"
-                      << engine::debug::kBenchLogSchema << " record\n";
+                      << pathtracer::debug::kBenchLogSchema << " record\n";
             return std::nullopt;
         }
         records.push_back(std::move(record));
@@ -442,7 +442,11 @@ int historyCommand(const Options& options, const std::vector<json>& records) {
             return (*g.front())["build"].value("uuid", std::string()) == r["build"].value("uuid", std::string());
         };
         const auto it = std::find_if(builds.begin(), builds.end(), sameBuild);
-        (it == builds.end() ? builds.emplace_back() : *it).push_back(&r);
+        if (it == builds.end()) {
+            builds.emplace_back().push_back(&r);
+        } else {
+            it->push_back(&r);
+        }
     }
     if (!std::all_of(builds.begin(), builds.end(), [&](const std::vector<const json*>& g) { return positiveValues(g, *metric); })) {
         return EXIT_FAILURE;

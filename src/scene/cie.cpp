@@ -1,6 +1,6 @@
-#include "engine/scene/cie.h"
+#include "pathtracer/scene/cie.h"
 
-namespace engine::scene::cie {
+namespace pathtracer::scene::cie {
 
 namespace {
 
@@ -68,4 +68,4 @@ const glm::dmat3& xyzToRec709() {
 
 glm::dvec3 reflectanceToRec709(const Spectrum& reflectance) { return xyzToRec709() * reflectanceToXyz(reflectance); }
 
-}  // namespace engine::scene::cie
+}  // namespace pathtracer::scene::cie

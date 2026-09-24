@@ -1,4 +1,4 @@
-// Timing harness for engine::scene::renderRasterGBuffer (rasterizer.h), the synchronous per-frame render-thread work behind the 14 primary-hit AOVs. Synthetic dependency-free scene (no glTF/EXR asset, constant-color 1x1 textures), same standalone-CLI convention as rasterizer_validate.cpp: no test framework, non-zero exit on bad input. Deliberately NOT an add_test: a benchmark is not a correctness gate, and the rasterizer's correctness gate is rasterizer_validate.
+// Timing harness for pathtracer::scene::renderRasterGBuffer (rasterizer.h), the synchronous per-frame render-thread work behind the 14 primary-hit AOVs. Synthetic dependency-free scene (no glTF/EXR asset, constant-color 1x1 textures), same standalone-CLI convention as rasterizer_validate.cpp: no test framework, non-zero exit on bad input. Deliberately NOT an add_test: a benchmark is not a correctness gate, and the rasterizer's correctness gate is rasterizer_validate.
 // Synthetic rather than asset-driven so the two variables the rasterizer's cost is actually a function of are independently controllable: --triangles sweeps the sub-triangle array past cache (the shipped scene is 20561 triangles = 1.81 MB, resident; the 5M-triangle tier is 440 MB, not), and --layers sweeps depth complexity, which is what a depth prepass is a function of. Neither is adjustable in a fixed asset.
 // Reports best-of-N, not the mean: run-to-run spread on this hardware is +/-10%, wide enough to hide a single change. --bench-log records the raw frames; bench_compare run makes the A/B.
 
@@ -17,18 +17,18 @@
 
 #include <glm/glm.hpp>
 
-#include "engine/debug/bench_log.h"
-#include "engine/gfx/hdr_image.h"
-#include "engine/scene/camera.h"
-#include "engine/scene/gltf_loader.h"
-#include "engine/scene/path_tracer.h"
-#include "engine/scene/rasterizer.h"
-#include "engine/scene/shading_scene.h"
-#include "engine/scene/thread_pool.h"
+#include "pathtracer/debug/bench_log.h"
+#include "pathtracer/gfx/hdr_image.h"
+#include "pathtracer/scene/camera.h"
+#include "pathtracer/scene/gltf_loader.h"
+#include "pathtracer/scene/path_tracer.h"
+#include "pathtracer/scene/rasterizer.h"
+#include "pathtracer/scene/shading_scene.h"
+#include "pathtracer/scene/thread_pool.h"
 
 namespace {
 
-using namespace engine::scene;  // NOLINT(google-build-using-namespace) -- tool-local convenience, mirrors rasterizer_validate.cpp
+using namespace pathtracer::scene;  // NOLINT(google-build-using-namespace) -- tool-local convenience, mirrors rasterizer_validate.cpp
 
 constexpr int kMaterialCount = 4;
 constexpr float kNearestLayerZ = 4.0F;   // world units in front of the camera; > nearClip so no layer is clipped away
@@ -46,7 +46,7 @@ struct Options {
     std::string benchLogPath;  // appends the run to this JSON Lines benchmark log (bench_log.h); empty = no log
 };
 
-engine::gfx::ImageTexture constantTexture(glm::vec4 color) {
+pathtracer::gfx::ImageTexture constantTexture(glm::vec4 color) {
     return {1, 1, std::vector<float>{color.r, color.g, color.b, color.a}};
 }
 
@@ -244,7 +244,7 @@ int main(int argc, char** argv) {
               << ", worst " << *worst << ")\n";
 
     if (!options->benchLogPath.empty()) {
-        const engine::debug::BenchRecord record{
+        const pathtracer::debug::BenchRecord record{
             .tool = "raster_bench",
             .argv = std::vector<std::string>(argv, argv + argc),
             .config = {{"triangles", options->triangleCount},
@@ -255,9 +255,9 @@ int main(int argc, char** argv) {
                        {"seed", options->seed}},
             .samples = {{"frame_ms", milliseconds}},
             .work = {{"triangles_emitted", shadingTriangles.size()},
-                     {"crc32", engine::debug::floatCrc32(gbuffer.depth.rgba)}},
+                     {"crc32", pathtracer::debug::floatCrc32(gbuffer.depth.rgba)}},
         };
-        if (!engine::debug::appendBenchRecord(options->benchLogPath, record)) {
+        if (!pathtracer::debug::appendBenchRecord(options->benchLogPath, record)) {
             return EXIT_FAILURE;
         }
     }

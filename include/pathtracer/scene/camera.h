@@ -1,0 +1,90 @@
+#pragma once
+
+#include <string>
+
+#include <glm/glm.hpp>
+
+#include "pathtracer/scene/ray_types.h"
+
+namespace pathtracer::scene {
+
+// A camera's pose, lens, and exposure, immutable once constructed.
+// No input handling lives here: pathtracer::scene::DebugCameraController owns pose mutation frame-to-frame (WASD/QE/R/orbit) and builds a fresh Camera each frame via its snapshot() method.
+// Convention: right-handed, +Y up, -Z forward in view space.
+// At yaw=0, pitch=0 the camera looks down world -Z with +Y up and +X right.
+// This matches GLM's own conventions (glm::lookAt, glm::perspective) and glTF's coordinate system.
+// Orientation is stored as yaw/pitch Euler angles rather than a quaternion: nothing on the roadmap needs roll, so the simpler representation is sufficient.
+// Known limitation: at pitch = +/-90 degrees the forward vector becomes parallel to world up and the right/up basis degenerates.
+// DebugCameraController clamps pitch to +/-89 degrees to avoid this rather than Camera guarding against it here.
+class Camera {
+public:
+    // Sensor gate size in millimetres (e.g. {36.0F, 24.0F} for 35mm full-frame), paired with focal length to derive vertical FOV.
+    struct FilmBack {
+        float widthMm;
+        float heightMm;
+    };
+
+    // A named, real-world FilmBack (e.g. "ARRI Alexa 65") -- the HUD's film-back preset dropdown and its backing JSON catalogue (assets/config/camera.json) both key off name.
+    struct FilmBackPreset {
+        std::string name;
+        FilmBack filmBack;
+    };
+
+    // yawDegrees/pitchDegrees are authored in degrees (more ergonomic at call sites than radians); converted once here and stored as radians, since every consumer (the Euler-to-forward-vector trig) needs radians. aperture is an f-number (e.g. 2.8 for f/2.8), shutterSeconds is the exposure time (e.g. 1/125), iso is sensor sensitivity: the standard photographic exposure triangle, feeding ev100() below.
+    Camera(const glm::vec3& position, float yawDegrees, float pitchDegrees, FilmBack filmBack,
+           float focalLengthMm, float nearClip, float farClip, float aperture,
+           float shutterSeconds, float iso);
+
+    [[nodiscard]] glm::vec3 position() const { return position_; }
+
+    // Orientation in the degrees it was authored in, completing the set of accessors that hand back every constructor parameter as given. Stored as radians because every consumer of the angles themselves needs radians; a caller reconstructing or serialising a Camera needs the authored units back.
+    [[nodiscard]] float yawDegrees() const { return glm::degrees(yawRadians_); }
+    [[nodiscard]] float pitchDegrees() const { return glm::degrees(pitchRadians_); }
+
+    // Unit-length view direction derived from yaw/pitch.
+    [[nodiscard]] glm::vec3 forward() const;
+    [[nodiscard]] FilmBack filmBack() const { return filmBack_; }
+    [[nodiscard]] float focalLengthMm() const { return focalLengthMm_; }
+    [[nodiscard]] float nearClip() const { return nearClip_; }
+    [[nodiscard]] float farClip() const { return farClip_; }
+    [[nodiscard]] float aperture() const { return aperture_; }
+    [[nodiscard]] float shutterSeconds() const { return shutterSeconds_; }
+    [[nodiscard]] float iso() const { return iso_; }
+
+    // Vertical FOV derived from focal length + film back height, not set directly: this is what a real lens/sensor combo actually determines.
+    [[nodiscard]] float verticalFovRadians() const;
+
+    // Orthonormal forward/right/up + view-plane half-extents, everything primaryRay() derives a ray direction from minus the per-pixel ndcX/ndcY weight -- exposed so a screen-space projector (e.g. a rasterizer) shares this exact basis instead of re-deriving it.
+    struct ViewBasis {
+        glm::vec3 forward;
+        glm::vec3 right;
+        glm::vec3 up;
+        float halfWidth;
+        float halfHeight;
+    };
+    [[nodiscard]] ViewBasis viewBasis(float aspect) const;
+
+    // Pinhole primary ray for a point in normalized device coordinates (ndcX/ndcY in [-1,1], +Y up). tMin/tMax are nearClip()/farClip().
+    [[nodiscard]] Ray primaryRay(float ndcX, float ndcY, float aspect) const;
+
+    // Same ray, from a basis the caller already built. The aspect-taking overload rebuilds the basis on every call -- two sin, two cos, an atan, a tan, two normalize and two cross -- which is constant across a whole render pass; this is what lets a per-pixel loop hoist that out and pay it once.
+    [[nodiscard]] Ray primaryRay(const ViewBasis& basis, float ndcX, float ndcY) const;
+
+    // Standard photographic exposure value at ISO 100 (log2 scale): log2(aperture^2 / shutterSeconds * (100/iso)). The static overload is the single definition of the formula, callable without a full Camera -- DebugCameraController::relativeExposureEv() needs it against two different (aperture, shutterSeconds, iso) triples (current vs. profile.json default) and holds no persistent Camera of its own.
+    [[nodiscard]] float ev100() const;
+    [[nodiscard]] static float ev100(float aperture, float shutterSeconds, float iso);
+
+private:
+    glm::vec3 position_;
+    float yawRadians_;
+    float pitchRadians_;
+    FilmBack filmBack_;
+    float focalLengthMm_;
+    float nearClip_;
+    float farClip_;
+    float aperture_;
+    float shutterSeconds_;
+    float iso_;
+};
+
+}  // namespace pathtracer::scene

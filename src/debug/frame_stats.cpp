@@ -1,8 +1,8 @@
-#include "engine/debug/frame_stats.h"
+#include "pathtracer/debug/frame_stats.h"
 
 #include <algorithm>
 
-namespace engine::debug {
+namespace pathtracer::debug {
 
 void FrameStats::tick() { tick(std::chrono::steady_clock::now()); }
 
@@ -62,4 +62,4 @@ float FrameStats::percentileMs(float fraction) const {
     return *nth;
 }
 
-}  // namespace engine::debug
+}  // namespace pathtracer::debug

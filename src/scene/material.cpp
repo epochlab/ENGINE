@@ -1,8 +1,8 @@
-#include "engine/scene/material.h"
+#include "pathtracer/scene/material.h"
 
 #include <vector>
 
-namespace engine::scene {
+namespace pathtracer::scene {
 
 Material makeDefaultMaterial() {
     // Float32 regardless of textureBitDepth: these are exact constants, not loaded scene data.
@@ -16,4 +16,4 @@ Material makeDefaultMaterial() {
     };
 }
 
-}  // namespace engine::scene
+}  // namespace pathtracer::scene

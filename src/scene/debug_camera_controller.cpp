@@ -1,4 +1,4 @@
-#include "engine/scene/debug_camera_controller.h"
+#include "pathtracer/scene/debug_camera_controller.h"
 
 #include <cmath>
 
@@ -6,9 +6,9 @@
 
 #include <glm/gtc/matrix_transform.hpp>
 
-#include "engine/platform/window.h"
+#include "pathtracer/platform/window.h"
 
-namespace engine::scene {
+namespace pathtracer::scene {
 
 namespace {
 
@@ -46,7 +46,7 @@ Camera DebugCameraController::snapshot() const {
                   farClip_, aperture_, shutterSeconds_, iso_);
 }
 
-void DebugCameraController::applyFlyInput(const engine::platform::Window& window,
+void DebugCameraController::applyFlyInput(const pathtracer::platform::Window& window,
                                            float dtSeconds) {
     if (orbiting_) {
         return;
@@ -126,4 +126,4 @@ void DebugCameraController::resetToDefault() {
     orbiting_ = false;
 }
 
-}  // namespace engine::scene
+}  // namespace pathtracer::scene

@@ -1,4 +1,4 @@
-#include "engine/debug/memory_tracker.h"
+#include "pathtracer/debug/memory_tracker.h"
 
 #include <atomic>
 #include <cassert>
@@ -8,7 +8,7 @@
 #include <mach/vm_statistics.h>
 #include <sys/sysctl.h>
 
-namespace engine::debug {
+namespace pathtracer::debug {
 
 namespace {
 std::atomic<std::size_t> gGpuBytes{0};
@@ -59,4 +59,4 @@ std::size_t availableSystemBytes() {
                                      static_cast<std::uint64_t>(pageSize));
 }
 
-}  // namespace engine::debug
+}  // namespace pathtracer::debug

@@ -1,4 +1,4 @@
-#include "engine/gfx/ocio_display_transform.h"
+#include "pathtracer/gfx/ocio_display_transform.h"
 
 #include <cmath>
 #include <cstdlib>
@@ -12,11 +12,11 @@
 
 #include <OpenColorIO/OpenColorIO.h>
 
-#include "engine/gfx/gl_debug.h"
+#include "pathtracer/gfx/gl_debug.h"
 
 namespace OCIO = OCIO_NAMESPACE;
 
-namespace engine::gfx {
+namespace pathtracer::gfx {
 
 namespace {
 
@@ -219,4 +219,4 @@ void OcioDisplayTransform::bind() const {
     glUniform1f(aberrationLoc, aberration_);
 }
 
-}  // namespace engine::gfx
+}  // namespace pathtracer::gfx

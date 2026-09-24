@@ -1,4 +1,4 @@
-#include "engine/scene/light.h"
+#include "pathtracer/scene/light.h"
 
 #include <algorithm>
 #include <cmath>
@@ -7,7 +7,7 @@
 
 #include <glm/gtc/constants.hpp>
 
-namespace engine::scene {
+namespace pathtracer::scene {
 
 namespace {
 
@@ -189,4 +189,4 @@ std::optional<LightSample> LightSet::sample(const glm::vec3& p, Sampler& sampler
                         selectionPdf / rect->solidAngle, distance};
 }
 
-}  // namespace engine::scene
+}  // namespace pathtracer::scene

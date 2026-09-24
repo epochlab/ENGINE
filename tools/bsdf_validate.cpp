@@ -1,4 +1,4 @@
-// Standalone correctness check for engine::scene::bsdf (bsdf.h): verifies the combined specular+diffuse pdf never integrates to more than the total lobe-selection mass.
+// Standalone correctness check for pathtracer::scene::bsdf (bsdf.h): verifies the combined specular+diffuse pdf never integrates to more than the total lobe-selection mass.
 // Upper bound only, deliberately: VNDF reflection sampling is not normalized over the hemisphere (samples reflecting below the horizon are discarded), so the true integral is the horizon-clipped mass, which has no closed form and is measured instead by the white furnace test below.
 // Also runs a furnace test (uniform incident radiance from every direction, including through transmission) via BSDF importance sampling: must never reflect/transmit more energy than received.
 // Same standalone-CLI convention as embree_validate.cpp/furnace_test.cpp: no test framework, non-zero exit on failure.
@@ -23,15 +23,15 @@
 #include "check.h"
 #include "conductor_reference.h"
 #include "fixtures.h"
-#include "engine/scene/bsdf.h"
-#include "engine/scene/fresnel_dielectric.h"
-#include "engine/scene/sampler.h"
+#include "pathtracer/scene/bsdf.h"
+#include "pathtracer/scene/fresnel_dielectric.h"
+#include "pathtracer/scene/sampler.h"
 
 #include "stats.h"
 
 namespace {
 
-using engine::scene::BsdfParams;
+using pathtracer::scene::BsdfParams;
 using tools::stats::simpson;
 
 using tools::fixtures::kPi;
@@ -46,7 +46,7 @@ using tools::reference::referenceConductorIor;
 // is in the rows, not in the assertion count.
 void finish(tools::check::Context& ctx, bool ok, const char* what) {
     ctx.plan(1);
-    ENGINE_EXPECT(ctx, ok, what);
+    PT_EXPECT(ctx, ok, what);
 }
 
 // edgeTint defaults to white, the no-dip edge Schlick always produced, so every pre-existing case here
@@ -57,7 +57,7 @@ BsdfParams makeParams(float roughness, float metallic, float transmissionFactor,
     const glm::vec3 f0 = glm::mix(glm::vec3(0.04F), baseColor, metallic);
     return BsdfParams{baseColor,          metallic, roughness,          f0, edgeTint,
                        /*ior=*/1.5F, transmissionFactor, diffuseRoughness,
-                       engine::scene::eonAlbedoInversion(baseColor, diffuseRoughness),
+                       pathtracer::scene::eonAlbedoInversion(baseColor, diffuseRoughness),
                        /*transmissionTint=*/glm::vec3(1.0F)};
 }
 
@@ -67,7 +67,7 @@ BsdfParams makeColoredMetalParams(float roughness, glm::vec3 edgeTint = glm::vec
     const glm::vec3 baseColor(1.0F);
     return BsdfParams{baseColor,    1.0F, roughness, glm::vec3(0.5F), edgeTint,
                        /*ior=*/1.5F, /*transmissionFactor=*/0.0F, /*diffuseRoughness=*/0.0F,
-                       engine::scene::eonAlbedoInversion(baseColor, 0.0F),
+                       pathtracer::scene::eonAlbedoInversion(baseColor, 0.0F),
                        /*transmissionTint=*/glm::vec3(1.0F)};
 }
 
@@ -77,7 +77,7 @@ BsdfParams makeColoredMetalParams(float roughness, glm::vec3 edgeTint = glm::vec
 // sampleBsdf draws from exactly pdfBsdf, so the second proposal's density IS the integrand and the combined balance-heuristic density collapses to N1/(2*pi) + N2*p(x): one pdf evaluation per sample, bounded below by the uniform term and above by N2*p, so it is well conditioned at every roughness. Unbiased despite that density being sub-normalised (sampleBsdf returns nullopt below the horizon), because the heuristic needs only the expected sample count per solid angle, which is N2*q2 either way.
 // Upper-bound only, not an equality: VNDF reflection sampling discards samples reflected below the horizon, so the true integral is the horizon-clipped mass, which has no closed form. The estimator is now tight enough that a real double-counted pdf shows up as an excess rather than drowning in variance.
 // diffuseRoughness is swept because at 0 -- the only value this used to test, and the one principled.json ships -- eonUniformMixWeight is pow(0, 0.1) = 0 exactly, so pdfEon degenerates to cltcPdf alone and CLTC itself degenerates to plain cosine. Neither the LTC fit's own normalisation nor the uniform/CLTC one-sample MIS mixture was reached at all. The metallic=1 rows matter most here: metallic zeroes diffuseKd but NOT diffuseProb, so a conductor still carries the full CLTC density with none of its value, and a mis-normalised fit shows up in the mixture denominator rather than in any picture.
-ENGINE_CHECK(pdf_normalization, Slow, Statistical) {
+PT_CHECK(pdf_normalization, Slow, Statistical) {
     std::mt19937 rng(7);
     constexpr int kUniformSamples = 200000;
     constexpr int kBsdfSamples = 200000;
@@ -109,14 +109,14 @@ ENGINE_CHECK(pdf_normalization, Slow, Statistical) {
                         if (ndotV < 0.0F) {
                             wi.z = -wi.z;
                         }
-                        const double p = engine::scene::pdfBsdf(params, wo, wi);
+                        const double p = pathtracer::scene::pdfBsdf(params, wo, wi);
                         integral += p / combinedDensity(p);
                     }
                     // sampleBsdf returns wi in woLocal's own convention and reports the density it drew from, so no second pdfBsdf evaluation is needed and none of the mirroring above applies.
                     for (int i = 0; i < kBsdfSamples; ++i) {
-                        engine::scene::Sampler sampler(0, 0, i, kBsdfSamples, kBsdfSeed);
-                        const std::optional<engine::scene::BsdfSample> sample =
-                            engine::scene::sampleBsdf(params, wo, sampler);
+                        pathtracer::scene::Sampler sampler(0, 0, i, kBsdfSamples, kBsdfSeed);
+                        const std::optional<pathtracer::scene::BsdfSample> sample =
+                            pathtracer::scene::sampleBsdf(params, wo, sampler);
                         if (sample.has_value()) {
                             integral += sample->pdf / combinedDensity(sample->pdf);
                         }
@@ -143,7 +143,7 @@ ENGINE_CHECK(pdf_normalization, Slow, Statistical) {
 // What it covers was measured, not assumed. NOT a mixture term missing from the density: sampleBsdf reports evaluateContinuousLobes' own pdf, so both sides are then wrong together and this stays green -- deleting the msReflect density term leaves 0 failures here and fails checkFurnace at Lo=1.28 instead -- checkSamplingChiSquare below is the instrument that does catch it directly. What it does cover is the sign-mirroring round trip, since sampleBsdf returns wi in woLocal's convention and pdfBsdf re-mirrors it and nothing else in the suite closes that loop, and any future strategy reporting a hand-computed density beside the mixture rather than through it -- the usual optimisation once a lobe's own pdf is already in hand.
 // Exact equality, not a tolerance: both sides are the same arithmetic over the same deterministic LobeProbabilities, so any difference is a broken round trip rather than drift. Delta transmission reports 0 on both sides and is asserted like every other row.
 // Swept over checkPdfNormalization's grid plus transmissionFactor, including the ndotV<0 exiting rows the mirroring claim rests on, so every strategy in the ladder is drawn: VNDF reflection, EON, both multiple-scattering cosine lobes, rough and smooth refraction.
-ENGINE_CHECK(sample_density_consistency, Slow, Exact) {
+PT_CHECK(sample_density_consistency, Slow, Exact) {
     constexpr int kSampleCount = 8000;
     constexpr std::uint32_t kSeed = 11;
     const std::array<float, 4> roughnesses = {0.05F, 0.25F, 0.5F, 1.0F};
@@ -164,15 +164,15 @@ ENGINE_CHECK(sample_density_consistency, Slow, Exact) {
                         const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (ndotV * ndotV))), 0.0F,
                                             ndotV);
                         for (int i = 0; i < kSampleCount && ok; ++i) {
-                            engine::scene::Sampler sampler(0, 0, i, kSampleCount, kSeed);
-                            const std::optional<engine::scene::BsdfSample> sample =
-                                engine::scene::sampleBsdf(params, wo, sampler);
+                            pathtracer::scene::Sampler sampler(0, 0, i, kSampleCount, kSeed);
+                            const std::optional<pathtracer::scene::BsdfSample> sample =
+                                pathtracer::scene::sampleBsdf(params, wo, sampler);
                             if (!sample.has_value()) {
                                 continue;
                             }
                             ++compared;
                             const float reevaluated =
-                                engine::scene::pdfBsdf(params, wo, sample->wiLocal);
+                                pathtracer::scene::pdfBsdf(params, wo, sample->wiLocal);
                             if (reevaluated == sample->pdf) {
                                 continue;
                             }
@@ -198,9 +198,9 @@ ENGINE_CHECK(sample_density_consistency, Slow, Exact) {
 glm::vec3 furnaceLo(const BsdfParams& params, const glm::vec3& wo, int sampleCount, std::uint32_t seed) {
     glm::vec3 accum(0.0F);
     for (int i = 0; i < sampleCount; ++i) {
-        engine::scene::Sampler sampler(0, 0, i, sampleCount, seed);
-        const std::optional<engine::scene::BsdfSample> sample =
-            engine::scene::sampleBsdf(params, wo, sampler);
+        pathtracer::scene::Sampler sampler(0, 0, i, sampleCount, seed);
+        const std::optional<pathtracer::scene::BsdfSample> sample =
+            pathtracer::scene::sampleBsdf(params, wo, sampler);
         if (sample.has_value()) {
             accum += sample->throughputWeight;  // L0=1
         }
@@ -220,7 +220,7 @@ bool withinBand(const glm::vec3& value, float centre, float tolerance) {
 // The gap it closes: sampling_chi_square tests the shape a strategy draws, and the furnaces test totals within a band, so a strategy whose selection is gated off while its lobe still has value is invisible to both -- msTransmit's forward-eta selection gate against its reciprocal-eta value gate did exactly that at roughness 0.128-0.168 on the entering side, under 1e-3 of the energy.
 // Exact, not a tolerance: f > 0 with pdf == 0 is a support defect at any magnitude. The converse (density on a zero-valued lobe) is variance, not bias, and is not asserted.
 // Roughness is swept at 8 steps per escape-table node through the band where the msTransmit lobe switches on, plus coarse points either side; both sides of the interface, every authored-range ior, the whole sphere of wi.
-ENGINE_CHECK(strategy_coverage, Fast, Exact) {
+PT_CHECK(strategy_coverage, Fast, Exact) {
     constexpr int kMuNodes = 16;
     constexpr int kPhiNodes = 8;
     constexpr float kBandStep = 1.0F / 248.0F;
@@ -242,7 +242,7 @@ ENGINE_CHECK(strategy_coverage, Fast, Exact) {
                 const BsdfParams params{glm::vec3(1.0F), 0.0F, roughness,
                                          glm::vec3(0.04F), glm::vec3(1.0F), ior,
                                          transmission, /*diffuseRoughness=*/0.0F,
-                                         engine::scene::eonAlbedoInversion(glm::vec3(1.0F), 0.0F),
+                                         pathtracer::scene::eonAlbedoInversion(glm::vec3(1.0F), 0.0F),
                                          /*transmissionTint=*/glm::vec3(1.0F)};
                 for (float ndotV : ndotVs) {
                     const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (ndotV * ndotV))), 0.0F, ndotV);
@@ -252,12 +252,12 @@ ENGINE_CHECK(strategy_coverage, Fast, Exact) {
                         for (int pi = 0; pi < kPhiNodes; ++pi) {
                             const float phi = 2.0F * kPi * (static_cast<float>(pi) + 0.5F) / kPhiNodes;
                             const glm::vec3 wi(r * std::cos(phi), r * std::sin(phi), z);
-                            if (!(maxChannel(engine::scene::evaluateBsdf(params, wo, wi)) > 0.0F)) {
+                            if (!(maxChannel(pathtracer::scene::evaluateBsdf(params, wo, wi)) > 0.0F)) {
                                 continue;
                             }
                             ++valued;
                             farValued += (wi.z * wo.z < 0.0F) ? 1 : 0;
-                            if (engine::scene::pdfBsdf(params, wo, wi) > 0.0F) {
+                            if (pathtracer::scene::pdfBsdf(params, wo, wi) > 0.0F) {
                                 continue;
                             }
                             if (uncovered++ < 8) {
@@ -288,7 +288,7 @@ ENGINE_CHECK(strategy_coverage, Fast, Exact) {
 // ndotV sweep includes negative values (woLocal.z<0, the exiting side of a transmissive dielectric) and a value past the ior=1.5 critical angle (~41.8deg, cosTheta~0.745) to force total internal reflection.
 // Energy bound is 1.0 (L0) everywhere except the exiting side (ndotV<0) of a transmissive material below the critical angle, where sampleBsdf's eta^2 non-symmetric radiance-compression factor (Veach 1997 sec. 5.2, see bsdf.cpp's transmission branch) legitimately raises Lo above L0: L/n^2 is the invariant along a ray, so radiance increases going from a denser medium (ior=1.5, inside) into a rarer one (1.0, outside) by up to ior^2.
 // The naive Lo<=1 bound only holds for eta==1 interfaces (pure reflection) or the entering side, where this same factor is <1, exactly compensating so a round trip through the surface loses no net energy.
-ENGINE_CHECK(furnace_energy_bound, Slow, Statistical) {
+PT_CHECK(furnace_energy_bound, Slow, Statistical) {
     constexpr int kSampleCount = 200000;
     constexpr float kTolerance = 0.1F;
     constexpr float kIor = 1.5F;  // matches makeParams/makeColoredMetalParams
@@ -351,7 +351,7 @@ struct WhiteFurnaceCase {
     bool offGrid;
 };
 
-ENGINE_CHECK(white_furnace_two_sided, Slow, Statistical) {
+PT_CHECK(white_furnace_two_sided, Slow, Statistical) {
     constexpr int kSampleCount = 400000;
     constexpr float kTolerance = 0.02F;
     const std::array<WhiteFurnaceCase, 14> cases = {{
@@ -420,7 +420,7 @@ ENGINE_CHECK(white_furnace_two_sided, Slow, Statistical) {
 // unguarded while the reflected multiple-scattering lobe borrowed the diffuse strategy -- a conductor
 // then drew a CLTC shape set by diffuseRoughness for a lobe of zero value, measurable only as variance,
 // which an energy band cannot see.
-ENGINE_CHECK(eon_diffuse_furnace, Slow, Statistical) {
+PT_CHECK(eon_diffuse_furnace, Slow, Statistical) {
     constexpr int kSampleCount = 400000;
     constexpr float kTolerance = 0.02F;
     constexpr float kRoughness = 0.5F;
@@ -487,7 +487,7 @@ BsdfParams makeDiffuseParams(const glm::vec3& baseColor, float diffuseRoughness,
     return BsdfParams{baseColor,          /*metallic=*/0.0F,          roughness,
                        glm::vec3(0.0F),    /*edgeTint=*/glm::vec3(1.0F), ior,
                        /*transmissionFactor=*/0.0F, diffuseRoughness,
-                       engine::scene::eonAlbedoInversion(baseColor, diffuseRoughness),
+                       pathtracer::scene::eonAlbedoInversion(baseColor, diffuseRoughness),
                        /*transmissionTint=*/glm::vec3(1.0F)};
 }
 
@@ -505,7 +505,7 @@ AlbedoEstimate measureDiffuseAlbedo(const BsdfParams& params, int sampleCount, s
     for (int i = 0; i < sampleCount; ++i) {
         const glm::vec3 wi = sampleUniformHemisphere(rng);
         const glm::vec3 sample =
-            engine::scene::evaluateBsdfSplit(params, wo, wi).diffuse * wi.z * 2.0F * kPi;
+            pathtracer::scene::evaluateBsdfSplit(params, wo, wi).diffuse * wi.z * 2.0F * kPi;
         sum += sample;
         sumSq += sample * sample;
     }
@@ -518,7 +518,7 @@ AlbedoEstimate measureDiffuseAlbedo(const BsdfParams& params, int sampleCount, s
 // The observed albedo must equal the AUTHORED albedo: the property EON's Appendix A inversion exists to provide, and the one thing nothing else in this suite can see. Every other case in every validator runs at either baseColor 1 or diffuseRoughness 0, where the inversion is exactly the identity -- measured, by reverting it and finding all five validators byte-identical -- so without this check the inversion could be deleted silently.
 // Two assertions per row, complementary rather than redundant. The analytic one is closed-form against closed-form and catches an error in the inversion algebra; the Monte Carlo one integrates the shipped lobe and additionally catches a diffuseRho that is computed and never consumed, which no closed-form identity can.
 // The chromatic row carries the weight: the multiple-scattering saturation the inversion undoes is per-channel, so a grey row cannot distinguish a correct inversion from one that merely preserves overall brightness. r=0 and baseColor=1 rows must read the identity exactly, which is what proves this change is a strict superset of the old behaviour rather than a shift of it.
-ENGINE_CHECK(eon_albedo_inversion, Slow, Statistical) {
+PT_CHECK(eon_albedo_inversion, Slow, Statistical) {
     constexpr int kSampleCount = 400000;
     // Two named, bounded residuals and nothing else. kSigmaBand is a confidence level on the estimator's own measured standard error; kFitTolerance is the paper's stated <0.1% bound on evalFonAlbedoApprox, the quartic the renderer evaluates in place of the exact FON albedo this check's reference uses. Neither is a tuned number: the first is derived per row from the run, the second is the documented error of an approximation the renderer deliberately ships.
     constexpr float kSigmaBand = 5.0F;
@@ -611,7 +611,7 @@ glm::vec3 referenceEon(const glm::vec3& rho, float r, const glm::vec3& wi, const
 // Two facts that set the sweep, both against instinct. The deviation peaks at NORMAL incidence, not grazing: coat = msTint*(1-E(mu)) and E rises toward grazing at high roughness (0.31 at mu=1, ~0.99 at the first grid column), so a grazing-first sweep is much weaker. And it changes sign below mu~0.3 at roughness 1, so only |delta|==0 is a safe predicate; any signed bound breaks.
 // The sweep reaches mu 1e-5 deliberately, and the four rows below 2.44e-4 are the regression test for the cos^2 Snell form: the old 1 - r^2*(1 - mu*mu) transcription rounded 1.0F-mu*mu to exactly 1.0F there, reported total internal reflection at an interface that has no critical angle, and returned fresnelDielectric(mu,1,1) = 1.0F instead of +0, which breaks every term of the collapse above. cos2Transmitted collapses to mu*mu at r == 1, so the sliver is now exact rather than excluded. Do NOT extend the sweep to ior>1 -- the identity is exact only at index match.
 // Residual, deliberate: any g(ior) with g(1)=0 passes here, notably 2*dielectricFresnelAvg(ior). This check pins the argument's collapse; checkAverageFresnel pins the function's value. Neither alone is sufficient and both are cheap.
-ENGINE_CHECK(index_matched_coat, Fast, Exact) {
+PT_CHECK(index_matched_coat, Fast, Exact) {
     // Exact, from the collapse above. The second bound is a float32-vs-double residual on the same closed form, ~15 operations deep, measured worst 2.03e-7 at the grazing tail -- 4.9x under, thin on purpose. It is not the instrument; it is the backstop that stops a roughness-INDEPENDENT corruption (a pinned diffuseKd, a lost 1/(1-coatAvg) normalisation, a channel swap) from passing as bit-identical, which the invariance assertion alone cannot see.
     constexpr float kInvarianceTolerance = 0.0F;
     constexpr float kValueTolerance = 1e-6F;
@@ -644,11 +644,11 @@ ENGINE_CHECK(index_matched_coat, Fast, Exact) {
                     const glm::vec3 wo(sinO, 0.0F, muO);
                     const glm::vec3 wi(sinI * std::cos(1.1F), sinI * std::sin(1.1F), muI);
                     const glm::vec3 reference =
-                        engine::scene::evaluateBsdfSplit(
+                        pathtracer::scene::evaluateBsdfSplit(
                             makeDiffuseParams(albedo, diffuseRoughness, roughnesses[0]), wo, wi)
                             .diffuse;
                     const glm::vec3 analytic = referenceEon(
-                        engine::scene::eonAlbedoInversion(albedo, diffuseRoughness),
+                        pathtracer::scene::eonAlbedoInversion(albedo, diffuseRoughness),
                         diffuseRoughness, wi, wo);
                     const float scale = std::max(maxChannel(analytic), 1e-6F);
                     const float valueErr = maxChannel(glm::abs(reference - analytic)) / scale;
@@ -666,7 +666,7 @@ ENGINE_CHECK(index_matched_coat, Fast, Exact) {
                     }
                     for (std::size_t i = 1; i < roughnesses.size(); ++i) {
                         const glm::vec3 value =
-                            engine::scene::evaluateBsdfSplit(
+                            pathtracer::scene::evaluateBsdfSplit(
                                 makeDiffuseParams(albedo, diffuseRoughness, roughnesses[i]), wo, wi)
                                 .diffuse;
                         const float delta = maxChannel(glm::abs(value - reference)) / scale;
@@ -718,13 +718,13 @@ glm::vec3 transmissiveEnergyLo(const BsdfParams& params, const glm::vec3& wo, in
     const float etaSq = eta * eta;
     glm::dvec3 accum(0.0);
     for (int i = 0; i < sampleCount; ++i) {
-        engine::scene::Sampler sampler(0, 0, i, sampleCount, seed);
-        const std::optional<engine::scene::BsdfSample> sample =
-            engine::scene::sampleBsdf(params, wo, sampler);
+        pathtracer::scene::Sampler sampler(0, 0, i, sampleCount, seed);
+        const std::optional<pathtracer::scene::BsdfSample> sample =
+            pathtracer::scene::sampleBsdf(params, wo, sampler);
         if (!sample.has_value()) {
             continue;
         }
-        accum += glm::dvec3(sample->type == engine::scene::LobeType::Transmission
+        accum += glm::dvec3(sample->type == pathtracer::scene::LobeType::Transmission
                                  ? sample->throughputWeight / etaSq
                                  : sample->throughputWeight);
     }
@@ -735,7 +735,7 @@ glm::vec3 transmissiveEnergyLo(const BsdfParams& params, const glm::vec3& wo, in
 // In the energy domain 1.0 is correct everywhere: a white, non-absorbing interface reflects, refracts, or hands the rest to the diffuse substrate, and the multiple-scattering lobes return what the Smith G2 masked; nothing is absorbed at any roughness, side, or transmissionFactor.
 // Gates two failure modes the radiance-domain checks structurally cannot see: multiple-scattering compensation delivered over the refraction-reachable cone only rather than the whole far hemisphere, and a transmission lobe whose value drops transmissionFactor or (1-metallic) while its selection probability keeps them (the factors cancel out of throughput, so only an absolute bound catches it).
 // metallic=1 rows cover a conductor, which must transmit nothing however its transmissionFactor is set.
-ENGINE_CHECK(transmissive_energy_balance, Slow, Statistical) {
+PT_CHECK(transmissive_energy_balance, Slow, Statistical) {
     constexpr int kSampleCount = 200000;
     // Same tolerance as the opaque white furnace: 1.0 is a correctness target, not a baseline, and the residual under it is deterministic model error rather than noise, which is why this stays a fixed target and not a replicate-derived band.
     // Measured worst 0.0036, at transmissionFactor 0.5 entering, where the diffuse coat coupling renormalises by an averaged rescale (the white furnace bounds that residual under 1%). The fully transmissive rows sit at 0.0012, the escape table's interpolation between its nodes.
@@ -781,7 +781,7 @@ ENGINE_CHECK(transmissive_energy_balance, Slow, Statistical) {
 // BSDF sampling alone (fixtures::slabWalkLo), so no integrator term can move it; integrator_validate's transmissive_slab_energy holds the Embree render to this same walk.
 // Replicated over independent scramble seeds, so the statistical half-width is the run's own Student-t interval rather than a hand-set tolerance. Closure also has a deterministic floor: the escape a vertex reads is interpolated between table nodes, and a path crosses several, so the band adds that floor times the walk's own measured vertices per path.
 // The floor is the table's accuracy against the generator's exact quadrature, not a fitted tolerance: 1e-3 over a measured worst 6.2e-4 (tools/albedo_table.cpp's grid read through bsdf.cpp's lookup, ior 1.5, roughness 0.4 to 1, both sides, all mu). Without it the check would reject the table's own resolution as an error the moment variance dropped below it.
-ENGINE_CHECK(transmissive_slab_walk, Slow, Statistical) {
+PT_CHECK(transmissive_slab_walk, Slow, Statistical) {
     // Sized so the band resolves the smallest shortfall the old table left, 0.6% at roughness 0.7, with room to spare.
     constexpr int kPathsPerReplicate = 1 << 20;
     constexpr double kEscapeInterpolationFloor = 1e-3;
@@ -821,9 +821,9 @@ ENGINE_CHECK(transmissive_slab_walk, Slow, Statistical) {
         char detail[256];
         std::snprintf(detail, sizeof(detail), "%s: Lo %.5f vs 1 +/- %.5f over %.2f vertices per path", label, lo.mean(), half, vertices.mean());
         std::cout << "  " << detail << '\n';
-        ENGINE_EXPECT(ctx, std::abs(lo.mean() - 1.0) <= half, detail);
+        PT_EXPECT(ctx, std::abs(lo.mean() - 1.0) <= half, detail);
         std::snprintf(detail, sizeof(detail), "%s: %lld paths reached the depth cap, which would truncate the estimate", label, truncated);
-        ENGINE_EXPECT(ctx, truncated == 0, detail);
+        PT_EXPECT(ctx, truncated == 0, detail);
     }
 }
 
@@ -833,7 +833,7 @@ BsdfParams makeTransmissiveTintParams(float roughness, const glm::vec3& baseColo
     return BsdfParams{baseColor,          /*metallic=*/0.0F,            roughness,
                        glm::vec3(0.04F),   /*edgeTint=*/glm::vec3(1.0F), /*ior=*/1.5F,
                        /*transmissionFactor=*/1.0F, /*diffuseRoughness=*/0.0F,
-                       engine::scene::eonAlbedoInversion(baseColor, 0.0F), transmissionTint};
+                       pathtracer::scene::eonAlbedoInversion(baseColor, 0.0F), transmissionTint};
 }
 
 // Snell refraction of wo about +z, transcribed here independently of bsdf.cpp: the direction the interface actually refracts into, where the single-scattering transmission lobe is strongest.
@@ -849,10 +849,10 @@ std::optional<glm::vec3> deltaTransmitThroughput(const BsdfParams& params, const
                                                   std::uint32_t seed) {
     constexpr int kAttempts = 64;
     for (int i = 0; i < kAttempts; ++i) {
-        engine::scene::Sampler sampler(0, 0, i, kAttempts, seed);
-        const std::optional<engine::scene::BsdfSample> sample =
-            engine::scene::sampleBsdf(params, wo, sampler);
-        if (sample.has_value() && sample->type == engine::scene::LobeType::Transmission &&
+        pathtracer::scene::Sampler sampler(0, 0, i, kAttempts, seed);
+        const std::optional<pathtracer::scene::BsdfSample> sample =
+            pathtracer::scene::sampleBsdf(params, wo, sampler);
+        if (sample.has_value() && sample->type == pathtracer::scene::LobeType::Transmission &&
             sample->pdf == 0.0F) {
             return sample->throughputWeight;
         }
@@ -865,7 +865,7 @@ std::optional<glm::vec3> deltaTransmitThroughput(const BsdfParams& params, const
 // Two complementary assertions per row. Independence of baseColor is asserted EXACTLY: at metallic 0 baseColor reaches f0 not at all, and the diffuse lobe is identically zero on the far side, so no term of the transmission value can legitimately move by one bit.
 // Linearity in the tint carries a few-ULP relative band instead, because the rough lobe sums a single-scattering and a multiple-scattering term and FP multiplication does not distribute over a sum. That band is numerical, not physical slack: a tint applied to only one of the two terms misses by the other term's whole share.
 // Rows span both code paths a tint must travel: the rough continuous lobe (evaluateTransmissionLobe plus transmitMultiScatter, which share one returned value here) and sampleBsdf's smooth delta branch.
-ENGINE_CHECK(transmission_tint, Fast, Exact) {
+PT_CHECK(transmission_tint, Fast, Exact) {
     constexpr float kUlpBand = 1e-6F;
     constexpr float kSmoothRoughness = 0.005F;   // below bsdf.cpp's smooth threshold, so transmission is the delta branch
     const glm::vec3 baseColour(0.2F, 0.5F, 0.9F);
@@ -919,7 +919,7 @@ ENGINE_CHECK(transmission_tint, Fast, Exact) {
         const glm::vec3 wi = refractAboutZ(wo, 1.0F / 1.5F);
         for (float roughness : roughnesses) {
             const auto rough = [&](const glm::vec3& bc, const glm::vec3& tn) {
-                return engine::scene::evaluateBsdfSplit(makeTransmissiveTintParams(roughness, bc, tn),
+                return pathtracer::scene::evaluateBsdfSplit(makeTransmissiveTintParams(roughness, bc, tn),
                                                          wo, wi)
                     .transmission;
             };
@@ -962,7 +962,7 @@ double referenceDielectricFresnel(double cosTheta, double ior) {
 // The instrument the suite never had. F_avg attenuates every repeated bounce of the Kulla-Conty multiple-scattering lobe, and NO energy test in this file can see an error in it: checkWhiteFurnaceTwoSided runs at f0=1, where Schlick's mean, the quadrature rule and the truth all agree to 1e-4, and checkFurnace's coloured-metal rows are upper-bound-only and so blind to a loss. Measuring F_avg directly is the honest fix; testing around it is not available, because a two-sided grey-conductor furnace has no closed form.
 // Truth is this file's own independent reference -- literal k^2, complex arithmetic, double -- not the shipped Fresnel, so a transcription error in bsdf.cpp shows up here instead of cancelling. The two inversions agree to 4e-12 (checkConductorFresnel pins that), twelve orders under the tolerance, so what this measures is the quadrature rule's own fit error and nothing else.
 // Conductor tolerance is the fit's measured bound (max 4.0e-4 over the full clamped domain, worst near r=0.48) plus headroom. Karis' Schlick mean fails it by 216x at r=0.255 g=1, which is the point: reverting bsdf.cpp to schlickFresnelAvg must fail this test, and must NOT fail at g=1 r=1 where the old suite did all its conductor energy checking.
-ENGINE_CHECK(average_fresnel, Fast, Exact) {
+PT_CHECK(average_fresnel, Fast, Exact) {
     constexpr double kConductorTolerance = 5e-4;
     // The working band: everything any material actually authors. Measured worst 5.5e-5 at ior 1.0575 over a 0.0025-step scan of [1.05, 3.0], so this is ~1.8x headroom, matching the conductor's 5e-4 over a measured 4.0e-4. Deliberately thin, so a refit or a tolerance change trips this rather than passing silently -- the two-constant rational fit this replaced misses it by 60x.
     constexpr double kDielectricTolerance = 1e-4;
@@ -986,7 +986,7 @@ ENGINE_CHECK(average_fresnel, Fast, Exact) {
             const std::complex<double> eta = referenceConductorIor(reflectivity, edgeTint);
             const double truth = cosineAverageFresnel(
                 [&](double mu) { return referenceConductorFresnelAt(eta, mu); });
-            const glm::vec3 rule = engine::scene::conductorFresnelAvg(
+            const glm::vec3 rule = pathtracer::scene::conductorFresnelAvg(
                 glm::vec3(static_cast<float>(eta.real())), glm::vec3(static_cast<float>(eta.imag())));
             const double error = std::abs(static_cast<double>(rule.x) - truth);
             if (error > worst) {
@@ -1008,7 +1008,7 @@ ENGINE_CHECK(average_fresnel, Fast, Exact) {
     for (double ior : iors) {
         const double truth =
             cosineAverageFresnel([&](double mu) { return referenceDielectricFresnel(mu, ior); });
-        const double rule = engine::scene::dielectricFresnelAvg(static_cast<float>(ior));
+        const double rule = pathtracer::scene::dielectricFresnelAvg(static_cast<float>(ior));
         const double error = std::abs(rule - truth);
         const double tolerance =
             ior < kNearIndexMatchIor ? kNearIndexMatchTolerance : kDielectricTolerance;
@@ -1152,7 +1152,7 @@ void recordWorst(InterpolationError& error, double delta, double roughness, doub
 
 // Worst over both Schlick channels of the shipped lookup against the reference, at one (mu, roughness).
 double directionalAlbedoError(double mu, double roughness) {
-    const glm::vec2 shipped = engine::scene::directionalAlbedoSplit(static_cast<float>(mu),
+    const glm::vec2 shipped = pathtracer::scene::directionalAlbedoSplit(static_cast<float>(mu),
                                                                      static_cast<float>(roughness));
     const glm::dvec2 exact = referenceDirectionalAlbedo(mu, alphaAt(roughness));
     return std::max(std::abs(static_cast<double>(shipped.x) - exact.x),
@@ -1190,7 +1190,7 @@ void parallelRows(int rows, int threads, Row row) {
     }
 }
 
-ENGINE_CHECK(albedo_table_interpolation, Slow, Exact) {
+PT_CHECK(albedo_table_interpolation, Slow, Exact) {
     // Each bound is the measured worst plus headroom, in the convention checkAverageFresnel already uses: thin
     // enough that a regeneration losing accuracy on any one axis trips that axis' own row rather than passing
     // under a combined figure. They are bounds on the COMMITTED table, so they move when it is rebaked.
@@ -1205,7 +1205,7 @@ ENGINE_CHECK(albedo_table_interpolation, Slow, Exact) {
     const std::array<double, 4> firstCellFractions = {0.2, 0.4, 0.6, 0.8};
     constexpr int kSpread = 16;
 
-    const glm::ivec2 res = engine::scene::albedoGridRes();
+    const glm::ivec2 res = pathtracer::scene::albedoGridRes();
     const std::vector<int> muNodes = spreadNodes(0, res.y - 1, kSpread);
     const std::vector<int> roughnessNodes = spreadNodes(0, res.x - 1, kSpread);
 
@@ -1216,10 +1216,10 @@ ENGINE_CHECK(albedo_table_interpolation, Slow, Exact) {
     // the limit and the four measurements are measuring it rather than the table.
     std::vector<InterpolationError> controlRows(static_cast<std::size_t>(res.x));
     parallelRows(res.x, ctx.threads(), [&](int ri) {
-        const double roughness = engine::scene::albedoGridRoughness(static_cast<float>(ri));
+        const double roughness = pathtracer::scene::albedoGridRoughness(static_cast<float>(ri));
         InterpolationError row{0.0, roughness, 0.0};
         for (int mi : muNodes) {
-            const double mu = engine::scene::albedoGridMu(static_cast<float>(mi));
+            const double mu = pathtracer::scene::albedoGridMu(static_cast<float>(mi));
             recordWorst(row, directionalAlbedoError(mu, roughness), roughness, mu);
         }
         controlRows[static_cast<std::size_t>(ri)] = row;
@@ -1228,10 +1228,10 @@ ENGINE_CHECK(albedo_table_interpolation, Slow, Exact) {
     // Roughness axis: every cell midpoint on that axis, held on exact mu nodes.
     std::vector<InterpolationError> roughnessRows(static_cast<std::size_t>(res.x - 1));
     parallelRows(res.x - 1, ctx.threads(), [&](int ri) {
-        const double roughness = engine::scene::albedoGridRoughness(static_cast<float>(ri) + 0.5F);
+        const double roughness = pathtracer::scene::albedoGridRoughness(static_cast<float>(ri) + 0.5F);
         InterpolationError row{0.0, roughness, 0.0};
         for (int mi : muNodes) {
-            const double mu = engine::scene::albedoGridMu(static_cast<float>(mi));
+            const double mu = pathtracer::scene::albedoGridMu(static_cast<float>(mi));
             recordWorst(row, directionalAlbedoError(mu, roughness), roughness, mu);
         }
         roughnessRows[static_cast<std::size_t>(ri)] = row;
@@ -1242,10 +1242,10 @@ ENGINE_CHECK(albedo_table_interpolation, Slow, Exact) {
     std::vector<InterpolationError> muRows(roughnessNodes.size());
     parallelRows(static_cast<int>(roughnessNodes.size()), ctx.threads(), [&](int k) {
         const int ri = roughnessNodes[static_cast<std::size_t>(k)];
-        const double roughness = engine::scene::albedoGridRoughness(static_cast<float>(ri));
+        const double roughness = pathtracer::scene::albedoGridRoughness(static_cast<float>(ri));
         InterpolationError row{0.0, roughness, 0.0};
         for (int mi = 1; mi + 1 < res.y; ++mi) {
-            const double mu = engine::scene::albedoGridMu(static_cast<float>(mi) + 0.5F);
+            const double mu = pathtracer::scene::albedoGridMu(static_cast<float>(mi) + 0.5F);
             recordWorst(row, directionalAlbedoError(mu, roughness), roughness, mu);
         }
         muRows[static_cast<std::size_t>(k)] = row;
@@ -1254,10 +1254,10 @@ ENGINE_CHECK(albedo_table_interpolation, Slow, Exact) {
     // First mu cell: dense in roughness, on exact nodes there, so what is left is the cell alone.
     std::vector<InterpolationError> firstCellRows(static_cast<std::size_t>(res.x));
     parallelRows(res.x, ctx.threads(), [&](int ri) {
-        const double roughness = engine::scene::albedoGridRoughness(static_cast<float>(ri));
+        const double roughness = pathtracer::scene::albedoGridRoughness(static_cast<float>(ri));
         InterpolationError row{0.0, roughness, 0.0};
         for (double fraction : firstCellFractions) {
-            const double mu = engine::scene::albedoGridMu(static_cast<float>(fraction));
+            const double mu = pathtracer::scene::albedoGridMu(static_cast<float>(fraction));
             recordWorst(row, directionalAlbedoError(mu, roughness), roughness, mu);
         }
         firstCellRows[static_cast<std::size_t>(ri)] = row;
@@ -1267,8 +1267,8 @@ ENGINE_CHECK(albedo_table_interpolation, Slow, Exact) {
     // whole diffuse coupling -- a different route into the shade than the directional lookups, so its own number.
     std::vector<InterpolationError> averageRows(static_cast<std::size_t>(res.x - 1));
     parallelRows(res.x - 1, ctx.threads(), [&](int ri) {
-        const double roughness = engine::scene::albedoGridRoughness(static_cast<float>(ri) + 0.5F);
-        const glm::vec2 shipped = engine::scene::averageAlbedoSplit(static_cast<float>(roughness));
+        const double roughness = pathtracer::scene::albedoGridRoughness(static_cast<float>(ri) + 0.5F);
+        const glm::vec2 shipped = pathtracer::scene::averageAlbedoSplit(static_cast<float>(roughness));
         const glm::dvec2 exact = referenceAverageAlbedo(alphaAt(roughness));
         const double delta = std::max(std::abs(static_cast<double>(shipped.x) - exact.x),
                                        std::abs(static_cast<double>(shipped.y) - exact.y));
@@ -1380,7 +1380,7 @@ double referenceCoupling(const CoatGeometry& geometry, double fresnelAvg) {
 // Worth recording that the same derivation predicted ~1.2e-3 for the offline bake's 3e-5 quadrature plus its bilinear error, and the realised residual was 1.2e-4, 10x better. The e/0.054 route is the multiple-scattering path alone; the dC/dF column shows the recovery's actual conditioning is ~0.81-0.91, because coatAlbedoAvg's fresnelAvg/karisAvg rescale sits in the 1/(1-coatAlbedoAvg) denominator and carries most of the signal. The prediction was pessimistic by the ratio of those two routes, not wrong in kind.
 // The ior range is now the full one, 1.1 to 3.0. It was 1.5 to 1.8 because the rational fit was not uniformly better than the Karis mean a revert would install -- it crossed over near ior 1.42 -- so below that the separation was a coin toss, and above 2.0 the fit failed its own bound. Neither constraint survives a rule that is within 2.3e-5 at every swept ior, and 4.5e-5 across the whole continuous range.
 // All three candidates re-measured by mutation, which is the only way this claim means anything, and each fails at every ior in the sweep. Reverting to schlickFresnelAvg(coatF0) recovers 0.0856466 against that function's own 0.0857143 -- the instrument still names it, to 7e-5 -- and fails by 31x at ior 1.5, 123x at 1.1, and 3.5x at its weakest (ior 2.5, where Karis happens to cross truth). Substituting 2*dielectricFresnelAvg fails by 126x to 1381x. Reverting to the rational fit this replaced, which this check used to PASS at 0.0035, fails by 12x at ior 1.5 and 30x at 1.1. Unmutated, the recovery lands 7.0e-5 from dielectricFresnelAvg's own value at ior 1.5.
-ENGINE_CHECK(coat_fresnel_average, Slow, Exact) {
+PT_CHECK(coat_fresnel_average, Slow, Exact) {
     constexpr double kTolerance = 6e-5;
     // Residual of the recovered root, not an accuracy claim: it catches a coupling the model cannot reproduce at ANY fresnelAvg (a lost 1/(1-coatAvg), a dropped wi-side factor), which an in-range root would otherwise launder into a plausible number.
     constexpr double kResidualTolerance = 1e-6;
@@ -1424,9 +1424,9 @@ ENGINE_CHECK(coat_fresnel_average, Slow, Exact) {
                     const BsdfParams coated = makeDiffuseParams(albedo, kDiffuseRoughness,
                                                                  static_cast<float>(roughness),
                                                                  static_cast<float>(ior));
-                    const glm::vec3 diffuse = engine::scene::evaluateBsdfSplit(coated, wo, wi).diffuse;
+                    const glm::vec3 diffuse = pathtracer::scene::evaluateBsdfSplit(coated, wo, wi).diffuse;
                     const glm::vec3 bare = referenceEon(
-                        engine::scene::eonAlbedoInversion(albedo, kDiffuseRoughness),
+                        pathtracer::scene::eonAlbedoInversion(albedo, kDiffuseRoughness),
                         kDiffuseRoughness, wi, wo);
                     const double measured =
                         static_cast<double>(maxChannel(diffuse)) / maxChannel(bare);
@@ -1517,7 +1517,7 @@ ENGINE_CHECK(coat_fresnel_average, Slow, Exact) {
 // where B is exactly 0 and dispersion is identically the no-op -- deliberately, since that is what lets
 // checkBeerLambert isolate the channel estimator from the refraction geometry. This check carries the
 // whole proof of the optics.
-ENGINE_CHECK(cauchy_dispersion, Fast, Exact) {
+PT_CHECK(cauchy_dispersion, Fast, Exact) {
     // Both bands are float32 rounding headroom, not fit error: the algebra is exact. The Abbe band is
     // relative because n_F - n_C is a ~0.008 difference of two ~1.5 quantities, so it carries the ~187x
     // cancellation amplification of their own ulp; the d-line band is absolute since nothing cancels there.
@@ -1544,19 +1544,19 @@ ENGINE_CHECK(cauchy_dispersion, Fast, Exact) {
     bool ok = true;
     std::cout << "bsdf_validate: Cauchy dispersion inverted from (ior, abbe)\n";
     for (const Glass& glass : glasses) {
-        const float nD = engine::scene::cauchyIor(glass.iorD, glass.abbe, kLambdaDNm);
-        const float nF = engine::scene::cauchyIor(glass.iorD, glass.abbe, kLambdaFNm);
-        const float nC = engine::scene::cauchyIor(glass.iorD, glass.abbe, kLambdaCNm);
+        const float nD = pathtracer::scene::cauchyIor(glass.iorD, glass.abbe, kLambdaDNm);
+        const float nF = pathtracer::scene::cauchyIor(glass.iorD, glass.abbe, kLambdaFNm);
+        const float nC = pathtracer::scene::cauchyIor(glass.iorD, glass.abbe, kLambdaCNm);
         const float measuredAbbeDifference = nF - nC;
         // The Abbe number's definition, rearranged. Computed here from the authored inputs alone.
         const float expectedAbbeDifference = (glass.iorD - 1.0F) / glass.abbe;
 
-        const float nRed = engine::scene::cauchyIor(glass.iorD, glass.abbe,
-                                                     engine::scene::kRgbWavelengthsNm.x);
-        const float nGreen = engine::scene::cauchyIor(glass.iorD, glass.abbe,
-                                                       engine::scene::kRgbWavelengthsNm.y);
-        const float nBlue = engine::scene::cauchyIor(glass.iorD, glass.abbe,
-                                                      engine::scene::kRgbWavelengthsNm.z);
+        const float nRed = pathtracer::scene::cauchyIor(glass.iorD, glass.abbe,
+                                                     pathtracer::scene::kRgbWavelengthsNm.x);
+        const float nGreen = pathtracer::scene::cauchyIor(glass.iorD, glass.abbe,
+                                                       pathtracer::scene::kRgbWavelengthsNm.y);
+        const float nBlue = pathtracer::scene::cauchyIor(glass.iorD, glass.abbe,
+                                                      pathtracer::scene::kRgbWavelengthsNm.z);
 
         std::cout << "  " << glass.name;
         for (std::size_t pad = std::string(glass.name).size(); pad < 28; ++pad) {
@@ -1596,9 +1596,9 @@ ENGINE_CHECK(cauchy_dispersion, Fast, Exact) {
     // exact rather than merely close: any drift here changes every existing render.
     std::cout << "  abbe 0 returns the authored ior unchanged at every wavelength\n";
     for (const Glass& glass : glasses) {
-        for (float lambda : {kLambdaFNm, engine::scene::kRgbWavelengthsNm.z, kLambdaDNm,
-                             engine::scene::kRgbWavelengthsNm.x, kLambdaCNm}) {
-            const float n = engine::scene::cauchyIor(glass.iorD, 0.0F, lambda);
+        for (float lambda : {kLambdaFNm, pathtracer::scene::kRgbWavelengthsNm.z, kLambdaDNm,
+                             pathtracer::scene::kRgbWavelengthsNm.x, kLambdaCNm}) {
+            const float n = pathtracer::scene::cauchyIor(glass.iorD, 0.0F, lambda);
             if (n != glass.iorD) {
                 std::cerr << "bsdf_validate: FAILED abbe=0 no-op at ior " << glass.iorD << " lambda "
                           << lambda << " -- returned " << n
@@ -1630,7 +1630,7 @@ ENGINE_CHECK(cauchy_dispersion, Fast, Exact) {
 // wo/wi are a coplanar pair mirrored about the normal, unlike checkReciprocity's deliberately
 // non-coplanar ones: that puts nh exactly on +z so woDotNh IS the swept cosine, which is what makes the
 // comparison against a reference evaluated at that cosine exact rather than approximate.
-ENGINE_CHECK(conductor_fresnel, Fast, Exact) {
+PT_CHECK(conductor_fresnel, Fast, Exact) {
     // The ratio is a quotient of differences of float BSDF values, so it carries the cancellation of both.
     constexpr float kRatioTolerance = 2e-3F;
     // Normal incidence is an exact identity, not a fit: R(theta=0) == r for every g (paper sec. 2.3.1).
@@ -1665,7 +1665,7 @@ ENGINE_CHECK(conductor_fresnel, Fast, Exact) {
             return BsdfParams{glm::vec3(1.0F),          1.0F, roughness, glm::vec3(reflectivity),
                                edgeTint,                 /*ior=*/1.5F,
                                /*transmissionFactor=*/0.0F, /*diffuseRoughness=*/0.0F,
-                               engine::scene::eonAlbedoInversion(glm::vec3(1.0F), 0.0F),
+                               pathtracer::scene::eonAlbedoInversion(glm::vec3(1.0F), 0.0F),
                                /*transmissionTint=*/glm::vec3(1.0F)};
         };
         // R(theta=0) == r, independent of edgeTint: wo == wi == +z puts woDotNh at exactly 1.
@@ -1673,7 +1673,7 @@ ENGINE_CHECK(conductor_fresnel, Fast, Exact) {
         for (float roughness : roughnesses) {
             std::array<float, 5> atNormal{};
             for (std::size_t i = 0; i < edgeTints.size(); ++i) {
-                atNormal[i] = maxChannel(engine::scene::evaluateBsdf(
+                atNormal[i] = maxChannel(pathtracer::scene::evaluateBsdf(
                     params(roughness, glm::vec3(edgeTints[i])), normalIncidence, normalIncidence));
             }
             const float atWhite = atNormal.back();
@@ -1722,9 +1722,9 @@ ENGINE_CHECK(conductor_fresnel, Fast, Exact) {
             const double referenceBlack = referenceConductorFresnel(reflectivity, 0.0, cosine);
             for (float roughness : roughnesses) {
                 const float atWhite =
-                    maxChannel(engine::scene::evaluateBsdf(params(roughness, glm::vec3(1.0F)), wo, wi));
+                    maxChannel(pathtracer::scene::evaluateBsdf(params(roughness, glm::vec3(1.0F)), wo, wi));
                 const float atBlack =
-                    maxChannel(engine::scene::evaluateBsdf(params(roughness, glm::vec3(0.0F)), wo, wi));
+                    maxChannel(pathtracer::scene::evaluateBsdf(params(roughness, glm::vec3(0.0F)), wo, wi));
                 const float span = atBlack - atWhite;
                 // The assertion that edgeTint reaches the lobe at all: a dropped edgeTint leaves every
                 // reading identical and span exactly zero. Holds at every r, including 1.
@@ -1753,7 +1753,7 @@ ENGINE_CHECK(conductor_fresnel, Fast, Exact) {
                 for (float edgeTint : edgeTints) {
                     ++ratiosChecked;
                     const float measured = maxChannel(
-                        engine::scene::evaluateBsdf(params(roughness, glm::vec3(edgeTint)), wo, wi));
+                        pathtracer::scene::evaluateBsdf(params(roughness, glm::vec3(edgeTint)), wo, wi));
                     const double expected =
                         (referenceConductorFresnel(reflectivity, edgeTint, cosine) - referenceWhite) /
                         (referenceBlack - referenceWhite);
@@ -1770,9 +1770,9 @@ ENGINE_CHECK(conductor_fresnel, Fast, Exact) {
             // Reported as reflectance, which the reference gives directly; the assertion is on the
             // measured BSDF values, so it is the shipped code being tested and not the reference.
             const float atWhite =
-                maxChannel(engine::scene::evaluateBsdf(params(0.05F, glm::vec3(1.0F)), wo, wi));
+                maxChannel(pathtracer::scene::evaluateBsdf(params(0.05F, glm::vec3(1.0F)), wo, wi));
             const float atBlack =
-                maxChannel(engine::scene::evaluateBsdf(params(0.05F, glm::vec3(0.0F)), wo, wi));
+                maxChannel(pathtracer::scene::evaluateBsdf(params(0.05F, glm::vec3(0.0F)), wo, wi));
             const float separation = (atWhite - atBlack) / atWhite;
             std::cout << "  " << reflectivity << "   " << cosine << "   " << referenceBlack << "   "
                       << referenceWhite << "   " << separation << '\n';
@@ -1825,7 +1825,7 @@ double specularGeometry(double alpha, double cosine) {
 // Roughness stays at or below checkConductorFresnel's kMsNegligibleRoughness so M sits under the tolerance -- it measures below float32 noise here, two orders under it; the two lowest rows are glass.json's and chrome.json's own values, which is what makes this the regression test for both D errors.
 // The sweep only reaches nh = +z, so it pins D at the lobe peak and says nothing about the tails; that is the right trade, since the peak is what a direct highlight is made of and the tails carry no absolute reference to compare against.
 // The grazing rows run to cos 1e-7, through the band where a 1e-6 floor on 4*muO*muI (engaging at cos 5e-4) used to darken the lobe as 4c^2/1e-6: it is the regression test for smithVisibility's clamp-free form, which must match the unfloored reference K all the way to the silhouette.
-ENGINE_CHECK(dielectric_fresnel, Fast, Exact) {
+PT_CHECK(dielectric_fresnel, Fast, Exact) {
     // Float32 round-off in the shipped lobe against a double reference, relative to F since rounding is: M is not resolvable at these roughnesses. Measured worst 3.98e-7 (6.7 float32 unit roundoffs) at ior 2.5, roughness 0.05, cos 4e-4, plus ~17% headroom. A fit-shaped error cannot hide under a bound this tight -- Schlick misses by 0.02 at ior 1.5168 cos 0.5, five orders above it.
     constexpr double kFresnelTolerance = 4.7e-7;
     // Normal incidence is an exact identity, not a fit: referenceDielectricFresnel(1, n) is ((n-1)/(n+1))^2 with both polarisations equal, and nh, woDotNh and G2 are all exactly 1 there, so the only residual is float32 evaluation of F itself. Measured worst 2.54e-8 at ior 2.5, plus ~18% headroom.
@@ -1853,7 +1853,7 @@ ENGINE_CHECK(dielectric_fresnel, Fast, Exact) {
                                      static_cast<float>(ior),
                                      /*transmissionFactor=*/0.0F,
                                      /*diffuseRoughness=*/0.0F,
-                                     engine::scene::eonAlbedoInversion(baseColor, 0.0F),
+                                     pathtracer::scene::eonAlbedoInversion(baseColor, 0.0F),
                                      /*transmissionTint=*/glm::vec3(1.0F)};
             double worstError = 0.0;
             double previous = -1.0;
@@ -1863,7 +1863,7 @@ ENGINE_CHECK(dielectric_fresnel, Fast, Exact) {
                 const glm::vec3 wo(sine, 0.0F, cosine);
                 const glm::vec3 wi(-sine, 0.0F, cosine);
                 const double measured =
-                    static_cast<double>(engine::scene::evaluateBsdfSplit(params, wo, wi).specular.x) /
+                    static_cast<double>(pathtracer::scene::evaluateBsdfSplit(params, wo, wi).specular.x) /
                     specularGeometry(alpha, cosine);
                 const double expected = referenceDielectricFresnel(cosine, ior);
                 const double tolerance = cosine == 1.0F ? kNormalIncidenceTolerance : kFresnelTolerance * expected;
@@ -1911,13 +1911,13 @@ ENGINE_CHECK(dielectric_fresnel, Fast, Exact) {
                                  /*ior=*/1.0F,
                                  /*transmissionFactor=*/0.0F,
                                  /*diffuseRoughness=*/0.0F,
-                                 engine::scene::eonAlbedoInversion(baseColor, 0.0F),
+                                 pathtracer::scene::eonAlbedoInversion(baseColor, 0.0F),
                                  /*transmissionTint=*/glm::vec3(1.0F)};
         for (float cosine : indexMatchedCosines) {
             const float sine = std::sqrt(std::max(0.0F, 1.0F - (cosine * cosine)));
             const glm::vec3 wo(sine, 0.0F, cosine);
             const glm::vec3 wi(-sine, 0.0F, cosine);
-            const float measured = maxChannel(engine::scene::evaluateBsdfSplit(params, wo, wi).specular);
+            const float measured = maxChannel(pathtracer::scene::evaluateBsdfSplit(params, wo, wi).specular);
             ++indexMatchedRows;
             if (!(measured == 0.0F)) {
                 std::cerr << "bsdf_validate: FAILED dielectric Fresnel at index match, roughness="
@@ -1939,7 +1939,7 @@ ENGINE_CHECK(dielectric_fresnel, Fast, Exact) {
 // Helmholtz reciprocity: f(wo->wi) == f(wi->wo). The continuous lobes are symmetric by construction after the directional-albedo diffuse coupling landed: D and G2 are symmetric, Fresnel is evaluated at the shared half-vector, and both the coupling and the multiple-scattering lobe are products of matching wo-side and wi-side factors, so this is an equality to float precision, not a statistical bound.
 // It fails hard on the pre-coupling code, where the diffuse lobe carried (1 - F(mu_o)) alone; not an energy error (the furnace passed throughout) but a misdistribution across view/light geometry, and the blocker for every bidirectional transport algorithm (BDPT, VCM, light tracing, photon mapping), all of which require symmetric f.
 // Transmission is excluded (transmissionFactor=0, both cosines positive): radiance transport across a refracting interface is genuinely non-symmetric, so f(wo->wi)==f(wi->wo) is the wrong invariant there; the eta^2-corrected one it does satisfy lives in checkTransmissionReciprocity below.
-ENGINE_CHECK(reciprocity, Fast, Exact) {
+PT_CHECK(reciprocity, Fast, Exact) {
     constexpr float kRelativeTolerance = 1e-4F;
     const std::array<float, 4> roughnesses = {0.05F, 0.25F, 0.5F, 1.0F};
     const std::array<float, 3> metallics = {0.0F, 0.5F, 1.0F};
@@ -1959,8 +1959,8 @@ ENGINE_CHECK(reciprocity, Fast, Exact) {
                         const float sinB = std::sqrt(std::max(0.0F, 1.0F - (muB * muB)));
                         const glm::vec3 wo(sinA, 0.0F, muA);
                         const glm::vec3 wi(sinB * std::cos(1.1F), sinB * std::sin(1.1F), muB);
-                        const glm::vec3 forward = engine::scene::evaluateBsdf(params, wo, wi);
-                        const glm::vec3 reverse = engine::scene::evaluateBsdf(params, wi, wo);
+                        const glm::vec3 forward = pathtracer::scene::evaluateBsdf(params, wo, wi);
+                        const glm::vec3 reverse = pathtracer::scene::evaluateBsdf(params, wi, wo);
                         const float scale = std::max(maxChannel(forward), maxChannel(reverse));
                         if (!(maxChannel(glm::abs(forward - reverse)) <=
                               kRelativeTolerance * std::max(scale, 1e-4F))) {
@@ -1986,7 +1986,7 @@ ENGINE_CHECK(reciprocity, Fast, Exact) {
 // Isolated by magnitude, with no new accessor: the multiple-scattering term is live at every rough roughness, but at 0.05 and 0.10 its deficit is so far below the single-scatter peak these constructed pairs sit on that the worst mismatch is unchanged by it (7.7e-5 and 3.0e-5 with the term on and off), two orders inside the tolerance. Both roughnesses stay above kSmoothAlpha or there is no continuous lobe to test at all.
 // wi is CONSTRUCTED, not sampled: at these roughnesses the lobe is a fraction of a degree wide, so an arbitrary far-side direction returns zero on both sides and the check passes having tested nothing. Refract wo through the macro normal, then perturb by a multiple of alpha for off-peak pairs; the non-zero-pair count is asserted for the same reason.
 // transmissionFactor is pinned at 1.0. Between 0 and 1 the entering side scales the lobe by it and the exiting side by 1.0 -- a modelling asymmetry (inside the medium there is no substrate to withhold anything), not a Jacobian error, so sweeping it would test the convention rather than the invariant.
-ENGINE_CHECK(transmission_reciprocity, Fast, Exact) {
+PT_CHECK(transmission_reciprocity, Fast, Exact) {
     // Not checkReciprocity's 1e-4: D is sharply peaked at these alphas (2.5e-3 to 1e-2) and the two queries build ht from differently scaled sums, so a few-ULP direction difference is amplified by dD/D ~ 4/alpha^2 off the peak. Worst measured 6.4e-3 at roughness 0.05, 2.1e-3 at 0.10; full discriminating power against the O(1) structural errors above survives at 1e-2.
     constexpr float kRelativeTolerance = 1e-2F;
     const std::array<float, 2> roughnesses = {0.05F, 0.10F};
@@ -2005,7 +2005,7 @@ ENGINE_CHECK(transmission_reciprocity, Fast, Exact) {
             const BsdfParams params{glm::vec3(1.0F), 0.0F, roughness,
                                      glm::vec3(0.04F), glm::vec3(1.0F), ior,
                                      /*transmissionFactor=*/1.0F, /*diffuseRoughness=*/0.0F,
-                                     engine::scene::eonAlbedoInversion(glm::vec3(1.0F), 0.0F),
+                                     pathtracer::scene::eonAlbedoInversion(glm::vec3(1.0F), 0.0F),
                                      /*transmissionTint=*/glm::vec3(1.0F)};
             for (float mu : cosines) {
                 const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (mu * mu))), 0.0F, mu);
@@ -2024,8 +2024,8 @@ ENGINE_CHECK(transmission_reciprocity, Fast, Exact) {
                         const glm::vec3 wi = glm::normalize((std::cos(angle) * refracted) +
                                                              (std::sin(angle) * tangent));
                         const glm::vec3 forward =
-                            engine::scene::evaluateBsdf(params, wo, wi) * ior * ior;
-                        const glm::vec3 reverse = engine::scene::evaluateBsdf(params, wi, wo);
+                            pathtracer::scene::evaluateBsdf(params, wo, wi) * ior * ior;
+                        const glm::vec3 reverse = pathtracer::scene::evaluateBsdf(params, wi, wo);
                         const float scale = std::max(maxChannel(forward), maxChannel(reverse));
                         if (scale <= 0.0F) {
                             continue;
@@ -2056,7 +2056,7 @@ ENGINE_CHECK(transmission_reciprocity, Fast, Exact) {
 
 // Round trip through a transmissive interface: sampleBsdf applies a non-symmetric eta^2 compression on refraction (Veach 1997 sec. 5.2), entering scales by (1/ior)^2, exiting by ior^2, so a ray that enters and leaves the same surface must lose no net energy.
 // checkFurnace tests each side separately against a per-side bound (1.0 entering, ior^2 exiting), which passes even if the two factors do not actually cancel; this asserts the invariant bsdf.cpp's own comment claims.
-ENGINE_CHECK(transmission_round_trip, Slow, Statistical) {
+PT_CHECK(transmission_round_trip, Slow, Statistical) {
     constexpr int kSampleCount = 200000;
     // Not tight to 1.0: each side's furnace value also contains that interface's reflected lobe, so the product carries a Fresnel cross-term that grows toward grazing (measured 1.027 at normal incidence, 1.058 at 60 degrees).
     // The band still has large discriminating power: factors that compounded rather than cancelled would land near ior^2=2.25, and ones that under-cancelled near 1/2.25=0.44.
@@ -2098,7 +2098,7 @@ ENGINE_CHECK(transmission_round_trip, Slow, Statistical) {
 // This is the only check in the suite that reaches the Snell block's cos^2 TIR predicate at ior 1. It decided total internal reflection from 1 - cos^2(thetaI), which rounds to exactly 1.0F below cos 2^-12, so it reported TIR at an interface with no critical angle and returned no sample at all. A lost transmission sample is silent: it is energy deleted from the estimator, not a wrong value, so no furnace, reciprocity or chi-square row above can see it -- only the absence asserted here.
 // It is also the only check that pins ior 1 to that same block at EVERY roughness. An index-matched interface is not a rough interface, it is no interface, and transmissionIsRough says so (PBRT-v4's DielectricBxDF branches its value, pdf and sampler on the same `eta == 1 || EffectivelySmooth()`). Before it did, the rough branch reached refractAbout, which returns -wo about every microfacet normal at ior 1, and evaluateTransmissionLobe then normalised the resulting zero half-vector: measured NaN throughput on 7783 of 7783 transmission draws at roughness 0.1 and 6666 of 7783 at roughness 1.0, the remainder being msTransmit draws, which do not form that half-vector. NaN is silent for the same reason a lost sample is -- it is not a wrong value any row above can average, it poisons the pixel for the rest of the render.
 // The existence assertion is binary and carries the check; it needs no tolerance and cannot be tuned. The direction and throughput assertions are the backstop that stops a sample that merely EXISTS from passing while pointing somewhere an index-matched interface cannot send it, and the reflection rows are the same statement on the near hemisphere: exact Fresnel is identically zero at ior 1, so nothing may come back.
-ENGINE_CHECK(index_matched_transmission, Fast, Exact) {
+PT_CHECK(index_matched_transmission, Fast, Exact) {
     // Straight-through is algebraic at r == 1 -- cos(thetaT) == cos(thetaI) and the tangential components scale by exactly 1 -- but it is reached through sqrt(fl(wo.z*wo.z)), which is not required to return |wo.z| to the last bit. Measured worst 0 over the whole sweep; the bound is one float32 epsilon of headroom, not a fitted number.
     constexpr float kDirectionTolerance = 1.2e-7F;
     // NOT throughput == tint: sampleBsdf returns f/pdf, which divides by the lobe-selection probability, so a single draw carries tint/P and reads 0.842105 against a 0.8 tint at P = 0.95. That factor is what makes the estimator unbiased, and asserting it away would assert a bias in.
@@ -2129,9 +2129,9 @@ ENGINE_CHECK(index_matched_transmission, Fast, Exact) {
                                        params.edgeTint,   /*ior=*/1.0F,
                                        params.transmissionFactor, params.diffuseRoughness,
                                        params.diffuseRho, params.transmissionTint};
-        engine::scene::Sampler sampler(0, 0, 0, 1, 9100U);
-        const std::optional<engine::scene::BsdfSample> smooth =
-            engine::scene::sampleBsdf(smoothParams, wo, sampler);
+        pathtracer::scene::Sampler sampler(0, 0, 0, 1, 9100U);
+        const std::optional<pathtracer::scene::BsdfSample> smooth =
+            pathtracer::scene::sampleBsdf(smoothParams, wo, sampler);
         ++rowsChecked;
         if (!smooth.has_value()) {
             std::cerr << "bsdf_validate: FAILED index-matched transmission at cos=" << cosine
@@ -2171,14 +2171,14 @@ ENGINE_CHECK(index_matched_transmission, Fast, Exact) {
         float roughDirection = 0.0F;
         float roughChromaticity = 0.0F;
         for (int i = 0; i < kRoughDraws; ++i) {
-            engine::scene::Sampler roughSampler(0, 0, i, kRoughDraws, 9200U);
-            const std::optional<engine::scene::BsdfSample> rough =
-                engine::scene::sampleBsdf(roughParams, wo, roughSampler);
+            pathtracer::scene::Sampler roughSampler(0, 0, i, kRoughDraws, 9200U);
+            const std::optional<pathtracer::scene::BsdfSample> rough =
+                pathtracer::scene::sampleBsdf(roughParams, wo, roughSampler);
             if (!rough.has_value()) {
                 ++rejected;
                 continue;
             }
-            if (rough->type != engine::scene::LobeType::Transmission) {
+            if (rough->type != pathtracer::scene::LobeType::Transmission) {
                 continue;
             }
             ++transmitted;
@@ -2222,7 +2222,7 @@ ENGINE_CHECK(index_matched_transmission, Fast, Exact) {
         // Nothing may reflect. Exact dielectric Fresnel is identically zero at ior 1, so the reflection lobe has no value to carry -- but the Kulla-Conty compensation reads its escaping fraction from a table whose eta axis is log-spaced and never lands on 1, and the interpolated reflected share it returns is energy the interface did not reflect. Measured up to 0.0191 over these rows before computeLobeProbabilities took the exact index-matched boundary, the grazing rows worst; asserted at zero, not at a bound, because zero is what the Fresnel says.
         for (float wiZ : {0.9F, 0.5F, 0.15F}) {
             const glm::vec3 wi(std::sqrt(std::max(0.0F, 1.0F - (wiZ * wiZ))), 0.0F, wiZ);
-            const glm::vec3 reflected = engine::scene::evaluateBsdfSplit(roughParams, wo, wi).specular;
+            const glm::vec3 reflected = pathtracer::scene::evaluateBsdfSplit(roughParams, wo, wi).specular;
             if (maxChannel(reflected) != 0.0F) {
                 std::cerr << "bsdf_validate: FAILED index-matched reflection at cos=" << cosine
                           << " wi.z=" << wiZ << " -- reflected (" << reflected.x << ", " << reflected.y
@@ -2297,7 +2297,7 @@ double criticalCosine(double iorDense) {
 // formulation that merely approaches 1 near grazing would pass a banded check and fail this one.
 // Outside the cone the reflectance must be strictly below 1, or the lobe has reported a critical angle that the
 // interface does not have -- the exact defect the cos^2 form fixed at ior 1, here at ior > 1 where the cone is real.
-ENGINE_CHECK(critical_angle_onset, Fast, Exact) {
+PT_CHECK(critical_angle_onset, Fast, Exact) {
     // Spans the shipped range: glass.json is 1.5, clay.json's coat is 1.55, and 1.33/2.4 bracket it with water and
     // diamond so the cone's width varies by more than a factor of two across the sweep.
     const std::array<double, 5> iors = {1.33, 1.5, 1.5168, 1.55, 2.4};
@@ -2316,7 +2316,7 @@ ENGINE_CHECK(critical_angle_onset, Fast, Exact) {
             const double inside = muC - offset;
             if (inside > 0.0) {
                 ++rowsChecked;
-                const float f = engine::scene::fresnelDielectric(static_cast<float>(inside),
+                const float f = pathtracer::scene::fresnelDielectric(static_cast<float>(inside),
                                                                   static_cast<float>(ior), 1.0F);
                 if (!(f == 1.0F)) {
                     std::cerr << "bsdf_validate: FAILED TIR onset at ior=" << ior << " cos=" << inside
@@ -2329,7 +2329,7 @@ ENGINE_CHECK(critical_angle_onset, Fast, Exact) {
             const double outside = muC + offset;
             if (outside <= 1.0) {
                 ++rowsChecked;
-                const float f = engine::scene::fresnelDielectric(static_cast<float>(outside),
+                const float f = pathtracer::scene::fresnelDielectric(static_cast<float>(outside),
                                                                   static_cast<float>(ior), 1.0F);
                 worstOutside = std::max(worstOutside, f);
                 if (!(f < 1.0F)) {
@@ -2364,7 +2364,7 @@ ENGINE_CHECK(critical_angle_onset, Fast, Exact) {
 // Both directions carry weight and fail differently: a transmitted sample inside the cone is energy arriving from a
 // direction Snell cannot reach, and no transmitted sample outside it is energy deleted from the estimator rather than
 // redirected -- the silent failure mode checkIndexMatchedTransmission exists to catch at ior 1, here at ior > 1.
-ENGINE_CHECK(tir_predicate_agreement, Fast, Exact) {
+PT_CHECK(tir_predicate_agreement, Fast, Exact) {
     // Enough draws that "transmission is reachable" is not a statement about one lucky lobe selection: just outside the
     // cone the transmitted share is already ~26% (measured 1068/4096 at ior 1.33), so a zero count over this many draws
     // is a structural absence rather than a sampling accident.
@@ -2391,7 +2391,7 @@ ENGINE_CHECK(tir_predicate_agreement, Fast, Exact) {
                 ++rowsChecked;
                 const float muF = static_cast<float>(mu);
                 const bool fresnelSaysTir =
-                    engine::scene::fresnelDielectric(muF, static_cast<float>(ior), 1.0F) == 1.0F;
+                    pathtracer::scene::fresnelDielectric(muF, static_cast<float>(ior), 1.0F) == 1.0F;
 
                 // Exiting side: woLocal.z < 0 is the orientation in which the dense medium is the incident one, and the
                 // only one in which a critical angle exists at all.
@@ -2408,11 +2408,11 @@ ENGINE_CHECK(tir_predicate_agreement, Fast, Exact) {
 
                 int transmitted = 0;
                 for (int i = 0; i < kDraws; ++i) {
-                    engine::scene::Sampler sampler(0, 0, i, kDraws, 5100U);
-                    const std::optional<engine::scene::BsdfSample> sample =
-                        engine::scene::sampleBsdf(params, wo, sampler);
+                    pathtracer::scene::Sampler sampler(0, 0, i, kDraws, 5100U);
+                    const std::optional<pathtracer::scene::BsdfSample> sample =
+                        pathtracer::scene::sampleBsdf(params, wo, sampler);
                     transmitted +=
-                        sample.has_value() && sample->type == engine::scene::LobeType::Transmission ? 1 : 0;
+                        sample.has_value() && sample->type == pathtracer::scene::LobeType::Transmission ? 1 : 0;
                 }
 
                 // The two sites must reach the same verdict from the same macro geometry. Stated as the agreement
@@ -2459,7 +2459,7 @@ struct ChiSquareCase {
     float ndotV;
 };
 
-ENGINE_CHECK(sampling_chi_square, Slow, Statistical) {
+PT_CHECK(sampling_chi_square, Slow, Statistical) {
     constexpr int kCosBins = 16;
     constexpr int kPhiBins = 8;
     constexpr int kPanels = 256;            // even, for Simpson, per axis per bin; measured, not guessed: the peaked refraction lobe at roughness 0.2 is mis-integrated badly enough to report p=1e-78 on correct code at 48 panels and to still fail at 64, passes from 96, and the p-value stops moving past this
@@ -2501,7 +2501,7 @@ ENGINE_CHECK(sampling_chi_square, Slow, Statistical) {
                         const glm::vec3 wi(static_cast<float>(sinTheta * std::cos(phi)),
                                             static_cast<float>(sinTheta * std::sin(phi)),
                                             static_cast<float>(cosTheta));
-                        return static_cast<double>(engine::scene::pdfBsdf(params, wo, wi));
+                        return static_cast<double>(pathtracer::scene::pdfBsdf(params, wo, wi));
                     });
                 });
                 expected[static_cast<std::size_t>((ci * kPhiBins) + pi)] = integral * kSampleCount;
@@ -2513,8 +2513,8 @@ ENGINE_CHECK(sampling_chi_square, Slow, Statistical) {
         std::vector<double> observed(expected.size(), 0.0);
         std::mt19937 rng(kSeed);
         for (int i = 0; i < kSampleCount; ++i) {
-            engine::scene::Sampler sampler(0, 0, 0, 1, rng());
-            const std::optional<engine::scene::BsdfSample> sample = engine::scene::sampleBsdf(params, wo, sampler);
+            pathtracer::scene::Sampler sampler(0, 0, 0, 1, rng());
+            const std::optional<pathtracer::scene::BsdfSample> sample = pathtracer::scene::sampleBsdf(params, wo, sampler);
             if (!sample.has_value() || sample->pdf <= 0.0F) {
                 observed.back() += 1.0;
                 continue;
@@ -2574,7 +2574,7 @@ ENGINE_CHECK(sampling_chi_square, Slow, Statistical) {
 // grows with alpha, and F is convex in cos, so the mean over the lobe falls below the macro value exactly where the
 // macro ramp is steepest. A version that ignored roughness -- or sampled the wrong distribution -- would pass (1) and
 // fail (2), which is why both are asserted together.
-ENGINE_CHECK(microfacet_fresnel, Slow, Statistical) {
+PT_CHECK(microfacet_fresnel, Slow, Statistical) {
     ctx.plan(3);
     constexpr int kDraws = 200000;
     constexpr std::uint32_t kSeed = 7919U;
@@ -2583,8 +2583,8 @@ ENGINE_CHECK(microfacet_fresnel, Slow, Statistical) {
         const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (ndotV * ndotV))), 0.0F, ndotV);
         glm::dvec3 sum(0.0);
         for (int i = 0; i < kDraws; ++i) {
-            engine::scene::Sampler sampler(0, 0, i, kDraws, kSeed);
-            sum += glm::dvec3(engine::scene::fresnelAtMicrofacet(params, wo, sampler.next2D()));
+            pathtracer::scene::Sampler sampler(0, 0, i, kDraws, kSeed);
+            sum += glm::dvec3(pathtracer::scene::fresnelAtMicrofacet(params, wo, sampler.next2D()));
         }
         return glm::vec3(sum / static_cast<double>(kDraws));
     };
@@ -2608,7 +2608,7 @@ ENGINE_CHECK(microfacet_fresnel, Slow, Statistical) {
     std::snprintf(smoothDetail, sizeof(smoothDetail),
                   "worst |E[F(wo.wh)] - F(n.wo)| at the roughness floor is %.3e, which must be below 1e-3",
                   static_cast<double>(worstSmooth));
-    ENGINE_EXPECT(ctx, smoothOk, smoothDetail);
+    PT_EXPECT(ctx, smoothOk, smoothDetail);
 
     // Grazing, where the macro ramp is steepest and the lobe average therefore departs from it most.
     constexpr float kGrazing = 0.1F;
@@ -2619,7 +2619,7 @@ ENGINE_CHECK(microfacet_fresnel, Slow, Statistical) {
     std::snprintf(flatDetail, sizeof(flatDetail),
                   "at roughness 0.6, grazing: E[F] = %.4f against a macro F of %.4f, which it must fall below",
                   static_cast<double>(roughMean.x), static_cast<double>(roughMacro.x));
-    ENGINE_EXPECT(ctx, roughMean.x < roughMacro.x, flatDetail);
+    PT_EXPECT(ctx, roughMean.x < roughMacro.x, flatDetail);
 
     // A coloured conductor: the reason the lane carries RGB rather than the (F, 1-F, 0) packing it replaced. Gulbrandsen
     // 2014's edgeTint inverts to a per-channel complex IOR, so the expectation is chromatic and a single channel cannot
@@ -2633,7 +2633,7 @@ ENGINE_CHECK(microfacet_fresnel, Slow, Statistical) {
                   "edge-tinted conductor spans %.4f across RGB (%.4f, %.4f, %.4f); a greyscale lane would report one",
                   static_cast<double>(spread), static_cast<double>(tintedMean.x),
                   static_cast<double>(tintedMean.y), static_cast<double>(tintedMean.z));
-    ENGINE_EXPECT(ctx, spread > 1e-3F, chromaDetail);
+    PT_EXPECT(ctx, spread > 1e-3F, chromaDetail);
 }
 
-ENGINE_CHECK_MAIN("bsdf")
+PT_CHECK_MAIN("bsdf")

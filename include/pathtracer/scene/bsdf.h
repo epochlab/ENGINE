@@ -1,0 +1,127 @@
+#pragma once
+
+#include <optional>
+
+#include <glm/glm.hpp>
+
+#include "pathtracer/scene/sampler.h"
+
+namespace pathtracer::scene {
+
+// Resolved shading parameters at a hit point (textures already sampled by the caller).
+struct BsdfParams {
+    // OpenPBR's base_color, "the observed reflection color (viewed at normal incidence under uniform illumination)" -- a REFLECTION quantity, and the authored colour resolveBsdfParams derives both f0 and diffuseRho from before this struct exists.
+    // It deliberately does not tint transmission, which transmissionTint below does, so the rasterizer's albedo AOV is now the only reader of the field itself.
+    glm::vec3 baseColor;
+    float metallic;
+    float roughness;            // perceptual; alpha = roughness^2, floored to avoid a delta lobe
+    glm::vec3 f0;                // specular reflectance at normal incidence; also Gulbrandsen's reflectivity r for the conductor lobe, clamped to [1e-4, 0.9999] at the point of use
+    // Gulbrandsen 2014 edgetint g, the conductor's grazing-angle colour bias: 1 = white edge (no reflectance dip, what Schlick forces), 0 = maximum dip. Together with f0 it inverts to a complex IOR -- see bsdf.cpp's conductorIorFromReflectivity. Inert at metallic=0.
+    glm::vec3 edgeTint;
+    float ior;                   // dielectric IOR, non-metal lobes only
+    float transmissionFactor;    // KHR_materials_transmission, 0 = opaque
+    // EON rough-diffuse parameter r in [0,1] (Portsmouth, Kutz, Hill 2025, "EON: A Practical
+    // Energy-Preserving Rough Diffuse BRDF", JCGT 14(1)) -- distinct from `roughness`, which drives
+    // the specular GGX lobe: these are different microsurface statistics even on the same material.
+    // 0 = Lambertian (EON's exact r->0 limit), see evaluateDiffuseLobe.
+    float diffuseRoughness;
+    // EON's single-scattering albedo parameter rho, which is what the diffuse lobe evaluates -- NOT the
+    // authored colour. baseColor is the albedo the surface is asked to be observed to have; rho is what
+    // reproduces it once the multiple-scattering lobe's saturation is accounted for. Resolved once per
+    // hit by gbuffer_shading.cpp's resolveBsdfParams via bsdf.cpp's eonAlbedoInversion, which is the
+    // sole source of this value; the two coincide exactly at diffuseRoughness 0 and at baseColor 1.
+    // Kept separate rather than folded into baseColor, which stays the authored colour f0 is derived from and the rasterizer's albedo AOV reports.
+    glm::vec3 diffuseRho;
+    // The transmission lobe's only tint, and the transmission-side counterpart to baseColor above: OpenPBR/Arnold's convention, the one path_tracer.cpp's sigmaAFromTransmission already cited by name.
+    // transmissionColor is realized either IN the volume or ON the surface and never both, selected by transmissionDepth: at depth > 0 it is Beer-Lambert extinction over that distance and this is white, at depth == 0 there is no interior medium and this is OpenPBR's "constant (on-surface) transmission tint", applied once per interface crossing.
+    // glTF KHR_materials_transmission tints with baseColor instead, but only for want of a transmission colour of its own: it is defined for "infinitely thin surfaces" whose absorption "is constant and equal to 1.0 - baseColor", which is the depth == 0 case under another name rather than a competing convention.
+    // Resolved once per hit by gbuffer_shading.cpp's resolveBsdfParams, the sole source of this value.
+    glm::vec3 transmissionTint;
+};
+
+// Local shading frame (z = shading normal) for world<->local direction transforms.
+struct ShadingFrame {
+    glm::vec3 tangent;
+    glm::vec3 bitangent;
+    glm::vec3 normal;
+    [[nodiscard]] glm::vec3 toLocal(const glm::vec3& v) const {
+        return {glm::dot(v, tangent), glm::dot(v, bitangent), glm::dot(v, normal)};
+    }
+    [[nodiscard]] glm::vec3 toWorld(const glm::vec3& v) const {
+        return (v.x * tangent) + (v.y * bitangent) + (v.z * normal);
+    }
+};
+
+// Which lobe sampleBsdf drew from -- used by path_tracer.cpp to bucket radiance into the AOV transport-component breakdown (Direct/Indirect Diffuse/Specular, Refraction). Transmission is a delta lobe ONLY below the smooth-roughness threshold; above it the lobe has a real continuous pdf and is MIS-eligible like any other, so callers must not assume a light sample can never land on it.
+enum class LobeType { Diffuse, SpecularReflection, Transmission };
+
+struct BsdfSample {
+    glm::vec3 wiLocal;            // sampled direction, local shading frame
+    glm::vec3 throughputWeight;   // f(wi)*|cosThetaI| / pdf(wi)
+    LobeType type;
+    // The mixture density wiLocal was actually drawn from -- exactly what pdfBsdf would return for it, computed here because sampleBsdf already has it in hand. Zero for the smooth-glass delta branch, which is what MIS's delta test keys on (path_tracer.cpp).
+    float pdf;
+};
+
+// The BSDF's continuous lobes at one wi, split by transport type and evaluated in a single pass. Reflection and transmission occupy disjoint hemispheres, so at most one of {diffuse+specular} and {transmission} is non-zero. total() is evaluateBsdf's value and pdf is pdfBsdf's, so the three components are a true partition of the value NEE divides by pdf -- which is what lets path_tracer.cpp's transport AOVs sum back to beauty exactly.
+struct BsdfEval {
+    glm::vec3 diffuse;
+    glm::vec3 specular;
+    glm::vec3 transmission;
+    float pdf;
+    [[nodiscard]] glm::vec3 total() const { return diffuse + specular + transmission; }
+};
+
+// Macro-surface Fresnel reflectance at cosTheta = dot(normal, viewDirection): the exact dielectric and exact complex-IOR conductor terms mixed by metallic, which is the same term evaluateSpecularLobe evaluates, in the entering orientation a primary-hit value wants.
+// It exists so the Fresnel AOV shows the Fresnel the renderer actually shades with: it used to be Schlick against f0, which for a metal is a different curve entirely -- Schlick is monotone in cos by construction, so it cannot show the reflectance dip an authored edgeTint produces. Reached only through fresnelAtMicrofacet below, which supplies the microfacet angle in place of the macro one.
+[[nodiscard]] glm::vec3 fresnelAtViewAngle(const BsdfParams& params, float cosTheta);
+
+// One sample of the Fresnel reflectance the microfacet BSDF actually evaluates at this vertex: a half-vector drawn from the visible normal distribution (Heitz 2018, the same D_vis and the same alpha sampleBsdf draws from) put through fresnelAtViewAngle above at dot(wo, wh) rather than at the macro dot(n, wo). Walter et al. 2007 is what makes that the right angle; Karis 2013's split-sum is the precedent for reporting the expectation of F over D_vis as a term in its own right.
+// The estimator is E[F(wo.wh)] over that distribution, so the CALLER MUST AVERAGE -- the path tracer's Fresnel AOV, its only consumer, accumulates it over samples and passes like every other lane. That is the whole difference from the macro value it replaces: this one is roughness-dependent, converging to a lobe-width-weighted mean that a single macro-normal evaluation cannot express, and it collapses back onto that evaluation as alpha reaches its kMinAlpha floor.
+// u: two independent uniforms, which the caller draws from a stream of its own so this cannot shift the path's sampler dimensions.
+[[nodiscard]] glm::vec3 fresnelAtMicrofacet(const BsdfParams& params, const glm::vec3& woLocal, glm::vec2 u);
+
+// Cosine-weighted hemisphere direction about +z, pdf = cos(theta)/pi. Promoted from bsdf.cpp for path_tracer.cpp's ambient-occlusion lane, the same reason fresnelAtViewAngle above is exported: that pdf cancels the cosine in Miller 1994's AO integral, collapsing the estimator to the mean of the visibility term.
+[[nodiscard]] glm::vec3 sampleCosineHemisphere(glm::vec2 u);
+
+// Cosine-weighted average Fresnel of each interface, 2*int_0^1 F(mu)*mu dmu -- what the Kulla-Conty multiple-scattering tint attenuates each repeated microfacet bounce by. One 3-node quadrature rule serves both, each evaluated over the Fresnel its own single scatter evaluates. Exported for tools/bsdf_validate.cpp's checkAverageFresnel, which is the only instrument that can see an error in either: the two-sided white furnace runs at f0=1 where every candidate average agrees, and the coloured-metal furnace rows are upper-bound-only and so blind to a loss.
+// conductorFresnelAvg takes the complex IOR rather than (reflectivity, edgeTint) because callers have already inverted it for the single-scatter term and must not invert twice; bsdf.cpp's conductorIorFromReflectivity is the inversion.
+[[nodiscard]] glm::vec3 conductorFresnelAvg(const glm::vec3& n, const glm::vec3& k);
+[[nodiscard]] float dielectricFresnelAvg(float ior);
+
+// Reflect-side Kulla-Conty albedo lookups: the Schlick-split directional albedo E(mu, roughness) as (a, b) with E = a+b, and its cosine-weighted mean Eavg(roughness). Exported for tools/bsdf_validate.cpp's checkAlbedoTableInterpolation under the same rule as the average-Fresnel pair above -- the table's quadrature residual is printed by its generator on every bake, but its INTERPOLATION error has no other instrument, and no energy test in the suite resolves better than the two-sided white furnace's 2%.
+// These are the lookups, not the table: what the check measures is src/scene/albedo_table.inc read through the axis warps and the bilinear blend bsdf.cpp actually performs.
+[[nodiscard]] glm::vec2 directionalAlbedoSplit(float mu, float roughness);
+[[nodiscard]] glm::vec2 averageAlbedoSplit(float roughness);
+
+// The grid those two index: its two resolutions, and each axis' node position at a possibly fractional index, so an instrument can place samples exactly ON nodes and exactly BETWEEN them without transcribing the grid. Transcribing it is what went stale in checkWhiteFurnaceTwoSided's off-grid rows the last time the table changed resolution, and a sample that drifts onto a node measures nothing.
+// Both axes are edge-aligned, so index 0 and index res-1 are exact endpoints, but they are NOT both linear in the index: the mu axis is uniform in sqrt(mu), and albedoGridMu inverts that warp. Reading it rather than assuming k/(res-1) is the whole point of the accessor.
+[[nodiscard]] glm::ivec2 albedoGridRes();
+[[nodiscard]] float albedoGridRoughness(float index);
+[[nodiscard]] float albedoGridMu(float index);
+
+// EON's Appendix A albedo inversion: the rho whose EON directional albedo at normal incidence equals albedo, under uniform illumination. The identity at r=0 and at albedo=1. Every BsdfParams::diffuseRho comes from here -- see that field, and bsdf.cpp for the derivation and the numerical form.
+[[nodiscard]] glm::vec3 eonAlbedoInversion(const glm::vec3& albedo, float r);
+
+// Representative wavelength of each RGB channel, from OpenPBR_BaseRgbWavelengths_nm in Adobe's OpenPBR BSDF reference implementation (openpbr_constants.h) -- the same standard this pipeline already takes edgeTint and EON from.
+// Known error, in that implementation's own words: one fixed wavelength per channel makes dispersion "produce ... discrete RGB bands" rather than natural rainbow colours, because an RGB channel integrates a band and cannot be represented by a line. Its documented remedy is a stochastically drawn lambda per path, which needs only this lookup replaced by a draw -- see docs/roadmap.md transport #5.
+inline constexpr glm::vec3 kRgbWavelengthsNm(620.0F, 540.0F, 450.0F);
+
+// Cauchy dispersion n(lambda) inverted from an authored (ior at the d line, Abbe number V_d), per Khronos KHR_materials_dispersion. abbe <= 0 returns iorD unchanged, which is how a non-dispersive material stays bit-identical. Exported for tools/bsdf_validate.cpp's checkCauchyDispersion; taken per-wavelength rather than per-channel so the Fraunhofer identities it is defined by are directly assertable.
+[[nodiscard]] float cauchyIor(float iorD, float abbe, float lambdaNm);
+
+// Value and pdf of the continuous lobes at wiLocal, split by transport type. Piecewise, since reflection and transmission occupy disjoint hemispheres: wiLocal on wo's side gives the specular-reflection + diffuse mixture, the far side gives the rough transmission lobe. Transmission is excluded only when it is a delta (roughness below the smooth threshold, zero-measure). woLocal.z sign: entering (>0) vs exiting (<0) a dielectric. One call rather than the four separate lobe evaluations NEE used to make -- the lobe probabilities, the GGX/Fresnel terms and the albedo-table lookups are all computed once and shared.
+[[nodiscard]] BsdfEval evaluateBsdfSplit(const BsdfParams& params, const glm::vec3& woLocal,
+                                          const glm::vec3& wiLocal);
+
+// evaluateBsdfSplit's total() and pdf. Kept as named entry points for the validation tools, which want one or the other; anything needing both, or the split, should call evaluateBsdfSplit once instead.
+[[nodiscard]] float pdfBsdf(const BsdfParams& params, const glm::vec3& woLocal,
+                            const glm::vec3& wiLocal);
+[[nodiscard]] glm::vec3 evaluateBsdf(const BsdfParams& params, const glm::vec3& woLocal,
+                                      const glm::vec3& wiLocal);
+
+// Stochastically samples one of {rough specular reflection, diffuse, refraction, multiple-scattering transmission} by Fresnel- and energy-derived probability, returns the ready-to-multiply throughput weight. Diffuse+specular combine via the one-sample mixture estimator (both lobes evaluated at whichever wi was drawn, not just the sampled lobe -- required since a rough surface's lobes overlap). The specular selection probability is scaled by the GGX directional albedo E(mu_o, roughness), so VNDF sampling takes the single-scattering share and the cosine strategy takes the (cosine-shaped) multiple-scattering share. Transmission: Walter et al. 2007 rough refraction about a VNDF-sampled microfacet normal, falling back to a pure-Snell delta lobe below the smooth-roughness threshold (matching PBRT's EffectivelySmooth, so smooth glass stays exact and noise-free); TIR folded into the specular probability; single non-nested dielectric boundary. The transmit-side multiple-scattering lobe is a fourth strategy, cosine-distributed over the far hemisphere, because refraction sampling reaches only directions some microfacet can refract into while that lobe spans the whole hemisphere. Returns nullopt if fully absorbed.
+[[nodiscard]] std::optional<BsdfSample> sampleBsdf(const BsdfParams& params,
+                                                    const glm::vec3& woLocal, Sampler& sampler);
+
+}  // namespace pathtracer::scene

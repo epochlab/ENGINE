@@ -1,13 +1,13 @@
-#include "engine/debug/histogram.h"
+#include "pathtracer/debug/histogram.h"
 
 #include <utility>
 
 #include <GL/glew.h>
 
-#include "engine/debug/memory_tracker.h"
-#include "engine/gfx/gl_debug.h"
+#include "pathtracer/debug/memory_tracker.h"
+#include "pathtracer/gfx/gl_debug.h"
 
-namespace engine::debug {
+namespace pathtracer::debug {
 
 Histogram::Histogram() {
     GL_CALL(glGenFramebuffers(1, &downsampleFbo_));
@@ -134,4 +134,4 @@ void Histogram::update(int windowWidth, int windowHeight) {
     GL_CALL(glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0));
 }
 
-}  // namespace engine::debug
+}  // namespace pathtracer::debug

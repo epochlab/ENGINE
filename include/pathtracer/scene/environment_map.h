@@ -1,0 +1,42 @@
+#pragma once
+
+#include <vector>
+
+#include <glm/glm.hpp>
+
+#include "pathtracer/gfx/hdr_image.h"
+
+namespace pathtracer::scene {
+
+// CPU-resident equirect env map for path-traced miss rays and NEE light sampling.
+class EnvironmentMap {
+public:
+    // Builds the 2D piecewise-constant importance-sampling CDFs (marginal over rows, conditional over columns per row) once here, at load time -- not per-trace, not per-pass. Weighted by sin(theta) so the sampling density corrects for the equirect projection's polar over-representation (a pixel row near a pole covers far less solid angle than one at the equator despite occupying the same image-space area).
+    explicit EnvironmentMap(pathtracer::gfx::ImageTexture image);
+
+    // Direction -> equirect UV -> bilinear sample; mapping matches sky.frag (theta=acos(y), phi=atan2(x,z)). envRotationRadians matches uEnvRotationRadians. For the camera-visible background and for a BSDF-sampled miss, where the env pdf enters only a bounded [0,1] MIS weight and bilinear smoothing is free -- NOT for NEE, see sampleDirectionNearest.
+    [[nodiscard]] glm::vec3 sampleDirection(const glm::vec3& direction,
+                                             float envRotationRadians = 0.0F) const;
+
+    // Nearest-texel radiance from the same piecewise-constant cell pdf()/importanceSampleDirection() derive their density from. For NEE only, where radiance is divided by that pdf: sampling radiance bilinearly there mismatches f against pdf, and near a small bright feature (a sun a few texels across, exactly what the luminance CDF exists to find) bilinear bleeds energy into neighbours whose density is correctly low, so f/pdf spikes into fireflies. Unbiased either way -- this removes variance, not bias.
+    [[nodiscard]] glm::vec3 sampleDirectionNearest(const glm::vec3& direction,
+                                                    float envRotationRadians = 0.0F) const;
+
+    struct EnvSample {
+        glm::vec3 direction;
+        float pdf;  // solid-angle pdf, > 0
+    };
+
+    // Importance-samples a direction from the map's luminance distribution -- for NEE light sampling. u: two independent uniform [0,1) values.
+    [[nodiscard]] EnvSample importanceSampleDirection(glm::vec2 u, float envRotationRadians = 0.0F) const;
+
+    // Solid-angle pdf of importanceSampleDirection() having produced this direction -- for MIS weighting a BSDF-sampled ray's environment-miss contribution against NEE's light-sampling strategy.
+    [[nodiscard]] float pdf(const glm::vec3& direction, float envRotationRadians = 0.0F) const;
+
+private:
+    pathtracer::gfx::ImageTexture image_;  // the CDFs below are built from these stored values, so sampling density matches the radiance returned at either ScalarType
+    std::vector<float> marginalCdf_;     // size height+1, marginalCdf_[0]=0, marginalCdf_[height]=1
+    std::vector<float> conditionalCdf_;  // size height*(width+1), row-major, each row's slice sums to 1 at its last entry
+};
+
+}  // namespace pathtracer::scene

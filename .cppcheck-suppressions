@@ -39,3 +39,7 @@ syntaxError:*/sampler.cpp
 # state, which reads worse than the loop and hides the early exit. Where the loop genuinely does one thing, the
 # algorithm is already used.
 useStlAlgorithm
+
+# spawnQuiet (bench_compare.cpp) builds posix_spawn's argv, which is char* const[]: the loop must hand out mutable
+# std::string::data(), so a const reference does not compile. Verified, not assumed.
+constVariableReference:*/bench_compare.cpp

@@ -88,19 +88,19 @@ int run(int argc, char** argv, const char* suiteName);
 }  // namespace tools::check
 
 // Defines and registers a check. The body receives `ctx`.
-#define ENGINE_CHECK(checkName, speed, kind)                                                    \
+#define PT_CHECK(checkName, speed, kind)                                                    \
     static void checkName(::tools::check::Context&);                                            \
     static const ::tools::check::Registrar checkName##_registrar{                               \
         {#checkName, &checkName, ::tools::check::Speed::speed, ::tools::check::Kind::kind}};    \
     static void checkName(::tools::check::Context& ctx)
 
-#define ENGINE_CHECK_MAIN(suiteName) \
+#define PT_CHECK_MAIN(suiteName) \
     int main(int argc, char** argv) { return ::tools::check::run(argc, argv, suiteName); }
 
 // The caller writes the PASS condition and the macro inverts it exactly once. That is what makes NaN fail: NaN
 // compares false against every ordered operator, so a negated-pass form rejects it while a "fail if worse than"
 // form would silently accept it. Never restate these as failure conditions.
-#define ENGINE_EXPECT(ctx, passExpression, detail)                                     \
+#define PT_EXPECT(ctx, passExpression, detail)                                     \
     do {                                                                               \
         if (!(passExpression)) {                                                       \
             (ctx).recordFailure(#passExpression, (detail), __FILE__, __LINE__);         \

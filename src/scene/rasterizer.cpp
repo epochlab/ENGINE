@@ -1,4 +1,4 @@
-#include "engine/scene/rasterizer.h"
+#include "pathtracer/scene/rasterizer.h"
 
 #include <algorithm>
 #include <array>
@@ -9,11 +9,11 @@
 #include <limits>
 #include <tuple>
 
-#include "engine/scene/bsdf.h"
-#include "engine/scene/false_color.h"
-#include "engine/scene/gbuffer_shading.h"
+#include "pathtracer/scene/bsdf.h"
+#include "pathtracer/scene/false_color.h"
+#include "pathtracer/scene/gbuffer_shading.h"
 
-namespace engine::scene {
+namespace pathtracer::scene {
 
 namespace {
 
@@ -339,7 +339,7 @@ std::vector<RasterSubTriangle> buildSubTriangles(const Camera& camera,
                                                    k + 2 == count && poly[static_cast<std::size_t>(count - 1)].meshEdge,
                                                    k == 1 && poly[0].meshEdge};
                 pushSubTriangle(snapped[0], snapped[static_cast<std::size_t>(k)],
-                                snapped[static_cast<std::size_t>(k + 1)], meshEdge, i, width, height, grid, out);
+                                snapped[static_cast<std::size_t>(k) + 1], meshEdge, i, width, height, grid, out);
             }
         }
     });
@@ -539,7 +539,7 @@ void drawBoxEdgesRow(RasterGBuffer& result, int y, const std::vector<RasterLineS
 }
 
 // Every AOV image in one place, so the reallocation and the per-row clear below cannot disagree about which fields exist -- adding an AOV to RasterGBuffer without adding it here leaves it uncleared, which this array's fixed size catches at compile time.
-std::array<engine::gfx::HdrImage*, 14> aovImages(RasterGBuffer& g) {
+std::array<pathtracer::gfx::HdrImage*, 14> aovImages(RasterGBuffer& g) {
     return {&g.iorAov, &g.depth,    &g.lookahead, &g.worldPos, &g.uv,      &g.normal,
             &g.geomNormal, &g.albedo, &g.metallic, &g.roughness, &g.tangent,
             &g.objectId, &g.alpha,  &g.wireframe};
@@ -552,10 +552,10 @@ void renderRasterGBuffer(const Camera& camera, const std::vector<ShadingTriangle
                           const std::vector<PathTraceSettings>& perInstanceSettings,
                           const std::vector<AabbBounds>& instanceBounds, int width, int height,
                           ThreadPool& threadPool, RasterGBuffer& result) {
-    const std::array<engine::gfx::HdrImage*, 14> images = aovImages(result);
+    const std::array<pathtracer::gfx::HdrImage*, 14> images = aovImages(result);
     // Reallocated only on a resolution change; every other call reuses the storage and relies on renderRow's clear. makeImage's own zeroing is redundant against that clear but runs once per resize, not once per frame.
     if (result.depth.width != width || result.depth.height != height) {
-        for (engine::gfx::HdrImage* image : images) {
+        for (pathtracer::gfx::HdrImage* image : images) {
             *image = makeImage(width, height);
         }
     }
@@ -584,7 +584,7 @@ void renderRasterGBuffer(const Camera& camera, const std::vector<ShadingTriangle
     const auto renderRow = [&](int y) {
         // Clearing this row of every AOV is what makes the buffers reusable across calls: the worker that is about to overwrite the row zeroes it first, in parallel and while it is already cache-warm, instead of 14 sequential full-image memsets before the dispatch. An uncovered pixel therefore still reads back zero (alpha 0, the miss test every consumer uses) exactly as a freshly allocated image did.
         const std::size_t rowStart = static_cast<std::size_t>(y) * static_cast<std::size_t>(width);
-        for (engine::gfx::HdrImage* image : images) {
+        for (pathtracer::gfx::HdrImage* image : images) {
             float* row = image->rgba.data() + (rowStart * 4);
             std::fill(row, row + (static_cast<std::size_t>(width) * 4), 0.0F);
         }
@@ -605,4 +605,4 @@ void renderRasterGBuffer(const Camera& camera, const std::vector<ShadingTriangle
     threadPool.parallelFor(height, renderRow);
 }
 
-}  // namespace engine::scene
+}  // namespace pathtracer::scene

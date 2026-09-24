@@ -1,4 +1,4 @@
-#include "engine/debug/aov_filters.h"
+#include "pathtracer/debug/aov_filters.h"
 
 #include <algorithm>
 #include <cmath>
@@ -7,12 +7,12 @@
 
 #include <glm/gtc/constants.hpp>
 
-namespace engine::debug {
+namespace pathtracer::debug {
 
 namespace {
 
-using engine::gfx::HdrImage;
-using engine::scene::ThreadPool;
+using pathtracer::gfx::HdrImage;
+using pathtracer::scene::ThreadPool;
 
 // Single-channel Rec.709 luminance, the shared input to Sobel and Gabor. Materialised once rather than recomputed per tap: Sobel reads 8 neighbours per pixel and Gabor 25, so the shader's per-tap dot product is up to 25x redundant work that one intermediate plane removes. The shader cannot do this -- a fragment has nowhere to put it -- which is why this is not simply a transcription.
 [[nodiscard]] std::vector<float> luminancePlane(const HdrImage& beauty, ThreadPool& threadPool) {
@@ -53,13 +53,13 @@ void writeScalar(HdrImage& out, std::size_t pixel, float value) {
 
 }  // namespace
 
-std::array<float, kGaborOrientations * kGaborTaps> buildGaborKernel() {
+std::array<float, kGaborKernelSize> buildGaborKernel() {
     constexpr float kSigma = 1.4F;
     constexpr float kLambda = 4.0F;
     constexpr float kGamma = 0.5F;
     constexpr std::array<float, kGaborOrientations> kOrientationsDeg = {0.0F, 45.0F, 90.0F, 135.0F};
 
-    std::array<float, kGaborOrientations * kGaborTaps> kernel{};
+    std::array<float, kGaborKernelSize> kernel{};
     for (int o = 0; o < kGaborOrientations; ++o) {
         const float theta = glm::radians(kOrientationsDeg[static_cast<std::size_t>(o)]);
         int tapIndex = 0;
@@ -120,7 +120,7 @@ HdrImage sobelAov(const HdrImage& beauty, ThreadPool& threadPool) {
 
 HdrImage gaborAov(const HdrImage& beauty, ThreadPool& threadPool) {
     // Built once per process, not per call: the bank depends on nothing but its own compile-time parameters, and the viewer pays the same 100 transcendentals once at shader setup.
-    static const std::array<float, kGaborOrientations * kGaborTaps> kernel = buildGaborKernel();
+    static const std::array<float, kGaborKernelSize> kernel = buildGaborKernel();
 
     const std::vector<float> plane = luminancePlane(beauty, threadPool);
     HdrImage out = makeBroadcastImage(beauty.width, beauty.height);
@@ -189,4 +189,4 @@ HdrImage hsvAov(const HdrImage& beauty, ThreadPool& threadPool) {
     return out;
 }
 
-}  // namespace engine::debug
+}  // namespace pathtracer::debug

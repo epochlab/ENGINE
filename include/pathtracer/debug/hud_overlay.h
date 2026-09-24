@@ -1,0 +1,99 @@
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+#include <vector>
+
+#include <glm/glm.hpp>
+
+#include "pathtracer/debug/scene_stats.h"
+
+struct GLFWwindow;
+
+namespace pathtracer::scene {
+class Camera;
+}
+
+namespace pathtracer::debug {
+
+struct GpuInfo;
+class FrameStats;
+class Histogram;
+
+// Toggle for the centre-crosshair framing overlay, owned by main.cpp (no runtime toggle; defaults on), then read here read-only to decide whether to draw it.
+struct FramingOverlayState {
+    bool crosshair = true;
+};
+
+// Read-only convergence status the AOV section's path-traced readout displays -- built fresh each frame by main.cpp from the frame's displayed PathTraceResult (its samples) and the driver's lastPassRecord(), not a snapshot of one completed call: the driver runs continuously in the background, so this reflects "as of this frame", not "as of the last Render click".
+struct PathTracedStatus {
+    bool hasResult = false;
+    double lastPassSeconds = 0.0;
+    int accumulatedSamples = 0;
+    int maxSamples = 0;  // 0 = unbounded
+};
+
+// Pixel under cursor, sampled by main.cpp's samplePixelProbe. For Beauty and the post-filter AOVs (HSV/Luminance/Sobel/Gabor), this is the composited framebuffer pixel (post-LUT, post-exposure, the literal on-screen value); for every other AOV, it's that AOV's own raw HdrImage texel (native units, full float precision, independent of the display transform). valid=false off-viewport.
+struct PixelProbeSample {
+    bool valid = false;
+    glm::vec4 color{0.0F};
+};
+
+// Everything HudOverlay::draw needs for one frame, bundled to keep its signature from growing indefinitely as sections are added. aov and FramingOverlayState stay as separate mutable out-parameters on draw() itself since ImGui widgets bind directly to them.
+struct HudFrameData {
+    const GpuInfo& gpuInfo;
+    double refreshHz;  // the window's display, measured by DisplayLink
+    const FrameStats& frameStats;
+    float postMs;
+    std::size_t ramBytes;
+    std::size_t gpuBytes;
+    std::size_t systemAvailableBytes;
+    std::uint64_t systemTotalBytes;
+    int channelView;
+    const char* lutName;
+    SceneStats sceneStats;
+    const pathtracer::scene::Camera& camera;
+    float cameraYawDegrees;
+    float cameraPitchDegrees;
+    bool cameraOrbiting;
+    const Histogram& histogram;
+    const PathTracedStatus& pathTraced;
+    // Fraction of Beauty's texels that would clip at the display encode, and the peak such value as a multiple of display range -- see main.cpp's updateOverRangeStats. Histogram alone can't distinguish "just over 1.0" from "100x over" since both pin its post-display-transform bin 255 identically.
+    float overRangeFraction;
+    float overRangePeakMultiple;
+    bool vsync;  // profile.json frame cap, for the Cap readout
+};
+
+// Owns the ImGui context and GLFW/OpenGL3 backends for one window's lifetime, move-only like this codebase's other RAII wrappers. Composites the debug panel onto the final backbuffer, after the OCIO tonemap pass, never into the linear HDR FBO (this project runs with no driver-level sRGB framebuffer conversion; display encoding happens only in-shader).
+class HudOverlay {
+public:
+    explicit HudOverlay(GLFWwindow* nativeHandle);
+    ~HudOverlay();
+
+    HudOverlay(const HudOverlay&) = delete;
+    HudOverlay& operator=(const HudOverlay&) = delete;
+    HudOverlay(HudOverlay&& other) noexcept;
+    HudOverlay& operator=(HudOverlay&& other) noexcept;
+
+    // Call after window.pollEvents(), before any GL draw calls.
+    void beginFrame() const;
+
+    // Call after beginFrame(), before render(). aov/focalLengthMm/aperture/shutterSeconds/iso/filmBackPresetIndex/showSky/envLightEnabled/envRotationDegrees/envExposureStops/aberrationStrength are widget-bound out-params (Camera/HDRI/AOV sections). filmBackPresetNames is read-only, index-parallel to the caller's film-back preset list (same "ImGui::Combo needs int&, const char* names" shape as aov/kAovNames). envExposureStops is EV; main.cpp's requestPathTrace does exp2(). envLightEnabled: whether the environment is a light at all (LightSet), distinct from showSky which only gates the camera ray's own miss. pixelProbe is read-only, rendered bottom-right. framing.crosshair gates the centre-crosshair foreground overlay.
+    void draw(const HudFrameData& frame, int& aov, float& focalLengthMm, float& aperture,
+              float& shutterSeconds, float& iso, int& filmBackPresetIndex,
+              const std::vector<const char*>& filmBackPresetNames, bool& showSky,
+              bool& envLightEnabled, int& envRotationDegrees, float& envExposureStops,
+              float& aberrationStrength, const FramingOverlayState& framing,
+              const PixelProbeSample& pixelProbe) const;
+
+    // ImGui::Render + backend draw-data submit. Call after the post-process blit, before window.swapBuffers().
+    void render() const;
+
+    // True while ImGui wants mouse input (e.g. dragging a HUD widget); callers should not interpret an LMB click as a scene interaction (orbit pivot pick) while this is true.
+    [[nodiscard]] bool wantsCaptureMouse() const;
+
+private:
+    bool owns_ = true;  // false on a moved-from instance; guards shutdown
+};
+
+}  // namespace pathtracer::debug

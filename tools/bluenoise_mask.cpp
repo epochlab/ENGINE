@@ -21,7 +21,7 @@
 #include <string>
 #include <vector>
 
-#include "engine/gfx/hdr_image.h"
+#include "pathtracer/gfx/hdr_image.h"
 
 namespace {
 
@@ -238,14 +238,14 @@ bool writeInc(const std::string& path, const std::array<std::uint16_t, kPixels>&
 // Greyscale dump of the normalised mask, for looking at. The radial spectrum in sampler_validate is the actual gate --
 // this catches the structural failures an angular average hides, like a directional streak or a residual tile seam.
 bool writePreview(const std::string& path, const std::array<std::uint16_t, kPixels>& ranks) {
-    engine::gfx::HdrImage image{kSize, kSize, std::vector<float>(static_cast<std::size_t>(kPixels) * 4, 1.0F)};
+    pathtracer::gfx::HdrImage image{kSize, kSize, std::vector<float>(static_cast<std::size_t>(kPixels) * 4, 1.0F)};
     for (int i = 0; i < kPixels; ++i) {
         const auto value = static_cast<float>((ranks[static_cast<std::size_t>(i)] + 0.5) / kPixels);
         for (int c = 0; c < 3; ++c) {
             image.rgba[(static_cast<std::size_t>(i) * 4) + static_cast<std::size_t>(c)] = value;
         }
     }
-    return engine::gfx::writeExr(path, image);
+    return pathtracer::gfx::writeExr(path, image);
 }
 
 }  // namespace

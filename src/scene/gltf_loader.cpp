@@ -1,4 +1,4 @@
-#include "engine/scene/gltf_loader.h"
+#include "pathtracer/scene/gltf_loader.h"
 
 #include <cgltf.h>
 
@@ -12,9 +12,9 @@
 #include <glm/gtc/matrix_inverse.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
-#include "engine/gfx/hdr_image.h"
+#include "pathtracer/gfx/hdr_image.h"
 
-namespace engine::scene {
+namespace pathtracer::scene {
 
 namespace {
 
@@ -64,16 +64,16 @@ std::optional<int> extrasTextureIndex(const char* extrasJson, const std::string&
     return value;
 }
 
-std::optional<engine::gfx::ImageTexture> loadTexture(const cgltf_texture* texture, const std::string& dir,
-                                                      engine::gfx::ScalarType textureType) {
+std::optional<pathtracer::gfx::ImageTexture> loadTexture(const cgltf_texture* texture, const std::string& dir,
+                                                      pathtracer::gfx::ScalarType textureType) {
     if (texture == nullptr || texture->image == nullptr || texture->image->uri == nullptr) {
         return std::nullopt;
     }
-    return engine::gfx::loadImageTexture(dir + "/" + texture->image->uri, textureType);
+    return pathtracer::gfx::loadImageTexture(dir + "/" + texture->image->uri, textureType);
 }
 
-std::optional<engine::gfx::ImageTexture> loadTextureByIndex(const cgltf_data* data, std::optional<int> index,
-                                                             const std::string& dir, engine::gfx::ScalarType textureType) {
+std::optional<pathtracer::gfx::ImageTexture> loadTextureByIndex(const cgltf_data* data, std::optional<int> index,
+                                                             const std::string& dir, pathtracer::gfx::ScalarType textureType) {
     if (!index.has_value() || *index < 0 ||
         static_cast<cgltf_size>(*index) >= data->textures_count) {
         return std::nullopt;
@@ -217,17 +217,17 @@ std::optional<std::vector<unsigned int>> readIndices(const cgltf_accessor* indic
 // DOES reference a texture but fails to resolve/decode it (bad path, corrupt file) is a real
 // error and must still propagate as nullopt, not silently default -- distinguishing these two
 // nullopt-producing cases is exactly what loadTexture/loadTextureByIndex can't do alone.
-std::optional<engine::gfx::ImageTexture> resolveTexture(const cgltf_texture* texture, const std::string& dir,
-                                                         engine::gfx::ScalarType textureType, engine::gfx::ImageTexture fallback) {
+std::optional<pathtracer::gfx::ImageTexture> resolveTexture(const cgltf_texture* texture, const std::string& dir,
+                                                         pathtracer::gfx::ScalarType textureType, pathtracer::gfx::ImageTexture fallback) {
     if (texture == nullptr) {
         return fallback;
     }
     return loadTexture(texture, dir, textureType);
 }
 
-std::optional<engine::gfx::ImageTexture> resolveTextureByIndex(const cgltf_data* data, std::optional<int> index,
-                                                                 const std::string& dir, engine::gfx::ScalarType textureType,
-                                                                 engine::gfx::ImageTexture fallback) {
+std::optional<pathtracer::gfx::ImageTexture> resolveTextureByIndex(const cgltf_data* data, std::optional<int> index,
+                                                                 const std::string& dir, pathtracer::gfx::ScalarType textureType,
+                                                                 pathtracer::gfx::ImageTexture fallback) {
     if (!index.has_value()) {
         return fallback;
     }
@@ -235,7 +235,7 @@ std::optional<engine::gfx::ImageTexture> resolveTextureByIndex(const cgltf_data*
 }
 
 std::optional<Material> loadMaterialTextures(const cgltf_data* data, const cgltf_material& mat,
-                                              const std::string& dir, engine::gfx::ScalarType textureType) {
+                                              const std::string& dir, pathtracer::gfx::ScalarType textureType) {
     const Material defaults = makeDefaultMaterial();
     auto baseColor = resolveTexture(mat.pbr_metallic_roughness.base_color_texture.texture, dir, textureType,
                                      defaults.baseColorTexture);
@@ -262,7 +262,7 @@ std::optional<Material> loadMaterialTextures(const cgltf_data* data, const cgltf
 // Builds one MeshInstance's Vertex/index arrays and Material from a single triangle primitive. Fails clearly (nullopt) rather than substituting a placeholder for a primitive this loader doesn't support (non-triangle mode, missing attributes). A material with no texture for a given slot -- or no material at all -- is not a failure: loadMaterialTextures substitutes a neutral default for that slot regardless, which for an absent material (kDefaultMaterial below) means every slot, reproducing glTF's own spec-defined default material.
 std::optional<MeshInstance> loadPrimitive(const cgltf_data* data, const cgltf_primitive& prim,
                                            const glm::mat4& transform, const std::string& dir,
-                                           engine::gfx::ScalarType textureType, int instanceIndex, const std::string& name,
+                                           pathtracer::gfx::ScalarType textureType, int instanceIndex, const std::string& name,
                                            std::vector<Triangle>& outWorldTriangles,
                                            std::vector<ShadingTriangle>& outShadingTriangles) {
     if (prim.type != cgltf_primitive_type_triangles) {
@@ -306,7 +306,7 @@ constexpr int kMaxNodeDepth = 256;
 // untrusted input, and an explicit stack would restate the call stack while gaining no invariant.
 // NOLINTNEXTLINE(misc-no-recursion)
 bool walkNodes(const cgltf_data* data, cgltf_node* const* nodes, cgltf_size count,
-               const glm::mat4& parentTransform, const std::string& dir, engine::gfx::ScalarType textureType,
+               const glm::mat4& parentTransform, const std::string& dir, pathtracer::gfx::ScalarType textureType,
                std::vector<MeshInstance>& instances, std::vector<Triangle>& worldTriangles,
                std::vector<ShadingTriangle>& shadingTriangles, int depth = 0) {
     if (depth >= kMaxNodeDepth) {
@@ -342,7 +342,7 @@ bool walkNodes(const cgltf_data* data, cgltf_node* const* nodes, cgltf_size coun
 
 }  // namespace
 
-std::optional<LoadedModel> loadGltf(const std::string& path, engine::gfx::ScalarType textureType,
+std::optional<LoadedModel> loadGltf(const std::string& path, pathtracer::gfx::ScalarType textureType,
                                      const glm::mat4& rootTransform, const std::string& textureDir) {
     const cgltf_options options{};
     cgltf_data* data = nullptr;
@@ -405,4 +405,4 @@ void appendQuadLights(LoadedModel& model, const std::vector<QuadLight>& lights,
     }
 }
 
-}  // namespace engine::scene
+}  // namespace pathtracer::scene

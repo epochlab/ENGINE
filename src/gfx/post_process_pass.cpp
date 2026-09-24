@@ -1,13 +1,13 @@
-#include "engine/gfx/post_process_pass.h"
+#include "pathtracer/gfx/post_process_pass.h"
 
 #include <utility>
 
 #include <GL/glew.h>
 
-#include "engine/gfx/gl_debug.h"
-#include "engine/gfx/shader_program.h"
+#include "pathtracer/gfx/gl_debug.h"
+#include "pathtracer/gfx/shader_program.h"
 
-namespace engine::gfx {
+namespace pathtracer::gfx {
 
 PostProcessPass::PostProcessPass() {
     GL_CALL(glGenVertexArrays(1, &vao_));
@@ -47,4 +47,4 @@ void PostProcessPass::draw(unsigned int hdrColorTexture, const ShaderProgram& di
     glBindVertexArray(0);
 }
 
-}  // namespace engine::gfx
+}  // namespace pathtracer::gfx

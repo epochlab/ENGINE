@@ -1,4 +1,4 @@
-#include "engine/gfx/hdr_image.h"
+#include "pathtracer/gfx/hdr_image.h"
 
 #include <array>
 #include <cmath>
@@ -14,7 +14,7 @@
 #include <OpenEXR/ImfOutputFile.h>
 #include <OpenEXR/ImfStandardAttributes.h>
 
-namespace engine::gfx {
+namespace pathtracer::gfx {
 
 namespace {
 
@@ -219,4 +219,4 @@ glm::vec4 sampleBilinear(const ImageTexture& image, glm::vec2 uv) {
     });
 }
 
-}  // namespace engine::gfx
+}  // namespace pathtracer::gfx

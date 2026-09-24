@@ -1,11 +1,11 @@
-#include "engine/scene/material_binding.h"
+#include "pathtracer/scene/material_binding.h"
 
 #include <iostream>
 #include <set>
 #include <string_view>
 #include <utility>
 
-namespace engine::scene {
+namespace pathtracer::scene {
 
 std::optional<std::vector<PathTraceSettings>> resolvePerInstanceSettings(
     const PathTraceSettings& base, const std::vector<MeshInstance>& instances,
@@ -22,13 +22,13 @@ std::optional<std::vector<PathTraceSettings>> resolvePerInstanceSettings(
         }
     }
 
-    std::map<std::string, engine::config::MaterialConfig> overrideMaterialsByPath;
+    std::map<std::string, pathtracer::config::MaterialConfig> overrideMaterialsByPath;
     for (const auto& [nodeName, path] : materialOverrides) {
         if (overrideMaterialsByPath.contains(path)) {
             continue;
         }
-        std::optional<engine::config::MaterialConfig> overrideMaterial =
-            engine::config::loadMaterialConfig(assetRoot + "/" + path);
+        std::optional<pathtracer::config::MaterialConfig> overrideMaterial =
+            pathtracer::config::loadMaterialConfig(assetRoot + "/" + path);
         if (!overrideMaterial) {
             std::cerr << "resolvePerInstanceSettings: materialOverrides entry '" << path
                       << "' failed to load\n";
@@ -43,7 +43,7 @@ std::optional<std::vector<PathTraceSettings>> resolvePerInstanceSettings(
         PathTraceSettings settings = base;
         if (const auto overrideIt = materialOverrides.find(instance.name);
             overrideIt != materialOverrides.end()) {
-            const engine::config::MaterialConfig& overrideMaterial =
+            const pathtracer::config::MaterialConfig& overrideMaterial =
                 overrideMaterialsByPath.at(overrideIt->second);
             settings.bumpStrength = overrideMaterial.bumpStrength;
             settings.roughnessMin = overrideMaterial.roughnessMin;
@@ -64,11 +64,11 @@ std::optional<std::vector<PathTraceSettings>> resolvePerInstanceSettings(
     return perInstanceSettings;
 }
 
-std::vector<QuadLight> buildQuadLights(const std::vector<engine::config::QuadLightConfig>& lights,
+std::vector<QuadLight> buildQuadLights(const std::vector<pathtracer::config::QuadLightConfig>& lights,
                                         const glm::mat4& sceneTransform) {
     std::vector<QuadLight> quadLights;
     quadLights.reserve(lights.size());
-    for (const engine::config::QuadLightConfig& light : lights) {
+    for (const pathtracer::config::QuadLightConfig& light : lights) {
         quadLights.push_back(QuadLight{
             glm::vec3(sceneTransform * glm::vec4(light.origin, 1.0F)),
             glm::vec3(sceneTransform * glm::vec4(light.edge0, 0.0F)),
@@ -80,4 +80,4 @@ std::vector<QuadLight> buildQuadLights(const std::vector<engine::config::QuadLig
     return quadLights;
 }
 
-}  // namespace engine::scene
+}  // namespace pathtracer::scene

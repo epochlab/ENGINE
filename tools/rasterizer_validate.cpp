@@ -1,4 +1,4 @@
-// Standalone correctness check for engine::scene::renderRasterGBuffer (rasterizer.h): synthetic dependency-free scene (no glTF/EXR asset -- constant-color 1x1 textures), cross-checked against a fresh pixel-center Embree primary-ray intersection resolved through the same gbuffer_shading.h sampling functions, deliberately independent of renderRasterGBuffer's own code path so agreement is a real cross-check, not a tautology. Same standalone-CLI convention as embree_validate.cpp/bsdf_validate.cpp/nee_validate.cpp: no test framework, non-zero exit on failure. A small fraction of coverage/value mismatches at triangle silhouette edges is tolerated -- an inherent rasterizer-vs-raytracer tie-break difference, not a bug.
+// Standalone correctness check for pathtracer::scene::renderRasterGBuffer (rasterizer.h): synthetic dependency-free scene (no glTF/EXR asset -- constant-color 1x1 textures), cross-checked against a fresh pixel-center Embree primary-ray intersection resolved through the same gbuffer_shading.h sampling functions, deliberately independent of renderRasterGBuffer's own code path so agreement is a real cross-check, not a tautology. Same standalone-CLI convention as embree_validate.cpp/bsdf_validate.cpp/nee_validate.cpp: no test framework, non-zero exit on failure. A small fraction of coverage/value mismatches at triangle silhouette edges is tolerated -- an inherent rasterizer-vs-raytracer tie-break difference, not a bug.
 
 #include <algorithm>
 #include <array>
@@ -13,21 +13,21 @@
 
 #include <glm/glm.hpp>
 
-#include "engine/gfx/hdr_image.h"
-#include "engine/scene/camera.h"
-#include "engine/scene/embree_accel.h"
-#include "engine/scene/false_color.h"
-#include "engine/scene/gbuffer_shading.h"
-#include "engine/scene/gltf_loader.h"
+#include "pathtracer/gfx/hdr_image.h"
+#include "pathtracer/scene/camera.h"
+#include "pathtracer/scene/embree_accel.h"
+#include "pathtracer/scene/false_color.h"
+#include "pathtracer/scene/gbuffer_shading.h"
+#include "pathtracer/scene/gltf_loader.h"
 #include "check.h"
-#include "engine/scene/rasterizer.h"
-#include "engine/scene/ray_types.h"
-#include "engine/scene/shading_scene.h"
-#include "engine/scene/thread_pool.h"
+#include "pathtracer/scene/rasterizer.h"
+#include "pathtracer/scene/ray_types.h"
+#include "pathtracer/scene/shading_scene.h"
+#include "pathtracer/scene/thread_pool.h"
 
 namespace {
 
-using namespace engine::scene;  // NOLINT(google-build-using-namespace) -- tool-local convenience, mirrors embree_validate.cpp's using-declarations
+using namespace pathtracer::scene;  // NOLINT(google-build-using-namespace) -- tool-local convenience, mirrors embree_validate.cpp's using-declarations
 
 constexpr int kWidth = 96;
 constexpr int kHeight = 96;
@@ -41,7 +41,7 @@ constexpr float kUnitEpsilon = 1e-2F;   // unit-vector/[0,1]-range fields (norma
 constexpr float kMaxCoverageMismatchFraction = 0.02F;
 constexpr float kMaxValueMismatchFraction = 0.02F;
 
-engine::gfx::ImageTexture constantTexture(glm::vec4 color) {
+pathtracer::gfx::ImageTexture constantTexture(glm::vec4 color) {
     return {1, 1, std::vector<float>{color.r, color.g, color.b, color.a}};
 }
 
@@ -98,7 +98,7 @@ std::vector<Triangle> worldTrianglesOf(const std::vector<ShadingTriangle>& shadi
     return triangles;
 }
 
-glm::vec3 texelAt(const engine::gfx::HdrImage& image, int x, int y) {
+glm::vec3 texelAt(const pathtracer::gfx::HdrImage& image, int x, int y) {
     const std::size_t idx = ((static_cast<std::size_t>(y) * static_cast<std::size_t>(image.width)) +
                               static_cast<std::size_t>(x)) *
                              4;
@@ -494,24 +494,24 @@ void runPose(tools::check::Context& ctx, const char* name, const Camera& camera)
     const std::unique_ptr<RasterFixture> fixture = makeFixture(ctx);
     ctx.plan(1);
     if (!fixture->accel) {
-        ENGINE_EXPECT(ctx, false, "EmbreeAccel::build failed");
+        PT_EXPECT(ctx, false, "EmbreeAccel::build failed");
         return;
     }
     const bool passed =
         checkPose(name, camera, *fixture->accel, fixture->shadingTriangles, fixture->instances,
                    fixture->perInstanceSettings, fixture->instanceBounds, fixture->threadPool);
-    ENGINE_EXPECT(ctx, passed, "G-buffer disagreed with the per-pixel Embree oracle; see the rows above");
+    PT_EXPECT(ctx, passed, "G-buffer disagreed with the per-pixel Embree oracle; see the rows above");
 }
 
 // Axis-aligned, near clip 0.1: the ordinary path, where no triangle is clipped and every G-buffer field is compared
 // against a primary ray fired through the same pixel centre.
-ENGINE_CHECK(gbuffer_pose_straight_on, Fast, Statistical) {
+PT_CHECK(gbuffer_pose_straight_on, Fast, Statistical) {
     runPose(ctx, "straightOn", straightOnCamera());
 }
 
 // Yawed and pitched off-axis, which is what separates a correct interpolation from one that happens to work when the
 // triangle's screen-space gradients are axis-aligned.
-ENGINE_CHECK(gbuffer_pose_angled, Fast, Statistical) {
+PT_CHECK(gbuffer_pose_angled, Fast, Statistical) {
     runPose(ctx, "angled",
             Camera(glm::vec3(3.0F, 2.0F, 1.0F), 20.0F, -10.0F, kFilmBack, 35.0F, 0.1F, 100.0F, 2.8F, 1.0F / 125.0F,
                     100.0F));
@@ -519,35 +519,35 @@ ENGINE_CHECK(gbuffer_pose_angled, Fast, Statistical) {
 
 // Near clip 5.0 (vs. the other poses' 0.1) puts it mid-cluster: centers in (-16,-5) stay fully in front, centers in
 // (-5,-1) straddle or sit behind -- exercises the Sutherland-Hodgman clip path instead of coincidentally skipping it.
-ENGINE_CHECK(gbuffer_pose_near_clip, Fast, Statistical) {
+PT_CHECK(gbuffer_pose_near_clip, Fast, Statistical) {
     runPose(ctx, "clipTest",
             Camera(glm::vec3(0.0F, 0.0F, 0.0F), 5.0F, 5.0F, kFilmBack, 35.0F, 5.0F, 100.0F, 2.8F, 1.0F / 125.0F,
                     100.0F));
 }
 
-ENGINE_CHECK(wireframe_sanity, Fast, Exact) {
+PT_CHECK(wireframe_sanity, Fast, Exact) {
     const std::unique_ptr<RasterFixture> fixture = makeFixture(ctx);
     ctx.plan(1);
     const bool passed =
         checkWireframeSanity(straightOnCamera(), fixture->shadingTriangles, fixture->instances,
                               fixture->perInstanceSettings, fixture->instanceBounds, fixture->threadPool);
-    ENGINE_EXPECT(ctx, passed, "wireframe was empty or covered more than half the hit pixels");
+    PT_EXPECT(ctx, passed, "wireframe was empty or covered more than half the hit pixels");
 }
 
-ENGINE_CHECK(bounding_box_occlusion, Fast, Exact) {
+PT_CHECK(bounding_box_occlusion, Fast, Exact) {
     ThreadPool threadPool;
     ctx.plan(1);
-    ENGINE_EXPECT(ctx, checkBoundingBoxOcclusion(threadPool), "box edges were not depth-tested against the occluder");
+    PT_EXPECT(ctx, checkBoundingBoxOcclusion(threadPool), "box edges were not depth-tested against the occluder");
 }
 
-ENGINE_CHECK(per_instance_boxes, Fast, Exact) {
+PT_CHECK(per_instance_boxes, Fast, Exact) {
     ThreadPool threadPool;
     ctx.plan(1);
-    ENGINE_EXPECT(ctx, checkPerInstanceBoxes(threadPool), "per-instance boxes were not drawn in disjoint hues/spans");
+    PT_EXPECT(ctx, checkPerInstanceBoxes(threadPool), "per-instance boxes were not drawn in disjoint hues/spans");
 }
 
 // Watertightness, exact: from inside a closed mesh every pixel must be covered, with no oracle and no tolerance. Straight on, the front face's shared diagonals run exactly through pixel centres -- the configuration that cracked the Cornell back wall -- so a centre on a shared edge must go to exactly one side by the fill rule; the seeded poses view a jittered cube from arbitrary angles, so shared edges are clipped against every frustum plane.
-ENGINE_CHECK(watertight_closed_mesh, Fast, Exact) {
+PT_CHECK(watertight_closed_mesh, Fast, Exact) {
     constexpr int kCells = 16;
     constexpr float kHalfExtent = 5.0F;
     constexpr int kSeededPoses = 8;
@@ -567,7 +567,7 @@ ENGINE_CHECK(watertight_closed_mesh, Fast, Exact) {
                              kHeight, threadPool, raster);
         const int uncovered = uncoveredPixels(raster);
         std::cout << "rasterizer_validate: watertight " << pose << " -- " << uncovered << " uncovered pixels\n";
-        ENGINE_EXPECT(ctx, uncovered == 0, pose + ": pixels uncovered from inside a closed mesh (a crack)");
+        PT_EXPECT(ctx, uncovered == 0, pose + ": pixels uncovered from inside a closed mesh (a crack)");
     };
 
     expectWatertight("straightOn", straightOnCamera(), makeClosedCube(kCells, kHalfExtent, 0.0F, rng));
@@ -585,7 +585,7 @@ ENGINE_CHECK(watertight_closed_mesh, Fast, Exact) {
 }
 
 // Clip-plane and fan edges are not mesh edges: one triangle far larger than the view, tilted so it also reaches behind the camera, is clipped against every frustum plane yet has no edge on screen -- so every pixel is covered and none is wireframe.
-ENGINE_CHECK(wireframe_ignores_clip_edges, Fast, Exact) {
+PT_CHECK(wireframe_ignores_clip_edges, Fast, Exact) {
     ThreadPool threadPool;
     const std::vector<MeshInstance> instances{
         MeshInstance{makeMaterial(glm::vec3(0.5F), 0.5F), glm::mat4(1.0F), ""}};
@@ -610,10 +610,10 @@ ENGINE_CHECK(wireframe_ignores_clip_edges, Fast, Exact) {
     std::cout << "rasterizer_validate: clip edges -- " << uncovered << " uncovered, " << wirePixels
               << " wireframe pixels\n";
     ctx.plan(2);
-    ENGINE_EXPECT(ctx, uncovered == 0, "the screen-covering triangle left pixels uncovered");
-    ENGINE_EXPECT(ctx, wirePixels == 0, "clip-plane or fan edges were drawn as mesh wireframe");
+    PT_EXPECT(ctx, uncovered == 0, "the screen-covering triangle left pixels uncovered");
+    PT_EXPECT(ctx, wirePixels == 0, "clip-plane or fan edges were drawn as mesh wireframe");
 }
 
 }  // namespace
 
-ENGINE_CHECK_MAIN("rasterizer")
+PT_CHECK_MAIN("rasterizer")

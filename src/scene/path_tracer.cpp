@@ -1,4 +1,4 @@
-#include "engine/scene/path_tracer.h"
+#include "pathtracer/scene/path_tracer.h"
 
 #include <algorithm>
 #include <array>
@@ -9,12 +9,12 @@
 #include <optional>
 #include <vector>
 
-#include "engine/scene/bsdf.h"
-#include "engine/scene/gbuffer_shading.h"
-#include "engine/scene/sampler.h"
-#include "engine/scene/shading_scene.h"
+#include "pathtracer/scene/bsdf.h"
+#include "pathtracer/scene/gbuffer_shading.h"
+#include "pathtracer/scene/sampler.h"
+#include "pathtracer/scene/shading_scene.h"
 
-namespace engine::scene {
+namespace pathtracer::scene {
 
 namespace {
 
@@ -129,7 +129,7 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
                        bool showSky, const PathTraceSettings& settings,
                        const std::vector<PathTraceSettings>& perInstanceSettings,
                        Sampler& sampler, glm::vec2 aoSample, glm::vec2 fresnelSample,
-                       engine::debug::RayCounts& __restrict rays) {
+                       pathtracer::debug::RayCounts& __restrict rays) {
     glm::vec3 radiance(0.0F);
     glm::vec3 throughput(1.0F);
     Ray ray = primaryRay;
@@ -470,7 +470,7 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                        std::uint32_t scrambleSeed, int sampleBase, int sampleCount,
                        const std::atomic<std::uint64_t>& generation,
                        std::uint64_t requestedGeneration, ThreadPool& threadPool,
-                       engine::debug::PassStats& stats, PathTraceResult& out) {
+                       pathtracer::debug::PassStats& stats, PathTraceResult& out) {
     const float aspect = static_cast<float>(width) / static_cast<float>(height);
     // Constant for the whole pass, so it is built once here rather than per primary ray: the aspect-taking primaryRay rebuilds it every call, which at samplesPerPixel rays per pixel is millions of identical reconstructions per pass. rasterizer.cpp already hoists it the same way.
     const Camera::ViewBasis basis = camera.viewBasis(aspect);
@@ -485,7 +485,7 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
         const int tileY1 = std::min(tileY0 + kPathTraceTileSize, height);
 
         // Stack-local, not thread_local like the accumulator below: zeroed by construction, so the reset boundary is the tile boundary with no bookkeeping. A thread_local would outlive the tile AND the pass, and a missed reset would silently double-count. tracePath increments this in place through a __restrict reference -- see render_stats.h for the measurement that settled that over returning the counts by value.
-        engine::debug::RayCounts tileRays;
+        pathtracer::debug::RayCounts tileRays;
 
         // Reused for the life of the worker thread, so a pass allocates nothing: sized for a full tile even at the image edge, which keeps the row stride a constant kPathTraceTileSize.
         // Block scope, so this already has internal linkage; misc-use-internal-linkage targets namespace-scope
@@ -599,4 +599,4 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
     });
 }
 
-}  // namespace engine::scene
+}  // namespace pathtracer::scene

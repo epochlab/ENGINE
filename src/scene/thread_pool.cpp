@@ -1,6 +1,6 @@
-#include "engine/scene/thread_pool.h"
+#include "pathtracer/scene/thread_pool.h"
 
-namespace engine::scene {
+namespace pathtracer::scene {
 
 ThreadPool::ThreadPool(unsigned int threadCount) {
     workers_.reserve(threadCount);
@@ -67,4 +67,4 @@ void ThreadPool::workerLoop() {
     }
 }
 
-}  // namespace engine::scene
+}  // namespace pathtracer::scene

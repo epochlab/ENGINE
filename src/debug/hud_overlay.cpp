@@ -1,4 +1,4 @@
-#include "engine/debug/hud_overlay.h"
+#include "pathtracer/debug/hud_overlay.h"
 
 // GLEW before GLFW: see gl_debug.cpp for why.
 #include <GL/glew.h>
@@ -14,17 +14,17 @@
 
 #include <glm/glm.hpp>
 
-#include "engine/debug/aov.h"
-#include "engine/debug/frame_stats.h"
-#include "engine/debug/histogram.h"
-#include "engine/debug/system_info.h"
-#include "engine/scene/camera.h"
+#include "pathtracer/debug/aov.h"
+#include "pathtracer/debug/frame_stats.h"
+#include "pathtracer/debug/histogram.h"
+#include "pathtracer/debug/system_info.h"
+#include "pathtracer/scene/camera.h"
 
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
 
-namespace engine::debug {
+namespace pathtracer::debug {
 
 namespace {
 
@@ -330,7 +330,7 @@ void drawViewportAndSceneSection(const HudFrameData& frame) {
     ImGui::Separator();
 }
 
-// Names/order come from the shared AovId enum (engine/debug/aov.h), not a locally duplicated array.
+// Names/order come from the shared AovId enum (pathtracer/debug/aov.h), not a locally duplicated array.
 void drawAovSection(int& aov) {
     ImGui::TextColored(kCyan, "AOV");
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
@@ -347,7 +347,7 @@ void drawCameraSection(const HudFrameData& frame, float& focalLengthMm, float& a
     const glm::vec3 camPos = frame.camera.position();
     ImGui::Text("pos  x %.2f  y %.2f  z %.2f", camPos.x, camPos.y, camPos.z);
     ImGui::Text("rot  x %.1f  y %.1f", frame.cameraPitchDegrees, frame.cameraYawDegrees);
-    const engine::scene::Camera::FilmBack filmBack = frame.camera.filmBack();
+    const pathtracer::scene::Camera::FilmBack filmBack = frame.camera.filmBack();
     // heightMm > 0 is guaranteed by loadFilmBackPresets's boundary validation (profile_config.cpp), so this division is always well-defined.
     ImGui::Text("Filmback  %.2f x %.2f mm  (%.2f:1)", filmBack.widthMm, filmBack.heightMm,
                 filmBack.widthMm / filmBack.heightMm);
@@ -539,4 +539,4 @@ bool HudOverlay::wantsCaptureMouse() const {
     return ImGui::GetIO().WantCaptureMouse;
 }
 
-}  // namespace engine::debug
+}  // namespace pathtracer::debug

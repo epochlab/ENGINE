@@ -27,17 +27,17 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <zlib.h>
 
-#include "engine/api/headless_renderer.h"
-#include "engine/debug/aov.h"
-#include "engine/debug/bench_log.h"
-#include "engine/debug/power_spectrum.h"
-#include "engine/debug/render_stats.h"
+#include "pathtracer/api/headless_renderer.h"
+#include "pathtracer/debug/aov.h"
+#include "pathtracer/debug/bench_log.h"
+#include "pathtracer/debug/power_spectrum.h"
+#include "pathtracer/debug/render_stats.h"
 #include "check.h"
 #include "stats.h"
-#include "engine/gfx/hdr_image.h"
-#include "engine/gfx/ocio_cpu_transform.h"
-#include "engine/gfx/ocio_display_transform.h"
-#include "engine/scene/camera.h"
+#include "pathtracer/gfx/hdr_image.h"
+#include "pathtracer/gfx/ocio_cpu_transform.h"
+#include "pathtracer/gfx/ocio_display_transform.h"
+#include "pathtracer/scene/camera.h"
 
 namespace OCIO = OCIO_NAMESPACE;
 
@@ -79,18 +79,18 @@ struct Options {
     // image, no tuned threshold -- see the gate itself for the construction.
     bool assertConverged = false;
     // Resolved by --aov. Defaulting to Beauty keeps every existing invocation -- and the bit-identity gate built on them -- unchanged.
-    engine::debug::AovId aov = engine::debug::AovId::Beauty;
+    pathtracer::debug::AovId aov = pathtracer::debug::AovId::Beauty;
     // Appends the timing run to this JSON Lines benchmark log (bench_log.h); empty = no log.
     std::string benchLogPath;
 };
 
-// Every AOV is reachable now that HeadlessRenderer drives the rasterizer and the Beauty filters as well as the path tracer; the name vocabulary is engine/debug/aov.h's, shared with the viewer's dropdown and the C ABI rather than restated here.
+// Every AOV is reachable now that HeadlessRenderer drives the rasterizer and the Beauty filters as well as the path tracer; the name vocabulary is pathtracer/debug/aov.h's, shared with the viewer's dropdown and the C ABI rather than restated here.
 bool resolveAov(const std::string& requested, Options& options) {
-    const engine::debug::AovId aov = engine::debug::aovIdFromName(requested);
-    if (aov == engine::debug::AovId::Count) {
+    const pathtracer::debug::AovId aov = pathtracer::debug::aovIdFromName(requested);
+    if (aov == pathtracer::debug::AovId::Count) {
         std::cerr << "render_beauty: unknown AOV \"" << requested << "\"; known AOVs are:";
-        for (int i = 0; i < static_cast<int>(engine::debug::AovId::Count); ++i) {
-            std::cerr << ' ' << engine::debug::kAovNames[i];
+        for (int i = 0; i < static_cast<int>(pathtracer::debug::AovId::Count); ++i) {
+            std::cerr << ' ' << pathtracer::debug::kAovNames[i];
         }
         std::cerr << '\n';
         return false;
@@ -251,7 +251,7 @@ glm::vec3 ditherOffset(float u, float v) {
 // Scene-referred image -> display-referred 8-bit, matching the viewer's pipeline exactly: exposure multiply, the display curve, then dither and quantize.
 // applyDisplayTransform mirrors presentFrame's `isBeauty ? userLut : Raw`: only Beauty is scene-referred radiance, and putting a data AOV like AO or Shadow through a display curve would distort values that are already display-ready. Raw is the OCIO-free branch, exactly what buildRawFragmentSource does -- exposure, then dither and quantize.
 // Largest RGB value in the image, for an AOV whose raw range is not [0,1] and must be normalized before an 8-bit encode. Alpha is excluded: it is 1 by the broadcast convention and would pin the result at 1 for every scalar AOV.
-float maxChannel(const engine::gfx::HdrImage& image) {
+float maxChannel(const pathtracer::gfx::HdrImage& image) {
     float peak = 0.0F;
     for (std::size_t texel = 0; texel + 3 < image.rgba.size(); texel += 4) {
         peak = std::max({peak, image.rgba[texel], image.rgba[texel + 1], image.rgba[texel + 2]});
@@ -259,7 +259,7 @@ float maxChannel(const engine::gfx::HdrImage& image) {
     return peak;
 }
 
-std::vector<unsigned char> encodeForDisplay(const engine::gfx::HdrImage& image, float exposureEv,
+std::vector<unsigned char> encodeForDisplay(const pathtracer::gfx::HdrImage& image, float exposureEv,
                                              bool applyDisplayTransform) {
     std::vector<float> rgb(static_cast<std::size_t>(image.width) *
                             static_cast<std::size_t>(image.height) * 3);
@@ -271,7 +271,7 @@ std::vector<unsigned char> encodeForDisplay(const engine::gfx::HdrImage& image, 
     }
 
     if (applyDisplayTransform) {
-        engine::gfx::applyOcioDisplayTransform(rgb, image.width, image.height);
+        pathtracer::gfx::applyOcioDisplayTransform(rgb, image.width, image.height);
     }
 
     std::vector<unsigned char> out(rgb.size());
@@ -300,7 +300,7 @@ std::vector<unsigned char> encodeForDisplay(const engine::gfx::HdrImage& image, 
 // magnitudes are still comparable as distributions -- the claim under test is that the total is unchanged and only its
 // placement moved, and those are two separate readings.
 // Luminance rather than per-channel: a scalar field is what has a spectrum, and error visibility is a luminance effect.
-void reportErrorSpectrum(const engine::gfx::HdrImage& image, const engine::gfx::HdrImage& reference) {
+void reportErrorSpectrum(const pathtracer::gfx::HdrImage& image, const pathtracer::gfx::HdrImage& reference) {
     const auto pixels = static_cast<std::size_t>(image.width) * static_cast<std::size_t>(image.height);
     std::vector<double> luminanceError(pixels);
     double squaredSum = 0.0;
@@ -313,17 +313,17 @@ void reportErrorSpectrum(const engine::gfx::HdrImage& image, const engine::gfx::
         squaredSum += e * e;
     }
 
-    const std::array<double, engine::debug::kSpectrumBands> bands =
-        engine::debug::octaveBandPower(luminanceError, image.width, image.height);
+    const std::array<double, pathtracer::debug::kSpectrumBands> bands =
+        pathtracer::debug::octaveBandPower(luminanceError, image.width, image.height);
     // Bands are far from equal in width, so a raw share says nothing on its own -- what matters is the share relative to
     // what white noise would put there. Printed alongside, so a band reads directly as blue (below 1.0) or red (above).
-    const std::array<double, engine::debug::kSpectrumBands> white =
-        engine::debug::whiteNoiseBandShare(image.width, image.height);
+    const std::array<double, pathtracer::debug::kSpectrumBands> white =
+        pathtracer::debug::whiteNoiseBandShare(image.width, image.height);
     const double total = std::accumulate(bands.begin(), bands.end(), 0.0);
     std::cout << "render_beauty: error spectrum -- luminance RMS "
               << std::sqrt(squaredSum / static_cast<double>(pixels))
               << ", octave bands (low to high), share of total power and ratio to white noise\n";
-    for (int band = engine::debug::kSpectrumBands - 1; band >= 0; --band) {
+    for (int band = pathtracer::debug::kSpectrumBands - 1; band >= 0; --band) {
         const double high = 0.5 / std::exp2(band);
         const double share = bands[static_cast<std::size_t>(band)] / total;
         // A band can hold no lattice points at all below 256 px on an axis, and dividing by its share would print nan.
@@ -339,11 +339,11 @@ void reportErrorSpectrum(const engine::gfx::HdrImage& image, const engine::gfx::
 
 // Everything the timed loop's cost depends on goes in `config`; output paths and exposure do not, so they never split two otherwise comparable runs.
 bool appendTimingRecord(const Options& options, int argc, char** argv, int width, int height,
-                        const std::string& aovName, const engine::scene::PathTraceSettings& settings,
+                        const std::string& aovName, const pathtracer::scene::PathTraceSettings& settings,
                         bool envLightEnabled, double rasterMs,
-                        engine::gfx::ScalarType textureType, const std::vector<double>& milliseconds, const engine::debug::RayCounts& rays,
-                        const engine::gfx::HdrImage& accumulated) {
-    const engine::debug::BenchRecord record{
+                        pathtracer::gfx::ScalarType textureType, const std::vector<double>& milliseconds, const pathtracer::debug::RayCounts& rays,
+                        const pathtracer::gfx::HdrImage& accumulated) {
+    const pathtracer::debug::BenchRecord record{
         .tool = "render_beauty",
         .argv = std::vector<std::string>(argv, argv + argc),
         .config = {{"scene", options.scenePath},
@@ -357,13 +357,13 @@ bool appendTimingRecord(const Options& options, int argc, char** argv, int width
                    {"max_bounces", settings.maxBounces},
                    {"rr_start_bounce", settings.russianRouletteStartBounce},
                    {"ao_max_distance", settings.aoMaxDistance},
-                   {"texture_type", engine::gfx::scalarTypeName(textureType)}},
+                   {"texture_type", pathtracer::gfx::scalarTypeName(textureType)}},
         .samples = {milliseconds.empty() ? std::pair<std::string, std::vector<double>>{"raster_ms", {rasterMs}}
                                           : std::pair<std::string, std::vector<double>>{"pass_ms", milliseconds}},
         .work = {{"rays", {{"primary", rays.primary}, {"bounce", rays.bounce}, {"ao", rays.ao}, {"shadow", rays.shadow}}},
-                 {"crc32", engine::debug::floatCrc32(accumulated.rgba)}},
+                 {"crc32", pathtracer::debug::floatCrc32(accumulated.rgba)}},
     };
-    return engine::debug::appendBenchRecord(options.benchLogPath, record);
+    return pathtracer::debug::appendBenchRecord(options.benchLogPath, record);
 }
 
 bool parseArgs(int argc, char** argv, Options& options) {
@@ -458,22 +458,22 @@ int main(int argc, char** argv) {
 
     const std::string assetRoot = ASSET_ROOT_DIR;
     std::string error;
-    const std::unique_ptr<engine::api::HeadlessRenderer> renderer =
-        engine::api::HeadlessRenderer::open(assetRoot, options.scenePath, error);
+    const std::unique_ptr<pathtracer::api::HeadlessRenderer> renderer =
+        pathtracer::api::HeadlessRenderer::open(assetRoot, options.scenePath, error);
     if (!renderer) {
         std::cerr << "render_beauty: " << error << "\n";
         return EXIT_FAILURE;
     }
 
     // Fixed camera from profile.json, no controller: what makes two runs comparable is that neither can have been nudged.
-    const engine::scene::Camera camera = renderer->defaultCamera();
+    const pathtracer::scene::Camera camera = renderer->defaultCamera();
     const int width = options.width > 0 ? options.width : renderer->defaultWidth();
     const int height = options.height > 0 ? options.height : renderer->defaultHeight();
     // --env-light overrides the scene's own authored default (-1 = no override).
     const std::optional<bool> envLightOverride =
         options.envLight >= 0 ? std::optional<bool>(options.envLight != 0) : std::nullopt;
     const bool envLightEnabled = envLightOverride.value_or(renderer->defaultEnvLightEnabled());
-    const std::string aovName = engine::debug::kAovNames[static_cast<int>(options.aov)];
+    const std::string aovName = pathtracer::debug::kAovNames[static_cast<int>(options.aov)];
 
     // One accumulation, parameterised by its randomization. Factored out so the gates below can render the same scene
     // several times: the scene, BVH, lights, camera and thread pool are built once by HeadlessRenderer and shared, so
@@ -483,7 +483,7 @@ int main(int argc, char** argv) {
     // stratify against each other exactly as they do in the viewer; the scramble seed is held fixed for the whole
     // render (--seed, default 1), which is what makes two runs over unchanged code byte-identical.
     const auto accumulate = [&](std::uint32_t scrambleSeed, int passes) {
-        const engine::api::HeadlessRenderer::Request request{
+        const pathtracer::api::HeadlessRenderer::Request request{
             .camera = camera,
             .width = width,
             .height = height,
@@ -506,8 +506,8 @@ int main(int argc, char** argv) {
     // something that is not its inputs -- thread scheduling, an uninitialised read, or sampler state surviving a pass
     // -- and until that is true no other image comparison in this suite means anything.
     if (options.assertDeterministic) {
-        const engine::gfx::HdrImage first = accumulate(options.scrambleSeed, options.passes);
-        const engine::gfx::HdrImage second = accumulate(options.scrambleSeed, options.passes);
+        const pathtracer::gfx::HdrImage first = accumulate(options.scrambleSeed, options.passes);
+        const pathtracer::gfx::HdrImage second = accumulate(options.scrambleSeed, options.passes);
         std::size_t differing = 0;
         double worst = 0.0;
         for (std::size_t i = 0; i < first.rgba.size(); ++i) {
@@ -542,7 +542,7 @@ int main(int argc, char** argv) {
         constexpr int kSubRenders = 8;
         const int perSubRender = std::max(1, options.passes / kSubRenders);
         const auto family = [&](std::uint32_t base) {
-            std::vector<engine::gfx::HdrImage> members;
+            std::vector<pathtracer::gfx::HdrImage> members;
             members.reserve(kSubRenders);
             for (int r = 0; r < kSubRenders; ++r) {
                 members.push_back(accumulate(base + static_cast<std::uint32_t>(r), perSubRender));
@@ -551,8 +551,8 @@ int main(int argc, char** argv) {
         };
         // Disjoint seed ranges, so no sub-render is shared between the two families -- a shared one would correlate
         // them and shrink the very difference being tested.
-        const std::vector<engine::gfx::HdrImage> a = family(options.scrambleSeed);
-        const std::vector<engine::gfx::HdrImage> b = family(options.scrambleSeed + 1000U);
+        const std::vector<pathtracer::gfx::HdrImage> a = family(options.scrambleSeed);
+        const std::vector<pathtracer::gfx::HdrImage> b = family(options.scrambleSeed + 1000U);
 
         const std::size_t pixels = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
         // Sidak over the pixels actually examined, so the threshold follows the resolution instead of being restated
@@ -564,7 +564,7 @@ int main(int argc, char** argv) {
         std::size_t examined = 0;
         std::size_t constantDisagreements = 0;
         for (std::size_t px = 0; px < pixels; ++px) {
-            const auto luminance = [&](const engine::gfx::HdrImage& image) {
+            const auto luminance = [&](const pathtracer::gfx::HdrImage& image) {
                 return (0.2126 * image.rgba[(px * 4) + 0]) + (0.7152 * image.rgba[(px * 4) + 1]) +
                        (0.0722 * image.rgba[(px * 4) + 2]);
             };
@@ -618,11 +618,11 @@ int main(int argc, char** argv) {
     }
 
     // Per-pass wall clock, so a change's traversal cost is measured rather than argued. Only the trace is timed: the accumulation inside HeadlessRenderer is O(pixels) and identical across revisions. Mean is the figure to compare -- unlike raster_bench's single-threaded frames, a pass's minimum is set by how the tile queue happened to drain and varies ~12% run to run, where the mean holds to ~1%. Reported alongside best/worst so a run disturbed by other load is visible rather than silently folded in. Pass 0 carries the pool spin-up and first-touch faults and is counted like any other: discarding it would change the image, and it biases both sides of an A/B equally.
-    const engine::gfx::HdrImage accumulated = accumulate(options.scrambleSeed, options.passes);
+    const pathtracer::gfx::HdrImage accumulated = accumulate(options.scrambleSeed, options.passes);
     const std::vector<double>& milliseconds = renderer->lastStats().passMilliseconds;
 
-    const engine::api::HeadlessRenderer::RenderStats& stats = renderer->lastStats();
-    const engine::debug::RayCounts rays = stats.rays;
+    const pathtracer::api::HeadlessRenderer::RenderStats& stats = renderer->lastStats();
+    const pathtracer::debug::RayCounts rays = stats.rays;
     // A rasterizer-backed AOV traces no rays and runs no passes -- it is scan-converted once -- so there is no
     // per-pass distribution to report for it, and reporting one would be a fabrication rather than a measurement.
     if (!milliseconds.empty()) {
@@ -650,7 +650,7 @@ int main(int argc, char** argv) {
     }
 
     if (!options.outExrPath.empty()) {
-        if (!engine::gfx::writeExr(options.outExrPath, accumulated)) {
+        if (!pathtracer::gfx::writeExr(options.outExrPath, accumulated)) {
             return EXIT_FAILURE;
         }
         std::cout << "render_beauty: wrote " << options.outExrPath << " (linear " << aovName << ", "
@@ -658,7 +658,7 @@ int main(int argc, char** argv) {
     }
 
     if (!options.compareExrPath.empty()) {
-        const std::optional<engine::gfx::HdrImage> reference = engine::gfx::loadExr(options.compareExrPath);
+        const std::optional<pathtracer::gfx::HdrImage> reference = pathtracer::gfx::loadExr(options.compareExrPath);
         if (!reference.has_value()) {
             return EXIT_FAILURE;
         }
@@ -695,12 +695,12 @@ int main(int argc, char** argv) {
         }
     }
 
-    const bool isBeauty = options.aov == engine::debug::AovId::Beauty;
+    const bool isBeauty = options.aov == pathtracer::debug::AovId::Beauty;
     // Depth is auto-ranged to the buffer's own maximum, exactly as the viewer does (main.cpp's presentFrame): its raw
     // metres exceed the 8-bit [0,1] range and would quantize to solid white, and Camera::farClip is a conservative ray
     // tMax bound rather than a proxy for the scene's real depth extent, so normalizing by it reads as near-black. This
     // overrides --exposure for Depth, which is again what the viewer does -- the AOV has no photographic exposure.
-    const float exposureEv = options.aov == engine::debug::AovId::Depth
+    const float exposureEv = options.aov == pathtracer::debug::AovId::Depth
                                  ? -std::log2(std::max(maxChannel(accumulated), 1e-4F))
                                  : options.exposureEv;
     const std::vector<unsigned char> encoded = encodeForDisplay(accumulated, exposureEv, isBeauty);

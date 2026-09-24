@@ -1,4 +1,4 @@
-#include "engine/config/scene_config.h"
+#include "pathtracer/config/scene_config.h"
 
 #include <cmath>
 #include <cstddef>
@@ -9,7 +9,7 @@
 
 #include "json_glm.h"
 
-namespace engine::config {
+namespace pathtracer::config {
 
 namespace {
 
@@ -139,4 +139,4 @@ std::optional<MaterialConfig> loadMaterialConfig(const std::string& path) {
     }
 }
 
-}  // namespace engine::config
+}  // namespace pathtracer::config

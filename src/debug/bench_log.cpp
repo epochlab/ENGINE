@@ -1,4 +1,4 @@
-#include "engine/debug/bench_log.h"
+#include "pathtracer/debug/bench_log.h"
 
 #include <fcntl.h>
 #include <sys/resource.h>
@@ -15,10 +15,10 @@
 #include <embree4/rtcore_config.h>
 #include <zlib.h>
 
-#include "engine/debug/memory_tracker.h"
-#include "engine/debug/system_info.h"
+#include "pathtracer/debug/memory_tracker.h"
+#include "pathtracer/debug/system_info.h"
 
-namespace engine::debug {
+namespace pathtracer::debug {
 
 namespace {
 
@@ -102,4 +102,4 @@ std::uint32_t floatCrc32(std::span<const float> values) {
     return static_cast<std::uint32_t>(crc);
 }
 
-}  // namespace engine::debug
+}  // namespace pathtracer::debug

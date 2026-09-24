@@ -1,4 +1,4 @@
-#include "engine/scene/path_trace_driver.h"
+#include "pathtracer/scene/path_trace_driver.h"
 
 #include <algorithm>
 #include <array>
@@ -8,7 +8,7 @@
 #include <utility>
 #include <vector>
 
-namespace engine::scene {
+namespace pathtracer::scene {
 
 namespace {
 
@@ -18,12 +18,12 @@ constexpr std::chrono::milliseconds kIdlePollInterval{5};
 void accumulateMean(PathTraceResult& sample, const PathTraceResult& previousMean, int n,
                      ThreadPool& threadPool) {
     // Index-aligned with `sources` below, and every PathTraceResult image must appear: unlike rasterizer.cpp's aovImages() there is no compile-time guard here, so a missing entry silently publishes that image's last pass instead of the running mean.
-    const std::array<engine::gfx::HdrImage*, 10> destinations{
+    const std::array<pathtracer::gfx::HdrImage*, 10> destinations{
         &sample.beauty,          &sample.bounceHeatmap,    &sample.ao,
         &sample.shadow,          &sample.directDiffuse,    &sample.indirectDiffuse,
         &sample.directSpecular,  &sample.indirectSpecular, &sample.refraction,
         &sample.fresnel};
-    const std::array<const engine::gfx::HdrImage*, 10> sources{
+    const std::array<const pathtracer::gfx::HdrImage*, 10> sources{
         &previousMean.beauty,          &previousMean.bounceHeatmap,
         &previousMean.ao,              &previousMean.shadow,
         &previousMean.directDiffuse,   &previousMean.indirectDiffuse,
@@ -48,7 +48,7 @@ void accumulateMean(PathTraceResult& sample, const PathTraceResult& previousMean
 // A separate pass over beauty rather than a fold into accumulateMean's inner loop, which would save the re-read: accumulateMean is skipped on the first pass of every generation (`if (passIndex > 1)` below), which is exactly the interactive case, so fusing would need a conditional duplicate of this code on that path.
 void reduceOverRange(PathTraceResult& pass, std::vector<OverRangeHistogram>& histograms,
                       std::vector<float>& peaks, ThreadPool& threadPool) {
-    const engine::gfx::HdrImage& beauty = pass.beauty;
+    const pathtracer::gfx::HdrImage& beauty = pass.beauty;
     const int chunkCount =
         std::max(1, std::min(beauty.height, static_cast<int>(threadPool.threadCount())));
     const int chunkRows = (beauty.height + chunkCount - 1) / chunkCount;
@@ -140,7 +140,7 @@ std::shared_ptr<PathTraceResult> PathTraceDriver::acquireFreeBuffer(int width, i
 }
 
 // Runs until destruction (jthread's stop token), picking up the latest requested state whenever its generation changes and otherwise repeatedly re-tracing the same request, accumulating each pass into a running mean that converges over time. A pass superseded mid-flight (renderPathTraced's own generation check, polled once per row) is discarded whole, never partially merged.
-engine::debug::PassRecord PathTraceDriver::lastPassRecord() const {
+pathtracer::debug::PassRecord PathTraceDriver::lastPassRecord() const {
     const std::lock_guard<std::mutex> lock(statsMutex_);
     return lastPass_;
 }
@@ -150,7 +150,7 @@ void PathTraceDriver::publishPassRecord(std::uint64_t generation, int passIndex,
                                          int height, double traceMs, double accumulateMs,
                                          double overRangeMs, double publishMs, double passMs,
                                          bool cancelled) {
-    const engine::debug::PassRecord record{generation,
+    const pathtracer::debug::PassRecord record{generation,
                                             passIndex,
                                             width,
                                             height,
@@ -275,4 +275,4 @@ void PathTraceDriver::driverLoop(std::stop_token stopToken) {
     }
 }
 
-}  // namespace engine::scene
+}  // namespace pathtracer::scene

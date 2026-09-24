@@ -27,12 +27,12 @@
 #include <nlohmann/json.hpp>
 
 #include "check.h"
-#include "engine/config/profile_config.h"
-#include "engine/config/scene_config.h"
-#include "engine/debug/aov.h"
-#include "engine/debug/bench_log.h"
-#include "engine/gfx/hdr_image.h"
-#include "engine/gfx/texture.h"
+#include "pathtracer/config/profile_config.h"
+#include "pathtracer/config/scene_config.h"
+#include "pathtracer/debug/aov.h"
+#include "pathtracer/debug/bench_log.h"
+#include "pathtracer/gfx/hdr_image.h"
+#include "pathtracer/gfx/texture.h"
 
 namespace {
 
@@ -44,8 +44,8 @@ std::filesystem::path scratchPath(const char* name) {
 
 // Values chosen to be hostile to a lossy or narrowing round trip: denormal-scale, exact halves, a value far outside
 // display range, and a negative -- all representable in float32 and all preserved by a full-float EXR channel.
-engine::gfx::HdrImage makeProbeImage() {
-    engine::gfx::HdrImage image;
+pathtracer::gfx::HdrImage makeProbeImage() {
+    pathtracer::gfx::HdrImage image;
     image.width = 7;   // deliberately not a power of two or a multiple of any tile size
     image.height = 5;
     image.rgba.resize(static_cast<std::size_t>(image.width) * image.height * 4);
@@ -65,18 +65,18 @@ engine::gfx::HdrImage makeProbeImage() {
 // The losslessness hdr_image.h claims in prose. Bit-exact, not approximate: both directions write full-float channels,
 // so any difference at all means a channel type or a stride is wrong. The 1e-20 and 65504 rows are what would expose a
 // half-float channel, which would round both to something else entirely while leaving the ordinary values intact.
-ENGINE_CHECK(exr_round_trip_is_lossless, Fast, Exact) {
+PT_CHECK(exr_round_trip_is_lossless, Fast, Exact) {
     ctx.plan(4);
-    const engine::gfx::HdrImage original = makeProbeImage();
+    const pathtracer::gfx::HdrImage original = makeProbeImage();
     const std::filesystem::path path = scratchPath("engine_io_validate_roundtrip.exr");
     std::filesystem::remove(path);
 
-    ENGINE_EXPECT(ctx, engine::gfx::writeExr(path.string(), original), "writeExr failed on a valid image");
-    const std::optional<engine::gfx::HdrImage> loaded = engine::gfx::loadExr(path.string());
+    PT_EXPECT(ctx, pathtracer::gfx::writeExr(path.string(), original), "writeExr failed on a valid image");
+    const std::optional<pathtracer::gfx::HdrImage> loaded = pathtracer::gfx::loadExr(path.string());
     if (!loaded.has_value()) {
-        ENGINE_EXPECT(ctx, false, "loadExr returned nullopt for a file writeExr had just written");
-        ENGINE_EXPECT(ctx, false, "dimensions unavailable");
-        ENGINE_EXPECT(ctx, false, "contents unavailable");
+        PT_EXPECT(ctx, false, "loadExr returned nullopt for a file writeExr had just written");
+        PT_EXPECT(ctx, false, "dimensions unavailable");
+        PT_EXPECT(ctx, false, "contents unavailable");
         std::filesystem::remove(path);
         return;
     }
@@ -84,8 +84,8 @@ ENGINE_CHECK(exr_round_trip_is_lossless, Fast, Exact) {
     char dimDetail[160];
     std::snprintf(dimDetail, sizeof(dimDetail), "round trip returned %dx%d, wrote %dx%d", loaded->width,
                   loaded->height, original.width, original.height);
-    ENGINE_EXPECT(ctx, loaded->width == original.width && loaded->height == original.height, dimDetail);
-    ENGINE_EXPECT(ctx, loaded->rgba.size() == original.rgba.size(), "round trip changed the channel count");
+    PT_EXPECT(ctx, loaded->width == original.width && loaded->height == original.height, dimDetail);
+    PT_EXPECT(ctx, loaded->rgba.size() == original.rgba.size(), "round trip changed the channel count");
 
     std::size_t differing = 0;
     float worst = 0.0F;
@@ -100,17 +100,17 @@ ENGINE_CHECK(exr_round_trip_is_lossless, Fast, Exact) {
     char detail[192];
     std::snprintf(detail, sizeof(detail), "%zu of %zu floats changed across the round trip, worst delta %.9g",
                   differing, original.rgba.size(), static_cast<double>(worst));
-    ENGINE_EXPECT(ctx, differing == 0, detail);
+    PT_EXPECT(ctx, differing == 0, detail);
     std::filesystem::remove(path);
 }
 
 // A missing file must be reported, not treated as an empty image: loadExr's contract is nullopt on failure, and a
 // caller that received a zero-sized image instead would render black and never know why.
-ENGINE_CHECK(exr_load_rejects_bad_input, Fast, Exact) {
+PT_CHECK(exr_load_rejects_bad_input, Fast, Exact) {
     ctx.plan(2);
     const std::filesystem::path missing = scratchPath("engine_io_validate_does_not_exist.exr");
     std::filesystem::remove(missing);
-    ENGINE_EXPECT(ctx, !engine::gfx::loadExr(missing.string()).has_value(),
+    PT_EXPECT(ctx, !pathtracer::gfx::loadExr(missing.string()).has_value(),
                   "loadExr accepted a path that does not exist");
 
     // A file that exists but is not an EXR at all -- the realistic corruption, and the one a magic-number check alone
@@ -120,7 +120,7 @@ ENGINE_CHECK(exr_load_rejects_bad_input, Fast, Exact) {
         std::ofstream out(garbage, std::ios::binary);
         out << "this is not an OpenEXR file, but it is definitely a file";
     }
-    ENGINE_EXPECT(ctx, !engine::gfx::loadExr(garbage.string()).has_value(),
+    PT_EXPECT(ctx, !pathtracer::gfx::loadExr(garbage.string()).has_value(),
                   "loadExr accepted a file whose contents are not EXR");
     std::filesystem::remove(garbage);
 }
@@ -135,19 +135,19 @@ std::filesystem::path writeJson(const char* name, const std::string& text) {
 }
 
 // The shipped scene must load: without this row, every rejection row below could pass by rejecting everything.
-ENGINE_CHECK(scene_config_accepts_the_shipped_scene, Fast, Exact) {
+PT_CHECK(scene_config_accepts_the_shipped_scene, Fast, Exact) {
     ctx.plan(1);
     const std::filesystem::path scene = std::filesystem::path(ASSET_ROOT_DIR) / "scenes" / "cornell.json";
-    const std::optional<engine::config::SceneConfig> loaded = engine::config::loadSceneConfig(scene.string());
+    const std::optional<pathtracer::config::SceneConfig> loaded = pathtracer::config::loadSceneConfig(scene.string());
     char detail[256];
     std::snprintf(detail, sizeof(detail), "loadSceneConfig rejected the shipped scene at %s", scene.string().c_str());
-    ENGINE_EXPECT(ctx, loaded.has_value(), detail);
+    PT_EXPECT(ctx, loaded.has_value(), detail);
 }
 
 // The rejection half of the contract. Each row is a malformation a real authoring mistake produces, and each must be
 // reported rather than absorbed into a default -- a quad light with non-perpendicular edges, for instance, would be
 // sampled by a spherical-rectangle sampler that is exact only for rectangles, producing a quietly wrong image.
-ENGINE_CHECK(scene_config_rejects_malformed_input, Fast, Exact) {
+PT_CHECK(scene_config_rejects_malformed_input, Fast, Exact) {
     struct Case {
         const char* name;
         const char* file;
@@ -190,35 +190,35 @@ ENGINE_CHECK(scene_config_rejects_malformed_input, Fast, Exact) {
 
     // Anti-vacuity: the base the three light rows are built from must itself LOAD, or they would prove nothing.
     const std::filesystem::path basePath = writeJson("engine_io_scene_base.json", scene(validLights));
-    const bool baseLoads = engine::config::loadSceneConfig(basePath.string()).has_value();
+    const bool baseLoads = pathtracer::config::loadSceneConfig(basePath.string()).has_value();
     std::filesystem::remove(basePath);
 
     ctx.plan(static_cast<int>(cases.size()) + 1);
-    ENGINE_EXPECT(ctx, baseLoads,
+    PT_EXPECT(ctx, baseLoads,
                   "the unmutated base scene must load, or every mutated row below passes vacuously");
     for (const Case& testCase : cases) {
         const std::filesystem::path path = writeJson(testCase.file, testCase.text);
-        const bool accepted = engine::config::loadSceneConfig(path.string()).has_value();
+        const bool accepted = pathtracer::config::loadSceneConfig(path.string()).has_value();
         char detail[224];
         std::snprintf(detail, sizeof(detail), "loadSceneConfig accepted a scene with %s", testCase.name);
-        ENGINE_EXPECT(ctx, !accepted, detail);
+        PT_EXPECT(ctx, !accepted, detail);
         std::filesystem::remove(path);
     }
 }
 
-ENGINE_CHECK(profile_config_accepts_the_shipped_profile, Fast, Exact) {
+PT_CHECK(profile_config_accepts_the_shipped_profile, Fast, Exact) {
     ctx.plan(1);
     const std::filesystem::path profile = std::filesystem::path(ASSET_ROOT_DIR) / "config" / "profile.json";
     char detail[256];
     std::snprintf(detail, sizeof(detail), "loadProfileConfig rejected the shipped profile at %s",
                   profile.string().c_str());
-    ENGINE_EXPECT(ctx, engine::config::loadProfileConfig(profile.string()).has_value(), detail);
+    PT_EXPECT(ctx, pathtracer::config::loadProfileConfig(profile.string()).has_value(), detail);
 }
 
 // profile_config.cpp had no coverage of any kind. These rows are the boundary values it is responsible for: a
 // zero-or-negative resolution divides an aspect ratio, and a zero film-back dimension is a denominator inside
 // Camera::verticalFovRadians().
-ENGINE_CHECK(profile_config_rejects_malformed_input, Fast, Exact) {
+PT_CHECK(profile_config_rejects_malformed_input, Fast, Exact) {
     struct Case {
         const char* name;
         const char* file;
@@ -235,19 +235,19 @@ ENGINE_CHECK(profile_config_rejects_malformed_input, Fast, Exact) {
         const std::filesystem::path path = writeJson(testCase.file, testCase.text);
         char detail[224];
         std::snprintf(detail, sizeof(detail), "loadProfileConfig accepted a profile with %s", testCase.name);
-        ENGINE_EXPECT(ctx, !engine::config::loadProfileConfig(path.string()).has_value(), detail);
+        PT_EXPECT(ctx, !pathtracer::config::loadProfileConfig(path.string()).has_value(), detail);
         std::filesystem::remove(path);
     }
 
     const std::filesystem::path missing = scratchPath("engine_io_profile_absent.json");
     std::filesystem::remove(missing);
-    ENGINE_EXPECT(ctx, !engine::config::loadProfileConfig(missing.string()).has_value(),
+    PT_EXPECT(ctx, !pathtracer::config::loadProfileConfig(missing.string()).has_value(),
                   "loadProfileConfig accepted a path that does not exist");
 }
 
 // render.vsync, displayBitDepth and textureBitDepth, each varied alone on the shipped profile: every accepted value must map to its own setting and leave the other two alone, every other value must be refused rather than coerced (16.5 would otherwise truncate to 16).
-ENGINE_CHECK(profile_config_render_display_settings, Fast, Exact) {
-    using engine::gfx::ScalarType;
+PT_CHECK(profile_config_render_display_settings, Fast, Exact) {
+    using pathtracer::gfx::ScalarType;
     struct Case {
         std::string name;
         const char* key;
@@ -274,11 +274,11 @@ ENGINE_CHECK(profile_config_render_display_settings, Fast, Exact) {
 
     // Each accepted row varies one key against the shipped profile, so the expectation is the shipped setting with that one key overridden -- no assumption about what the shipped depths are.
     const std::filesystem::path shippedPath = std::filesystem::path(ASSET_ROOT_DIR) / "config" / "profile.json";
-    const std::optional<engine::config::ProfileConfig> shippedConfig = engine::config::loadProfileConfig(shippedPath.string());
+    const std::optional<pathtracer::config::ProfileConfig> shippedConfig = pathtracer::config::loadProfileConfig(shippedPath.string());
     std::ifstream shippedFile(shippedPath);
     const nlohmann::json shipped = nlohmann::json::parse(shippedFile);
     ctx.plan(static_cast<int>(cases.size()) + 1);
-    ENGINE_EXPECT(ctx, shippedConfig.has_value(), "the shipped profile does not load, so no row below means anything");
+    PT_EXPECT(ctx, shippedConfig.has_value(), "the shipped profile does not load, so no row below means anything");
     if (!shippedConfig) {
         return;
     }
@@ -290,33 +290,33 @@ ENGINE_CHECK(profile_config_render_display_settings, Fast, Exact) {
             edited["render"][testCase.key] = testCase.value;
         }
         const std::filesystem::path path = writeJson("engine_io_profile_render.json", edited.dump());
-        const std::optional<engine::config::ProfileConfig> loaded = engine::config::loadProfileConfig(path.string());
+        const std::optional<pathtracer::config::ProfileConfig> loaded = pathtracer::config::loadProfileConfig(path.string());
         std::filesystem::remove(path);
         char detail[224];
         if (testCase.accepted) {
             const bool isDisplay = std::string(testCase.key) == "displayBitDepth";
             const bool isTexture = std::string(testCase.key) == "textureBitDepth";
             const std::optional<ScalarType> varied =
-                testCase.value.is_number_integer() ? engine::gfx::scalarTypeFromBitDepth(testCase.value.get<int>())
+                testCase.value.is_number_integer() ? pathtracer::gfx::scalarTypeFromBitDepth(testCase.value.get<int>())
                                                    : std::nullopt;
             const ScalarType display = isDisplay ? *varied : shippedConfig->render.displayFormat;
             const ScalarType texture = isTexture ? *varied : shippedConfig->render.textureType;
             const bool vsync = isDisplay || isTexture ? shippedConfig->render.vsync : testCase.value.get<bool>();
             std::snprintf(detail, sizeof(detail), "loadProfileConfig rejected or mis-mapped %s", testCase.name.c_str());
-            ENGINE_EXPECT(ctx,
+            PT_EXPECT(ctx,
                           loaded.has_value() && loaded->render.displayFormat == display &&
                               loaded->render.textureType == texture && loaded->render.vsync == vsync,
                           detail);
         } else {
             std::snprintf(detail, sizeof(detail), "loadProfileConfig accepted %s", testCase.name.c_str());
-            ENGINE_EXPECT(ctx, !loaded.has_value(), detail);
+            PT_EXPECT(ctx, !loaded.has_value(), detail);
         }
     }
 }
 
 // render.defaultAOV is a raw index into kAovNames that main.cpp's startup spec block dereferences unchecked, so the bound has to hold at load. Both ends plus the first value past the top, which is the one an AOV insertion moves.
-ENGINE_CHECK(profile_config_default_aov_is_in_range, Fast, Exact) {
-    const int aovCount = static_cast<int>(engine::debug::AovId::Count);
+PT_CHECK(profile_config_default_aov_is_in_range, Fast, Exact) {
+    const int aovCount = static_cast<int>(pathtracer::debug::AovId::Count);
     const std::vector<std::pair<nlohmann::json, bool>> cases = {
         {0, true}, {aovCount - 1, true}, {aovCount, false}, {-1, false}, {nlohmann::json(nullptr), false},
     };
@@ -325,7 +325,7 @@ ENGINE_CHECK(profile_config_default_aov_is_in_range, Fast, Exact) {
     std::ifstream shippedFile(shippedPath);
     const nlohmann::json shipped = nlohmann::json::parse(shippedFile);
     ctx.plan(static_cast<int>(cases.size()) + 1);
-    ENGINE_EXPECT(ctx, engine::config::loadProfileConfig(shippedPath.string()).has_value(),
+    PT_EXPECT(ctx, pathtracer::config::loadProfileConfig(shippedPath.string()).has_value(),
                   "the shipped profile does not load, so no row below means anything");
     for (const auto& [value, accepted] : cases) {
         nlohmann::json edited = shipped;
@@ -335,18 +335,18 @@ ENGINE_CHECK(profile_config_default_aov_is_in_range, Fast, Exact) {
             edited["render"]["defaultAOV"] = value;
         }
         const std::filesystem::path path = writeJson("engine_io_profile_defaultaov.json", edited.dump());
-        const std::optional<engine::config::ProfileConfig> loaded = engine::config::loadProfileConfig(path.string());
+        const std::optional<pathtracer::config::ProfileConfig> loaded = pathtracer::config::loadProfileConfig(path.string());
         std::filesystem::remove(path);
         char detail[224];
         std::snprintf(detail, sizeof(detail), "loadProfileConfig %s defaultAOV %s",
                       accepted ? "rejected" : "accepted", value.dump().c_str());
-        ENGINE_EXPECT(ctx, loaded.has_value() == accepted && (!accepted || loaded->render.defaultAov == value.get<int>()),
+        PT_EXPECT(ctx, loaded.has_value() == accepted && (!accepted || loaded->render.defaultAov == value.get<int>()),
                       detail);
     }
 }
 
 // The two scene-scale distances in `pathTracer`, each a divisor at its point of use: aoMaxDistance normalizes the AO obscurance falloff (path_tracer.cpp), lookaheadDistance the Lookahead AOV's ramp (rasterizer.cpp). At or below zero the lane is inf/NaN rather than the bounded gradient it is defined to be, and a missing or non-numeric key must fail at this asset-load boundary rather than default silently. Each varied alone against the shipped profile, so an accepted row also proves the value reaches the struct unaltered and leaves the other distance alone.
-ENGINE_CHECK(profile_config_scene_scale_distances, Fast, Exact) {
+PT_CHECK(profile_config_scene_scale_distances, Fast, Exact) {
     struct Case {
         std::string name;
         const char* key;
@@ -362,7 +362,7 @@ ENGINE_CHECK(profile_config_scene_scale_distances, Fast, Exact) {
         }
     }
 
-    const auto distanceOf = [](const engine::config::PathTracerConfig& config, const char* key) {
+    const auto distanceOf = [](const pathtracer::config::PathTracerConfig& config, const char* key) {
         return std::string(key) == "aoMaxDistance" ? config.aoMaxDistance : config.lookaheadDistance;
     };
     const auto otherKey = [](const char* key) {
@@ -370,12 +370,12 @@ ENGINE_CHECK(profile_config_scene_scale_distances, Fast, Exact) {
     };
 
     const std::filesystem::path shippedPath = std::filesystem::path(ASSET_ROOT_DIR) / "config" / "profile.json";
-    const std::optional<engine::config::ProfileConfig> shippedConfig =
-        engine::config::loadProfileConfig(shippedPath.string());
+    const std::optional<pathtracer::config::ProfileConfig> shippedConfig =
+        pathtracer::config::loadProfileConfig(shippedPath.string());
     std::ifstream shippedFile(shippedPath);
     const nlohmann::json shipped = nlohmann::json::parse(shippedFile);
     ctx.plan(static_cast<int>(cases.size()) + 1);
-    ENGINE_EXPECT(ctx, shippedConfig.has_value(), "the shipped profile does not load, so no row below means anything");
+    PT_EXPECT(ctx, shippedConfig.has_value(), "the shipped profile does not load, so no row below means anything");
     if (!shippedConfig) {
         return;
     }
@@ -387,13 +387,13 @@ ENGINE_CHECK(profile_config_scene_scale_distances, Fast, Exact) {
             edited["pathTracer"][testCase.key] = testCase.value;
         }
         const std::filesystem::path path = writeJson("engine_io_profile_distances.json", edited.dump());
-        const std::optional<engine::config::ProfileConfig> loaded = engine::config::loadProfileConfig(path.string());
+        const std::optional<pathtracer::config::ProfileConfig> loaded = pathtracer::config::loadProfileConfig(path.string());
         std::filesystem::remove(path);
         char detail[224];
         if (testCase.accepted) {
             std::snprintf(detail, sizeof(detail), "loadProfileConfig rejected or mis-mapped %s",
                           testCase.name.c_str());
-            ENGINE_EXPECT(ctx,
+            PT_EXPECT(ctx,
                           loaded.has_value() &&
                               distanceOf(loaded->pathTracer, testCase.key) == testCase.value.get<float>() &&
                               distanceOf(loaded->pathTracer, otherKey(testCase.key)) ==
@@ -401,23 +401,23 @@ ENGINE_CHECK(profile_config_scene_scale_distances, Fast, Exact) {
                           detail);
         } else {
             std::snprintf(detail, sizeof(detail), "loadProfileConfig accepted %s", testCase.name.c_str());
-            ENGINE_EXPECT(ctx, !loaded.has_value(), detail);
+            PT_EXPECT(ctx, !loaded.has_value(), detail);
         }
     }
 }
 
 // loadImageTexture's typed read: binary16-exact data loads bit-identically at both types, arbitrary data at Float16 equals the IEEE round-to-nearest-even cast (IEEE 754-2008 4.3.1) that OpenEXR's float-to-half conversion must perform, and a finite source above kHalfMax overflows and is rejected at Float16 only.
-ENGINE_CHECK(image_texture_half_load, Fast, Exact) {
-    using engine::gfx::ScalarType;
+PT_CHECK(image_texture_half_load, Fast, Exact) {
+    using pathtracer::gfx::ScalarType;
     const auto writeProbe = [](const char* name, const std::vector<float>& values) {
-        engine::gfx::HdrImage image{static_cast<int>(values.size()), 1, {}};
+        pathtracer::gfx::HdrImage image{static_cast<int>(values.size()), 1, {}};
         for (const float v : values) {
             image.rgba.insert(image.rgba.end(), {v, v, v, 1.0F});
         }
         const std::filesystem::path path = scratchPath(name);
-        return engine::gfx::writeExr(path.string(), image) ? std::optional(path) : std::nullopt;
+        return pathtracer::gfx::writeExr(path.string(), image) ? std::optional(path) : std::nullopt;
     };
-    const auto sameTexels = [](const engine::gfx::ImageTexture& a, const std::vector<float>& expected) {
+    const auto sameTexels = [](const pathtracer::gfx::ImageTexture& a, const std::vector<float>& expected) {
         for (int x = 0; x < a.width; ++x) {
             const glm::vec4 texel = a.texel(x, 0);
             if (texel.r != expected[static_cast<std::size_t>(x)] || texel.b != expected[static_cast<std::size_t>(x)]) {
@@ -429,36 +429,36 @@ ENGINE_CHECK(image_texture_half_load, Fast, Exact) {
     ctx.plan(5);
 
     // Exact in binary16: small integers, dyadic fractions, the largest finite value, the smallest normal.
-    const std::vector<float> exact = {0.0F, 1.0F, 1.5F, 0.25F, 2048.0F, -3.0F, engine::gfx::kHalfMax, 1.0F / 16384.0F};
+    const std::vector<float> exact = {0.0F, 1.0F, 1.5F, 0.25F, 2048.0F, -3.0F, pathtracer::gfx::kHalfMax, 1.0F / 16384.0F};
     const std::optional<std::filesystem::path> exactPath = writeProbe("engine_io_half_exact.exr", exact);
-    const std::optional<engine::gfx::ImageTexture> exact16 =
-        exactPath ? engine::gfx::loadImageTexture(exactPath->string(), ScalarType::Float16) : std::nullopt;
-    const std::optional<engine::gfx::ImageTexture> exact32 =
-        exactPath ? engine::gfx::loadImageTexture(exactPath->string(), ScalarType::Float32) : std::nullopt;
-    ENGINE_EXPECT(ctx, exact16 && exact32 && std::holds_alternative<std::vector<engine::gfx::Half>>(exact16->texels) && sameTexels(*exact16, exact) &&
+    const std::optional<pathtracer::gfx::ImageTexture> exact16 =
+        exactPath ? pathtracer::gfx::loadImageTexture(exactPath->string(), ScalarType::Float16) : std::nullopt;
+    const std::optional<pathtracer::gfx::ImageTexture> exact32 =
+        exactPath ? pathtracer::gfx::loadImageTexture(exactPath->string(), ScalarType::Float32) : std::nullopt;
+    PT_EXPECT(ctx, exact16 && exact32 && std::holds_alternative<std::vector<pathtracer::gfx::Half>>(exact16->texels) && sameTexels(*exact16, exact) &&
                            sameTexels(*exact32, exact),
                   "binary16-exact values did not load bit-identically at Float16 and Float32");
 
     // Arbitrary: needs rounding, including the exact midpoint above 1.0 (ties to even -> 1.0), a subnormal, and one below the smallest subnormal (-> 0).
-    const std::vector<float> arbitrary = {0.1F, 1.0F + engine::gfx::kHalfUnitRoundoff, 3.14159265F, 1.0e-6F, 1.0e-20F, 60000.5F};
+    const std::vector<float> arbitrary = {0.1F, 1.0F + pathtracer::gfx::kHalfUnitRoundoff, 3.14159265F, 1.0e-6F, 1.0e-20F, 60000.5F};
     std::vector<float> rounded;
     for (const float v : arbitrary) {
-        rounded.push_back(static_cast<float>(static_cast<engine::gfx::Half>(v)));
+        rounded.push_back(static_cast<float>(static_cast<pathtracer::gfx::Half>(v)));
     }
     const std::optional<std::filesystem::path> arbitraryPath = writeProbe("engine_io_half_arbitrary.exr", arbitrary);
-    const std::optional<engine::gfx::ImageTexture> arbitrary16 =
-        arbitraryPath ? engine::gfx::loadImageTexture(arbitraryPath->string(), ScalarType::Float16) : std::nullopt;
-    ENGINE_EXPECT(ctx, arbitrary16 && sameTexels(*arbitrary16, rounded),
+    const std::optional<pathtracer::gfx::ImageTexture> arbitrary16 =
+        arbitraryPath ? pathtracer::gfx::loadImageTexture(arbitraryPath->string(), ScalarType::Float16) : std::nullopt;
+    PT_EXPECT(ctx, arbitrary16 && sameTexels(*arbitrary16, rounded),
                   "Float16 load differs from static_cast<Half> (round to nearest even)");
-    const std::optional<engine::gfx::ImageTexture> arbitrary32 =
-        arbitraryPath ? engine::gfx::loadImageTexture(arbitraryPath->string(), ScalarType::Float32) : std::nullopt;
-    ENGINE_EXPECT(ctx, arbitrary32 && sameTexels(*arbitrary32, arbitrary), "Float32 load is not an exact copy");
+    const std::optional<pathtracer::gfx::ImageTexture> arbitrary32 =
+        arbitraryPath ? pathtracer::gfx::loadImageTexture(arbitraryPath->string(), ScalarType::Float32) : std::nullopt;
+    PT_EXPECT(ctx, arbitrary32 && sameTexels(*arbitrary32, arbitrary), "Float32 load is not an exact copy");
 
     // Overflow: 70000 is finite in float and beyond kHalfMax, so Float16 must reject it and Float32 must not.
     const std::optional<std::filesystem::path> overPath = writeProbe("engine_io_half_overflow.exr", {1.0F, 70000.0F});
-    ENGINE_EXPECT(ctx, overPath && !engine::gfx::loadImageTexture(overPath->string(), ScalarType::Float16),
+    PT_EXPECT(ctx, overPath && !pathtracer::gfx::loadImageTexture(overPath->string(), ScalarType::Float16),
                   "Float16 accepted a texel above binary16's finite max");
-    ENGINE_EXPECT(ctx, overPath && engine::gfx::loadImageTexture(overPath->string(), ScalarType::Float32),
+    PT_EXPECT(ctx, overPath && pathtracer::gfx::loadImageTexture(overPath->string(), ScalarType::Float32),
                   "Float32 rejected a finite texel");
     for (const std::optional<std::filesystem::path>& path : {exactPath, arbitraryPath, overPath}) {
         if (path) {
@@ -468,32 +468,32 @@ ENGINE_CHECK(image_texture_half_load, Fast, Exact) {
 }
 
 // sampleBilinear at Float16 against Float32 on the same non-negative, normal-range data. Each stored texel is t(1 + d) with |d| <= u = 2^-11, and bilinear weights are non-negative and sum to 1, so the storage error is at most u * s32; each path's float arithmetic (two mix levels, 3 roundings each) adds at most gamma_6 * s (Higham 2002, 3.1). The bound is derived, not fitted; a zero observed difference would mean the Float16 path was never exercised.
-ENGINE_CHECK(image_texture_bilinear_half_bound, Fast, Exact) {
-    using engine::gfx::ScalarType;
+PT_CHECK(image_texture_bilinear_half_bound, Fast, Exact) {
+    using pathtracer::gfx::ScalarType;
     constexpr int kWidth = 13;
     constexpr int kHeight = 7;
     constexpr int kSamples = 20000;
     const double unitRoundoff = std::numeric_limits<float>::epsilon() / 2.0;
     const double gamma6 = 6.0 * unitRoundoff / (1.0 - (6.0 * unitRoundoff));
-    const double bound = engine::gfx::kHalfUnitRoundoff + (2.0 * gamma6);
+    const double bound = pathtracer::gfx::kHalfUnitRoundoff + (2.0 * gamma6);
 
     std::mt19937 rng(static_cast<std::mt19937::result_type>(ctx.seed()));
     // Normal range of binary16: [2^-14, kHalfMax], log-uniform so every binade is exercised.
-    std::uniform_real_distribution<float> logValue(-14.0F, std::log2(engine::gfx::kHalfMax));
+    std::uniform_real_distribution<float> logValue(-14.0F, std::log2(pathtracer::gfx::kHalfMax));
     std::vector<float> rgba(static_cast<std::size_t>(kWidth) * kHeight * 4);
     for (float& v : rgba) {
         v = std::exp2(logValue(rng));
     }
-    const engine::gfx::ImageTexture full{kWidth, kHeight, rgba};
-    const engine::gfx::ImageTexture half{kWidth, kHeight, std::vector<engine::gfx::Half>(rgba.begin(), rgba.end())};
+    const pathtracer::gfx::ImageTexture full{kWidth, kHeight, rgba};
+    const pathtracer::gfx::ImageTexture half{kWidth, kHeight, std::vector<pathtracer::gfx::Half>(rgba.begin(), rgba.end())};
 
     std::uniform_real_distribution<float> unit(-1.0F, 2.0F);  // beyond [0,1] so both wrap directions are covered
     double worst = 0.0;
     double largest = 0.0;
     for (int i = 0; i < kSamples; ++i) {
         const glm::vec2 uv(unit(rng), unit(rng));
-        const glm::vec4 s32 = engine::gfx::sampleBilinear(full, uv);
-        const glm::vec4 s16 = engine::gfx::sampleBilinear(half, uv);
+        const glm::vec4 s32 = pathtracer::gfx::sampleBilinear(full, uv);
+        const glm::vec4 s16 = pathtracer::gfx::sampleBilinear(half, uv);
         for (int c = 0; c < 4; ++c) {
             const double relative = std::fabs(static_cast<double>(s16[c]) - s32[c]) / s32[c];
             worst = std::max(worst, relative / bound);
@@ -503,77 +503,77 @@ ENGINE_CHECK(image_texture_bilinear_half_bound, Fast, Exact) {
     ctx.plan(2);
     char detail[192];
     std::snprintf(detail, sizeof(detail), "worst |s16 - s32| / s32 is %.4g of the derived bound %.4g", worst, bound);
-    ENGINE_EXPECT(ctx, worst <= 1.0, detail);
-    ENGINE_EXPECT(ctx, largest > 0.0, "Float16 and Float32 samples never differed: the half path was not exercised");
+    PT_EXPECT(ctx, worst <= 1.0, detail);
+    PT_EXPECT(ctx, largest > 0.0, "Float16 and Float32 samples never differed: the half path was not exercised");
 }
 
 // The film-back catalogue's own contract: every preset's dimensions feed Camera::verticalFovRadians() as a
 // denominator and an aspect ratio, so a zero or negative entry is not a cosmetic defect.
-ENGINE_CHECK(film_back_presets_are_physically_valid, Fast, Exact) {
+PT_CHECK(film_back_presets_are_physically_valid, Fast, Exact) {
     ctx.plan(2);
     const std::filesystem::path camera = std::filesystem::path(ASSET_ROOT_DIR) / "config" / "camera.json";
-    const std::optional<std::vector<engine::scene::Camera::FilmBackPreset>> presets =
-        engine::config::loadFilmBackPresets(camera.string());
+    const std::optional<std::vector<pathtracer::scene::Camera::FilmBackPreset>> presets =
+        pathtracer::config::loadFilmBackPresets(camera.string());
     if (!presets.has_value()) {
-        ENGINE_EXPECT(ctx, false, "loadFilmBackPresets rejected the shipped camera.json");
-        ENGINE_EXPECT(ctx, false, "presets unavailable");
+        PT_EXPECT(ctx, false, "loadFilmBackPresets rejected the shipped camera.json");
+        PT_EXPECT(ctx, false, "presets unavailable");
         return;
     }
-    ENGINE_EXPECT(ctx, !presets->empty(), "the shipped film-back catalogue is empty");
+    PT_EXPECT(ctx, !presets->empty(), "the shipped film-back catalogue is empty");
     bool allPositive = true;
-    for (const engine::scene::Camera::FilmBackPreset& preset : *presets) {
+    for (const pathtracer::scene::Camera::FilmBackPreset& preset : *presets) {
         allPositive = allPositive && preset.filmBack.widthMm > 0.0F && preset.filmBack.heightMm > 0.0F;
     }
-    ENGINE_EXPECT(ctx, allPositive, "a film-back preset has a non-positive dimension");
+    PT_EXPECT(ctx, allPositive, "a film-back preset has a non-positive dimension");
 }
 
 // Every appended record is exactly one line that parses back with every schema field, and appending never rewrites earlier lines.
-ENGINE_CHECK(bench_log_appends_one_parseable_line_per_record, Fast, Exact) {
+PT_CHECK(bench_log_appends_one_parseable_line_per_record, Fast, Exact) {
     ctx.plan(5);
     const std::filesystem::path path = scratchPath("engine_io_validate_bench.jsonl");
     std::filesystem::remove(path);
-    const engine::debug::BenchRecord first{"io_validate", {"io_validate", "--flag"}, {{"width", 7}}, {{"ms", {1.5, 2.5}}}, {{"crc32", 1}}};
-    const engine::debug::BenchRecord second{"io_validate", {"io_validate"}, {{"width", 9}}, {{"ms", {3.0}}}, {{"crc32", 2}}};
-    ENGINE_EXPECT(ctx, engine::debug::appendBenchRecord(path.string(), first) && engine::debug::appendBenchRecord(path.string(), second), "appendBenchRecord failed on a writable scratch path");
+    const pathtracer::debug::BenchRecord first{"io_validate", {"io_validate", "--flag"}, {{"width", 7}}, {{"ms", {1.5, 2.5}}}, {{"crc32", 1}}};
+    const pathtracer::debug::BenchRecord second{"io_validate", {"io_validate"}, {{"width", 9}}, {{"ms", {3.0}}}, {{"crc32", 2}}};
+    PT_EXPECT(ctx, pathtracer::debug::appendBenchRecord(path.string(), first) && pathtracer::debug::appendBenchRecord(path.string(), second), "appendBenchRecord failed on a writable scratch path");
 
     std::vector<nlohmann::json> records;
     std::ifstream in(path);
     for (std::string line; std::getline(in, line);) {
         records.push_back(nlohmann::json::parse(line, nullptr, /*allow_exceptions=*/false));
     }
-    ENGINE_EXPECT(ctx, records.size() == 2, "expected exactly two lines after two appends");
+    PT_EXPECT(ctx, records.size() == 2, "expected exactly two lines after two appends");
 
     const auto complete = [](const nlohmann::json& r) {
-        return !r.is_discarded() && r.value("schema", 0) == engine::debug::kBenchLogSchema && r.contains("time_utc") && r.contains("pid") &&
+        return !r.is_discarded() && r.value("schema", 0) == pathtracer::debug::kBenchLogSchema && r.contains("time_utc") && r.contains("pid") &&
                !r["build"].value("git", std::string()).empty() && r["build"].value("uuid", std::string()).size() == 32 &&
                r["host"].value("logical_cpus", 0) > 0 && r["rusage"].contains("user_s") && r["rusage"].contains("nivcsw");
     };
-    ENGINE_EXPECT(ctx, records.size() == 2 && complete(records[0]) && complete(records[1]), "a record is missing a provenance or rusage field");
-    ENGINE_EXPECT(ctx, records.size() == 2 && records[0]["config"] == first.config && records[0]["samples"] == first.samples && records[0]["argv"] == first.argv,
+    PT_EXPECT(ctx, records.size() == 2 && complete(records[0]) && complete(records[1]), "a record is missing a provenance or rusage field");
+    PT_EXPECT(ctx, records.size() == 2 && records[0]["config"] == first.config && records[0]["samples"] == first.samples && records[0]["argv"] == first.argv,
                   "first record's caller-supplied content did not round-trip");
-    ENGINE_EXPECT(ctx, records.size() == 2 && records[1]["config"] == second.config && records[1]["work"] == second.work,
+    PT_EXPECT(ctx, records.size() == 2 && records[1]["config"] == second.config && records[1]["work"] == second.work,
                   "second record's caller-supplied content did not round-trip");
     std::filesystem::remove(path);
 }
 
 // A path that cannot be opened is reported as a failure, never as a silently skipped record.
-ENGINE_CHECK(bench_log_rejects_unwritable_path, Fast, Exact) {
+PT_CHECK(bench_log_rejects_unwritable_path, Fast, Exact) {
     ctx.plan(1);
     const std::filesystem::path path = scratchPath("engine_io_validate_no_such_dir") / "bench.jsonl";
     std::filesystem::remove_all(path.parent_path());
-    const engine::debug::BenchRecord record{"io_validate", {}, nlohmann::json::object(), nlohmann::json::object(), nlohmann::json::object()};
-    ENGINE_EXPECT(ctx, !engine::debug::appendBenchRecord(path.string(), record), "appendBenchRecord reported success writing into a missing directory");
+    const pathtracer::debug::BenchRecord record{"io_validate", {}, nlohmann::json::object(), nlohmann::json::object(), nlohmann::json::object()};
+    PT_EXPECT(ctx, !pathtracer::debug::appendBenchRecord(path.string(), record), "appendBenchRecord reported success writing into a missing directory");
 }
 
 // Known answers from an independent implementation (Python's zlib.crc32 over the same little-endian bytes).
-ENGINE_CHECK(float_crc32_matches_reference, Fast, Exact) {
+PT_CHECK(float_crc32_matches_reference, Fast, Exact) {
     ctx.plan(2);
     const std::vector<float> zero{0.0F};
     const std::vector<float> mixed{1.0F, -2.5F, 0.1F};
-    ENGINE_EXPECT(ctx, engine::debug::floatCrc32(zero) == 0x2144DF1CU, "CRC-32 of four zero bytes is not 0x2144DF1C");
-    ENGINE_EXPECT(ctx, engine::debug::floatCrc32(mixed) == 2706677804U, "CRC-32 of {1, -2.5, 0.1} disagrees with zlib.crc32");
+    PT_EXPECT(ctx, pathtracer::debug::floatCrc32(zero) == 0x2144DF1CU, "CRC-32 of four zero bytes is not 0x2144DF1C");
+    PT_EXPECT(ctx, pathtracer::debug::floatCrc32(mixed) == 2706677804U, "CRC-32 of {1, -2.5, 0.1} disagrees with zlib.crc32");
 }
 
 }  // namespace
 
-ENGINE_CHECK_MAIN("io")
+PT_CHECK_MAIN("io")

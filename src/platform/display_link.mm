@@ -1,4 +1,4 @@
-#include "engine/platform/display_link.h"
+#include "pathtracer/platform/display_link.h"
 
 #include <chrono>
 #include <cmath>
@@ -17,10 +17,10 @@
 #include <GLFW/glfw3.h>
 #include <GLFW/glfw3native.h>
 
-#include "engine/platform/window.h"
+#include "pathtracer/platform/window.h"
 
 // Times are CACurrentMediaTime seconds, the timebase CADisplayLink reports in.
-struct engine::platform::DisplayLink::State {
+struct pathtracer::platform::DisplayLink::State {
     std::mutex mutex;
     std::condition_variable vblank;
     std::uint64_t ticks = 0;     // vblanks delivered by the link
@@ -34,15 +34,15 @@ struct engine::platform::DisplayLink::State {
 };
 
 @interface EngineDisplayLinkTarget : NSObject
-- (instancetype)initWithState:(engine::platform::DisplayLink::State*)state;
+- (instancetype)initWithState:(pathtracer::platform::DisplayLink::State*)state;
 - (void)vblank:(CADisplayLink*)link;
 @end
 
 @implementation EngineDisplayLinkTarget {
-    engine::platform::DisplayLink::State* state_;
+    pathtracer::platform::DisplayLink::State* state_;
 }
 
-- (instancetype)initWithState:(engine::platform::DisplayLink::State*)state {
+- (instancetype)initWithState:(pathtracer::platform::DisplayLink::State*)state {
     if ((self = [super init])) {
         state_ = state;
     }
@@ -61,7 +61,7 @@ struct engine::platform::DisplayLink::State {
 
 @end
 
-namespace engine::platform {
+namespace pathtracer::platform {
 
 DisplayLink::DisplayLink(const Window& window) : state_(std::make_unique<State>()) {
     NSView* view = glfwGetCocoaView(window.nativeHandle());
@@ -123,4 +123,4 @@ double DisplayLink::refreshPeriodSeconds() const {
     return state_->period;
 }
 
-}  // namespace engine::platform
+}  // namespace pathtracer::platform

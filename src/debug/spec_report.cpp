@@ -1,11 +1,11 @@
-#include "engine/debug/spec_report.h"
+#include "pathtracer/debug/spec_report.h"
 
 #include <cstdio>
 
-#include "engine/debug/memory_tracker.h"
-#include "engine/debug/system_info.h"
+#include "pathtracer/debug/memory_tracker.h"
+#include "pathtracer/debug/system_info.h"
 
-namespace engine::debug {
+namespace pathtracer::debug {
 
 namespace {
 
@@ -73,4 +73,4 @@ void printSpec(const EngineSpec& spec, const GpuInfo& gpu) {
     std::fflush(stdout);
 }
 
-}  // namespace engine::debug
+}  // namespace pathtracer::debug

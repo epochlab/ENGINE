@@ -1,4 +1,4 @@
-#include "engine/gfx/gl_debug.h"
+#include "pathtracer/gfx/gl_debug.h"
 
 #include <iomanip>
 #include <iostream>
@@ -7,7 +7,7 @@
 #include <GL/glew.h>
 #include <GLFW/glfw3.h>
 
-namespace engine::gfx {
+namespace pathtracer::gfx {
 
 void checkError(const char* file, int line) {
     for (GLenum error = glGetError(); error != GL_NO_ERROR; error = glGetError()) {
@@ -20,4 +20,4 @@ bool khrDebugAvailable() {
     return glfwExtensionSupported("GL_KHR_debug") == GLFW_TRUE;
 }
 
-}  // namespace engine::gfx
+}  // namespace pathtracer::gfx

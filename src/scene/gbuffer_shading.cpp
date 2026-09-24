@@ -1,9 +1,9 @@
-#include "engine/scene/gbuffer_shading.h"
+#include "pathtracer/scene/gbuffer_shading.h"
 
 #include <algorithm>
 #include <cstddef>
 
-namespace engine::scene {
+namespace pathtracer::scene {
 
 namespace {
 
@@ -12,12 +12,12 @@ namespace {
 // has no COLOR_0 attribute, making this a no-op multiply for every asset that doesn't use it.
 glm::vec3 resolveBaseColor(const Material& material, glm::vec2 uv, const glm::vec3& vertexColour,
                             const PathTraceSettings& settings) {
-    const glm::vec4 sample = engine::gfx::sampleBilinear(material.baseColorTexture, uv);
+    const glm::vec4 sample = pathtracer::gfx::sampleBilinear(material.baseColorTexture, uv);
     return glm::vec3(sample) * settings.diffuseColour * vertexColour;
 }
 
 float resolveRoughness(const Material& material, glm::vec2 uv, const PathTraceSettings& settings) {
-    const float sample = engine::gfx::sampleBilinear(material.roughnessTexture, uv).r;
+    const float sample = pathtracer::gfx::sampleBilinear(material.roughnessTexture, uv).r;
     // Floor (UE4/Frostbite convention) avoids a near-zero-roughness GGX singularity.
     return std::clamp(sample * settings.roughnessFactor, settings.roughnessMin, settings.roughnessMax);
 }
@@ -37,7 +37,7 @@ BsdfParams resolveBsdfParams(const Material& material, glm::vec2 uv, const glm::
                               std::optional<int> heroChannel) {
     const glm::vec3 baseColor = resolveBaseColor(material, uv, vertexColour, settings);
     const float roughness = resolveRoughness(material, uv, settings);
-    const glm::vec3 specular = glm::vec3(engine::gfx::sampleBilinear(material.specularTexture, uv));
+    const glm::vec3 specular = glm::vec3(pathtracer::gfx::sampleBilinear(material.specularTexture, uv));
     const glm::vec3 f0 = glm::mix(specular, baseColor, settings.metallicFactor);
     // Dispersion enters here and nowhere else: every ior consumer downstream -- Fresnel, the lobe
     // probabilities, the escape-albedo tables, the refraction direction -- reads this one scalar, so
@@ -62,7 +62,7 @@ ShadingFrame buildShadingFrame(const ShadingVertex& shading, const Material& mat
     tangent = glm::normalize(tangent - (glm::dot(tangent, normal) * normal));
     const glm::vec3 bitangent = glm::cross(normal, tangent) * shading.tangent.w;
 
-    const glm::vec4 normalSample = engine::gfx::sampleBilinear(material.normalTexture, shading.uv);
+    const glm::vec4 normalSample = pathtracer::gfx::sampleBilinear(material.normalTexture, shading.uv);
     const glm::vec3 tangentSpaceNormal = glm::normalize((glm::vec3(normalSample) * 2.0F) - 1.0F);
     const glm::vec3 mappedNormal = glm::normalize(
         (tangentSpaceNormal.x * tangent) + (tangentSpaceNormal.y * bitangent) +
@@ -72,11 +72,11 @@ ShadingFrame buildShadingFrame(const ShadingVertex& shading, const Material& mat
     const glm::vec2 texel(1.0F / static_cast<float>(material.bumpTexture.width),
                            1.0F / static_cast<float>(material.bumpTexture.height));
     const float dHdu =
-        engine::gfx::sampleBilinear(material.bumpTexture, shading.uv + glm::vec2(texel.x, 0.0F)).r -
-        engine::gfx::sampleBilinear(material.bumpTexture, shading.uv - glm::vec2(texel.x, 0.0F)).r;
+        pathtracer::gfx::sampleBilinear(material.bumpTexture, shading.uv + glm::vec2(texel.x, 0.0F)).r -
+        pathtracer::gfx::sampleBilinear(material.bumpTexture, shading.uv - glm::vec2(texel.x, 0.0F)).r;
     const float dHdv =
-        engine::gfx::sampleBilinear(material.bumpTexture, shading.uv + glm::vec2(0.0F, texel.y)).r -
-        engine::gfx::sampleBilinear(material.bumpTexture, shading.uv - glm::vec2(0.0F, texel.y)).r;
+        pathtracer::gfx::sampleBilinear(material.bumpTexture, shading.uv + glm::vec2(0.0F, texel.y)).r -
+        pathtracer::gfx::sampleBilinear(material.bumpTexture, shading.uv - glm::vec2(0.0F, texel.y)).r;
     const glm::vec3 bumpedNormal = glm::normalize(
         mappedNormal - (settings.bumpStrength * dHdu * tangent) -
         (settings.bumpStrength * dHdv * bitangent));
@@ -92,7 +92,7 @@ glm::vec3 geometricNormalOf(const ShadingTriangle& tri) {
         glm::cross(tri.v1.position - tri.v0.position, tri.v2.position - tri.v0.position));
 }
 
-void writeTexel(engine::gfx::HdrImage& image, int x, int y, glm::vec3 rgb) {
+void writeTexel(pathtracer::gfx::HdrImage& image, int x, int y, glm::vec3 rgb) {
     const std::size_t idx = ((static_cast<std::size_t>(y) * static_cast<std::size_t>(image.width)) +
                               static_cast<std::size_t>(x)) *
                              4;
@@ -102,12 +102,12 @@ void writeTexel(engine::gfx::HdrImage& image, int x, int y, glm::vec3 rgb) {
     image.rgba[idx + 3] = 1.0F;
 }
 
-engine::gfx::HdrImage makeImage(int width, int height) {
-    engine::gfx::HdrImage image;
+pathtracer::gfx::HdrImage makeImage(int width, int height) {
+    pathtracer::gfx::HdrImage image;
     image.width = width;
     image.height = height;
     image.rgba.assign(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4, 0.0F);
     return image;
 }
 
-}  // namespace engine::scene
+}  // namespace pathtracer::scene

@@ -1,19 +1,19 @@
-#include "engine/config/profile_config.h"
+#include "pathtracer/config/profile_config.h"
 
 #include <fstream>
 #include <iostream>
 
 #include <nlohmann/json.hpp>
 
-#include "engine/debug/aov.h"
+#include "pathtracer/debug/aov.h"
 #include "json_glm.h"
 
-namespace engine::config {
+namespace pathtracer::config {
 
 namespace {
 
-std::optional<engine::gfx::OcioDisplayTransform::Lut> parseLut(const std::string& name) {
-    using Lut = engine::gfx::OcioDisplayTransform::Lut;
+std::optional<pathtracer::gfx::OcioDisplayTransform::Lut> parseLut(const std::string& name) {
+    using Lut = pathtracer::gfx::OcioDisplayTransform::Lut;
     if (name == "sRGB") {
         return Lut::SRGB;
     }
@@ -27,8 +27,8 @@ std::optional<engine::gfx::OcioDisplayTransform::Lut> parseLut(const std::string
 }
 
 // Integer-typed first: get<int>() would silently truncate 16.5 to 16.
-std::optional<engine::gfx::ScalarType> parseBitDepth(const nlohmann::json& bitDepth) {
-    return bitDepth.is_number_integer() ? engine::gfx::scalarTypeFromBitDepth(bitDepth.get<int>()) : std::nullopt;
+std::optional<pathtracer::gfx::ScalarType> parseBitDepth(const nlohmann::json& bitDepth) {
+    return bitDepth.is_number_integer() ? pathtracer::gfx::scalarTypeFromBitDepth(bitDepth.get<int>()) : std::nullopt;
 }
 
 }  // namespace
@@ -51,7 +51,7 @@ std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
         const nlohmann::json& pathTracer = j.at("pathTracer");
 
         const std::string defaultLutName = render.at("defaultLUT").get<std::string>();
-        const std::optional<engine::gfx::OcioDisplayTransform::Lut> defaultLut =
+        const std::optional<pathtracer::gfx::OcioDisplayTransform::Lut> defaultLut =
             parseLut(defaultLutName);
         if (!defaultLut.has_value()) {
             std::cerr << "loadProfileConfig: " << path << " has an unrecognised defaultLUT \""
@@ -61,8 +61,8 @@ std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
 
         const nlohmann::json& displayBitDepth = render.at("displayBitDepth");
         const nlohmann::json& textureBitDepth = render.at("textureBitDepth");
-        const std::optional<engine::gfx::ScalarType> displayFormat = parseBitDepth(displayBitDepth);
-        const std::optional<engine::gfx::ScalarType> textureType = parseBitDepth(textureBitDepth);
+        const std::optional<pathtracer::gfx::ScalarType> displayFormat = parseBitDepth(displayBitDepth);
+        const std::optional<pathtracer::gfx::ScalarType> textureType = parseBitDepth(textureBitDepth);
         if (!displayFormat.has_value() || !textureType.has_value()) {
             std::cerr << "loadProfileConfig: " << path << " has displayBitDepth " << displayBitDepth.dump()
                        << ", textureBitDepth " << textureBitDepth.dump() << ", each expected 16 or 32\n";
@@ -108,9 +108,9 @@ std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
             return std::nullopt;
         }
         // A raw index into kAovNames, dereferenced unchecked by main.cpp's startup spec block and cast to AovId by the HUD, so an out-of-range value here is an out-of-bounds read rather than a wrong picture. Checked at the load boundary like every other field, not trusted as an internal invariant.
-        if (defaultAov < 0 || defaultAov >= static_cast<int>(engine::debug::AovId::Count)) {
+        if (defaultAov < 0 || defaultAov >= static_cast<int>(pathtracer::debug::AovId::Count)) {
             std::cerr << "loadProfileConfig: " << path << " has a defaultAOV outside [0, "
-                       << static_cast<int>(engine::debug::AovId::Count) - 1 << "]\n";
+                       << static_cast<int>(pathtracer::debug::AovId::Count) - 1 << "]\n";
             return std::nullopt;
         }
         // AO ray tfar. At or below zero every occlusion ray is degenerate (tfar < tnear), Embree reports no hit, and the AO AOV reads a uniform 1.0 -- the inert white this feature exists to replace.
@@ -169,7 +169,7 @@ std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
     }
 }
 
-std::optional<std::vector<engine::scene::Camera::FilmBackPreset>> loadFilmBackPresets(
+std::optional<std::vector<pathtracer::scene::Camera::FilmBackPreset>> loadFilmBackPresets(
     const std::string& path) {
     std::ifstream file(path, std::ios::binary);
     if (!file) {
@@ -181,7 +181,7 @@ std::optional<std::vector<engine::scene::Camera::FilmBackPreset>> loadFilmBackPr
         nlohmann::json j;
         file >> j;
 
-        std::vector<engine::scene::Camera::FilmBackPreset> presets;
+        std::vector<pathtracer::scene::Camera::FilmBackPreset> presets;
         presets.reserve(j.size());
         for (const nlohmann::json& presetJson : j) {
             std::string name = presetJson.at("name").get<std::string>();
@@ -193,7 +193,7 @@ std::optional<std::vector<engine::scene::Camera::FilmBackPreset>> loadFilmBackPr
                            << name << "\"\n";
                 return std::nullopt;
             }
-            presets.push_back({std::move(name), engine::scene::Camera::FilmBack{widthMm, heightMm}});
+            presets.push_back({std::move(name), pathtracer::scene::Camera::FilmBack{widthMm, heightMm}});
         }
         return presets;
     } catch (const nlohmann::json::exception& e) {
@@ -202,4 +202,4 @@ std::optional<std::vector<engine::scene::Camera::FilmBackPreset>> loadFilmBackPr
     }
 }
 
-}  // namespace engine::config
+}  // namespace pathtracer::config

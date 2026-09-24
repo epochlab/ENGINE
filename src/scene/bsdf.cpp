@@ -1,12 +1,12 @@
-#include "engine/scene/bsdf.h"
-#include "engine/scene/fresnel_dielectric.h"
+#include "pathtracer/scene/bsdf.h"
+#include "pathtracer/scene/fresnel_dielectric.h"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
 
-namespace engine::scene {
+namespace pathtracer::scene {
 
 namespace {
 
@@ -1149,4 +1149,4 @@ std::optional<BsdfSample> sampleBsdf(const BsdfParams& params, const glm::vec3& 
     return BsdfSample{glm::vec3(wt.x, wt.y, wt.z * sign), throughput, LobeType::Transmission, 0.0F};
 }
 
-}  // namespace engine::scene
+}  // namespace pathtracer::scene

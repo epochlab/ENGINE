@@ -1,12 +1,12 @@
-#include "engine/debug/aov.h"
+#include "pathtracer/debug/aov.h"
 
-#include "engine/debug/aov_routing.h"
+#include "pathtracer/debug/aov_routing.h"
 
 #include <cctype>
 #include <string>
 #include <string_view>
 
-namespace engine::debug {
+namespace pathtracer::debug {
 
 AovSource aovSource(AovId aov) {
     switch (aov) {
@@ -95,7 +95,7 @@ int aovChannels(AovId aov) {
 }
 
 PathTracedLane pathTracedLane(AovId aov) {
-    using Result = engine::scene::PathTraceResult;
+    using Result = pathtracer::scene::PathTraceResult;
     switch (aov) {
         case AovId::Beauty:           return &Result::beauty;
         case AovId::BounceCount:      return &Result::bounceHeatmap;
@@ -112,7 +112,7 @@ PathTracedLane pathTracedLane(AovId aov) {
 }
 
 GBufferLane gbufferLane(AovId aov) {
-    using GBuffer = engine::scene::RasterGBuffer;
+    using GBuffer = pathtracer::scene::RasterGBuffer;
     switch (aov) {
         case AovId::IOR:        return &GBuffer::iorAov;
         case AovId::Depth:      return &GBuffer::depth;
@@ -159,4 +159,4 @@ AovId aovIdFromName(std::string_view name) {
     return AovId::Count;
 }
 
-}  // namespace engine::debug
+}  // namespace pathtracer::debug

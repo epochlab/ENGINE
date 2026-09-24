@@ -1,8 +1,8 @@
-#include "engine/scene/ray_types.h"
+#include "pathtracer/scene/ray_types.h"
 
 #include <cmath>
 
-namespace engine::scene {
+namespace pathtracer::scene {
 
 namespace {
 
@@ -55,4 +55,4 @@ std::optional<Hit> bruteForceIntersect(const std::vector<Triangle>& triangles, c
     return best;
 }
 
-}  // namespace engine::scene
+}  // namespace pathtracer::scene

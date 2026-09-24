@@ -1,8 +1,8 @@
-#include "engine/debug/gpu_timer.h"
+#include "pathtracer/debug/gpu_timer.h"
 
 #include <GL/glew.h>
 
-namespace engine::debug {
+namespace pathtracer::debug {
 
 bool gpuTimerQueryAvailable() {
     return GLEW_ARB_timer_query != 0;
@@ -71,4 +71,4 @@ float GpuTimer::millisecondsElapsed() {
     return lastMs_;
 }
 
-}  // namespace engine::debug
+}  // namespace pathtracer::debug

@@ -1,4 +1,4 @@
-#include "engine/scene/embree_accel.h"
+#include "pathtracer/scene/embree_accel.h"
 
 #include <atomic>
 #include <cstdint>
@@ -8,7 +8,7 @@
 
 #include <embree4/rtcore.h>
 
-namespace engine::scene {
+namespace pathtracer::scene {
 
 namespace {
 
@@ -157,4 +157,4 @@ bool EmbreeAccel::occluded(const Ray& ray) const {
     return embreeRay.tfar < 0.0F;
 }
 
-}  // namespace engine::scene
+}  // namespace pathtracer::scene

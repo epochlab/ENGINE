@@ -1,11 +1,11 @@
-#include "engine/platform/window.h"
+#include "pathtracer/platform/window.h"
 
 #include <cstdlib>
 #include <iostream>
 
 #include <GLFW/glfw3.h>
 
-namespace engine::platform {
+namespace pathtracer::platform {
 
 Window::Window(int width, int height, const std::string& title) {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
@@ -124,4 +124,4 @@ void Window::mouseButtonCallback(GLFWwindow* window, int button, int action, int
     }
 }
 
-}  // namespace engine::platform
+}  // namespace pathtracer::platform

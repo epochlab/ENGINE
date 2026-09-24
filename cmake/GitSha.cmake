@@ -1,4 +1,4 @@
-# Script mode (cmake -P), run every build: writes ENGINE_GIT_SHA to OUTPUT, touching it only when the SHA changed so an unchanged tree recompiles nothing (LLVM's GenerateVersionFromVCS.cmake pattern).
+# Script mode (cmake -P), run every build: writes PATHTRACER_GIT_SHA to OUTPUT, touching it only when the SHA changed so an unchanged tree recompiles nothing (LLVM's GenerateVersionFromVCS.cmake pattern).
 # Inputs: SOURCE_DIR, OUTPUT, GIT_EXECUTABLE (empty when git was not found at configure time).
 set(sha "unknown")
 # EXISTS also matches a .git file, which is what this repo has as a submodule; a tarball checkout reports "unknown" rather than failing the build.
@@ -14,6 +14,6 @@ if(GIT_EXECUTABLE AND EXISTS "${SOURCE_DIR}/.git")
     endif()
 endif()
 
-file(WRITE "${OUTPUT}.tmp" "#pragma once\n#define ENGINE_GIT_SHA \"${sha}\"\n")
+file(WRITE "${OUTPUT}.tmp" "#pragma once\n#define PATHTRACER_GIT_SHA \"${sha}\"\n")
 file(COPY_FILE "${OUTPUT}.tmp" "${OUTPUT}" ONLY_IF_DIFFERENT)
 file(REMOVE "${OUTPUT}.tmp")

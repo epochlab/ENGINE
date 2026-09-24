@@ -1,4 +1,4 @@
-#include "engine/debug/system_info.h"
+#include "pathtracer/debug/system_info.h"
 
 #include <array>
 #include <cstdio>
@@ -12,7 +12,7 @@
 #include <embree4/rtcore_config.h>
 #include <glm/detail/setup.hpp>
 
-namespace engine::debug {
+namespace pathtracer::debug {
 
 namespace {
 std::string glString(GLenum name) {
@@ -43,4 +43,4 @@ LibraryVersions queryLibraryVersions() {
     return versions;
 }
 
-}  // namespace engine::debug
+}  // namespace pathtracer::debug

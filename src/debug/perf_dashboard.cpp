@@ -1,4 +1,4 @@
-#include "engine/debug/perf_dashboard.h"
+#include "pathtracer/debug/perf_dashboard.h"
 
 #include <unistd.h>
 
@@ -10,9 +10,9 @@
 #include <cstdlib>
 #include <cstring>
 
-#include "engine/debug/frame_stats.h"
+#include "pathtracer/debug/frame_stats.h"
 
-namespace engine::debug {
+namespace pathtracer::debug {
 
 namespace {
 
@@ -372,4 +372,4 @@ void PerfDashboard::drawFooter(const DashboardFrame& frame) {
     append("\x1b[2K\n");
 }
 
-}  // namespace engine::debug
+}  // namespace pathtracer::debug

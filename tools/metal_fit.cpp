@@ -9,13 +9,13 @@
 #include <limits>
 
 #include "conductor_reference.h"
-#include "engine/scene/cie.h"
+#include "pathtracer/scene/cie.h"
 
 namespace tools::metal_fit {
 
 namespace {
 
-namespace cie = engine::scene::cie;
+namespace cie = pathtracer::scene::cie;
 using tools::reference::cosineAverageFresnel;
 using tools::reference::referenceConductorFresnel;
 using tools::reference::referenceConductorFresnelAt;

@@ -24,10 +24,10 @@
 
 #include "check.h"
 #include "stats.h"
-#include "engine/debug/power_spectrum.h"
-#include "engine/scene/sampler.h"
+#include "pathtracer/debug/power_spectrum.h"
+#include "pathtracer/scene/sampler.h"
 
-using engine::scene::Sampler;
+using pathtracer::scene::Sampler;
 
 namespace {
 
@@ -54,7 +54,7 @@ constexpr int kMaskPixels = kMaskSize * kMaskSize;
 // both multiples of 2^-24 in [0,1), so the difference is representable and IEEE returns it exactly -- which is what lets
 // the net checks below stay tolerance-free assertions on integer counts rather than becoming statistical ones.
 float unshift(float value, int pixelX, int pixelY, int ditherChannel) {
-    const float dither = engine::scene::blueNoiseDither(pixelX, pixelY, ditherChannel);
+    const float dither = pathtracer::scene::blueNoiseDither(pixelX, pixelY, ditherChannel);
     return value >= dither ? value - dither : (value - dither) + 1.0F;
 }
 
@@ -90,7 +90,7 @@ std::size_t binOf(float value, int binCount) {
 // Guaranteed by the direction vectors forming a nonsingular generator matrix and preserved by both the Owen scramble
 // and the per-set index shuffle -- so this fails on a mis-derived recurrence, a mistranscribed seed row, or a shuffle
 // that moved a power-of-two prefix off its strata.
-ENGINE_CHECK(one_dimensional_net, Fast, Exact) {
+PT_CHECK(one_dimensional_net, Fast, Exact) {
     const int m = kM;
     const int setCount = kSetCount;
     const int n = 1 << m;
@@ -114,7 +114,7 @@ ENGINE_CHECK(one_dimensional_net, Fast, Exact) {
         std::snprintf(detail, sizeof(detail), "set %d is not a (0,m,1)-net", worstSet);
     }
     ctx.plan(1);
-    ENGINE_EXPECT(ctx, worstSet < 0, detail);
+    PT_EXPECT(ctx, worstSet < 0, detail);
 }
 
 // Net quality t of a 2D set: the smallest t for which the first 2^m samples form a (t,m,2)-net, i.e. every 2^a x 2^b
@@ -153,7 +153,7 @@ int measureNetQuality(int m, int set) {
 // the sets a deep path reaches. Drawing dimension pairs out of one high-dimensional sequence instead would degrade with
 // depth -- Sobol's (62,63) projection is only a (4,m,2)-net, sixteen points per cell -- so a 12-bounce path would
 // sample its last bounces worse than white noise. Asserted at depths a path actually reaches, exactly, no tolerance.
-ENGINE_CHECK(every_set_is_perfect_net, Fast, Exact) {
+PT_CHECK(every_set_is_perfect_net, Fast, Exact) {
     const int m = kM;
     const std::array<int, 7>& sets = kNetDepths;
     int worstSet = -1;
@@ -174,13 +174,13 @@ ENGINE_CHECK(every_set_is_perfect_net, Fast, Exact) {
         std::snprintf(detail, sizeof(detail), "set %d is only a (%d,m,2)-net", worstSet, worstT);
     }
     ctx.plan(1);
-    ENGINE_EXPECT(ctx, worstSet < 0, detail);
+    PT_EXPECT(ctx, worstSet < 0, detail);
 }
 
 // The regression test for the defect this sampler replaces. Drives it exactly as PathTraceDriver does -- one sample per
 // pass, index advancing, seed fixed -- and requires the accumulated points to be stratified. Under the old white-noise
 // behaviour every dimension left ~N/e (36.8%) of bins empty; a correct sequence leaves none.
-ENGINE_CHECK(pass_direction_occupancy, Fast, Exact) {
+PT_CHECK(pass_direction_occupancy, Fast, Exact) {
     const int m = kM;
     const int setCount = kSetCount;
     const int n = 1 << m;
@@ -208,7 +208,7 @@ ENGINE_CHECK(pass_direction_occupancy, Fast, Exact) {
                       100.0 * worstEmpty / n);
     }
     ctx.plan(1);
-    ENGINE_EXPECT(ctx, worstSet < 0, detail);
+    PT_EXPECT(ctx, worstSet < 0, detail);
 }
 
 // Sobol's index-0 point is all zeros before scrambling, and the renderer's very first displayed pass is index 0 for
@@ -217,7 +217,7 @@ ENGINE_CHECK(pass_direction_occupancy, Fast, Exact) {
 // deliberately, since the shift is the mechanism under test. A chi-square well BELOW its 15 dof is the expected result
 // rather than a suspicious one: a blue-noise mask distributes its values more evenly over any local region than the
 // independent draws the statistic is defined against.
-ENGINE_CHECK(index_zero_is_scrambled, Fast, Statistical) {
+PT_CHECK(index_zero_is_scrambled, Fast, Statistical) {
     constexpr int kPixels = 4096;
     constexpr int kBins = 16;
     std::vector<int> bins(kBins, 0);
@@ -244,12 +244,12 @@ ENGINE_CHECK(index_zero_is_scrambled, Fast, Statistical) {
     char detail[192];
     std::snprintf(detail, sizeof(detail), "chi2 = %.1f over %d dof, p = %.3g vs alpha %.3g (degenerate would be %d)",
                   chiSquare, kDof, p, ctx.alpha(), kPixels * 15);
-    ENGINE_EXPECT(ctx, p >= ctx.alpha(), detail);
+    PT_EXPECT(ctx, p >= ctx.alpha(), detail);
 }
 
 // Padding's other requirement: consecutive sets must be uncorrelated, or a path's successive decisions would move in
 // lockstep. Two sets sharing one shuffled index and scramble would return identical values.
-ENGINE_CHECK(sets_are_decorrelated, Fast, Exact) {
+PT_CHECK(sets_are_decorrelated, Fast, Exact) {
     constexpr int kSamples = 128;
     int identical = 0;
     for (int i = 0; i < kSamples; ++i) {
@@ -258,13 +258,13 @@ ENGINE_CHECK(sets_are_decorrelated, Fast, Exact) {
     char detail[128];
     std::snprintf(detail, sizeof(detail), "%d/%d collisions between set 0 and set 1", identical, kSamples);
     ctx.plan(1);
-    ENGINE_EXPECT(ctx, identical == 0, detail);
+    PT_EXPECT(ctx, identical == 0, detail);
 }
 
 // Neighbouring pixels must not draw the same values, or every pixel would share one noise realization. What separates
 // them is now the dither shift rather than a per-pixel scramble, and the mask being a permutation is what guarantees it:
 // adjacent cells hold distinct ranks, so adjacent pixels are shifted by distinct amounts.
-ENGINE_CHECK(pixels_are_decorrelated, Fast, Exact) {
+PT_CHECK(pixels_are_decorrelated, Fast, Exact) {
     constexpr int kSamples = 128;
     int identical = 0;
     for (int i = 0; i < kSamples; ++i) {
@@ -275,7 +275,7 @@ ENGINE_CHECK(pixels_are_decorrelated, Fast, Exact) {
     char detail[128];
     std::snprintf(detail, sizeof(detail), "%d/%d collisions between adjacent pixels", identical, kSamples);
     ctx.plan(1);
-    ENGINE_EXPECT(ctx, identical == 0, detail);
+    PT_EXPECT(ctx, identical == 0, detail);
 }
 
 // The shift must be a property of the pixel ALONE -- one value, reused at every sample index and in every dimension set.
@@ -284,7 +284,7 @@ ENGINE_CHECK(pixels_are_decorrelated, Fast, Exact) {
 // It must vary per channel, and separately does: see checkChannelsAreDecorrelated.
 // Asserted directly and exactly: with each pixel's own shift removed, two different pixels must recover bit-identical
 // values everywhere, which is true only if they share one sequence and each shift is rigid.
-ENGINE_CHECK(shift_is_rigid, Fast, Exact) {
+PT_CHECK(shift_is_rigid, Fast, Exact) {
     const int setCount = kSetCount;
     constexpr int kSamples = 64;
     int mismatches = 0;
@@ -298,7 +298,7 @@ ENGINE_CHECK(shift_is_rigid, Fast, Exact) {
     char detail[128];
     std::snprintf(detail, sizeof(detail), "%d/%d draws disagree after unshifting", mismatches, kSamples * setCount);
     ctx.plan(1);
-    ENGINE_EXPECT(ctx, mismatches == 0, detail);
+    PT_EXPECT(ctx, mismatches == 0, detail);
 }
 
 // Distinct dither channels must carry distinct, uncorrelated shift fields. This is the direct regression test for the
@@ -308,7 +308,7 @@ ENGINE_CHECK(shift_is_rigid, Fast, Exact) {
 // Two channels landing on the same translation would reintroduce it silently, since the image would still look like
 // noise. Gate at |r| < 0.1: two independent fields of kMaskPixels samples have a sample correlation of SD 1/128, so 0.1
 // is ~13 SD and cannot fire by chance, while a repeated translation reads exactly 1.
-ENGINE_CHECK(channels_are_decorrelated, Fast, Statistical) {
+PT_CHECK(channels_are_decorrelated, Fast, Statistical) {
     const int channelCount = (2 * kSetCount) + 2;
     std::vector<std::vector<double>> fields(static_cast<std::size_t>(channelCount));
     for (int c = 0; c < channelCount; ++c) {
@@ -317,7 +317,7 @@ ENGINE_CHECK(channels_are_decorrelated, Fast, Statistical) {
         for (int y = 0; y < kMaskSize; ++y) {
             for (int x = 0; x < kMaskSize; ++x) {
                 field[(static_cast<std::size_t>(y) * kMaskSize) + static_cast<std::size_t>(x)] =
-                    engine::scene::blueNoiseDither(x, y, c) - 0.5;  // mean-centred: the mask is uniform on [0,1)
+                    pathtracer::scene::blueNoiseDither(x, y, c) - 0.5;  // mean-centred: the mask is uniform on [0,1)
             }
         }
     }
@@ -348,18 +348,18 @@ ENGINE_CHECK(channels_are_decorrelated, Fast, Statistical) {
     std::snprintf(detail, sizeof(detail), "worst |r| = %.4f between channels %d and %d, over %d channels", worst,
                   worstA, worstB, channelCount);
     ctx.plan(1);
-    ENGINE_EXPECT(ctx, worst < 0.1, detail);
+    PT_EXPECT(ctx, worst < 0.1, detail);
 }
 
 // The mask must be a permutation of [0, kMaskPixels): every shift used exactly once, so the set of shifts is precisely
 // the uniform grid a toroidal shift needs -- no value doubled, none missing. The rank is recovered exactly rather than
 // rounded, since (rank + 0.5) / kMaskPixels is a multiple of 2^-24 and scaling it back is a power-of-two multiply.
-ENGINE_CHECK(mask_is_permutation, Fast, Exact) {
+PT_CHECK(mask_is_permutation, Fast, Exact) {
     std::vector<int> seen(kMaskPixels, 0);
     int bad = 0;
     for (int y = 0; y < kMaskSize; ++y) {
         for (int x = 0; x < kMaskSize; ++x) {
-            const float value = engine::scene::blueNoiseDither(x, y, 0);
+            const float value = pathtracer::scene::blueNoiseDither(x, y, 0);
             const int rank = static_cast<int>((value * static_cast<float>(kMaskPixels)) - 0.5F);
             if (rank < 0 || rank >= kMaskPixels || seen[static_cast<std::size_t>(rank)] != 0) {
                 ++bad;
@@ -371,7 +371,7 @@ ENGINE_CHECK(mask_is_permutation, Fast, Exact) {
     char detail[128];
     std::snprintf(detail, sizeof(detail), "%d/%d ranks out of range or repeated", bad, kMaskPixels);
     ctx.plan(1);
-    ENGINE_EXPECT(ctx, bad == 0, detail);
+    PT_EXPECT(ctx, bad == 0, detail);
 }
 
 // The mask must actually be blue noise, which is a statement about its spectrum and nothing else: a permutation with the
@@ -384,22 +384,22 @@ ENGINE_CHECK(mask_is_permutation, Fast, Exact) {
 // controls for, and the flat spectrum white noise is DEFINED by needs no sampling at all.
 // The gate is a factor of two below the null: a wide margin, since void-and-cluster suppresses this band by four orders
 // of magnitude and the failure guarded against -- a mask that degenerated toward white noise -- sits at 1.0x.
-ENGINE_CHECK(mask_is_blue_noise, Fast, Statistical) {
+PT_CHECK(mask_is_blue_noise, Fast, Statistical) {
     std::vector<double> mask(kMaskPixels);
     for (int y = 0; y < kMaskSize; ++y) {
         for (int x = 0; x < kMaskSize; ++x) {
             mask[(static_cast<std::size_t>(y) * kMaskSize) + static_cast<std::size_t>(x)] =
-                engine::scene::blueNoiseDither(x, y, 0);
+                pathtracer::scene::blueNoiseDither(x, y, 0);
         }
     }
 
     // Bands 3 and up are everything below an eighth of Nyquist -- the low-frequency error a blue-noise mask exists to
     // suppress, and the band a subsequent filter or the eye integrates over.
     constexpr int kLowBand = 3;
-    const std::array<double, engine::debug::kSpectrumBands> bands =
-        engine::debug::octaveBandPower(mask, kMaskSize, kMaskSize);
-    const std::array<double, engine::debug::kSpectrumBands> null =
-        engine::debug::whiteNoiseBandShare(kMaskSize, kMaskSize);
+    const std::array<double, pathtracer::debug::kSpectrumBands> bands =
+        pathtracer::debug::octaveBandPower(mask, kMaskSize, kMaskSize);
+    const std::array<double, pathtracer::debug::kSpectrumBands> null =
+        pathtracer::debug::whiteNoiseBandShare(kMaskSize, kMaskSize);
     const double measured = std::accumulate(bands.begin() + kLowBand, bands.end(), 0.0) /
                              std::accumulate(bands.begin(), bands.end(), 0.0);
     const double expected = std::accumulate(null.begin() + kLowBand, null.end(), 0.0);
@@ -408,9 +408,9 @@ ENGINE_CHECK(mask_is_blue_noise, Fast, Statistical) {
     std::snprintf(detail, sizeof(detail), "low band %.5f%% of power vs %.3f%% white-noise null (%.0fx suppressed)",
                   100.0 * measured, 100.0 * expected, expected / measured);
     ctx.plan(1);
-    ENGINE_EXPECT(ctx, measured < 0.5 * expected, detail);
+    PT_EXPECT(ctx, measured < 0.5 * expected, detail);
 }
 
 }  // namespace
 
-ENGINE_CHECK_MAIN("sampler")
+PT_CHECK_MAIN("sampler")
