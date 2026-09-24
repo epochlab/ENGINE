@@ -13,28 +13,23 @@ namespace {
 constexpr float kPi = 3.14159265F;
 constexpr float kMinAlpha = 0.02F * 0.02F;  // roughness floor, avoids a degenerate GGX delta lobe
 
-// Perceptual roughness to GGX alpha, in one place: evaluateBsdfSplit, sampleBsdf and fresnelAtMicrofacet must agree,
-// or the Fresnel AOV reports a term the lobe never evaluated.
+// Perceptual roughness to GGX alpha, in one place: the three consumers must agree, or the Fresnel AOV reports an unevaluated term.
 float alphaForRoughness(float roughness) { return std::max(roughness * roughness, kMinAlpha); }
 
-// GGX D in the cancellation-free form (Filament 4.4.2): the textbook denominator cancels catastrophically near the
-// normal, which at low roughness is the whole lobe. No denominator floor is needed or wanted -- kPi*d*d >= 8e-14.
-// See DERIVATIONS.md "GGX numerical forms" for both measurements.
+// GGX D, cancellation-free (Filament 4.4.2); no denominator floor, kPi*d*d >= 8e-14. See DERIVATIONS.md "GGX numerical forms".
 float distributionGGX(const glm::vec3& nh, float alpha) {
     const float alpha2 = alpha * alpha;
     const float d = (alpha2 * nh.z * nh.z) + (nh.x * nh.x) + (nh.y * nh.y);
     return alpha2 / (kPi * d * d);
 }
 
-// cos*sqrt(1 + alpha^2*tan^2), the GGX Smith Lambda's radical scaled by the cosine: 1 + Lambda(c) = (c + radical)/(2c),
-// and unlike tan it is finite at c = 0.
+// cos*sqrt(1 + alpha^2*tan^2), the Smith Lambda radical scaled by cosine: 1 + Lambda(c) = (c + radical)/(2c), finite at c = 0.
 float smithRadical(float cosTheta, float alpha) {
     const float alpha2 = alpha * alpha;
     return std::sqrt(alpha2 + ((1.0F - alpha2) * cosTheta * cosTheta));
 }
 
-// G2/(4*cosO*cosI) for the height-correlated Smith G2 (Heitz 2014; Filament's V_SmithGGXCorrelated): the cosines
-// multiply rather than divide, so it is exact to the silhouette and vanishes only where both cosines do.
+// G2/(4*cosO*cosI), height-correlated Smith (Heitz 2014): cosines multiply rather than divide, so it is exact to the silhouette.
 float smithVisibility(float cosO, float cosI, float alpha) {
     return 0.5F / ((cosI * smithRadical(cosO, alpha)) + (cosO * smithRadical(cosI, alpha)));
 }
@@ -42,13 +37,9 @@ float smithVisibility(float cosO, float cosI, float alpha) {
 // G1(c)/c, the VNDF pdf's projected-area factor, in the same division-free form: 2/alpha at grazing rather than 0/0.
 float smithG1OverCos(float cosTheta, float alpha) { return 2.0F / (cosTheta + smithRadical(cosTheta, alpha)); }
 
-// --- Conductor Fresnel: Gulbrandsen 2014, "Artist Friendly Metallic Fresnel", JCGT 3(4). Replaces Schlick on the
-// metal path, which is monotone in cos and so cannot express the reflectance dip real metals have. Parameterised by
-// reflectivity r and edgetint g, inverted to a complex IOR. See DERIVATIONS.md "Conductor Fresnel".
+// --- Conductor Fresnel (Gulbrandsen 2014, JCGT 3(4)), replacing Schlick. See DERIVATIONS.md "Conductor Fresnel".
 
-// Reflectivity is clamped, not asserted: f0 arrives as an unbounded texture product, so both ends are reachable from
-// an asset. r=1 would evaluate 0*inf; r=0 inverts to an index-matched interface. The 0.9999 upper clamp is safe only
-// because of the factored k^2 below -- the paper's literal form needs 0.99, costing 1% at f0=1.
+// Reflectivity is clamped: f0 is an unbounded product. 0.9999 needs the factored k^2 below; the literal form needs 0.99, 1% at f0=1.
 constexpr float kMinReflectivity = 1e-4F;
 constexpr float kMaxReflectivity = 0.9999F;
 
@@ -57,9 +48,7 @@ struct ConductorIor {
     glm::vec3 k;
 };
 
-// Paper eq 12 for n, eq 2 for k. k^2 is the factored (nMax - n)(n - nLow), not the listing's literal form, which
-// returns k^2 = -1.28e6 in float32 at r=0.9999, g=0 where the truth is exactly 0. Reflectivity and edgeTint come
-// from measured (lambda, n, k) via tools/metal_fit, never from eyeballing a colour.
+// Paper eq 12 for n, eq 2 for k, factored: the literal form gives k^2 = -1.28e6 at r=0.9999, g=0. Inputs come from tools/metal_fit.
 ConductorIor conductorIorFromReflectivity(const glm::vec3& reflectivity, const glm::vec3& edgeTint) {
     const glm::vec3 r = glm::clamp(reflectivity, kMinReflectivity, kMaxReflectivity);
     const glm::vec3 g = glm::clamp(edgeTint, 0.0F, 1.0F);  // the paper's stated domain for g
@@ -68,23 +57,18 @@ ConductorIor conductorIorFromReflectivity(const glm::vec3& reflectivity, const g
     const glm::vec3 nMax = (1.0F + sqrtR) / (1.0F - sqrtR);
     const glm::vec3 nLow = (1.0F - sqrtR) / (1.0F + sqrtR);
     const glm::vec3 n = (g * nMin) + ((1.0F - g) * nMax);
-    // Both factors are non-negative across the clamped domain (nLow <= nMin <= n <= nMax); the max
-    // absorbs float rounding on nMax - n at g -> 0, where the true value is zero.
+    // Both factors are non-negative over the clamped domain; the max absorbs float rounding on nMax - n at g -> 0.
     return {n, glm::sqrt(glm::max((nMax - n) * (n - nLow), 0.0F))};
 }
 
-// Exact unpolarized Fresnel of one conductor channel with complex IOR n + ik (Born & Wolf), in real arithmetic: two
-// sqrts, no complex division. Not the paper's Appendix A rs/rp, the large-|eta| approximation, which deviates by up
-// to 0.094 around r~0.25 -- where real metals sit. Deliberately clampless; DERIVATIONS.md says why none can help.
+// Exact unpolarized conductor Fresnel (Born & Wolf), not the paper's large-|eta| approximation, which is off by 0.094 at r~0.25.
 float fresnelConductorChannel(float cosTheta, float n, float k) {
     const float c2 = cosTheta * cosTheta;
     const float s2 = 1.0F - c2;
     const float nk2 = (n * n) * (k * k);
     const float t0 = (n * n) - (k * k) - s2;
     const float a2b2 = std::sqrt((t0 * t0) + (4.0F * nk2));
-    // a^2 = (a2b2 + t0)/2, through whichever of its two algebraically equal forms is a sum: the direct form subtracts
-    // near-equal magnitudes when t0 < 0 and collapses a to zero in float32, pinning F at exactly 1.0 -- which is
-    // Schlick's own answer at f0=1, so the furnace rows read byte-identical and the fault looked inert.
+    // a^2 through whichever equal form is a sum: the direct one collapses a to zero in float32 when t0 < 0, pinning F at exactly 1.0.
     const float a2 = t0 >= 0.0F ? (a2b2 + t0) * 0.5F : (2.0F * nk2) / (a2b2 - t0);
     const float a = std::sqrt(a2);
     const float t1 = a2b2 + c2;
@@ -96,8 +80,7 @@ float fresnelConductorChannel(float cosTheta, float n, float k) {
     return 0.5F * rPerpendicular * (1.0F + ((t3 - t4) / (t3 + t4)));
 }
 
-// cosTheta is clamped to [0,1] rather than sign-swapped the way fresnelDielectric handles etaI/etaT: a
-// conductor has no far side to enter, and grazing-angle normal mapping can push wo.z negative.
+// cosTheta clamped to [0,1] rather than sign-swapped: a conductor has no far side, and grazing normal maps push wo.z negative.
 glm::vec3 fresnelConductor(float cosTheta, const glm::vec3& n, const glm::vec3& k) {
     const float c = std::clamp(cosTheta, 0.0F, 1.0F);
     return {fresnelConductorChannel(c, n.x, k.x), fresnelConductorChannel(c, n.y, k.y),
@@ -122,9 +105,7 @@ glm::vec3 sampleGGXVNDF(const glm::vec3& wo, float alpha, glm::vec2 u) {
     return glm::normalize(glm::vec3(alpha * nh.x, alpha * nh.y, std::max(0.0F, nh.z)));
 }
 
-// Kulla-Conty energy tables, baked offline by tools/albedo_table.cpp (Kulla & Conty 2017). The .inc defines the grid
-// resolutions alongside the arrays, so the grid the lookups index is the grid the generator wrote.
-// See DERIVATIONS.md "Kulla-Conty energy tables" for what each array holds and why the escape tables use exact Fresnel.
+// Kulla-Conty energy tables, baked by tools/albedo_table.cpp (Kulla & Conty 2017). See DERIVATIONS.md "Kulla-Conty energy tables".
 #include "albedo_table.inc"
 
 // Refract wo about microfacet normal ht. Returns false on total internal reflection at that facet.
@@ -151,9 +132,7 @@ struct AlbedoSplit {
     [[nodiscard]] float at(float f0) const { return (f0 * a) + b; }
 };
 
-// Bilinear lookup, indexed by sqrt(mu) to match the grid the generator wrote: E climbs from 1 at grazing to its
-// plateau over mu ~ alpha, a layer a uniform axis would span with under one cell at low roughness.
-// checkAlbedoTableInterpolation measures the residual per axis.
+// Bilinear lookup indexed by sqrt(mu), matching the generator's grid: E reaches its plateau over mu ~ alpha, under a cell if uniform.
 AlbedoSplit directionalAlbedo(float mu, float roughness) {
     const float rf = std::clamp(roughness, 0.0F, 1.0F) * (kAlbedoRoughnessRes - 1);
     const float mf = std::sqrt(std::clamp(mu, 0.0F, 1.0F)) * (kAlbedoMuRes - 1);
@@ -177,9 +156,7 @@ AlbedoSplit averageAlbedo(float roughness) {
              lerp1(kAlbedoAvgB[r0], kAlbedoAvgB[r0 + 1], rt)};
 }
 
-// --- Reflected multiple-scattering lobe, from kMsReflectDensity/kMsReflectCdf. The zero-variance density is
-// (1-E(mu_i))*cos/(pi*(1-Eavg)), and the table holds exactly that shape, piecewise-linear with exact prefix
-// integrals. Cosine sampling costs up to +17.3 relative variance at low roughness. DERIVATIONS.md has the rest.
+// --- Reflected multiple-scattering lobe; cosine sampling costs up to +17.3 relative variance at low roughness. See DERIVATIONS.md.
 struct MsReflectRow {
     int base;
     float blend;
@@ -201,9 +178,7 @@ float msReflectCdf(const MsReflectRow& row, int index) {
                   row.blend);
 }
 
-// Solid-angle density: the mu density spread over 2*pi of azimuth, reducing to mu/pi wherever the stored shape is
-// 2*mu. Uniform in mu, not sqrt(mu): this reads the sampling shape, whose grid stays uniform so the inversion keeps
-// one step width. The generator already applied the albedo warp when it built each node from E.
+// Solid-angle density: the mu density over 2*pi of azimuth. Uniform in mu, not sqrt(mu), this being the sampling grid.
 float msReflectPdf(float mu, float roughness) {
     const MsReflectRow row = msReflectRow(roughness);
     const float mf = std::clamp(mu, 0.0F, 1.0F) * (kMsReflectMuRes - 1);
@@ -212,9 +187,7 @@ float msReflectPdf(float mu, float roughness) {
     return lerp1(msReflectDensity(row, m0), msReflectDensity(row, m0 + 1), mt) / (2.0F * kPi);
 }
 
-// Exact inversion of a tabulated piecewise-linear density over mu on an edge-aligned grid: binary search the prefix
-// integrals for the segment, then take the positive root of its quadratic. Written in the form that stays finite as
-// a segment flattens and at mu = 0 -- see DERIVATIONS.md "Multiple-scattering lobe sampling".
+// Exact inversion of a tabulated piecewise-linear density over mu. See DERIVATIONS.md "Multiple-scattering lobe sampling".
 template <typename Density, typename Cdf>
 float invertPiecewiseLinearDensity(Density density, Cdf cdf, int resolution, float u) {
     int low = 0;
@@ -294,9 +267,7 @@ EscapeSplit averageEscapeAlbedo(float roughness, float eta) {
              lerp1(fetch(kEscapeAvgTransmit, r0), fetch(kEscapeAvgTransmit, r0 + 1), rt)};
 }
 
-// --- Transmitted multiple-scattering lobe, from kMsTransmitDensity/kMsTransmitCdf: the far-hemisphere twin of
-// sampleMsReflect, one axis wider because the escape it is built from is eta-dependent. Value, density and sampler
-// read one interpolant (Dupuy & Jakob 2018), so f*cos/pdf is constant for every wi.
+// --- Transmitted multiple-scattering lobe, the far-hemisphere twin, one axis wider because the escape is eta-dependent.
 struct MsTransmitRow {
     std::array<int, 4> base;
     std::array<float, 4> weight;
@@ -311,9 +282,7 @@ float msTransmitBlend(const Table& table, const MsTransmitRow& row, int index) {
            (row.weight[2] * table[row.base[2] + offset]) + (row.weight[3] * table[row.base[3] + offset]);
 }
 
-// Stored unnormalised and divided by its own blended total here rather than normalised per row at bake time:
-// integration is linear, so a blend of exact prefix integrals is the exact prefix integral of the blended density.
-// It also makes a numerically dead row harmless, contributing near-zero weight rather than amplified noise.
+// Stored unnormalised, divided by its blended total here: integration is linear, so blended prefix integrals are the blend's integral.
 MsTransmitRow msTransmitRow(float roughness, float eta) {
     const float rf = std::clamp(roughness, 0.0F, 1.0F) * (kTransmitRoughnessRes - 1);
     const float ef = etaAxisCoord(eta);
@@ -326,8 +295,7 @@ MsTransmitRow msTransmitRow(float roughness, float eta) {
     MsTransmitRow row{{base0, base0 + 1, base1, base1 + 1},
                        {(1.0F - rt) * (1.0F - et), (1.0F - rt) * et, rt * (1.0F - et), rt * et},
                        0.0F};
-    // Last prefix integral is the row's total energy deficit. Zero only if every clamped deficit in all four rows is
-    // zero, leaving the lobe no energy to carry, so a zero scale correctly reports a zero density rather than dividing.
+    // Last prefix integral is the row's energy deficit; zero means no energy to carry, so it reports zero density rather than dividing.
     const float total = msTransmitBlend(kMsTransmitCdf, row, kTransmitMuRes - 1);
     row.scale = total > 0.0F ? 1.0F / total : 0.0F;
     return row;
@@ -360,24 +328,18 @@ glm::vec3 sampleMsTransmit(const MsTransmitRow& row, glm::vec2 u) {
 
 }  // namespace
 
-// Malley's method: a uniform point on the unit disk lifted to the hemisphere, exactly the cosine distribution
-// (PBR 4th ed. 13.6.3). External linkage for path_tracer.cpp's AO lane, whose estimator is the mean of visibility
-// alone because this pdf cancels the cosine.
+// Malley's method, a uniform disk point lifted to the hemisphere (PBR 4th ed. 13.6.3). External for the AO lane, where the pdf cancels.
 glm::vec3 sampleCosineHemisphere(glm::vec2 u) {
     const float r = std::sqrt(u.x);
     const float phi = 2.0F * kPi * u.y;
     return {r * std::cos(phi), r * std::sin(phi), std::sqrt(std::max(0.0F, 1.0F - u.x))};
 }
 
-// Cosine-weighted average Fresnel, 2*int_0^1 F(mu)*mu dmu. One 3-node rule serves both interfaces, each over the
-// Fresnel its own single scatter evaluates. External linkage for checkAverageFresnel, the only instrument that can
-// see an error in either. Fit, error bounds and rejected alternatives: DERIVATIONS.md "Average Fresnel quadrature".
+// Cosine-weighted average Fresnel, 2*int_0^1 F(mu)*mu dmu, one 3-node rule for both. See DERIVATIONS.md "Average Fresnel quadrature".
 constexpr float kFresnelAvgNodes[3] = {0.105319802F, 0.382154433F, 0.796427281F};
 constexpr float kFresnelAvgWeights[3] = {0.038972482F, 0.280518736F, 0.680508783F};
 
-// The dielectric interface, over the same fresnelDielectric the coat and specular lobes evaluate. The conductor
-// nodes are carried here unrefitted: worst 5.5e-5 over ior [1.05, 3.0]. Exactly +0 at ior 1, structurally rather
-// than by an algebraic accident -- checkIndexMatchedCoat requires that zero at tolerance exactly 0.
+// The dielectric interface. Conductor nodes carried unrefitted: worst 5.5e-5 over ior [1.05, 3.0]. Exactly +0 at ior 1, structurally.
 float dielectricFresnelAvg(float ior) {
     float sum = 0.0F;
     for (int i = 0; i < 3; ++i) {
@@ -386,9 +348,7 @@ float dielectricFresnelAvg(float ior) {
     return sum;
 }
 
-// The two reflect-side albedo lookups have external linkage under the same rule: checkAlbedoTableInterpolation is
-// the only instrument that can see albedo_table.inc's interpolation error, the second error source beside the
-// quadrature residual the generator prints. glm::vec2 rather than AlbedoSplit, which is a shading-side concept.
+// External linkage under the same rule: checkAlbedoTableInterpolation is the only instrument that sees the .inc's interpolation error.
 glm::vec2 directionalAlbedoSplit(float mu, float roughness) {
     const AlbedoSplit split = directionalAlbedo(mu, roughness);
     return {split.a, split.b};
@@ -399,22 +359,18 @@ glm::vec2 averageAlbedoSplit(float roughness) {
     return {split.a, split.b};
 }
 
-// The grid the two lookups index, described rather than transcribed -- see the header. Both axes are edge-aligned,
-// so index 0 and res-1 are exact endpoints and a fractional index lands where the lookups interpolate.
+// The grid the two lookups index, described rather than transcribed. Both axes edge-aligned, so 0 and res-1 are exact endpoints.
 glm::ivec2 albedoGridRes() { return {kAlbedoRoughnessRes, kAlbedoMuRes}; }
 
 float albedoGridRoughness(float index) { return index / static_cast<float>(kAlbedoRoughnessRes - 1); }
 
-// Inverts directionalAlbedo's sqrt(mu) index, so an instrument placing a sample at a fractional index lands where
-// that lookup interpolates rather than where a linear axis would put it.
+// Inverts directionalAlbedo's sqrt(mu) index, so an instrument's fractional index lands where that lookup interpolates.
 float albedoGridMu(float index) {
     const float t = index / static_cast<float>(kAlbedoMuRes - 1);
     return t * t;
 }
 
-// The conductor interface, over the same fresnelConductorChannel its single scatter evaluates. Karis' mean is exact
-// for Schlick and so averages a different function once the single scatter is complex-IOR; worse, its error changes
-// sign with edgeTint, which f0 alone cannot express.
+// The conductor interface. Karis' mean is exact for Schlick, so it averages a different function once the scatter is complex-IOR.
 glm::vec3 conductorFresnelAvg(const glm::vec3& n, const glm::vec3& k) {
     glm::vec3 sum(0.0F);
     for (int i = 0; i < 3; ++i) {
@@ -423,15 +379,12 @@ glm::vec3 conductorFresnelAvg(const glm::vec3& n, const glm::vec3& k) {
     return sum;
 }
 
-// Fraunhofer d, F and C lines: the three wavelengths the Abbe number is defined at, V_d = (n_d-1)/(n_F-n_C), and the
-// only ones (ior, abbe) pins. Physical constants of the definition, not tuning.
+// Fraunhofer d, F and C lines, where V_d = (n_d-1)/(n_F-n_C) is defined: physical constants of the definition, not tuning.
 constexpr float kLambdaDNm = 587.56F;
 constexpr float kLambdaFNm = 486.13F;
 constexpr float kLambdaCNm = 656.27F;
 
-// Cauchy's two-term n(lambda) = A + B/lambda^2, (A, B) inverted from the authored (n_d, V_d), as Khronos
-// KHR_materials_dispersion specifies. abbe <= 0 is the documented off switch, which also keeps 1/abbe off the hot
-// path; n_d = 1 gives B = 0 exactly. See DERIVATIONS.md "Cauchy dispersion".
+// Cauchy n(lambda) = A + B/lambda^2, (A,B) from (n_d, V_d) per KHR_materials_dispersion. See DERIVATIONS.md "Cauchy dispersion".
 float cauchyIor(float iorD, float abbe, float lambdaNm) {
     if (abbe <= 0.0F) {
         return iorD;
@@ -446,15 +399,13 @@ namespace {
 
 glm::vec3 schlickFresnelAvg(const glm::vec3& f0) { return f0 + ((glm::vec3(1.0F) - f0) / 21.0F); }
 
-// Normal-incidence reflectance implied by the ior -- the dielectric coat's own f0, independent of the
-// (currently unrelated, see A5) f0 texture the conductor path uses.
+// Normal-incidence reflectance implied by the ior: the coat's own f0, independent of the f0 texture the conductor path uses.
 float dielectricF0(float ior) {
     const float r = (ior - 1.0F) / (ior + 1.0F);
     return r * r;
 }
 
-// Kulla-Conty multiple-scattering tint: the share of the (1-E) energy surviving repeated microsurface bounces, each
-// attenuated by Favg. Equals 1 for a perfect reflector (Favg=1), so a white conductor conserves exactly.
+// Kulla-Conty tint: the share of (1-E) energy surviving repeated bounces, each attenuated by Favg. Exactly 1 at Favg=1.
 float multiScatterTint(float fresnelAvg, float albedoAvg) {
     return (fresnelAvg * fresnelAvg * albedoAvg) /
            std::max(1.0F - (fresnelAvg * (1.0F - albedoAvg)), 1e-4F);
@@ -464,28 +415,22 @@ float schlickScalar(float cosTheta, float f0) {
     return f0 + ((1.0F - f0) * std::pow(std::clamp(1.0F - cosTheta, 0.0F, 1.0F), 5.0F));
 }
 
-// etaI/etaT rather than a bare ior: on the exiting side fresnelDielectric returns exactly 1.0 past the critical
-// angle, and Schlick cannot express TIR at all. Hardcoding the entering orientation under-reported an exiting ray's
-// reflected share by up to the whole TIR cone, which the compensation then handed back as multiple scattering.
+// etaI/etaT rather than a bare ior: fresnelDielectric returns exactly 1.0 past the critical angle, and Schlick cannot express TIR.
 float coatFresnelRatio(float cosTheta, float etaI, float etaT, float f0) {
     return fresnelDielectric(cosTheta, etaI, etaT) / std::max(schlickScalar(cosTheta, f0), 1e-6F);
 }
 
-// Total directional albedo of the dielectric coat, single scatter plus its own multiple-scattering lobe -- not the
-// macro-facet F(mu_o), which differs by 4x at roughness 1, mu 0.4 and cost a measured 10% energy loss. fresnelRatio
-// and fresnelAvg reconcile the Schlick-basis table with the exact Fresnel. DERIVATIONS.md "Dielectric coat coupling".
+// Coat albedo, not the macro-facet F(mu_o): 4x at roughness 1, mu 0.4, 10% energy lost. See DERIVATIONS.md "Dielectric coat coupling".
 float coatAlbedo(const AlbedoSplit& split, float albedoAvg, float f0, float fresnelRatio,
                   float fresnelAvg) {
     return (split.at(f0) * fresnelRatio) +
            (multiScatterTint(fresnelAvg, albedoAvg) * (1.0F - split.total()));
 }
 
-// Below this the GGX transmission lobe is a delta (PBRT's EffectivelySmooth). kMinAlpha (roughness 0.02) sits inside
-// this region, so smooth glass keeps its exact noise-free Snell path.
+// Below this the GGX transmission lobe is a delta (PBRT's EffectivelySmooth); kMinAlpha sits inside it, so smooth glass stays exact.
 constexpr float kSmoothAlpha = 1e-3F;
 
-// ior == 1 is a delta at every roughness, not a rough interface: the half-vector normalizes the zero vector and every
-// guard below becomes a NaN comparison. See DERIVATIONS.md "Smooth-transmission threshold" for the measured rates.
+// ior == 1 is a delta at every roughness: the half-vector normalizes zero. See DERIVATIONS.md "Smooth-transmission threshold".
 bool transmissionIsRough(const BsdfParams& params, float alpha) {
     return params.transmissionFactor > 0.0F && alpha >= kSmoothAlpha && params.ior != 1.0F;
 }
@@ -510,43 +455,32 @@ struct LobeProbabilities {
     float albedoWo;         // E(mu_o, roughness), Fresnel-free
     float albedoAvg;        // Eavg(roughness)
     float coatF0;           // dielectric f0 implied by ior, for the diffuse coupling
-    // The coat's own cosine-mean Fresnel. Separate from fresnelAvg below, the metallic-blended mean the specular lobe
-    // needs and wrong for the coat at any metallic > 0.
+    // The coat's own cosine-mean Fresnel, separate from the metallic-blended fresnelAvg below, which is wrong for the coat.
     float coatFresnelAvg;
     glm::vec3 fresnelAvg;
-    // Complex IOR inverted from (f0, edgeTint) once per evaluation rather than once per lobe call.
-    // Index-matched (1, 0) when metallic==0, where no consumer reads them: evaluateSpecularLobe gates its conductor
-    // Fresnel on the same metallic>0 test, and the two must stay identical -- (1, 0) is 0/0 at cosTheta=0 exactly.
+    // Complex IOR inverted from (f0, edgeTint) once per evaluation. Index-matched (1, 0) at metallic==0, where no consumer reads them.
     glm::vec3 conductorN;
     glm::vec3 conductorK;
-    // Multiple-scattering state for a transmissive interface, which needs its own deficit: a facet either reflects or
-    // refracts, so the escaping fraction is Fresnel-weighted (R_ss + T_ss) and cannot reuse the opaque Fresnel-free
-    // (1 - E). Blended by transmissionFactor rather than unified, so an opaque material keeps its measured behaviour.
+    // Multiple-scattering state for a transmissive interface: a facet reflects or refracts, so the escape is Fresnel-weighted.
     float escapeWo;         // R_ss(mu_o) + T_ss(mu_o), the Fresnel-weighted escaping fraction
     // Escape-deficit shape at the reciprocal eta (etaT/etaI); scale 0 where no transmitted multiple scattering exists.
     MsTransmitRow transmitShape;
     MsTransmitRow reflectShape;   // the same at the forward eta (etaI/etaT), for the reflected share whose wi stays in wo's medium
     float transmitShare;    // of the multiple-scattered energy, the fraction leaving refracted
     float etaSq;            // (etaI/etaT)^2, the radiance compression the transmit lobe must carry
-    // effectiveTransmission*(1-metallic): how much transmission actually happens. Scales the single-scatter and the
-    // multiple-scattering transmit value; the delta branch carries the same factors through transmitPhysicalValue.
+    // effectiveTransmission*(1-metallic): how much transmission happens. Scales single-scatter and multiple-scattering transmit alike.
     float transmitWeight;
-    // Refraction's value per unit (1-F) in the VNDF strategy's per-facet reflect/refract split, transmitWeight;
-    // 0 where that strategy only reflects.
+    // Refraction's value per unit (1-F) in the VNDF strategy's reflect/refract split; 0 where that strategy only reflects.
     float facetTransmit;
 };
 
-// The transmitted share of the multiple-scattering energy, for any wi on the far side, free of the half-vector
-// rejections that describe single scattering only. K*pdf/mu integrates to exactly K for any table noise, so no gate
-// is needed. mu > 0 strictly -- the only caller is evaluateContinuousLobes' wi.z < 0 branch.
+// The transmitted share of the multiple-scattering energy for any far-side wi. K*pdf/mu integrates to exactly K, so no gate is needed.
 glm::vec3 transmitMultiScatter(const BsdfParams& params, float mu, float msPdf, const LobeProbabilities& lobes) {
     return params.transmissionTint * lobes.transmitWeight * lobes.transmitShare * lobes.etaSq *
            (std::max(1.0F - lobes.escapeWo, 0.0F) * msPdf / mu);
 }
 
-// The full reciprocal coupling factor at wi: the wo-side half is precomputed into lobes.diffuseKd, the
-// wi-side half is the same (1 - coatAlbedo) evaluated here. The cosine mean is lobes.coatFresnelAvg, the same float
-// computeLobeProbabilities already produced from the same params.ior -- bit-identical to recomputing it here.
+// The full reciprocal coupling at wi: the wo half is in lobes.diffuseKd, the wi half the same (1 - coatAlbedo) evaluated here.
 float diffuseKdAt(const BsdfParams& params, const glm::vec3& wi, const LobeProbabilities& lobes) {
     const AlbedoSplit splitWi = directionalAlbedo(wi.z, params.roughness);
     const float coat = coatAlbedo(splitWi, lobes.albedoAvg, lobes.coatF0,
@@ -555,15 +489,12 @@ float diffuseKdAt(const BsdfParams& params, const glm::vec3& wi, const LobeProba
     return std::max(lobes.diffuseKd, 0.0F) * (1.0F - coat);
 }
 
-// --- EON rough-diffuse BRDF (Portsmouth, Kutz, Hill 2025, JCGT 14(1)), replacing plain Lambertian as
-// evaluateDiffuseLobe's base reflectance, still wrapped by diffuseKdAt's Fresnel-coat coupling. Fujii's FON model
-// plus analytic multiple-scattering compensation. Ported from the paper's GLSL; do not hand-derive its constants.
+// --- EON rough-diffuse BRDF (Portsmouth, Kutz, Hill 2025, JCGT 14(1)); ported from the paper's GLSL, never hand-derived.
 
 constexpr float kConstant1Fon = 0.5F - (2.0F / (3.0F * kPi));
 constexpr float kConstant2Fon = (2.0F / 3.0F) - (28.0F / (15.0F * kPi));
 
-// FON directional albedo, quartic polynomial fit (paper eq. 14): accurate to <0.1% versus the exact
-// trigonometric form and ~5x cheaper to evaluate -- used exclusively, the exact form has no consumer here.
+// FON directional albedo, quartic fit (paper eq. 14): within 0.1% of the exact form and ~5x cheaper, so used exclusively.
 float evalFonAlbedoApprox(float mu, float r) {
     const float muComplement = 1.0F - mu;
     constexpr float g1 = 0.0571085289F;
@@ -578,9 +509,7 @@ float evalFonAlbedoApprox(float mu, float r) {
 
 }  // namespace
 
-// Paper Appendix A: the rho achieving a desired observed albedo, so diffuseColour means what OpenPBR says base_color
-// means. One branch-free expression via the stable conjugate-multiplied root, not eq. 30's. Exported for
-// checkEonAlbedoInversion and resolved once per hit. See DERIVATIONS.md "EON albedo inversion".
+// Paper Appendix A: the rho giving a desired observed albedo, via the stable root, not eq. 30's. See DERIVATIONS.md "EON albedo inversion".
 glm::vec3 eonAlbedoInversion(const glm::vec3& albedo, float r) {
     const float eFonNormal = 1.0F / (1.0F + (kConstant1Fon * r));
     const float avgEFon = eFonNormal * (1.0F + (kConstant2Fon * r));
@@ -591,9 +520,7 @@ glm::vec3 eonAlbedoInversion(const glm::vec3& albedo, float r) {
 
 namespace {
 
-// EON BRDF value (paper eq. 16-19): FON single scatter plus an analytic multiple-scattering lobe. rho
-// is the single-scattering albedo, NOT the authored colour: eonAlbedoInversion above maps one to the
-// other, so that the albedo this lobe is observed to have is the albedo the material asked for.
+// EON BRDF value (paper eq. 16-19): FON single scatter plus an analytic multiple-scattering lobe. rho is not the authored colour.
 glm::vec3 evaluateEon(const glm::vec3& rho, float r, const glm::vec3& wi, const glm::vec3& wo) {
     const float muI = wi.z;
     const float muO = wo.z;
@@ -612,9 +539,7 @@ glm::vec3 evaluateEon(const glm::vec3& rho, float r, const glm::vec3& wi, const 
     return singleScatter + multiScatter;
 }
 
-// Uniform hemisphere direction (z = u.x directly, not remapped to [-1,1]): pdf = 1/(2*pi). EON's
-// defensive-sampling companion to CLTC below (Owen & Zhou 2000's one-sample MIS), not a general utility
-// -- sampleCosineHemisphere already covers the codebase's other uniform/cosine sampling needs.
+// Uniform hemisphere direction, pdf = 1/(2*pi): EON's defensive-sampling companion to CLTC (Owen & Zhou 2000 one-sample MIS).
 glm::vec3 sampleUniformHemisphereEon(glm::vec2 u) {
     const float sinTheta = std::sqrt(std::max(0.0F, 1.0F - (u.x * u.x)));
     const float phi = 2.0F * kPi * u.y;
@@ -628,9 +553,7 @@ struct EonLtcCoeffs {
     float d;
 };
 
-// Fitted Linearly-Transformed-Cosine matrix coefficients (paper Listing 2) that best match EON's
-// cosine-weighted backscattering lobe for a given view angle/roughness -- the shape CLTC sampling below
-// imports from.
+// Fitted LTC matrix coefficients (paper Listing 2) matching EON's cosine-weighted backscattering lobe at a view angle and roughness.
 EonLtcCoeffs eonLtcCoeffs(float mu, float r) {
     const float a = 1.0F + (r * (0.303392F + (((-0.518982F + (0.111709F * mu)) * mu) +
                                                 ((-0.276266F + (0.335918F * mu)) * r))));
@@ -642,8 +565,7 @@ EonLtcCoeffs eonLtcCoeffs(float mu, float r) {
     return {a, b, c, d};
 }
 
-// Orthonormal frame aligning wLocal's azimuth to the x-axis, used to move into/out of the space the LTC
-// fit (above) is expressed in.
+// Orthonormal frame aligning wLocal's azimuth to the x-axis, to move into and out of the space the LTC fit is expressed in.
 glm::mat3 orthonormalBasisLtc(const glm::vec3& wLocal) {
     const float lenSq = (wLocal.x * wLocal.x) + (wLocal.y * wLocal.y);
     const glm::vec3 x = lenSq > 0.0F ? glm::vec3(wLocal.x, wLocal.y, 0.0F) * (1.0F / std::sqrt(lenSq))
@@ -652,9 +574,7 @@ glm::mat3 orthonormalBasisLtc(const glm::vec3& wLocal) {
     return glm::mat3(x, y, glm::vec3(0.0F, 0.0F, 1.0F));
 }
 
-// Clipped-LTC direction sample (paper Sec. 4, Listing 3): cosine-weighted sampling of the hemisphere clipped to
-// the LTC lobe's positive half-space, the Nusselt-analog projection, restricted to the positive hemisphere by
-// construction -- no rejected below-surface samples, unlike naive LTC sampling.
+// Clipped-LTC sample (paper Sec. 4, Listing 3): cosine sampling of the hemisphere clipped to the lobe, so no sample lands below.
 glm::vec3 cltcSample(const glm::vec3& woLocal, float r, glm::vec2 u) {
     const EonLtcCoeffs m = eonLtcCoeffs(woLocal.z, r);
     const float radius = std::sqrt(u.x);
@@ -668,9 +588,7 @@ glm::vec3 cltcSample(const glm::vec3& woLocal, float r, glm::vec2 u) {
     return glm::normalize(orthonormalBasisLtc(woLocal) * wiUnnormalized);
 }
 
-// pdf of cltcSample's distribution at an arbitrary wiLocal (paper Listing 3's cltc_pdf) -- evaluated
-// independently of how wiLocal was actually obtained, matching this file's existing convention of
-// recomputing a lobe's pdf from evaluateBsdfSplit rather than threading it out of the sampler.
+// pdf of cltcSample's distribution at an arbitrary wiLocal (paper Listing 3's cltc_pdf), evaluated independently of how wiLocal arose.
 float cltcPdf(const glm::vec3& woLocal, const glm::vec3& wiLocal, float r) {
     const EonLtcCoeffs m = eonLtcCoeffs(woLocal.z, r);
     const glm::vec3 wi = glm::transpose(orthonormalBasisLtc(woLocal)) * wiLocal;
@@ -683,23 +601,17 @@ float cltcPdf(const glm::vec3& woLocal, const glm::vec3& wiLocal, float r) {
     return (detM * detM) / std::max(lenSq * lenSq, 1e-12F) * std::max(wh.z, 0.0F) / (kPi * s);
 }
 
-// Mixing weight between the CLTC lobe and a uniform-hemisphere lobe (paper Sec. 4, fitted by minimizing the CLTC
-// estimator's maximum throughput weight): CLTC alone has a bias/variance spike the uniform term corrects via
-// one-sample MIS. Shared by sampleEon and pdfEon so the two agree on which mixture they draw from.
+// Mixing weight between the CLTC and uniform lobes (paper Sec. 4): CLTC alone has a variance spike the uniform term corrects.
 float eonUniformMixWeight(float mu, float r) {
     const float inner = 0.538233F - (0.290822F * mu);
     const float mid = -0.372058F + (inner * mu);
     return std::pow(r, 0.1F) * (0.162925F + (mid * mu));
 }
 
-// Samples EON's importance-sampling distribution (paper Sec. 4): one-sample MIS between the CLTC lobe
-// and a uniform hemisphere lobe. Direction only -- pdfEon below is the single source of truth for the
-// resulting density, called via evaluateDiffuseLobe regardless of which strategy produced wi.
+// Samples EON's distribution (paper Sec. 4), one-sample MIS between CLTC and uniform. Direction only; pdfEon owns the density.
 glm::vec3 sampleEon(const glm::vec3& woLocal, float r, glm::vec2 u) {
     const float pUniform = eonUniformMixWeight(woLocal.z, r);
-    // Strict: pUniform is exactly 0 at r=0 (pow(0,0.1)), where an inclusive test admits u.x==0 -- reachable from the
-    // sampler's Cranley-Patterson wrap -- and reshuffles it as 0/0. The NaN direction passes every downstream guard,
-    // NaN failing all ordered comparisons, and poisons the pixel for the rest of the progressive render.
+    // Strict: pUniform is exactly 0 at r=0, where an inclusive test admits u.x==0 and reshuffles it as 0/0, poisoning the pixel with NaN.
     if (u.x < pUniform) {
         u.x /= pUniform;
         return sampleUniformHemisphereEon(u);
@@ -733,17 +645,13 @@ float facetReflectance(const BsdfParams& params, float cosTheta, float fDielectr
     return glm::mix(fDielectric, (conductor.x + conductor.y + conductor.z) / 3.0F, params.metallic);
 }
 
-// Probability the VNDF strategy reflects about a facet on a rough transmissive interface: the facet's reflected value
-// over reflected plus refracted (Walter 2007 sec. 5.3; PBRT-v4 DielectricBxDF), so both branches weigh G2/G1 alone.
-// The caller gates on facetTransmit > 0, where the denominator is positive.
+// Probability the VNDF strategy reflects about a facet (Walter 2007 5.3); callers gate facetTransmit > 0, so the denominator is positive.
 float facetReflectProbability(const BsdfParams& params, float cosTheta, float fDielectric, const LobeProbabilities& lobes) {
     const float reflect = facetReflectance(params, cosTheta, fDielectric, lobes);
     return reflect / (reflect + ((1.0F - fDielectric) * lobes.facetTransmit));
 }
 
-// Single scatter D*G2*F/(4*ndotV*ndotL) plus the Kulla-Conty multiple-scattering lobe, and the VNDF pdf (Heitz 2018
-// eq.3) times its reflection Jacobian. The pdf covers single scattering only: the reflected multiple-scattering
-// share is (1-E)cos-shaped with its own strategy, lobes.msReflect, whose density joins the same mixture.
+// Single scatter D*G2*F/(4*ndotV*ndotL) plus the Kulla-Conty lobe, and the VNDF pdf (Heitz 2018 eq.3) times its Jacobian.
 LobeEval evaluateSpecularLobe(const BsdfParams& params, const glm::vec3& wo, const glm::vec3& wi,
                                float alpha, const LobeProbabilities& lobes) {
     if (wo.z <= 0.0F || wi.z <= 0.0F) {
@@ -756,9 +664,7 @@ LobeEval evaluateSpecularLobe(const BsdfParams& params, const glm::vec3& wo, con
     }
     const float d = distributionGGX(nh, alpha);
     const float fDielectric = fresnelDielectric(woDotNh, lobes.etaI, lobes.etaT);
-    // Gated, not mixed away at weight 0: glm::mix is a + t*(b-a), so a non-finite conductor term would
-    // survive t=0 as NaN rather than cancel. Skipping the call keeps every dielectric bit-identical and
-    // costs it nothing -- the same reasoning as the transmitWeight gate below.
+    // Gated, not mixed away at weight 0: glm::mix is a + t*(b-a), so a non-finite conductor term would survive t=0 as NaN.
     const glm::vec3 f =
         params.metallic > 0.0F
             ? glm::mix(glm::vec3(fDielectric),
@@ -766,18 +672,14 @@ LobeEval evaluateSpecularLobe(const BsdfParams& params, const glm::vec3& wo, con
             : glm::vec3(fDielectric);
     const glm::vec3 singleScatter = d * smithVisibility(wo.z, wi.z, alpha) * f;
 
-    // Kulla & Conty 2017. Integrates to (1-E(mu_o)) at Favg=1 -- the energy G2 discarded -- so a white conductor
-    // conserves, within the 1% the white furnace bounds. Symmetric in wo/wi, so it preserves reciprocity. The tint
-    // blends to 1 as the interface becomes fully transmissive, a lossless dielectric returning all of it.
+    // Kulla & Conty 2017. Integrates to (1-E(mu_o)) at Favg=1, so a white conductor conserves within the 1% the furnace bounds.
     const glm::vec3 fms(multiScatterTint(lobes.fresnelAvg.x, lobes.albedoAvg),
                          multiScatterTint(lobes.fresnelAvg.y, lobes.albedoAvg),
                          multiScatterTint(lobes.fresnelAvg.z, lobes.albedoAvg));
     const float albedoWi = directionalAlbedo(wi.z, params.roughness).total();
     const glm::vec3 opaqueMs = fms * ((1.0F - lobes.albedoWo) * (1.0F - albedoWi)) /
                                 (kPi * std::max(1.0F - lobes.albedoAvg, 1e-4F));
-    // transmitWeight is exactly zero for every opaque material -- the common case -- so skip the escape-shape row
-    // rather than build it and mix it away at weight 0. The transmissive reflected share is transmitMultiScatter's
-    // near-side twin over the forward-eta row, so the two shares sum to the deficit exactly.
+    // transmitWeight is exactly zero for every opaque material, so skip the escape-shape row rather than mix it away at weight 0.
     const glm::vec3 multiScatter =
         lobes.transmitWeight > 0.0F
             ? glm::mix(opaqueMs,
@@ -792,9 +694,7 @@ LobeEval evaluateSpecularLobe(const BsdfParams& params, const glm::vec3& wo, con
             lobes.facetTransmit > 0.0F ? vndfPdf * facetReflectProbability(params, woDotNh, fDielectric, lobes) : vndfPdf};
 }
 
-// Opaque: specular is the Fresnel reflectance probability times E; the rest is diffuse and msReflect. Transmissive:
-// every strategy by its energy at wo, and an exiting ray has no diffuse substrate. transmitPhysicalValue must
-// independently carry transmit's transmissionFactor and metallic factors, or they cancel out of the throughput.
+// Opaque: specular is the Fresnel probability times E, the rest diffuse and msReflect. Transmissive: every strategy by its energy at wo.
 LobeProbabilities computeLobeProbabilities(const BsdfParams& params, const glm::vec3& wo, float sign,
                                             float alpha) {
     const bool exiting = sign < 0.0F && params.transmissionFactor > 0.0F;
@@ -814,9 +714,7 @@ LobeProbabilities computeLobeProbabilities(const BsdfParams& params, const glm::
     const AlbedoSplit splitWo = directionalAlbedo(wo.z, params.roughness);
     const AlbedoSplit splitAvg = averageAlbedo(params.roughness);
     const float transmittance = (1.0F - fresnelAtNormal) * (1.0F - params.metallic);
-    // Reciprocal diffuse coupling: the substrate receives what the coat did not reflect, in and out, renormalised by
-    // 1/(1-coatAlbedoAvg) so the directional albedo integrates to (1-coatAlbedo(mu_o)). Symmetric in wo/wi, which the
-    // bare (1-F(mu_o)) form was not. Not exact -- the white furnace bounds the residual under 1%.
+    // Reciprocal diffuse coupling, renormalised by 1/(1-coatAlbedoAvg) and symmetric in wo/wi, which the bare (1-F(mu_o)) form was not.
     const float coatF0 = dielectricF0(params.ior);
     const float dielectricAvg = dielectricFresnelAvg(params.ior);
     const float coatAlbedoAvg =
@@ -833,12 +731,9 @@ LobeProbabilities computeLobeProbabilities(const BsdfParams& params, const glm::
         diffuseKd = diffuseCoupling * (1.0F - params.metallic) * (1.0F - params.transmissionFactor);
         transmitPhysicalValue = transmittance * params.transmissionFactor;
     }
-    // Each interface's own cosine mean, over the Fresnel its single scatter evaluates: one 3-node rule, over the
-    // conductor's complex IOR and over the dielectric's. conductorAvg is 0 off the metal path, where mix returns the
-    // dielectric term exactly.
+    // Each interface's own cosine mean over the Fresnel its single scatter evaluates; conductorAvg is 0 off the metal path.
     const glm::vec3 fresnelAvg = glm::mix(glm::vec3(dielectricAvg), conductorAvg, params.metallic);
-    // msEnergy is exact: opaqueMs integrates over the hemisphere to fms*(1-E(mu_o)), since int (1-E(mu_i)) cos =
-    // pi*(1-Eavg). diffuseEnergy drops the wi-side coat factor -- selection mass need only be proportional to energy.
+    // msEnergy is exact: opaqueMs integrates to fms*(1-E(mu_o)), since int (1-E(mu_i)) cos = pi*(1-Eavg). Mass need only be proportional.
     const float msReflectEnergy = ((multiScatterTint(fresnelAvg.x, splitAvg.total()) +
                                      multiScatterTint(fresnelAvg.y, splitAvg.total()) +
                                      multiScatterTint(fresnelAvg.z, splitAvg.total())) /
@@ -846,9 +741,7 @@ LobeProbabilities computeLobeProbabilities(const BsdfParams& params, const glm::
                                    std::max(1.0F - splitWo.total(), 0.0F);
     const float diffuseEnergy =
         diffuseKd * (params.diffuseRho.x + params.diffuseRho.y + params.diffuseRho.z) / 3.0F;
-    // R_ss uses the same Schlick split with exact-Fresnel rescale as the coat; T_ss is the (1-fc) channel scaled by
-    // (1-f0). transmitWeight, not transmissionFactor: a metallic=1 material transmits nothing, and inside the medium
-    // there is no diffuse substrate, so transmissionFactor gates the entering side only.
+    // R_ss uses the coat's Schlick split with exact-Fresnel rescale, T_ss is (1-fc) scaled by (1-f0). transmitWeight gates entry only.
     const float eta = etaI / etaT;
     const float effectiveTransmission = exiting ? 1.0F : params.transmissionFactor;
     const float transmitWeight = effectiveTransmission * (1.0F - params.metallic);
@@ -878,14 +771,11 @@ LobeProbabilities computeLobeProbabilities(const BsdfParams& params, const glm::
                             .facetTransmit = 0.0F};
 
     if (params.transmissionFactor <= 0.0F) {
-        // Scaled by E: only the single-scattering part is drawn by VNDF sampling. The multiple-scattering part is
-        // (1-E)cos-shaped and drawn by msReflect, so its selection mass must move there too.
+        // Scaled by E: VNDF draws only the single-scattering part, the (1-E)cos-shaped rest belonging to msReflect's selection mass.
         const float specularProb = std::clamp(
             glm::mix(fresnelAtNormal, conductorLuma, params.metallic) * splitWo.total(), 0.05F, 0.95F);
         const float diffuseProb = 1.0F - specularProb;
-        // Splits the non-specular mass proportional to the energy each strategy carries; without it the Kulla-Conty
-        // lobe borrows the diffuse slot and takes a CLTC shape set by diffuseRoughness. No deficit gate -- the ratio
-        // already vanishes with the deficit. All to cosine on underflow, it being positive over the whole hemisphere.
+        // Splits the non-specular mass by the energy each strategy carries; without it the Kulla-Conty lobe borrows the diffuse slot.
         const float msReflectProb =
             diffuseProb *
             (msReflectEnergy + diffuseEnergy > 1e-6F ? msReflectEnergy / (msReflectEnergy + diffuseEnergy) : 1.0F);
@@ -895,18 +785,14 @@ LobeProbabilities computeLobeProbabilities(const BsdfParams& params, const glm::
         return lobes;
     }
 
-    // Transmissive: every strategy's mass is proportional to the energy it carries at wo, so f*cos/pdf is as flat as
-    // their shapes allow. Flux terms without the eta^2 compression, as PBRT-v4's DielectricBxDF selects R/T, and
-    // untinted so directions are independent of transmissionTint. Index-matched interfaces take the exact boundary.
+    // Transmissive: each strategy's mass is proportional to its energy at wo, as flux without the eta^2 compression (PBRT-v4).
     float reflectSs = 0.0F;
     float transmitSs = 1.0F;
     if (params.ior == 1.0F) {
         lobes.escapeWo = 1.0F;
         lobes.transmitShare = 1.0F;
     } else {
-        // R + T, with no transmissionFactor weighting: energy the interface refracts but transmissionFactor withholds
-        // from the transmit lobe enters the diffuse substrate instead -- that is what diffuseKd's (1-transmissionFactor)
-        // does -- and escapes from there.
+        // R + T, unweighted by transmissionFactor: energy it withholds from the transmit lobe enters the diffuse substrate instead.
         const EscapeSplit escapeWo = escapeAlbedo(wo.z, params.roughness, eta);
         const EscapeSplit escapeMean = averageEscapeAlbedo(params.roughness, eta);
         lobes.escapeWo = escapeWo.total();
@@ -924,8 +810,7 @@ LobeProbabilities computeLobeProbabilities(const BsdfParams& params, const glm::
     // A zero-scale row has no density to draw from, and its value reads the same zero.
     const float msReflectTransmissiveEnergy =
         lobes.reflectShape.scale > 0.0F ? transmitWeight * (1.0F - lobes.transmitShare) * deficit : 0.0F;
-    // A rough interface's refraction is the VNDF strategy's other branch, chosen per facet, so its energy joins the
-    // specular mass; a delta keeps its own.
+    // A rough interface's refraction is the VNDF strategy's other branch, so its energy joins the specular mass; a delta keeps its own.
     const float transmitEnergy = rough ? transmitWeight * transmitSs : transmitPhysicalValue;
     // evaluateContinuousLobes drops the far-side multiple scattering of a delta interface, so it has no energy to select for.
     const float msTransmitEnergy = rough && lobes.transmitShape.scale > 0.0F
@@ -933,8 +818,7 @@ LobeProbabilities computeLobeProbabilities(const BsdfParams& params, const glm::
                                        : 0.0F;
     const float total = specularEnergy + diffuseEnergy + opaqueMsEnergy + msReflectTransmissiveEnergy +
                         transmitEnergy + msTransmitEnergy;
-    // Zero only where every lobe's value is zero (a fully metallic interface whose conductor Fresnel is 0), leaving
-    // sampleBsdf nothing to draw.
+    // Zero only where every lobe's value is zero -- a fully metallic interface with conductor Fresnel 0 -- leaving sampleBsdf nothing.
     const float inverseTotal = total > 0.0F ? 1.0F / total : 0.0F;
     lobes.specular = (rough ? specularEnergy + transmitEnergy : specularEnergy) * inverseTotal;
     lobes.diffuse = diffuseEnergy * inverseTotal;
@@ -946,9 +830,7 @@ LobeProbabilities computeLobeProbabilities(const BsdfParams& params, const glm::
     return lobes;
 }
 
-// Walter et al. 2007 rough transmission, single scatter only (value eq. 21, half-vector eq. 16, Jacobian eq. 17), in
-// PBRT-v3's radiance-transport form. The eta^2 radiance compression (Veach 1997 sec. 5.2) is already folded in, so
-// this must not apply it again; the etaR^2 surviving in the pdf but not the value is that asymmetry.
+// Walter 2007 (eq. 21, 16, 17), PBRT-v3 radiance form: eta^2 (Veach 1997 5.2) is already folded in, hence etaR^2 in the pdf only.
 LobeEval evaluateTransmissionLobe(const BsdfParams& params, const glm::vec3& wo, const glm::vec3& wi,
                                    float alpha, const LobeProbabilities& lobes) {
     if (wo.z <= 0.0F || wi.z >= 0.0F) {
@@ -975,9 +857,7 @@ LobeEval evaluateTransmissionLobe(const BsdfParams& params, const glm::vec3& wo,
     // D*G2*|wi.h|*(wo.h)/(wo.z*|wi.z|*denom^2), with G2/(wo.z*|wi.z|) taken as 4*smithVisibility.
     const float common = (4.0F * d * smithVisibility(wo.z, -wi.z, alpha) * std::abs(wiDotH) * woDotH) / denom2;
     const float vndfPdf = d * woDotH * smithG1OverCos(wo.z, alpha);
-    // transmitWeight carries the same factors as the delta branch: (1-metallic), a conductor transmitting nothing
-    // whatever its transmissionFactor, and the entering side's transmissionFactor.
-    // The VNDF strategy refracts about this facet with probability 1 - facetReflectProbability, and never where facetTransmit is 0.
+    // transmitWeight carries the delta branch's factors: (1-metallic), a conductor transmitting nothing, and the entering side's factor.
     const float refractProbability =
         lobes.facetTransmit > 0.0F ? 1.0F - facetReflectProbability(params, woDotH, fresnel, lobes) : 0.0F;
     return {params.transmissionTint * (1.0F - fresnel) * lobes.transmitWeight * common,
@@ -988,8 +868,7 @@ BsdfEval evaluateContinuousLobes(const BsdfParams& params, const glm::vec3& wo, 
                                   float alpha, const LobeProbabilities& lobes) {
     // Reflection and transmission occupy disjoint hemispheres, so the mixture is piecewise: no overlap between the two to double-count.
     if (wi.z < 0.0F) {
-        // The multiple-scattering term stays inside this gate. A delta interface keeps pdf=0 on the far side, and a
-        // non-zero value there would be silently discarded by path_tracer.cpp's bsdfPdf>0 guard: energy lost.
+        // The multiple-scattering term stays inside this gate: a delta keeps pdf=0 on the far side, where a non-zero value would be lost.
         if (!transmissionIsRough(params, alpha)) {
             return {};
         }
@@ -1012,8 +891,7 @@ BsdfEval evaluateContinuousLobes(const BsdfParams& params, const glm::vec3& wo, 
 }  // namespace
 
 glm::vec3 fresnelAtViewAngle(const BsdfParams& params, float cosTheta) {
-    // Entering orientation (etaI=1): a primary-hit view-angle value is always outside the surface, so
-    // unlike evaluateSpecularLobe there is no exiting side to swap etaI/etaT for.
+    // Entering orientation (etaI=1): a primary-hit view-angle value is always outside the surface, so there is no exiting side to swap.
     const float fDielectric = fresnelDielectric(cosTheta, 1.0F, params.ior);
     if (params.metallic <= 0.0F) {
         return glm::vec3(fDielectric);
@@ -1024,12 +902,10 @@ glm::vec3 fresnelAtViewAngle(const BsdfParams& params, float cosTheta) {
 }
 
 glm::vec3 fresnelAtMicrofacet(const BsdfParams& params, const glm::vec3& woLocal, glm::vec2 u) {
-    // sampleGGXVNDF's +z-hemisphere precondition, met as evaluateBsdfSplit and sampleBsdf meet it. Only dot(wo, wh) is
-    // read, and reflecting the frame leaves it unchanged, so the flip needs no undoing.
+    // sampleGGXVNDF's +z-hemisphere precondition. Only dot(wo, wh) is read and reflecting leaves it unchanged, so the flip needs no undo.
     const glm::vec3 wo(woLocal.x, woLocal.y, std::abs(woLocal.z));
     const glm::vec3 wh = sampleGGXVNDF(wo, alphaForRoughness(params.roughness), u);
-    // Clamped, not raw: fresnelDielectric swaps etaI/etaT below zero, so a negative dot would report the exiting-side
-    // term instead of the entering one fresnelAtViewAngle documents.
+    // Clamped, not raw: fresnelDielectric swaps etaI/etaT below zero, so a negative dot would report the exiting-side term.
     return fresnelAtViewAngle(params, std::max(glm::dot(wo, wh), 0.0F));
 }
 
@@ -1070,9 +946,7 @@ std::optional<BsdfSample> sampleBsdf(const BsdfParams& params, const glm::vec3& 
                            eval.pdf};
     };
 
-    // VNDF single scatter, refracting about the sampled facet too on a rough transmissive interface (Walter 2007),
-    // split per facet by facetReflectProbability; lobeU/specular is uniform given this strategy, so it decides the
-    // split without another draw. A facet whose refraction totally internally reflects has Fresnel 1 and reflects.
+    // VNDF single scatter, refracting about the sampled facet too (Walter 2007), split by facetReflectProbability without another draw.
     if (lobeU < lobes.specular) {
         const glm::vec3 nh = sampleGGXVNDF(wo, alpha, sampler.next2D());
         if (lobes.facetTransmit > 0.0F) {
@@ -1093,8 +967,7 @@ std::optional<BsdfSample> sampleBsdf(const BsdfParams& params, const glm::vec3& 
         return weigh(wi, LobeType::SpecularReflection);
     }
 
-    // The reflection region's sub-ranges are prefix sums of one expression, so they partition it exactly: a strategy
-    // with no mass has an empty range and is never reached.
+    // The reflection sub-ranges are prefix sums of one expression, so they partition it exactly: a massless strategy is never reached.
     if (lobeU < lobes.specular + lobes.diffuse + lobes.msReflect + lobes.msReflectTransmissive) {
         const bool sampledDiffuse = lobeU < lobes.specular + lobes.diffuse;
         glm::vec3 wi;
@@ -1108,14 +981,11 @@ std::optional<BsdfSample> sampleBsdf(const BsdfParams& params, const glm::vec3& 
         if (wi.z <= 0.0F) {
             return std::nullopt;
         }
-        // The multiple-scattering branches report SpecularReflection: path_tracer.cpp buckets by strategy, and
-        // repeated bounces on a GGX microsurface are specular however broad their exitant distribution.
+        // The multiple-scattering branches report SpecularReflection: repeated GGX bounces are specular however broad their exitant lobe.
         return weigh(wi, sampledDiffuse ? LobeType::Diffuse : LobeType::SpecularReflection);
     }
 
-    // Top slice of the ladder: the multiple-scattering transmission lobe, from its own tabulated shape over the far
-    // hemisphere, needed because refraction VNDF reaches only directions some microfacet can refract into. Tested
-    // first because the probabilities below sum to 1.0 only to float precision.
+    // Tested first because the probabilities below sum to 1.0 only in float: this lobe reaches directions no microfacet could refract into.
     if (lobes.msTransmit > 0.0F &&
         lobeU >= lobes.specular + lobes.diffuse + lobes.msReflect + lobes.msReflectTransmissive + lobes.transmit) {
         glm::vec3 wi = sampleMsTransmit(lobes.transmitShape, sampler.next2D());
@@ -1127,8 +997,7 @@ std::optional<BsdfSample> sampleBsdf(const BsdfParams& params, const glm::vec3& 
         return std::nullopt;
     }
 
-    // Smooth specular transmission (delta lobe): Snell, with TIR already folded into lobes.transmit, whose (1-F)
-    // energy is exactly 0 past the critical angle since both sites decide it with the same cos2Transmitted predicate.
+    // Smooth specular transmission: Snell, TIR already folded into lobes.transmit, whose (1-F) energy is exactly 0 past the critical angle.
     const float eta = lobes.etaI / lobes.etaT;
     const float cos2ThetaT = cos2Transmitted(wo.z, eta);
     if (cos2ThetaT < 0.0F) {
@@ -1136,8 +1005,7 @@ std::optional<BsdfSample> sampleBsdf(const BsdfParams& params, const glm::vec3& 
     }
     const float cosThetaT = std::sqrt(cos2ThetaT);
     const glm::vec3 wt(-eta * wo.x, -eta * wo.y, -cosThetaT);
-    // Non-symmetric radiance-compression factor for camera-originated transport (Veach 1997 sec. 5.2): eta^2 =
-    // (etaI/etaT)^2, the squared ratio of the medium being left to the one being entered.
+    // Non-symmetric radiance compression for camera-originated transport (Veach 1997 sec. 5.2): eta^2 = (etaI/etaT)^2.
     const glm::vec3 throughput =
         params.transmissionTint * (lobes.transmitPhysicalValue / lobes.transmit) * (eta * eta);
     // pdf 0: a delta lobe has no density for NEE to double-count against, which is exactly the test path_tracer.cpp's MIS weighting makes.

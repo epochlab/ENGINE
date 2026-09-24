@@ -33,8 +33,7 @@ LibraryVersions queryLibraryVersions() {
     versions.embree = RTC_VERSION_STRING;
     versions.openexr = OPENEXR_VERSION_STRING;
     versions.ocio = OCIO_VERSION_FULL_STR;
-    // glfwGetVersionString carries the backend list too, which is worth having: it says which platform and timer
-    // backend were compiled in, not just the version.
+    // glfwGetVersionString carries the backend list too: which platform and timer backend were compiled in, not just the version.
     versions.glfw = glfwGetVersionString();
     versions.glew = reinterpret_cast<const char*>(glewGetString(GLEW_VERSION));
     std::array<char, 32> glmVersion{};

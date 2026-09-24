@@ -3,8 +3,7 @@
 #include <iomanip>
 #include <iostream>
 
-// GLEW must be included before GLFW in any translation unit needing both: GLFW detects GLEW's include guard and
-// skips pulling in the platform GL headers itself. Reversing the order redeclares them and fails to compile.
+// GLEW must precede GLFW: GLFW detects GLEW's include guard and skips the platform GL headers. Reversed, the declarations clash.
 #include <GL/glew.h>
 #include <GLFW/glfw3.h>
 

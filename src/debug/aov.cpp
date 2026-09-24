@@ -30,8 +30,7 @@ AovSource aovSource(AovId aov) {
         case AovId::Gabor:
             return AovSource::BeautyFilter;
 
-        // The 14 primary-hit lanes renderRasterGBuffer scan-converts. No default: a new AovId must be classified
-        // here, and -Werror makes forgetting it a compile error rather than a silently black AOV.
+        // The 14 primary-hit lanes renderRasterGBuffer scan-converts. No default: -Werror makes an unclassified AovId a compile error.
         case AovId::Wireframe:
         case AovId::Alpha:
         case AovId::Depth:
@@ -73,8 +72,7 @@ int aovChannels(AovId aov) {
         case AovId::UV:
             return 2;
 
-        // Radiance triples, world-space vectors, and the two deliberately false-coloured lanes, all of which need
-        // three channels rather than a broadcast scalar.
+        // Radiance triples, world-space vectors and the two false-coloured lanes, all needing three channels, not a broadcast scalar.
         case AovId::Beauty:
         case AovId::HSV:
         case AovId::WorldPos:

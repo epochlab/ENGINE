@@ -10,8 +10,7 @@ namespace pathtracer::debug {
 
 namespace {
 
-// DFT of one strided line of a complex field, in place. The running `angle` replaces a `(k * t) % n` per tap: the
-// twiddle index advances by k and wraps, which is the same value without the division that would otherwise dominate.
+// DFT of one strided line of a complex field, in place. The running `angle` replaces a `(k * t) % n` per tap, without the division.
 void dftLine(double* re, double* im, int n, std::ptrdiff_t stride, const std::vector<double>& cosTable,
              const std::vector<double>& sinTable, std::vector<double>& scratchRe, std::vector<double>& scratchIm) {
     for (int k = 0; k < n; ++k) {
@@ -47,9 +46,7 @@ void makeTwiddle(int n, std::vector<double>& cosTable, std::vector<double>& sinT
     }
 }
 
-// Which octave a lattice point falls in, band 0 being the top (Nyquist/2 to Nyquist). Axis frequencies are normalised
-// independently, so a non-square field bins by true radial frequency. The clamp folds the corners past Nyquist into
-// band 0 and anything below the eighth octave into the last, so every point is counted exactly once.
+// Which octave a lattice point falls in, band 0 the top. Axes normalise independently, and the clamp counts every point exactly once.
 int bandOf(int kx, int ky, int width, int height) {
     const double fx = static_cast<double>(kx <= width / 2 ? kx : kx - width) / width;
     const double fy = static_cast<double>(ky <= height / 2 ? ky : ky - height) / height;

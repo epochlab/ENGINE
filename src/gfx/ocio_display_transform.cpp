@@ -25,8 +25,7 @@ constexpr const char* kBuiltinConfigName = kOcioConfigName;
 constexpr const char* kSceneColorSpace = kOcioSceneColorSpace;
 constexpr const char* kView = kOcioView;
 
-// Channel isolation, applied to the sampled texels before exposure and the display curve -- the exact pipeline
-// position the CPU-side bake occupied, so the displayed result is unchanged. As a uniform it costs no re-upload.
+// Channel isolation before exposure and the display curve, the pipeline position the CPU bake held, so the result is unchanged.
 constexpr const char* kChannelViewGlsl =
     "uniform int uChannelView;\n";
 
@@ -38,9 +37,7 @@ constexpr const char* kApplyChannelViewGlsl =
 // 1.0 - rgb, applied to the final display-referred colour (after the display curve/Raw passthrough, before dither).
 constexpr const char* kInvertGlsl = "uniform bool uInvert;\n";
 
-// Radial per-channel UV offset, 0 = off: R pulled toward centre, B pushed away, G unchanged, strongest at the frame
-// edges since it scales with distance from centre. Beauty only, so it lives where both LUTs and Raw already sample
-// uHdrColor rather than as a separate render pass.
+// Radial per-channel UV offset, 0 = off: R toward centre, B away, scaling with distance from centre. Beauty only, so no separate pass.
 constexpr const char* kAberrationGlsl =
     "uniform float uAberration;\n"
     "vec3 sampleAberrated(vec2 uv) {\n"
@@ -52,8 +49,7 @@ constexpr const char* kAberrationGlsl =
     "    return color;\n"
     "}\n";
 
-// Triangular-PDF dither before the default framebuffer's 8-bit quantization: without it, smooth dark gradients in a
-// converged render band visibly, Monte Carlo noise no longer masking them.
+// Triangular-PDF dither before the 8-bit quantization: without it, smooth dark gradients band once noise no longer masks them.
 constexpr const char* kDitherGlsl =
     "float ditherRand(vec2 co) { return fract(sin(dot(co, vec2(12.9898, 78.233))) * 43758.5453); }\n"
     "vec3 ditherOffset(vec2 uv) {\n"
@@ -71,8 +67,7 @@ std::optional<std::string> readFile(const std::string& path) {
     return contents.str();
 }
 
-// Wraps OCIO's generated GLSL in this project's client fragment program. Exposure is applied here as a uniform
-// pow(2,ev) multiply before the OCIO function, so it stays scene-referred.
+// Wraps OCIO's generated GLSL in this project's fragment program; exposure is a uniform pow(2,ev) before it, so it stays scene-referred.
 std::string buildFragmentSource(const std::string& ocioShaderText, const std::string& functionName) {
     std::ostringstream src;
     src << "#version 410 core\n\n"
@@ -94,8 +89,7 @@ std::string buildFragmentSource(const std::string& ocioShaderText, const std::st
     return src.str();
 }
 
-// No OCIO at all: exposure applied, then output directly with no display encode. Lets 'L' cycle to a genuinely
-// unencoded state for direct comparison, rather than only ever toggling between two encoded ones.
+// No OCIO at all: exposure applied, then output with no display encode, so 'L' can cycle to a genuinely unencoded state.
 std::string buildRawFragmentSource() {
     return std::string("#version 410 core\n\n"
                        "in vec2 vUv;\n"
@@ -112,9 +106,7 @@ std::string buildRawFragmentSource() {
            "}\n";
 }
 
-// Builds one LUT's fragment source through OCIO's real Display/View API using the "Un-tone-mapped" view, a genuine
-// View entry rather than a colorspace-pair bypass. Both displays resolve to pure Matrix+Gamma OETF math, verified
-// against OCIO source and empirically. A config/display/view name error is an internal defect, so it exits at once.
+// One LUT's fragment source through OCIO's Display/View API. Both displays resolve to pure Matrix+Gamma, verified against OCIO source.
 std::string buildOcioFragmentSource(const char* display, const char* functionName) {
     try {
         const OCIO::ConstConfigRcPtr config = OCIO::Config::CreateFromBuiltinConfig(kBuiltinConfigName);
@@ -127,8 +119,7 @@ std::string buildOcioFragmentSource(const char* display, const char* functionNam
         shaderDesc->setFunctionName(functionName);
         gpuProcessor->extractGpuShaderInfo(shaderDesc);
 
-        // Defensive, not merely documentary: this design assumes zero LUT textures, verified against the installed
-        // OCIO. If a future config ever introduces one, silently skipping the upload would render wrong colours.
+        // Defensive, not documentary: this design assumes zero LUT textures. Skipping the upload would render wrong colours.
         if (shaderDesc->getNumTextures() != 0 || shaderDesc->getNum3DTextures() != 0) {
             std::cerr << "OcioDisplayTransform: " << display
                       << " processor unexpectedly requires LUT textures ("

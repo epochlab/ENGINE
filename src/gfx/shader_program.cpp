@@ -37,8 +37,7 @@ std::optional<unsigned int> compileStage(GLenum stage, const std::string& source
     if (compiled == GL_FALSE) {
         GLint logLength = 0;
         glGetShaderiv(shader, GL_INFO_LOG_LENGTH, &logLength);
-        // std::string::data() is always valid, non-null and null-terminated even when empty, unlike
-        // std::vector<char>::data() at length 0: a driver returning an empty log is otherwise a null dereference.
+        // std::string::data() is valid, non-null and null-terminated even when empty, unlike std::vector<char>::data() at length 0.
         std::string log(static_cast<std::size_t>(logLength), '\0');
         glGetShaderInfoLog(shader, logLength, nullptr, log.data());
         std::cerr << "ShaderProgram: shader compile failed:\n" << log << '\n';

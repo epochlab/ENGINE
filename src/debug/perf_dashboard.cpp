@@ -20,12 +20,10 @@ constexpr double kMiB = 1024.0 * 1024.0;
 constexpr double kGiB = 1024.0 * 1024.0 * 1024.0;
 constexpr double kMillion = 1.0e6;
 
-// Index into PerfDashboard's burst arrays. Bursty means it runs on a small fraction of frames: the rasterizer only on
-// a trigger change into one of its AOVs, the upload only when a newly published result must be re-sent.
+// Index into PerfDashboard's burst arrays. Bursty means it runs on a small fraction of frames, on a trigger change or a republish.
 enum BurstStage { kBurstRaster = 0, kBurstUpload = 1 };
 
-// Frames per firing, "1/88", in the column a per-frame stage puts its percentage. "never" for a stage that has not
-// fired since launch -- a real state, not a missing measurement.
+// Frames per firing, "1/88", in the column a per-frame stage puts its percentage. "never" is a real state, not a missing measurement.
 void formatDuty(std::array<char, 8>& out, double framesPerFiring) {
     if (framesPerFiring > 0.0) {
         std::snprintf(out.data(), out.size(), "1/%.0f", framesPerFiring);
@@ -38,8 +36,7 @@ using Bar = std::array<char, 64>;
 constexpr int kBarCells = 10;
 constexpr const char* kBarBlank = "          ";
 
-// Ten cells at 1/8-cell resolution (U+2588 down to U+258F), so a stage worth 1.2% of the frame still leaves a visible
-// mark where a whole-block bar would round it away.
+// Ten cells at 1/8-cell resolution (U+2588 to U+258F), so a stage worth 1.2% still marks where a whole-block bar would round away.
 constexpr std::array<const char*, 9> kBlocks{" ", "▏", "▎", "▍", "▌",
                                               "▋", "▊", "▉", "█"};
 
@@ -58,13 +55,10 @@ void formatBar(Bar& out, double fraction) {
     out[used] = '\0';
 }
 
-// Display range of the residual bar, not a threshold: a healthy reconciliation sits under 1% of the frame, which
-// against the stage bars' 100% scale would leave no mark at all.
+// Display range of the residual bar, not a threshold: a healthy reconciliation sits under 1%, invisible against a 100% scale.
 constexpr double kResidualFullScale = 0.10;
 
-// Diverging bar for a signed quantity: the reconciliation residual is the one row that can fall either side of zero,
-// and a left-aligned bar draws a small overshoot and a small undershoot identically. The negative half is quantised
-// to whole cells, the graded block series filling a cell from its left edge.
+// Diverging bar: the residual is the one row that can fall either side of zero, which a left-aligned bar would draw identically.
 void formatSignedBar(Bar& out, double fraction) {
     constexpr int kHalfCells = kBarCells / 2;
     const int eighths =
@@ -94,8 +88,7 @@ double rate(std::uint64_t count, double milliseconds) {
 
 }  // namespace
 
-// isatty on the descriptor actually written, not on std::cout: a shell redirect changes the former and says nothing
-// about the latter. TERM=dumb is honoured too, the conventional way to ask for no escapes.
+// isatty on the descriptor actually written, not std::cout: a shell redirect changes one and says nothing about the other.
 PerfDashboard::PerfDashboard() : lastDraw_(std::chrono::steady_clock::now()) {
     const char* term = std::getenv("TERM");
     tty_ = isatty(STDOUT_FILENO) == 1 && (term == nullptr || std::strcmp(term, "dumb") != 0);
@@ -119,8 +112,7 @@ void PerfDashboard::append(const char* format, ...) {
     used_ += advance;
 }
 
-// One write(2) of the whole block, not std::cout: iostream formatting can allocate through locale, and a partially
-// flushed frame tears visibly. The return value is deliberately ignored -- a failed dashboard write is not fatal.
+// One write(2) of the whole block: iostream can allocate through locale, and a partially flushed frame tears visibly.
 void PerfDashboard::flush() {
     if (used_ > 0) {
         [[maybe_unused]] const ssize_t ignored = ::write(STDOUT_FILENO, buffer_.data(), used_);
@@ -143,8 +135,7 @@ void PerfDashboard::accumulate(const DashboardFrame& frame) {
     sums_.uploadMs += stages.uploadMs;
     sums_.rasterMs += stages.rasterMs;
     sums_.overRangeMs += stages.overRangeMs;
-    // Every stage, bursty ones included: this is what must reconcile against the measured frame time, so it cannot
-    // exclude the stages that cost the most.
+    // Every stage, bursty included: this must reconcile against the measured frame time, so it cannot exclude the costliest.
     cpuTotalSum_ += stages.fenceMs + stages.paceMs + stages.pollMs + stages.cameraMs + stages.rasterMs + stages.presentMs +
                      stages.histogramMs + stages.overRangeMs + stages.probeMs + stages.hudMs +
                      stages.swapMs + unbilledDrawMs_;
@@ -153,8 +144,7 @@ void PerfDashboard::accumulate(const DashboardFrame& frame) {
     ++windowFrames_;
     ++totalFrames_;
 
-    // A stage that did not run this frame reads exactly 0, so a non-zero value is a firing and the value kept is the
-    // real cost rather than a mean diluted by the frames it sat out.
+    // A stage that did not run reads exactly 0, so a non-zero value is a firing and the value kept is real, not a diluted mean.
     const std::array<float, 2> burst{stages.rasterMs, stages.uploadMs};
     for (std::size_t i = 0; i < burst.size(); ++i) {
         if (burst[i] > 0.0F) {
@@ -208,8 +198,7 @@ float PerfDashboard::windowMean(float sum) const {
 
 float PerfDashboard::cpuTotalMs() const { return windowMean(cpuTotalSum_); }
 
-// Frames per firing since launch. A stage that has never fired returns 0, which the caller renders as "never" rather
-// than dividing by a floor of 1 and reporting it as every frame.
+// Frames per firing since launch. Never fired returns 0, rendered as "never" rather than divided by a floor of 1.
 double PerfDashboard::burstDutyFrames(int stage) const {
     const std::uint64_t fires = burstFireCount_[static_cast<std::size_t>(stage)];
     return fires > 0 ? static_cast<double>(totalFrames_) / static_cast<double>(fires) : 0.0;
@@ -218,8 +207,7 @@ double PerfDashboard::burstDutyFrames(int stage) const {
 void PerfDashboard::draw(const DashboardFrame& frame) {
     lines_ = 0;
     if (lastLineCount_ == 0) {
-        // Reserve the block on the first draw so the cursor-up below always has real lines to move over, rather than
-        // walking back over whatever was on screen before.
+        // Reserve the block on the first draw so the cursor-up always has real lines to move over, not whatever was on screen.
         for (int i = 0; i < kBodyLines; ++i) {
             append("\n");
         }
@@ -227,16 +215,14 @@ void PerfDashboard::draw(const DashboardFrame& frame) {
         flush();
         lines_ = 0;
     }
-    // Up by exactly what the previous draw emitted, then erase each line as it is rewritten. Never \x1b[2J or
-    // \x1b[H: those destroy scrollback and pin the block to the screen origin.
+    // Up by exactly what the previous draw emitted, erasing each line as it is rewritten. Never \x1b[2J: that destroys scrollback.
     append("\x1b[%zuA", lastLineCount_);
 
     drawFrameHeader(frame);
     drawStageRows(frame);
     drawRayRows(frame);
     drawFooter(frame);
-    // The first draw reserves kBodyLines as an estimate; if the real block is shorter, the shed lines are erased and
-    // kept blank so the next cursor-up still accounts for them.
+    // The first draw reserves kBodyLines as an estimate; if the real block is shorter, shed lines are erased and kept blank.
     while (lines_ < lastLineCount_) {
         append("\x1b[2K\n");
     }
@@ -245,21 +231,18 @@ void PerfDashboard::draw(const DashboardFrame& frame) {
     flush();
 }
 
-// A fixed 78-column grid, not eyeballed spacing: the left pane is columns 0-42, the divider sits at 43 on every split
-// row, and the right pane fills 44-77.
+// A fixed 78-column grid, not eyeballed: left pane columns 0-42, divider at 43 on every split row, right pane 44-77.
 void PerfDashboard::drawFrameHeader(const DashboardFrame& frame) {
     const double budgetMs = 1000.0 / frame.refreshHz;
     append("\x1b[2K== PATHTRACER PERF ============================================== %5.1f fps ==\n",
             static_cast<double>(frame.frameStats.fps()));
-    // Percentiles lead, mean trails: a mean hides the hitch, and the hitch is what a viewer feels. p95 rather than
-    // p99 because 120 samples cannot express a 99th percentile.
+    // Percentiles lead, mean trails: a mean hides the hitch. p95 not p99, because 120 samples cannot express a 99th percentile.
     append("\x1b[2K frame    p50 %6.2f   p95 %6.2f   max %6.2f   mean %6.2f ms   (%3d frames)\n",
             static_cast<double>(frame.frameStats.percentileMs(0.5F)),
             static_cast<double>(frame.frameStats.percentileMs(0.95F)),
             static_cast<double>(frame.frameStats.maxMs()),
             static_cast<double>(windowMean(frameMsSum_)), FrameStats::kHistoryLength);
-    // The vblank wait is the headroom itself, so it is excluded from the work the budget is spent on; the fence wait
-    // is GPU time the frame did spend.
+    // The vblank wait is the headroom itself, so it is excluded from the work; the fence wait is GPU time the frame did spend.
     append("\x1b[2K budget   %6.2f ms @ %6.2f Hz %-8s                  headroom %8.2f ms\n",
             budgetMs, frame.refreshHz, frame.vsync ? "vsync" : "uncapped", budgetMs - static_cast<double>(cpuTotalMs() - windowMean(sums_.paceMs)));
     append("\x1b[2K------------------------------------------------------------------------------\n");
@@ -272,14 +255,12 @@ void PerfDashboard::drawStageRows(const DashboardFrame& frame) {
     const auto phasePct = [&](double ms) { return passMs > 0.0 ? (ms / passMs) * 100.0 : 0.0; };
     const auto mean = [&](float sum) { return static_cast<double>(windowMean(sum)); };
     const auto pct = [&](float sum) { return static_cast<double>(percentOf(windowMean(sum), cpu)); };
-    // presentMs and hudMs are each measured inclusive of a stage nested inside them, so the outer half's own cost is
-    // the difference -- arithmetic, not a second instrument.
+    // presentMs and hudMs each measure a nested stage too, so the outer half's own cost is the difference -- arithmetic, not a probe.
     const double blitMs = std::max(mean(sums_.presentMs) - mean(sums_.uploadMs), 0.0);
     const double hudBuildMs = std::max(mean(sums_.hudMs) - mean(sums_.hudRenderMs), 0.0);
     // One buffer, rewritten per row: formatBar always overwrites and terminates, and no row's bar is read after its own append.
     Bar bar{};
-    // Bursty stages print their last real cost and, in place of a percentage, how often they fire: averaging a 150ms
-    // stall that happens 1 frame in 88 reports 1.7ms for something that drops a frame outright.
+    // Bursty stages print their last real cost and how often they fire: a 150ms stall 1 frame in 88 averages to a harmless 1.7ms.
     std::array<char, 8> duty{};
     const auto barFor = [&](float sum) {
         formatBar(bar, static_cast<double>(percentOf(windowMean(sum), cpu)) / 100.0);
@@ -357,8 +338,7 @@ void PerfDashboard::drawRayRows(const DashboardFrame& frame) {
     append("\x1b[2K  %-15s%8.3f %5s %s |  %-9s%7.3f M %7.2f %5.1f\n", "frame measured",
             static_cast<double>(frameMs), "", kBarBlank, "shadow", millions(rays.shadow),
             mray(rays.shadow), share(rays.shadow));
-    // The residual is printed, not left to be subtracted: a growing gap is the signal that a stage exists which
-    // nothing is measuring, which is why it gets its own colour.
+    // The residual is printed, not left to be subtracted: a growing gap means a stage exists that nothing is measuring.
     const double residual = static_cast<double>(percentOf(frameMs - cpu, frameMs)) / 100.0;
     formatSignedBar(bar, residual / kResidualFullScale);
     append("\x1b[2K  %-15s%8.3f %5.1f %s |  --------------------------------\n", "unaccounted",
@@ -387,8 +367,7 @@ void PerfDashboard::drawFooter(const DashboardFrame& frame) {
             frame.windowHeight, static_cast<double>(frame.renderScale),
             frame.interactiveScale ? " interactive" : "", frame.renderWidth, frame.renderHeight);
     append("\x1b[2K==============================================================================\n");
-    // Blank line inside the block, not after it: it separates the table from the shell cursor and is still a line the
-    // next redraw's cursor-up accounts for and erases.
+    // Blank line inside the block, not after: it separates the table from the shell cursor and the next cursor-up still erases it.
     append("\x1b[2K\n");
 }
 

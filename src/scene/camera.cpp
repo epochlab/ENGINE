@@ -8,8 +8,7 @@ namespace {
 
 constexpr glm::vec3 kWorldUp{0.0F, 1.0F, 0.0F};
 
-// Standard right-handed Euler-angle forward vector, parameterised so yaw=0, pitch=0 already points down -Z, this
-// codebase's convention, without the usual -90-degree yaw offset.
+// Right-handed Euler forward vector, parameterised so yaw=0, pitch=0 points down -Z without the usual -90-degree yaw offset.
 glm::vec3 forwardFromEuler(float yawRadians, float pitchRadians) {
     const float cosPitch = std::cos(pitchRadians);
     return glm::normalize(glm::vec3(-std::sin(yawRadians) * cosPitch, std::sin(pitchRadians),

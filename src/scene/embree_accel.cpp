@@ -16,12 +16,10 @@ void logEmbreeError(void* /*userPtr*/, RTCError code, const char* str) {
     std::cerr << "EmbreeAccel: " << rtcGetErrorString(code) << ": " << str << "\n";
 }
 
-// Signed: Embree passes a negative delta on free. Relaxed because the counter carries no other data and is only read
-// after rtcCommitScene has returned, which has already joined the build threads that wrote it.
+// Signed: Embree passes a negative delta on free. Relaxed, being read only after rtcCommitScene joins the threads that wrote it.
 std::atomic<std::int64_t> gEmbreeBytes{0};
 
-// Embree's own documented BVH accounting, not an estimate from triangle count. Invoked concurrently from Embree's
-// internal build threads, hence the atomic. Returning true permits the allocation.
+// Embree's own BVH accounting, not an estimate. Called concurrently from its build threads, hence the atomic; true permits the alloc.
 bool embreeMemoryMonitor(void* /*userPtr*/, ssize_t bytes, bool /*post*/) {
     gEmbreeBytes.fetch_add(static_cast<std::int64_t>(bytes), std::memory_order_relaxed);
     return true;
@@ -84,12 +82,10 @@ std::optional<EmbreeAccel> EmbreeAccel::build(std::vector<Triangle> triangles) {
         RTCGeometry geometry = rtcNewGeometry(device, RTC_GEOMETRY_TYPE_TRIANGLE);
         rtcSetGeometryBuildQuality(geometry, RTC_BUILD_QUALITY_HIGH);
 
-        // triangles is non-indexed triangle soup, three unique vertices each, shared directly as the vertex buffer
-        // with no copy rather than deduplicated into an indexed mesh.
+        // triangles is non-indexed soup, three unique vertices each, shared directly as the vertex buffer with no copy.
         static_assert(sizeof(Triangle) == 3 * sizeof(glm::vec3),
                       "Triangle must be tightly packed for the shared vertex buffer stride below");
-        // Embree reads the last vertex of a shared buffer with a 16-byte SSE load, so the buffer needs at least one
-        // float of padding past the last vertex -- its documented shared-buffer contract, which Triangle lacks.
+        // Embree reads the last vertex of a shared buffer with a 16-byte SSE load, so it needs a float of padding past it.
         triangles.reserve(triangles.size() + 1);
         rtcSetSharedGeometryBuffer(geometry, RTC_BUFFER_TYPE_VERTEX, 0, RTC_FORMAT_FLOAT3,
                                     triangles.data(), 0, sizeof(glm::vec3),
@@ -157,8 +153,7 @@ bool EmbreeAccel::occluded(const Ray& ray) const {
 
     rtcOccluded1(scene_, &embreeRay, nullptr);
 
-    // rtcOccluded1 signals a hit by setting tfar to -inf, per Embree convention: it populates no hit record, there
-    // being none to check, occlusion being a boolean query.
+    // rtcOccluded1 signals a hit by setting tfar to -inf, per Embree convention: no hit record, occlusion being a boolean query.
     return embreeRay.tfar < 0.0F;
 }
 

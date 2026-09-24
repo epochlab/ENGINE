@@ -6,8 +6,7 @@ namespace pathtracer::scene {
 
 namespace {
 
-// Moller-Trumbore ray-triangle intersection. No backface culling, so det may be negative. Known edge case, accepted
-// rather than solved: a ray exactly in the triangle plane has det == 0 and reports no hit.
+// Moller-Trumbore ray-triangle intersection, no backface culling so det may be negative. A ray in the triangle plane reports no hit.
 bool intersectTriangle(const Ray& ray, const Triangle& tri, float& outT, float& outU,
                         float& outV) {
     constexpr float kEpsilon = 1e-8F;

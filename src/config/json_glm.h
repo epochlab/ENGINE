@@ -3,8 +3,7 @@
 #include <glm/glm.hpp>
 #include <nlohmann/json.hpp>
 
-// ADL hook (found via glm's namespace) so nlohmann::json can convert a JSON array directly via
-// j.at("key").get<glm::vec3>(), instead of every config file indexing components by hand.
+// ADL hook (found via glm's namespace) so nlohmann can do j.at("key").get<glm::vec3>() instead of indexing components by hand.
 namespace glm {
 
 inline void from_json(const nlohmann::json& j, vec3& v) {

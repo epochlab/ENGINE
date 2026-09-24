@@ -11,8 +11,7 @@ namespace pathtracer::scene {
 
 namespace {
 
-// atan2(|a x b|, a.b) -- PBRT v4's AngleBetween: robust near 0 and pi, unlike acos(dot(a,b)) which
-// loses precision exactly where buildSphericalRectangle's internal angles (gamma_i) are smallest.
+// atan2(|a x b|, a.b) -- PBRT v4's AngleBetween: robust near 0 and pi, where acos(dot) loses precision as gamma_i shrinks.
 float angleBetween(const glm::vec3& a, const glm::vec3& b) {
     return std::atan2(glm::length(glm::cross(a, b)), glm::dot(a, b));
 }
@@ -35,15 +34,12 @@ std::optional<SphericalRectangle> buildSphericalRectangle(const QuadLight& quad,
     }
     z /= zLen;
 
-    // Rectangle-corner-to-referencePoint vector, in world space; the local frame's origin is
-    // referencePoint itself (Ureña et al.'s "o"), matching Sample()'s reconstruction below.
+    // Rectangle-corner-to-referencePoint vector in world space; the local frame's origin is referencePoint (Urena's "o").
     const glm::vec3 d = quad.origin - referencePoint;
     float z0 = glm::dot(d, z);
     glm::vec3 zFrame = z;
     if (z0 > 0.0F) {
-        // Keep z0 negative regardless of which way the quad's own normal happens to point -- purely a
-        // numerical-robustness convention of the parametrization, unrelated to one-/two-sidedness of
-        // emission (that is LightSet::quadRadianceToward's own, separate front-face test).
+        // Keep z0 negative whichever way the quad's normal points: a numerical convention of the parametrization, not a front-face test.
         zFrame = -z;
         z0 = -z0;
     }
@@ -85,8 +81,7 @@ std::optional<SphericalRectangle> buildSphericalRectangle(const QuadLight& quad,
 }
 
 glm::vec3 SphericalRectangle::sample(glm::vec2 u) const {
-    // Ureña/Fajardo/King 2013's closed-form inversion of the constant-solid-angle-density CDF.
-    // Variable names (au/fu/cu/xu/hv/yv) match the paper's own derivation, not renamed for this codebase.
+    // Urena/Fajardo/King 2013's closed-form CDF inversion; au/fu/cu/xu/hv/yv keep the paper's own names, not renamed here.
     const float au = (u.x * solidAngle) + k;
     const float fu = ((std::cos(au) * b0) - b1) / std::sin(au);
     float cu = std::copysign(1.0F / std::sqrt((fu * fu) + (b0 * b0)), fu);
@@ -172,8 +167,7 @@ std::optional<LightSample> LightSet::sample(const glm::vec3& p, Sampler& sampler
 
     const int quadIndex = index - (envPresent ? 1 : 0);
     const QuadLight& quad = quads_[static_cast<std::size_t>(quadIndex)];
-    // Drawn before the degeneracy check, not after: returning early without consuming this 2D would shift every later
-    // dimension on that path, moving every other image.
+    // Drawn before the degeneracy check: returning early without consuming this 2D would shift every later dimension on that path.
     const glm::vec2 u = sampler.next2D();
     const std::optional<SphericalRectangle> rect = buildSphericalRectangle(quad, p);
     if (!rect.has_value()) {

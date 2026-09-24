@@ -7,9 +7,7 @@ namespace pathtracer::scene {
 
 namespace {
 
-// glTF core spec order: baseColorFactor * baseColorTexture * COLOR_0 (commutative, so the order here
-// is documentation, not a correctness requirement). vertexColour is white (1,1,1) when the primitive
-// has no COLOR_0 attribute, making this a no-op multiply for every asset that doesn't use it.
+// glTF core order: baseColorFactor * baseColorTexture * COLOR_0 (commutative). vertexColour is white with no COLOR_0 attribute.
 glm::vec3 resolveBaseColor(const Material& material, glm::vec2 uv, const glm::vec3& vertexColour,
                             const PathTraceSettings& settings) {
     const glm::vec4 sample = pathtracer::gfx::sampleBilinear(material.baseColorTexture, uv);
@@ -39,14 +37,11 @@ BsdfParams resolveBsdfParams(const Material& material, glm::vec2 uv, const glm::
     const float roughness = resolveRoughness(material, uv, settings);
     const glm::vec3 specular = glm::vec3(pathtracer::gfx::sampleBilinear(material.specularTexture, uv));
     const glm::vec3 f0 = glm::mix(specular, baseColor, settings.metallicFactor);
-    // Dispersion enters here and nowhere else: every ior consumer downstream -- Fresnel, the lobe probabilities, the
-    // escape tables, the refraction direction -- reads this one scalar, so resolving it per hero channel makes the
-    // whole vertex spectrally consistent. Unset leaves the authored d-line index.
+    // Dispersion enters here alone: every downstream ior consumer reads this one scalar, so the vertex stays spectrally consistent.
     const float ior = heroChannel.has_value()
                           ? cauchyIor(settings.ior, settings.abbe, kRgbWavelengthsNm[*heroChannel])
                           : settings.ior;
-    // OpenPBR's two regimes for transmissionColor, exclusive by construction: at transmissionDepth > 0 it is the
-    // interior medium's Beer-Lambert extinction and the interface is untinted; at 0 it is the on-surface tint.
+    // OpenPBR's two exclusive regimes: at transmissionDepth > 0 Beer-Lambert extinction carries it; at 0 it is the on-surface tint.
     const glm::vec3 transmissionTint =
         settings.transmissionDepth > 0.0F ? glm::vec3(1.0F) : settings.transmissionColor;
     return BsdfParams{baseColor,          settings.metallicFactor, roughness,
@@ -68,8 +63,7 @@ ShadingFrame buildShadingFrame(const ShadingVertex& shading, const Material& mat
         (tangentSpaceNormal.x * tangent) + (tangentSpaceNormal.y * bitangent) +
         (tangentSpaceNormal.z * normal));
 
-    // Blinn 1978 bump mapping: perturbs mappedNormal further using the bump texture's height difference between
-    // adjacent texels, a texture-space gradient turned into a shading-normal tilt.
+    // Blinn 1978 bump mapping: the bump texture's height difference between adjacent texels becomes a shading-normal tilt.
     const glm::vec2 texel(1.0F / static_cast<float>(material.bumpTexture.width),
                            1.0F / static_cast<float>(material.bumpTexture.height));
     const float dHdu =
