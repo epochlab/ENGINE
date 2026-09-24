@@ -38,7 +38,11 @@ struct ImageTexture {
 // Writes a linear scanline EXR, loadExr's inverse with the same full-float channels, so a round trip is lossless.
 [[nodiscard]] bool writeExr(const std::string& path, const HdrImage& image);
 
-// Bilinear sample at uv, wrapping both axes (GL_REPEAT equivalent), filtered in float after widening each texel.
-[[nodiscard]] glm::vec4 sampleBilinear(const ImageTexture& image, glm::vec2 uv);
+// How the v axis resolves outside [0,1). u always repeats; ClampV is for an equirect map, whose top and bottom rows are poles.
+enum class WrapMode { Repeat, ClampV };
+
+// Bilinear sample at uv (GL_REPEAT equivalent by default), filtered in float after widening each texel.
+[[nodiscard]] glm::vec4 sampleBilinear(const ImageTexture& image, glm::vec2 uv,
+                                        WrapMode wrap = WrapMode::Repeat);
 
 }  // namespace pathtracer::gfx

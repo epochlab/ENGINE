@@ -71,8 +71,8 @@ public:
     // Le toward `direction` (unit, from the light toward the viewer) -- 0 on the non-emitting back face unless twoSided.
     [[nodiscard]] glm::vec3 quadRadianceToward(int quadIndex, const glm::vec3& direction) const;
 
-    // Radiance from the environment toward `direction`, 0 if excluded. nearest picks sampleDirectionNearest over sampleDirection.
-    [[nodiscard]] glm::vec3 environmentRadiance(const glm::vec3& direction, bool nearest) const;
+    // Radiance from the environment toward `direction`, 0 if excluded. The one Le in the renderer: NEE and the miss path share it.
+    [[nodiscard]] glm::vec3 environmentRadiance(const glm::vec3& direction) const;
 
 private:
     const EnvironmentMap* environment_;

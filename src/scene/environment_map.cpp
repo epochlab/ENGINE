@@ -16,10 +16,10 @@ glm::vec3 rotateAboutY(const glm::vec3& v, float angleRadians) {
     return {(v.x * c) + (v.z * s), v.y, (-v.x * s) + (v.z * c)};
 }
 
-// Same Rec.709 weights as edge_filter.frag's sampleLuminance.
+// Rec.709 weights as edge_filter.frag, floored at 0: a negative texel makes the CDF non-monotonic, which invertCdf's search needs.
 float luminanceOf(const pathtracer::gfx::ImageTexture& image, int x, int y) {
     const glm::vec4 texel = image.texel(x, y);
-    return (0.2126F * texel.r) + (0.7152F * texel.g) + (0.0722F * texel.b);
+    return std::max(0.0F, (0.2126F * texel.r) + (0.7152F * texel.g) + (0.0722F * texel.b));
 }
 
 // Inverts a piecewise-constant CDF slice at u, returning the bin and the fractional offset within its mass. Shared by both inversions.
@@ -27,7 +27,7 @@ struct CdfSample {
     int index;
     float fraction;  // [0,1) position within the selected bin
 };
-// The integer texel a direction falls in, plus that row's sin(theta) for the Jacobian. Shared by pdf() and sampleDirectionNearest().
+// The integer texel a direction falls in, plus that row's sin(theta) for the Jacobian, as pdf()'s piecewise-constant cell.
 struct EquirectTexel {
     int x;
     int y;
@@ -110,7 +110,7 @@ glm::vec3 EnvironmentMap::sampleDirection(const glm::vec3& direction,
     const float theta = std::acos(glm::clamp(rotated.y, -1.0F, 1.0F));
     const float phi = std::atan2(rotated.x, rotated.z);
     const glm::vec2 uv((phi / (2.0F * glm::pi<float>())) + 0.5F, theta / glm::pi<float>());
-    return glm::vec3(pathtracer::gfx::sampleBilinear(image_, uv));
+    return glm::vec3(pathtracer::gfx::sampleBilinear(image_, uv, pathtracer::gfx::WrapMode::ClampV));
 }
 
 EnvironmentMap::EnvSample EnvironmentMap::importanceSampleDirection(glm::vec2 u,
@@ -140,12 +140,6 @@ EnvironmentMap::EnvSample EnvironmentMap::importanceSampleDirection(glm::vec2 u,
     const float pdfSolidAngle =
         (pdfU * pdfV) / std::max(2.0F * glm::pi<float>() * glm::pi<float>() * sinTheta, 1e-6F);
     return {direction, std::max(pdfSolidAngle, 1e-8F)};
-}
-
-glm::vec3 EnvironmentMap::sampleDirectionNearest(const glm::vec3& direction,
-                                                  float envRotationRadians) const {
-    const EquirectTexel texel = equirectTexelOf(image_, direction, envRotationRadians);
-    return glm::vec3(image_.texel(texel.x, texel.y));
 }
 
 float EnvironmentMap::pdf(const glm::vec3& direction, float envRotationRadians) const {

@@ -267,14 +267,7 @@ EscapeSplit averageEscapeAlbedo(float roughness, float eta) {
              lerp1(fetch(kEscapeAvgTransmit, r0), fetch(kEscapeAvgTransmit, r0 + 1), rt)};
 }
 
-// --- Transmitted multiple-scattering lobe, the far-hemisphere twin, one axis wider because the escape is eta-dependent.
-struct MsTransmitRow {
-    std::array<int, 4> base;
-    std::array<float, 4> weight;
-    float scale;
-};
-
-// Bilinear over (roughness, eta) of four rows, each entry a stride of kEtaRes apart along mu.
+// --- Transmitted multiple-scattering lobe, the far-hemisphere twin: bilinear over (roughness, eta) of four rows, mu stride kEtaRes.
 template <typename Table>
 float msTransmitBlend(const Table& table, const MsTransmitRow& row, int index) {
     const int offset = index * kEtaRes;
@@ -438,40 +431,6 @@ bool transmissionIsRough(const BsdfParams& params, float alpha) {
 struct LobeEval {
     glm::vec3 f;
     float pdf;
-};
-
-struct LobeProbabilities {
-    float specular;
-    float diffuse;
-    float msReflect;    // multiple-scattering reflection, drawn from kMsReflectDensity over the near hemisphere
-    float msReflectTransmissive;  // a transmissive interface's reflected multiple scattering, drawn from reflectShape
-    float transmit;     // single-scatter refraction, VNDF-sampled about a microfacet normal
-    float msTransmit;   // multiple-scattering transmission, drawn from kMsTransmitDensity over the far hemisphere
-    float etaI;
-    float etaT;
-    float diffuseKd;              // evaluateDiffuseLobe's wo-side energy factor, 0 on the exiting side
-    float transmitPhysicalValue;  // transmission's true (1-F)*t energy fraction -- see below
-    // Energy-compensation state, hoisted so the wo-side table lookups happen once per evaluation, not per lobe call.
-    float albedoWo;         // E(mu_o, roughness), Fresnel-free
-    float albedoAvg;        // Eavg(roughness)
-    float coatF0;           // dielectric f0 implied by ior, for the diffuse coupling
-    // The coat's own cosine-mean Fresnel, separate from the metallic-blended fresnelAvg below, which is wrong for the coat.
-    float coatFresnelAvg;
-    glm::vec3 fresnelAvg;
-    // Complex IOR inverted from (f0, edgeTint) once per evaluation. Index-matched (1, 0) at metallic==0, where no consumer reads them.
-    glm::vec3 conductorN;
-    glm::vec3 conductorK;
-    // Multiple-scattering state for a transmissive interface: a facet reflects or refracts, so the escape is Fresnel-weighted.
-    float escapeWo;         // R_ss(mu_o) + T_ss(mu_o), the Fresnel-weighted escaping fraction
-    // Escape-deficit shape at the reciprocal eta (etaT/etaI); scale 0 where no transmitted multiple scattering exists.
-    MsTransmitRow transmitShape;
-    MsTransmitRow reflectShape;   // the same at the forward eta (etaI/etaT), for the reflected share whose wi stays in wo's medium
-    float transmitShare;    // of the multiple-scattered energy, the fraction leaving refracted
-    float etaSq;            // (etaI/etaT)^2, the radiance compression the transmit lobe must carry
-    // effectiveTransmission*(1-metallic): how much transmission happens. Scales single-scatter and multiple-scattering transmit alike.
-    float transmitWeight;
-    // Refraction's value per unit (1-F) in the VNDF strategy's reflect/refract split; 0 where that strategy only reflects.
-    float facetTransmit;
 };
 
 // The transmitted share of the multiple-scattering energy for any far-side wi. K*pdf/mu integrates to exactly K, so no gate is needed.
@@ -909,14 +868,22 @@ glm::vec3 fresnelAtMicrofacet(const BsdfParams& params, const glm::vec3& woLocal
     return fresnelAtViewAngle(params, std::max(glm::dot(wo, wh), 0.0F));
 }
 
-BsdfEval evaluateBsdfSplit(const BsdfParams& params, const glm::vec3& woLocal,
-                            const glm::vec3& wiLocal) {
+BsdfClosure makeBsdfClosure(const BsdfParams& params, const glm::vec3& woLocal) {
     const float sign = woLocal.z >= 0.0F ? 1.0F : -1.0F;
     const glm::vec3 wo(woLocal.x, woLocal.y, woLocal.z * sign);
-    const glm::vec3 wi(wiLocal.x, wiLocal.y, wiLocal.z * sign);
     const float alpha = alphaForRoughness(params.roughness);
-    const LobeProbabilities lobes = computeLobeProbabilities(params, wo, sign, alpha);
-    return evaluateContinuousLobes(params, wo, wi, alpha, lobes);
+    return {params, wo, sign, alpha, computeLobeProbabilities(params, wo, sign, alpha)};
+}
+
+BsdfEval evaluateBsdfSplit(const BsdfClosure& closure, const glm::vec3& wiLocal) {
+    const glm::vec3 wi(wiLocal.x, wiLocal.y, wiLocal.z * closure.sign);
+    return evaluateContinuousLobes(closure.params, closure.wo, wi, closure.alpha, closure.lobes);
+}
+
+// The params/wo form, for the validators and any caller with a single direction to answer for: one closure, used once.
+BsdfEval evaluateBsdfSplit(const BsdfParams& params, const glm::vec3& woLocal,
+                            const glm::vec3& wiLocal) {
+    return evaluateBsdfSplit(makeBsdfClosure(params, woLocal), wiLocal);
 }
 
 float pdfBsdf(const BsdfParams& params, const glm::vec3& woLocal, const glm::vec3& wiLocal) {
@@ -927,12 +894,13 @@ glm::vec3 evaluateBsdf(const BsdfParams& params, const glm::vec3& woLocal, const
     return evaluateBsdfSplit(params, woLocal, wiLocal).total();
 }
 
-std::optional<BsdfSample> sampleBsdf(const BsdfParams& params, const glm::vec3& woLocal,
-                                      Sampler& sampler) {
-    const float sign = woLocal.z >= 0.0F ? 1.0F : -1.0F;
-    const glm::vec3 wo(woLocal.x, woLocal.y, woLocal.z * sign);
-    const float alpha = alphaForRoughness(params.roughness);
-    const LobeProbabilities lobes = computeLobeProbabilities(params, wo, sign, alpha);
+std::optional<BsdfSample> sampleBsdf(const BsdfClosure& closure, Sampler& sampler) {
+    // Named aliases, so the strategy selection below reads exactly as it did when it built this state itself.
+    const BsdfParams& params = closure.params;
+    const glm::vec3& wo = closure.wo;
+    const float sign = closure.sign;
+    const float alpha = closure.alpha;
+    const LobeProbabilities& lobes = closure.lobes;
 
     const float lobeU = sampler.next1D();
 
@@ -1010,6 +978,11 @@ std::optional<BsdfSample> sampleBsdf(const BsdfParams& params, const glm::vec3& 
         params.transmissionTint * (lobes.transmitPhysicalValue / lobes.transmit) * (eta * eta);
     // pdf 0: a delta lobe has no density for NEE to double-count against, which is exactly the test path_tracer.cpp's MIS weighting makes.
     return BsdfSample{glm::vec3(wt.x, wt.y, wt.z * sign), throughput, LobeType::Transmission, 0.0F};
+}
+
+std::optional<BsdfSample> sampleBsdf(const BsdfParams& params, const glm::vec3& woLocal,
+                                      Sampler& sampler) {
+    return sampleBsdf(makeBsdfClosure(params, woLocal), sampler);
 }
 
 }  // namespace pathtracer::scene

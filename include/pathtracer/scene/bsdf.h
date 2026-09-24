@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <optional>
 
 #include <glm/glm.hpp>
@@ -60,6 +61,64 @@ struct BsdfEval {
     float pdf;
     [[nodiscard]] glm::vec3 total() const { return diffuse + specular + transmission; }
 };
+
+// Bilinear (roughness, eta) weights over four tabulated rows of the escape-deficit shape, with the reciprocal of their blended total.
+struct MsTransmitRow {
+    std::array<int, 4> base;
+    std::array<float, 4> weight;
+    float scale;
+};
+
+// Per-strategy selection mass plus the Fresnel, albedo and escape state a vertex's lobes share. Built by makeBsdfClosure.
+struct LobeProbabilities {
+    float specular;
+    float diffuse;
+    float msReflect;    // multiple-scattering reflection, drawn from kMsReflectDensity over the near hemisphere
+    float msReflectTransmissive;  // a transmissive interface's reflected multiple scattering, drawn from reflectShape
+    float transmit;     // single-scatter refraction, VNDF-sampled about a microfacet normal
+    float msTransmit;   // multiple-scattering transmission, drawn from kMsTransmitDensity over the far hemisphere
+    float etaI;
+    float etaT;
+    float diffuseKd;              // evaluateDiffuseLobe's wo-side energy factor, 0 on the exiting side
+    float transmitPhysicalValue;  // transmission's true (1-F)*t energy fraction -- see below
+    // Energy-compensation state, hoisted so the wo-side table lookups happen once per evaluation, not per lobe call.
+    float albedoWo;         // E(mu_o, roughness), Fresnel-free
+    float albedoAvg;        // Eavg(roughness)
+    float coatF0;           // dielectric f0 implied by ior, for the diffuse coupling
+    // The coat's own cosine-mean Fresnel, separate from the metallic-blended fresnelAvg below, which is wrong for the coat.
+    float coatFresnelAvg;
+    glm::vec3 fresnelAvg;
+    // Complex IOR inverted from (f0, edgeTint) once per evaluation. Index-matched (1, 0) at metallic==0, where no consumer reads them.
+    glm::vec3 conductorN;
+    glm::vec3 conductorK;
+    // Multiple-scattering state for a transmissive interface: a facet reflects or refracts, so the escape is Fresnel-weighted.
+    float escapeWo;         // R_ss(mu_o) + T_ss(mu_o), the Fresnel-weighted escaping fraction
+    // Escape-deficit shape at the reciprocal eta (etaT/etaI); scale 0 where no transmitted multiple scattering exists.
+    MsTransmitRow transmitShape;
+    MsTransmitRow reflectShape;   // the same at the forward eta (etaI/etaT), for the reflected share whose wi stays in wo's medium
+    float transmitShare;    // of the multiple-scattered energy, the fraction leaving refracted
+    float etaSq;            // (etaI/etaT)^2, the radiance compression the transmit lobe must carry
+    // effectiveTransmission*(1-metallic): how much transmission happens. Scales single-scatter and multiple-scattering transmit alike.
+    float transmitWeight;
+    // Refraction's value per unit (1-F) in the VNDF strategy's reflect/refract split; 0 where that strategy only reflects.
+    float facetTransmit;
+};
+
+// One shading vertex's BSDF: everything derived from (params, woLocal), built once and then both sampled and evaluated at that vertex.
+struct BsdfClosure {
+    BsdfParams params;
+    glm::vec3 wo;  // woLocal mirrored into the +z hemisphere, which every lobe below assumes
+    float sign;    // the mirror that produced wo; wiLocal crosses it on the way in and the sampled wi on the way out
+    float alpha;
+    LobeProbabilities lobes;
+};
+
+// Builds the closure. Consumes no sampler dimensions, so where it is called relative to a draw does not move the sample stream.
+[[nodiscard]] BsdfClosure makeBsdfClosure(const BsdfParams& params, const glm::vec3& woLocal);
+
+// The closure forms, for a caller that both samples a continuation and evaluates toward a light at one vertex, as the integrator does.
+[[nodiscard]] BsdfEval evaluateBsdfSplit(const BsdfClosure& closure, const glm::vec3& wiLocal);
+[[nodiscard]] std::optional<BsdfSample> sampleBsdf(const BsdfClosure& closure, Sampler& sampler);
 
 // Macro-surface Fresnel at cosTheta = dot(n, wo), dielectric and conductor mixed by metallic. Exists so the Fresnel AOV shows the curve.
 [[nodiscard]] glm::vec3 fresnelAtViewAngle(const BsdfParams& params, float cosTheta);

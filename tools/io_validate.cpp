@@ -185,6 +185,69 @@ PT_CHECK(scene_config_rejects_malformed_input, Fast, Exact) {
     }
 }
 
+// Anti-vacuity for the rejection rows below: every material the repo ships must still load once loadMaterialConfig validates.
+PT_CHECK(material_config_accepts_the_shipped_materials, Fast, Exact) {
+    const std::vector<const char*> shipped = {"chrome.json", "clay.json", "glass.json", "principled.json"};
+    ctx.plan(static_cast<int>(shipped.size()));
+    for (const char* name : shipped) {
+        const std::filesystem::path path = std::filesystem::path(ASSET_ROOT_DIR) / "materials" / name;
+        char detail[256];
+        std::snprintf(detail, sizeof(detail), "loadMaterialConfig rejected the shipped material %s", name);
+        PT_EXPECT(ctx, pathtracer::config::loadMaterialConfig(path.string()).has_value(), detail);
+    }
+}
+
+// Each row names the BSDF failure it prevents; without the loader's bounds these reach the integrator as NaN or negative energy.
+PT_CHECK(material_config_rejects_malformed_input, Fast, Exact) {
+    struct Case {
+        const char* name;
+        const char* file;
+        std::string text;
+    };
+    // Mutations of one base that loads, so a row fails for the reason it names rather than vacuously on an earlier parse error.
+    const auto material = [](const std::string& overrides) {
+        return std::string("{\"diffuseColour\":[1,1,1],\"roughnessFactor\":0.5,\"roughnessMin\":0.045,"
+                           "\"roughnessMax\":1.0,\"bumpStrength\":0.0") +
+               overrides + "}";
+    };
+
+    const std::vector<Case> cases = {
+        // std::clamp(v, lo, hi) has undefined behaviour when lo > hi, and resolveRoughness clamps with exactly these two.
+        {"roughnessMin above roughnessMax", "engine_io_material_roughrange.json",
+         "{\"diffuseColour\":[1,1,1],\"roughnessFactor\":0.5,\"roughnessMin\":0.9,\"roughnessMax\":0.2,\"bumpStrength\":0.0}"},
+        // eonUniformMixWeight raises r to the 0.1 power, which is NaN for r < 0, and the NaN reaches the pixel through sampleEon.
+        {"negative diffuseRoughness", "engine_io_material_negdiffrough.json", material(",\"diffuseRoughness\":-0.2")},
+        // Outside [0,1] the EON quartic albedo fit is extrapolated, where 1 - E can go negative and the BRDF with it.
+        {"diffuseRoughness above 1", "engine_io_material_diffroughhigh.json", material(",\"diffuseRoughness\":1.5")},
+        // transmissionColor is a transmittance; above 1 sigma_a = -ln(colour)/depth is negative and Beer-Lambert amplifies without bound.
+        {"transmissionColor above 1", "engine_io_material_transcolour.json",
+         material(",\"transmissionColor\":[1.4,1.0,1.0],\"transmissionDepth\":0.4")},
+        // Lobe selection probabilities are mixed by these; outside [0,1] glm::mix extrapolates and the prefix-sum partition goes negative.
+        {"metallicFactor above 1", "engine_io_material_metallic.json", material(",\"metallicFactor\":1.5")},
+        {"negative transmissionFactor", "engine_io_material_negtrans.json", material(",\"transmissionFactor\":-0.5")},
+        // dielectricF0 divides by ior + 1, and every dielectric lobe by the etaI/etaT ratio.
+        {"non-positive ior", "engine_io_material_zeroior.json", material(",\"ior\":0.0")},
+        // The EON albedo inversion leaves rho unbounded above an albedo of 1, where its multiple-scatter denominator can reach zero.
+        {"diffuseColour above 1", "engine_io_material_colour.json",
+         "{\"diffuseColour\":[1,2,1],\"roughnessFactor\":0.5,\"roughnessMin\":0.045,\"roughnessMax\":1.0,\"bumpStrength\":0.0}"},
+        {"negative transmissionDepth", "engine_io_material_negdepth.json", material(",\"transmissionDepth\":-1.0")},
+    };
+
+    const std::filesystem::path basePath = writeJson("engine_io_material_base.json", material(""));
+    const bool baseLoads = pathtracer::config::loadMaterialConfig(basePath.string()).has_value();
+    std::filesystem::remove(basePath);
+
+    ctx.plan(static_cast<int>(cases.size()) + 1);
+    PT_EXPECT(ctx, baseLoads, "the unmutated base material must load, or every mutated row below passes vacuously");
+    for (const Case& testCase : cases) {
+        const std::filesystem::path path = writeJson(testCase.file, testCase.text);
+        char detail[224];
+        std::snprintf(detail, sizeof(detail), "loadMaterialConfig accepted a material with %s", testCase.name);
+        PT_EXPECT(ctx, !pathtracer::config::loadMaterialConfig(path.string()).has_value(), detail);
+        std::filesystem::remove(path);
+    }
+}
+
 PT_CHECK(profile_config_accepts_the_shipped_profile, Fast, Exact) {
     ctx.plan(1);
     const std::filesystem::path profile = std::filesystem::path(ASSET_ROOT_DIR) / "config" / "profile.json";
@@ -380,6 +443,58 @@ PT_CHECK(profile_config_scene_scale_distances, Fast, Exact) {
             std::snprintf(detail, sizeof(detail), "loadProfileConfig accepted %s", testCase.name.c_str());
             PT_EXPECT(ctx, !loaded.has_value(), detail);
         }
+    }
+}
+
+// The integer counts nothing downstream re-checks. samplesPerPixel 0 is the sharp one: it divides by a zero filter weight, writing NaN.
+PT_CHECK(profile_config_integer_counts, Fast, Exact) {
+    struct Case {
+        std::string name;
+        const char* section;
+        const char* key;
+        nlohmann::json value;  // null = key removed
+        bool accepted;
+    };
+    std::vector<Case> cases;
+    // Lowest legal value accepted, then each way of going under it. maxBounces/maxSamples 0 are meaningful: direct-only and unbounded.
+    const std::vector<std::pair<const char*, int>> floors = {
+        {"samplesPerPixel", 1}, {"maxBounces", 0}, {"russianRouletteStartBounce", 0}, {"maxSamples", 0}};
+    for (const auto& [key, floor] : floors) {
+        cases.push_back({std::string(key) + " " + std::to_string(floor), "pathTracer", key, floor, true});
+        cases.push_back({std::string(key) + " " + std::to_string(floor - 1), "pathTracer", key, floor - 1, false});
+        cases.push_back({std::string(key) + " missing", "pathTracer", key, nlohmann::json(nullptr), false});
+    }
+    // The framebuffer renderScale multiplies and the denominator of the primary ray's aspect ratio.
+    for (const char* key : {"width", "height"}) {
+        cases.push_back({std::string("window.") + key + " 1", "window", key, 1, true});
+        cases.push_back({std::string("window.") + key + " 0", "window", key, 0, false});
+        cases.push_back({std::string("window.") + key + " -1", "window", key, -1, false});
+    }
+
+    const std::filesystem::path shippedPath = std::filesystem::path(ASSET_ROOT_DIR) / "config" / "profile.json";
+    const std::optional<pathtracer::config::ProfileConfig> shippedConfig =
+        pathtracer::config::loadProfileConfig(shippedPath.string());
+    std::ifstream shippedFile(shippedPath);
+    const nlohmann::json shipped = nlohmann::json::parse(shippedFile);
+    ctx.plan(static_cast<int>(cases.size()) + 1);
+    PT_EXPECT(ctx, shippedConfig.has_value(), "the shipped profile does not load, so no row below means anything");
+    if (!shippedConfig) {
+        return;
+    }
+    for (const Case& testCase : cases) {
+        nlohmann::json edited = shipped;
+        if (testCase.value.is_null()) {
+            edited[testCase.section].erase(testCase.key);
+        } else {
+            edited[testCase.section][testCase.key] = testCase.value;
+        }
+        const std::filesystem::path path = writeJson("engine_io_profile_counts.json", edited.dump());
+        const std::optional<pathtracer::config::ProfileConfig> loaded = pathtracer::config::loadProfileConfig(path.string());
+        std::filesystem::remove(path);
+        char detail[224];
+        std::snprintf(detail, sizeof(detail), "loadProfileConfig %s %s", testCase.accepted ? "rejected" : "accepted",
+                      testCase.name.c_str());
+        PT_EXPECT(ctx, loaded.has_value() == testCase.accepted, detail);
     }
 }
 

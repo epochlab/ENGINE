@@ -176,7 +176,7 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
             if (bounce == 0 && !showSky) {
                 break;
             }
-            const glm::vec3 envRadiance = lights.environmentRadiance(ray.dir, /*nearest=*/false);
+            const glm::vec3 envRadiance = lights.environmentRadiance(ray.dir);
             // Power heuristic (Veach 1997): full weight at bounce 0 and after a delta sample, neither having a density to balance.
             float misWeight = 1.0F;
             if (bounce > 0 && !lastSampleWasDelta) {
@@ -241,6 +241,8 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
         const glm::vec3 geoNormal = geometricNormalOf(triangle);
 
         const glm::vec3 woLocal = frame.toLocal(woWorld);
+        // Built once for both estimators below: the continuation draw and NEE's evaluation share every wo-side lookup it holds.
+        const BsdfClosure closure = makeBsdfClosure(params, woLocal);
 
         if (bounce == 0) {
             gShadow = 1.0F;  // assume shadowed once we know there's a real surface; the NEE check below may clear this
@@ -267,7 +269,7 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
         }
 
         // A failed sample must not skip the NEE block: the two are independent estimators, sharing only this vertex's params and frame.
-        const std::optional<BsdfSample> sample = sampleBsdf(params, woLocal, sampler);
+        const std::optional<BsdfSample> sample = sampleBsdf(closure, sampler);
 
         // Bucket assignment: bounce 0 sets it from scratch, any later bounce only ever overrides it to Refraction, stickily.
         if (sample.has_value()) {
@@ -301,7 +303,7 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
                 const glm::vec3 wiLocalLight = frame.toLocal(lightSample->direction);
                 const float lightCos = std::abs(shadingCos);  // far-side samples carry a negative cosine
                 // One evaluation for the value, the pdf and the per-lobe split: four separate calls recomputed the same lookups.
-                const BsdfEval eval = evaluateBsdfSplit(params, woLocal, wiLocalLight);
+                const BsdfEval eval = evaluateBsdfSplit(closure, wiLocalLight);
                 const glm::vec3 bsdfValue = eval.total();
                 if (eval.pdf > 0.0F &&
                     (bsdfValue.x > 0.0F || bsdfValue.y > 0.0F || bsdfValue.z > 0.0F)) {
@@ -488,7 +490,7 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                                 accumulator.data() +
                                 ((static_cast<std::size_t>(splatY - tileY0) * kPathTraceTileSize) +
                                  static_cast<std::size_t>(splatX - tileX0)) * kTileLanes;
-                            for (std::size_t lane = 0; lane < kSampleLanes; ++lane) {
+                            for (int lane = 0; lane < kSampleLanes; ++lane) {
                                 lanes[lane] += weight * values[lane];
                             }
                             lanes[kSampleLanes] += weight;
