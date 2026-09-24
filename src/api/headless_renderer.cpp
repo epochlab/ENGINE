@@ -206,17 +206,19 @@ void HeadlessRenderer::resizeBuffers(int width, int height) {
 
 const pathtracer::gfx::HdrImage& HeadlessRenderer::lastImage(AovId aov) const {
     switch (pathtracer::debug::aovSource(aov)) {
+        // at(), not []: an AOV absent from the parallel name vector indexes exactly one past the end, which render() must not do silently.
         case AovSource::PathTraced: {
             const auto it = std::find(accumulatedAovs_.begin(), accumulatedAovs_.end(), aov);
-            return accumulators_[static_cast<std::size_t>(it - accumulatedAovs_.begin())];
+            return accumulators_.at(static_cast<std::size_t>(it - accumulatedAovs_.begin()));
         }
         case AovSource::GBuffer:
             return gbuffer_.*pathtracer::debug::gbufferLane(aov);
         case AovSource::BeautyFilter: {
             const auto it = std::find(filteredAovs_.begin(), filteredAovs_.end(), aov);
-            return filtered_[static_cast<std::size_t>(it - filteredAovs_.begin())];
+            return filtered_.at(static_cast<std::size_t>(it - filteredAovs_.begin()));
         }
     }
+    // Not dead: a scoped enum holds any value of its underlying type, so falling off a covered switch is still undefined behaviour.
     return gbuffer_.depth;
 }
 
@@ -287,6 +289,13 @@ bool HeadlessRenderer::render(const Request& request, std::string& error) {
         const pathtracer::scene::LightSet& lights =
             request.envLightEnabled.value_or(defaultEnvLightEnabled_) ? lights_ : lightsEnvOff_;
         stats_.passMilliseconds.reserve(static_cast<std::size_t>(request.samples));
+        // Resolved once: the lane set is fixed for this request, and pathTracedLane is a switch the row loop would otherwise re-run.
+        std::vector<const std::vector<float>*> laneSources;
+        laneSources.reserve(accumulatedAovs_.size());
+        for (const AovId aov : accumulatedAovs_) {
+            laneSources.push_back(&(pathTraced_.*pathtracer::debug::pathTracedLane(aov)).rgba);
+        }
+        const auto rowFloats = static_cast<std::size_t>(request.width) * 4;
         for (int pass = 0; pass < request.samples; ++pass) {
             // Only the trace is timed: the accumulation below it is O(pixels) and identical across revisions.
             const auto passStart = std::chrono::steady_clock::now();
@@ -299,22 +308,29 @@ bool HeadlessRenderer::render(const Request& request, std::string& error) {
                                              /*requestedGeneration=*/1U, threadPool_, stats, pathTraced_);
             stats_.passMilliseconds.push_back(
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - passStart).count());
-            for (std::size_t lane = 0; lane < accumulatedAovs_.size(); ++lane) {
-                const pathtracer::debug::PathTracedLane member = pathtracer::debug::pathTracedLane(accumulatedAovs_[lane]);
-                const std::vector<float>& source = (pathTraced_.*member).rgba;
-                std::vector<float>& sum = accumulators_[lane].rgba;
-                for (std::size_t i = 0; i < sum.size(); ++i) {
-                    sum[i] += source[i];
+            // By row, as the interactive driver's accumulateMean is: each element's chain stays in order, so the sum is bit-identical.
+            threadPool_.parallelFor(request.height, [&](int y) {
+                const std::size_t begin = static_cast<std::size_t>(y) * rowFloats;
+                for (std::size_t lane = 0; lane < laneSources.size(); ++lane) {
+                    const float* source = laneSources[lane]->data();
+                    float* sum = accumulators_[lane].rgba.data();
+                    for (std::size_t i = begin; i < begin + rowFloats; ++i) {
+                        sum[i] += source[i];
+                    }
                 }
-            }
+            });
         }
         stats_.rays = stats.rays();
         const auto passes = static_cast<float>(request.samples);
-        for (pathtracer::gfx::HdrImage& accumulator : accumulators_) {
-            for (float& value : accumulator.rgba) {
-                value /= passes;
+        threadPool_.parallelFor(request.height, [&](int y) {
+            const std::size_t begin = static_cast<std::size_t>(y) * rowFloats;
+            for (pathtracer::gfx::HdrImage& accumulator : accumulators_) {
+                float* rgba = accumulator.rgba.data();
+                for (std::size_t i = begin; i < begin + rowFloats; ++i) {
+                    rgba[i] /= passes;
+                }
             }
-        }
+        });
     }
 
     if (wantsGBuffer) {
