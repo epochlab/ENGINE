@@ -23,7 +23,8 @@ constexpr glm::dvec2 kRec709Blue(0.150, 0.060);
 // XYZ of chromaticity xy at Y = 1.
 glm::dvec3 xyzAtUnitLuminance(const glm::dvec2& xy) { return {xy.x / xy.y, 1.0, (1.0 - xy.x - xy.y) / xy.y}; }
 
-// D65-weighted yBar sum, the normaliser giving the perfect reflector Y = 1 (CIE 015:2018 eq 7.3's k); the 1 nm interval cancels in the ratio.
+// D65-weighted yBar sum, the normaliser giving the perfect reflector Y = 1 (CIE 015:2018 eq 7.3's k); the 1 nm
+// interval cancels in the ratio.
 double whiteLuminanceSum() {
     double sum = 0.0;
     for (const Sample& s : kTable) {

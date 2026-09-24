@@ -49,7 +49,8 @@ nlohmann::json hostJson() {
             {"ram_bytes", totalSystemBytes()}};
 }
 
-// Whole-process CPU time and scheduler interference: user_s sums every thread, so it measures work independent of how the pool was scheduled; nivcsw counts preemptions, the signature of a disturbed run.
+// Whole-process CPU time and scheduler interference: user_s sums every thread, so it measures work independent of how
+// the pool was scheduled, and nivcsw counts preemptions, the signal that another process perturbed a timing.
 nlohmann::json rusageJson() {
     rusage usage{};
     getrusage(RUSAGE_SELF, &usage);

@@ -105,7 +105,8 @@ void Histogram::update(int windowWidth, int windowHeight) {
     GL_CALL(glBindBuffer(GL_PIXEL_PACK_BUFFER, pbos_[currentPbo_]));
     GL_CALL(glReadPixels(0, 0, kWidth, kHeight, GL_RGB, GL_UNSIGNED_BYTE, nullptr));
 
-    // Bin the *other* PBO's contents -- written a full capture interval ago, so its transfer has long since completed and mapping it here never stalls on this frame's GPU work.
+    // Bin the other PBO's contents, written a full capture interval ago, so its transfer has long since completed
+    // and mapping it here never stalls on this frame's GPU work.
     const int readyPbo = 1 - currentPbo_;
     if (pboWritten_[readyPbo]) {
         GL_CALL(glBindBuffer(GL_PIXEL_PACK_BUFFER, pbos_[readyPbo]));

@@ -15,7 +15,8 @@ namespace {
 using pathtracer::api::HeadlessRenderer;
 using pathtracer::debug::AovId;
 
-// Every entry point is noexcept at the boundary: an exception crossing into ctypes is undefined behaviour, so each one is caught here and reported through the same err/return convention as an ordinary failure.
+// Every entry point is noexcept at the boundary: an exception crossing into ctypes is undefined behaviour, so each
+// one is caught here and reported through the same err and return-code contract.
 void writeError(char* err, int errCap, const std::string& message) {
     if (err == nullptr || errCap <= 0) {
         return;
@@ -71,7 +72,8 @@ PtRenderer* pt_renderer_open(const char* asset_root, const char* scene_path, cha
 }
 
 void pt_renderer_close(PtRenderer* renderer) {
-    // Raw delete is the C ABI's ownership contract: pt_renderer_open released a unique_ptr into the caller's hands and this is the paired free.
+    // Raw delete is the C ABI's ownership contract: pt_renderer_open released a unique_ptr into the caller's hands
+    // and this is the paired free.
     // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
     delete reinterpret_cast<HeadlessRenderer*>(renderer);
 }

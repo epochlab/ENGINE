@@ -19,7 +19,8 @@ void trackGpuAlloc(std::size_t bytes) {
 }
 
 void trackGpuFree(std::size_t bytes) {
-    // Freeing more than was ever tracked is a programming-invariant violation (a missing/duplicated trackGpuAlloc call), not user input -- assert rather than let the unsigned counter wrap.
+    // Freeing more than was ever tracked is a programming-invariant violation, not user input: assert rather than
+    // let the unsigned subtraction wrap into a nonsense total.
     assert(bytes <= gGpuBytes);
     gGpuBytes -= bytes;
 }

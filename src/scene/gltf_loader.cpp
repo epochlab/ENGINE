@@ -18,7 +18,8 @@ namespace pathtracer::scene {
 
 namespace {
 
-// Raw glTF-read vertex, one per accessor entry -- an intermediate the world-triangle/shading-triangle builders below consume; not retained past loadPrimitive.
+// Raw glTF-read vertex, one per accessor entry: an intermediate the world-triangle and shading-triangle builders
+// consume, not retained past load.
 struct Vertex {
     glm::vec3 position;
     glm::vec2 uv;
@@ -32,7 +33,8 @@ std::string dirOf(const std::string& path) {
     return pos == std::string::npos ? "." : path.substr(0, pos);
 }
 
-// This project's gltf material `extras` are hand-authored to look like {"roughnessTexture":{"index":2}, ...} (see the gltf fix-up this loader depends on) -- not a general JSON parser, just enough to pull an integer index back out of that exact, self-controlled shape.
+// This project's glTF material `extras` are hand-authored to look like {"roughnessTexture":{"index":2}, ...}, so the
+// loader reads them as a parallel texture-slot table beside the core material.
 std::optional<int> extrasTextureIndex(const char* extrasJson, const std::string& key) {
     if (extrasJson == nullptr) {
         return std::nullopt;
@@ -90,7 +92,8 @@ glm::mat4 localNodeTransform(const cgltf_node* node) {
     return glm::make_mat4(local);
 }
 
-// Appends this primitive's triangles to outWorldTriangles, each vertex baked to world space by transform -- EmbreeAccel (embree_accel.h) operates on world-space triangles, not the model-space Vertex data read from the accessors.
+// Appends this primitive's triangles to outWorldTriangles, each vertex baked to world space by transform: EmbreeAccel
+// operates on one flat world-space soup rather than per-instance geometry with transforms.
 void appendWorldTriangles(const std::vector<Vertex>& vertices,
                            const std::vector<unsigned int>& indices, const glm::mat4& transform,
                            std::vector<Triangle>& outWorldTriangles) {
@@ -137,12 +140,9 @@ struct RequiredAccessors {
     const cgltf_accessor* color;  // COLOR_0, optional -- nullptr means "no vertex colour"
 };
 
-// Locates the position/normal/uv0/tangent accessors this loader requires (plus an optional COLOR_0)
-// and rejects (nullopt) a primitive missing any of the required ones, or -- since
-// cgltf_accessor_read_float can't signal failure through its return value for a sparse accessor
-// (their own source: "This is an error case, but we can't communicate the error with existing
-// interface") -- a primitive using a sparse accessor for any of them (COLOR_0 included, when
-// present), which this loader doesn't support.
+// Locates the position/normal/uv0/tangent accessors this loader requires, plus an optional COLOR_0, and returns
+// nullopt for a primitive missing any required one or using a sparse accessor for any of them: cgltf_accessor_read_
+// float cannot communicate that failure through its return value, in their own source's words.
 std::optional<RequiredAccessors> findAttributeAccessors(const cgltf_primitive& prim) {
     RequiredAccessors acc{nullptr, nullptr, nullptr, nullptr, nullptr};
     for (cgltf_size ai = 0; ai < prim.attributes_count; ++ai) {
@@ -182,10 +182,9 @@ std::vector<Vertex> readVertices(const RequiredAccessors& acc) {
         cgltf_accessor_read_float(acc.uv, vi, &v.uv.x, 2);
         cgltf_accessor_read_float(acc.tangent, vi, &v.tangent.x, 4);
         if (acc.color != nullptr) {
-            // COLOR_0 may be VEC3 or VEC4 per the glTF 2.0 core spec; cgltf_accessor_read_float
-            // already normalizes FLOAT vs. UNSIGNED_BYTE/UNSIGNED_SHORT transparently, but won't
-            // default a missing 4th component itself, so size the read to the accessor's own type
-            // and drop alpha -- nothing in this engine's shading consumes vertex-colour alpha.
+        // COLOR_0 may be VEC3 or VEC4 per the glTF 2.0 core spec. cgltf normalizes the component type transparently
+        // but will not default a missing 4th component, so the read is sized to the accessor's own type and alpha is
+        // dropped -- nothing in this engine consumes vertex-colour alpha.
             float raw[4] = {1.0F, 1.0F, 1.0F, 1.0F};
             cgltf_accessor_read_float(acc.color, vi, raw, cgltf_num_components(acc.color->type));
             v.colour = glm::vec3(raw[0], raw[1], raw[2]);
@@ -196,7 +195,8 @@ std::vector<Vertex> readVertices(const RequiredAccessors& acc) {
     return vertices;
 }
 
-// Rejects a missing or sparse index accessor for the same reason findAttributeAccessors rejects sparse vertex attributes -- cgltf can't signal a sparse-index read failure through its return value either.
+// Rejects a missing or sparse index accessor for the same reason findAttributeAccessors rejects sparse vertex
+// attributes: cgltf cannot signal that read failure through its return value.
 std::optional<std::vector<unsigned int>> readIndices(const cgltf_accessor* indicesAcc) {
     if (indicesAcc == nullptr) {
         std::cerr << "loadGltf: primitive has no index accessor\n";
@@ -213,10 +213,9 @@ std::optional<std::vector<unsigned int>> readIndices(const cgltf_accessor* indic
     return indices;
 }
 
-// A slot with no texture referenced at all is not a failure -- substitutes fallback. A slot that
-// DOES reference a texture but fails to resolve/decode it (bad path, corrupt file) is a real
-// error and must still propagate as nullopt, not silently default -- distinguishing these two
-// nullopt-producing cases is exactly what loadTexture/loadTextureByIndex can't do alone.
+    // A slot referencing no texture at all is not a failure and substitutes the fallback. A slot that does reference
+    // one but fails to resolve or decode it is a real error and must propagate as nullopt: distinguishing the two is
+    // exactly what loadTexture cannot do alone.
 std::optional<pathtracer::gfx::ImageTexture> resolveTexture(const cgltf_texture* texture, const std::string& dir,
                                                          pathtracer::gfx::ScalarType textureType, pathtracer::gfx::ImageTexture fallback) {
     if (texture == nullptr) {
@@ -259,7 +258,8 @@ std::optional<Material> loadMaterialTextures(const cgltf_data* data, const cgltf
     };
 }
 
-// Builds one MeshInstance's Vertex/index arrays and Material from a single triangle primitive. Fails clearly (nullopt) rather than substituting a placeholder for a primitive this loader doesn't support (non-triangle mode, missing attributes). A material with no texture for a given slot -- or no material at all -- is not a failure: loadMaterialTextures substitutes a neutral default for that slot regardless, which for an absent material (kDefaultMaterial below) means every slot, reproducing glTF's own spec-defined default material.
+// Builds one MeshInstance's vertex and index arrays and its Material from a single triangle primitive. Fails clearly
+// with nullopt rather than substituting defaults for geometry it cannot read.
 std::optional<MeshInstance> loadPrimitive(const cgltf_data* data, const cgltf_primitive& prim,
                                            const glm::mat4& transform, const std::string& dir,
                                            pathtracer::gfx::ScalarType textureType, int instanceIndex, const std::string& name,
@@ -299,7 +299,8 @@ std::optional<MeshInstance> loadPrimitive(const cgltf_data* data, const cgltf_pr
     };
 }
 
-// Hard cap on node-graph recursion depth. glTF's node hierarchy is untrusted external data -- cgltf_validate doesn't check for cycles or pathological nesting depth, so an unbounded recursion here would let a malformed/cyclic file overflow the stack. 256 comfortably covers any legitimate scene hierarchy.
+// Hard cap on node-graph recursion depth. glTF's node hierarchy is untrusted external data and cgltf_validate checks
+// neither cycles nor pathological depth, so the walk bounds itself.
 constexpr int kMaxNodeDepth = 256;
 
 // A glTF node hierarchy is a tree, so recursion is its structure; the depth cap above is what makes it safe on

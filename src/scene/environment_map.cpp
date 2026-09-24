@@ -22,12 +22,14 @@ float luminanceOf(const pathtracer::gfx::ImageTexture& image, int x, int y) {
     return (0.2126F * texel.r) + (0.7152F * texel.g) + (0.0722F * texel.b);
 }
 
-// Inverts a piecewise-constant CDF slice [cdf[0], cdf[count]) (cdf[0]==0, cdf[count]==1) at u, returning the bin index and the fractional offset within that bin's probability mass -- shared by both the marginal (row) and conditional (column) inversion steps.
+// Inverts a piecewise-constant CDF slice at u, returning the bin index and the fractional offset within that bin's
+// probability mass. Shared by both the marginal (row) and conditional (column) inversions.
 struct CdfSample {
     int index;
     float fraction;  // [0,1) position within the selected bin
 };
-// The integer texel a direction falls in -- the piecewise-constant cell the marginal/conditional CDFs are built over -- plus that row's sin(theta) for the solid-angle Jacobian. Shared by pdf() and sampleDirectionNearest() so the NEE estimator's f and its pdf can never describe different texels.
+// The integer texel a direction falls in -- the piecewise-constant cell the CDFs are built over -- plus that row's
+// sin(theta) for the solid-angle Jacobian. Shared by pdf() and sampleDirectionNearest() so the two cannot disagree.
 struct EquirectTexel {
     int x;
     int y;
@@ -47,7 +49,8 @@ EquirectTexel equirectTexelOf(const pathtracer::gfx::ImageTexture& image, const 
 }
 
 CdfSample invertCdf(const float* cdf, int count, float u) {
-    // upper_bound finds the first entry > u; the bin just before it is the one u falls into. cdf[0]==0 is never > u (u>=0) and searching it is harmless, so no need to special-case it out.
+    // upper_bound finds the first entry > u; the bin just before it is the one u falls into. cdf[0]==0 is never > u,
+    // so searching it is harmless.
     const float* it = std::upper_bound(cdf, cdf + count + 1, u);
     const int index = std::clamp(static_cast<int>(it - cdf) - 1, 0, count - 1);
     const float lo = cdf[index];
@@ -67,7 +70,8 @@ EnvironmentMap::EnvironmentMap(pathtracer::gfx::ImageTexture image) : image_(std
 
     float total = 0.0F;
     for (int y = 0; y < height; ++y) {
-        // Row-center theta, sin(theta)-weighted so sampling density corrects for the equirect projection's polar over-representation (see class doc comment).
+        // Row-centre theta, sin(theta)-weighted so sampling density corrects for the equirect projection's polar
+        // over-representation.
         const float theta = glm::pi<float>() * (static_cast<float>(y) + 0.5F) / static_cast<float>(height);
         const float sinTheta = std::max(std::sin(theta), 1e-6F);
 
@@ -136,7 +140,8 @@ EnvironmentMap::EnvSample EnvironmentMap::importanceSampleDirection(glm::vec2 u,
                          marginalCdf_[static_cast<std::size_t>(rowSample.index)]) *
                         static_cast<float>(height);
     const float pdfU = (row[colSample.index + 1] - row[colSample.index]) * static_cast<float>(width);
-    // Jacobian from (u,v) density to solid-angle density: dw = sin(theta) * (pi dv) * (2pi du), so pdf_solid_angle = pdf_uv / (2 * pi^2 * sin(theta)) -- see class doc comment.
+    // Jacobian from (u,v) density to solid-angle density: dw = sin(theta) * (pi dv) * (2pi du), so the solid-angle
+    // pdf is pdf_uv / (2 * pi^2 * sin(theta)).
     const float pdfSolidAngle =
         (pdfU * pdfV) / std::max(2.0F * glm::pi<float>() * glm::pi<float>() * sinTheta, 1e-6F);
     return {direction, std::max(pdfSolidAngle, 1e-8F)};

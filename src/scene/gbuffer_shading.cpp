@@ -39,14 +39,14 @@ BsdfParams resolveBsdfParams(const Material& material, glm::vec2 uv, const glm::
     const float roughness = resolveRoughness(material, uv, settings);
     const glm::vec3 specular = glm::vec3(pathtracer::gfx::sampleBilinear(material.specularTexture, uv));
     const glm::vec3 f0 = glm::mix(specular, baseColor, settings.metallicFactor);
-    // Dispersion enters here and nowhere else: every ior consumer downstream -- Fresnel, the lobe
-    // probabilities, the escape-albedo tables, the refraction direction -- reads this one scalar, so
-    // resolving it per hero channel makes the whole vertex spectrally consistent with no second
-    // mechanism. Unset (rasterizer preview, any non-dispersive path) leaves the authored d-line index.
+    // Dispersion enters here and nowhere else: every ior consumer downstream -- Fresnel, the lobe probabilities, the
+    // escape tables, the refraction direction -- reads this one scalar, so resolving it per hero channel makes the
+    // whole vertex spectrally consistent. Unset leaves the authored d-line index.
     const float ior = heroChannel.has_value()
                           ? cauchyIor(settings.ior, settings.abbe, kRgbWavelengthsNm[*heroChannel])
                           : settings.ior;
-    // OpenPBR's two regimes for transmissionColor, exclusive by construction: at transmissionDepth > 0 it is the interior medium's Beer-Lambert extinction (path_tracer.cpp's sigmaAFromTransmission) and the interface itself is untinted, at 0 there is no medium and it is the on-surface tint instead.
+    // OpenPBR's two regimes for transmissionColor, exclusive by construction: at transmissionDepth > 0 it is the
+    // interior medium's Beer-Lambert extinction and the interface is untinted; at 0 it is the on-surface tint.
     const glm::vec3 transmissionTint =
         settings.transmissionDepth > 0.0F ? glm::vec3(1.0F) : settings.transmissionColor;
     return BsdfParams{baseColor,          settings.metallicFactor, roughness,
@@ -68,7 +68,8 @@ ShadingFrame buildShadingFrame(const ShadingVertex& shading, const Material& mat
         (tangentSpaceNormal.x * tangent) + (tangentSpaceNormal.y * bitangent) +
         (tangentSpaceNormal.z * normal));
 
-    // Blinn 1978 bump mapping: perturbs mappedNormal further using the bump texture's height difference between adjacent texels -- a texture-space (not screen-space) derivative, so no ray-differential tracking is needed. Applied on top of the normal map (not the base geometric normal), since this asset ships both: the normal map carries the sculpted macro surface direction, bump adds a finer wrinkle on top. Deliberately NOT divided by texel size into a true per-UV-unit derivative: at this asset's 4096px resolution that divisor is ~4096, which amplifies even tiny neighboring-texel differences into a huge tilt -- settings.bumpStrength instead scales the raw (small, well-behaved) per-texel height difference directly.
+    // Blinn 1978 bump mapping: perturbs mappedNormal further using the bump texture's height difference between
+    // adjacent texels, a texture-space gradient turned into a shading-normal tilt.
     const glm::vec2 texel(1.0F / static_cast<float>(material.bumpTexture.width),
                            1.0F / static_cast<float>(material.bumpTexture.height));
     const float dHdu =

@@ -14,7 +14,8 @@ namespace {
 using pathtracer::gfx::HdrImage;
 using pathtracer::scene::ThreadPool;
 
-// Single-channel Rec.709 luminance, the shared input to Sobel and Gabor. Materialised once rather than recomputed per tap: Sobel reads 8 neighbours per pixel and Gabor 25, so the shader's per-tap dot product is up to 25x redundant work that one intermediate plane removes. The shader cannot do this -- a fragment has nowhere to put it -- which is why this is not simply a transcription.
+// Single-channel Rec.709 luminance, the shared input to Sobel and Gabor. Materialised once rather than recomputed per
+// tap: Sobel reads 8 neighbours per pixel and Gabor 25, so the dot product would run up to 25 times per output.
 [[nodiscard]] std::vector<float> luminancePlane(const HdrImage& beauty, ThreadPool& threadPool) {
     std::vector<float> plane(static_cast<std::size_t>(beauty.width) * static_cast<std::size_t>(beauty.height));
     threadPool.parallelFor(beauty.height, [&](int y) {
@@ -42,7 +43,8 @@ using pathtracer::scene::ThreadPool;
                     std::vector<float>(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4, 0.0F)};
 }
 
-// Writes one scalar to RGB with alpha 1, the broadcast convention every other AOV uses (gbuffer_shading.h's writeTexel), so a single-channel AOV still goes straight through HdrImage's fixed 4-floats/texel layout.
+// Writes one scalar to RGB with alpha 1, the broadcast convention every other AOV uses, so a single-channel AOV
+// still goes straight through HdrImage to the GPU.
 void writeScalar(HdrImage& out, std::size_t pixel, float value) {
     const std::size_t texel = pixel * 4;
     out.rgba[texel] = value;
@@ -119,7 +121,8 @@ HdrImage sobelAov(const HdrImage& beauty, ThreadPool& threadPool) {
 }
 
 HdrImage gaborAov(const HdrImage& beauty, ThreadPool& threadPool) {
-    // Built once per process, not per call: the bank depends on nothing but its own compile-time parameters, and the viewer pays the same 100 transcendentals once at shader setup.
+    // Built once per process, not per call: the bank depends on nothing but its own compile-time parameters, and the
+    // viewer pays the same transcendentals once at shader setup.
     static const std::array<float, kGaborKernelSize> kernel = buildGaborKernel();
 
     const std::vector<float> plane = luminancePlane(beauty, threadPool);
@@ -163,7 +166,8 @@ HdrImage hsvAov(const HdrImage& beauty, ThreadPool& threadPool) {
             const float b = beauty.rgba[texel + 2];
             const float value = std::max({r, g, b});
             const float chroma = value - std::min({r, g, b});
-            // Exact degenerate branches rather than the shader's 1e-10 denominator guard: hue is undefined on the achromatic axis and saturation on black, and the convention is 0 for both (Smith 1978). An epsilon only approximates that, and biases every near-grey pixel.
+            // Exact degenerate branches rather than the shader's 1e-10 denominator guard: hue is undefined on the
+            // achromatic axis and saturation on black, and the convention is to report 0 rather than a ratio.
             const float saturation = value > 0.0F ? chroma / value : 0.0F;
             float hue = 0.0F;
             if (chroma > 0.0F) {

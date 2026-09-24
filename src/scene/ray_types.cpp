@@ -6,7 +6,8 @@ namespace pathtracer::scene {
 
 namespace {
 
-// Moller-Trumbore ray-triangle intersection. No backface culling (det may be negative). Known edge case, accepted rather than solved: a ray exactly parallel to an axis with its origin exactly on that axis's bounding plane can produce a 0*inf NaN here -- vanishingly unlikely for the random/synthetic rays this is exercised with (tools/embree_validate.cpp), not worth the extra robust-intersection machinery here.
+// Moller-Trumbore ray-triangle intersection. No backface culling, so det may be negative. Known edge case, accepted
+// rather than solved: a ray exactly in the triangle plane has det == 0 and reports no hit.
 bool intersectTriangle(const Ray& ray, const Triangle& tri, float& outT, float& outU,
                         float& outV) {
     constexpr float kEpsilon = 1e-8F;

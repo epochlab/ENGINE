@@ -32,7 +32,8 @@ constexpr ImVec4 kCyan(0.0F, 0.85F, 0.85F, 1.0F);
 
 constexpr float kHistogramHeight = 72.0F;
 
-// 9-tap triangular smoother (radius 4): every output bin 0-255 is a weighted average of sqrt(min(rawCount, peak)/peak) over neighbors whose index falls in [1, 254] -- bins 0/255 are never read, including as their own center sample, so their displayed height comes entirely from extrapolating nearby interior bins. This is what keeps a background spike at bin 0 (e.g. camera far from a small on-screen subject) from ever reaching the curve or the peak calculation, rather than merely being deprioritized.
+// 9-tap triangular smoother (radius 4): every output bin 0-255 is a weighted average of sqrt(min(rawCount, peak)/peak)
+// over neighbours whose index falls in [1, 254]. Bins 0 and 255 are never read, so clipping spikes do not bleed in.
 void smoothChannel(const std::array<std::uint32_t, 256>& channelBins, std::uint32_t peak,
                     std::array<float, 256>& out) {
     for (int bin = 0; bin < 256; ++bin) {
@@ -54,7 +55,8 @@ void smoothChannel(const std::array<std::uint32_t, 256>& channelBins, std::uint3
     }
 }
 
-// Rescales an already-smoothed curve so its own true maximum reaches 1.0 -- smoothChannel's averaging can only pull values down from the raw-count peak they were normalized against, never back up, so without this the rendered curve's real maximum silently ends up short of the panel's full height for anything but a flat-topped distribution.
+// Rescales an already-smoothed curve so its own maximum reaches 1.0: smoothChannel's averaging can only pull values
+// down from the raw-count peak they were normalized against, never up.
 void rescaleToUnitPeak(std::array<float, 256>& curve) {
     float maxValue = 0.0F;
     for (const float value : curve) {
@@ -68,7 +70,8 @@ void rescaleToUnitPeak(std::array<float, 256>& curve) {
     }
 }
 
-// Same idea across every active channel at once, using their combined maximum -- so the tallest channel reaches full height and the others keep their correct height relative to it (sharedPeak's whole point), rather than each independently rescaling to its own max.
+// Same idea across every active channel at once, using their combined maximum, so the tallest channel reaches full
+// height and the others keep their correct height relative to it.
 void rescaleToUnitPeak(std::array<std::array<float, 256>, 3>& curves, const std::array<bool, 3>& active) {
     float maxValue = 0.0F;
     for (int c = 0; c < 3; ++c) {
@@ -101,7 +104,8 @@ bool isGrayscale(const std::array<std::array<std::uint32_t, 256>, 3>& bins) {
     return true;
 }
 
-// One continuous filled+outlined curve from a [0,1]-normalized heights array, rather than 256 independent rectangles -- the technique that actually produces a smooth silhouette instead of a blocky bar chart.
+// One continuous filled and outlined curve from a [0,1]-normalized heights array, rather than 256 independent
+// rectangles: the technique that produces a smooth silhouette instead of a comb.
 void drawHistogramCurve(ImDrawList* drawList, ImVec2 origin, float histogramWidth,
                          const std::array<float, 256>& vals, ImU32 fillColor, ImU32 lineColor) {
     const float binWidth = histogramWidth / 256.0F;
@@ -118,7 +122,8 @@ void drawHistogramCurve(ImDrawList* drawList, ImVec2 origin, float histogramWidt
     }
     poly[257] = ImVec2(origin.x + histogramWidth, origin.y + kHistogramHeight);
 
-    // Concave fills triangulate internally; per-triangle AA seams show as faint diagonal lines across the fill, so anti-aliasing is switched off for just this call -- the outline stroke below keeps its own.
+    // Concave fills triangulate internally, and per-triangle AA seams show as faint diagonal lines across the fill,
+    // so anti-aliasing is off for just this call -- the outline stroke below restores the smooth edge.
     const ImDrawListFlags savedFlags = drawList->Flags;
     drawList->Flags &= ~ImDrawListFlags_AntiAliasedFill;
     drawList->AddConcavePolyFilled(poly.data(), 258, fillColor);
@@ -126,14 +131,16 @@ void drawHistogramCurve(ImDrawList* drawList, ImVec2 origin, float histogramWidt
     drawList->AddPolyline(edge.data(), 256, lineColor, 0, 1.0F);
 }
 
-// Grayscale AOVs (R==G==B in every bin) collapse to a single curve, using a full-range unsmoothed scale for near-binary content (e.g. alpha/depth masks) so 0/255 clipping spikes stay exactly as captured.
+// Grayscale AOVs, R==G==B in every bin, collapse to a single curve, using a full-range unsmoothed scale for
+// near-binary content so 0/255 clipping spikes stay exactly where they are.
 void drawGrayscaleHistogram(ImDrawList* drawList, ImVec2 origin, float histogramWidth,
                              const std::array<std::array<std::uint32_t, 256>, 3>& bins) {
     std::uint64_t interiorTotal = 0;
     for (int bin = 1; bin <= 254; ++bin) {
         interiorTotal += bins[0][static_cast<std::size_t>(bin)];
     }
-    // Under ~1% of the 256x144 downsample's pixels fall in the interior -- near-binary content (e.g. an alpha/depth mask): full-range peak, raw sqrt scale, no smoothing, so the 0/255 spikes stay exactly as captured.
+    // Under ~1% of the downsample's pixels falling in the interior means near-binary content, an alpha or depth mask:
+    // full-range peak, raw sqrt scale, no smoothing, so the spikes stay readable.
     const bool nearBinary = interiorTotal < static_cast<std::uint64_t>(256 * 144 / 100);
     std::array<float, 256> heights{};
     if (nearBinary) {
@@ -158,7 +165,8 @@ void drawGrayscaleHistogram(ImDrawList* drawList, ImVec2 origin, float histogram
                         IM_COL32(220, 220, 220, 220));
 }
 
-// A channel this AOV structurally doesn't use (e.g. blue in a UV AOV) has every pixel at bin 0 -- checked over bins 1-255 (not 0) so a background-dominated but genuinely-used channel isn't mistaken for an unused one.
+// A channel this AOV structurally does not use -- blue in a UV AOV -- has every pixel at bin 0. Checked over bins
+// 1-255, not 0, so a background-dominated but genuinely used channel is not mistaken for an unused one.
 std::array<bool, 3> activeChannels(const std::array<std::array<std::uint32_t, 256>, 3>& bins) {
     std::array<bool, 3> active{};
     for (int c = 0; c < 3; ++c) {
@@ -174,7 +182,8 @@ std::array<bool, 3> activeChannels(const std::array<std::array<std::uint32_t, 25
     return active;
 }
 
-// One peak shared across every active channel -- not an independent peak per channel -- so a channel with genuinely more signal reads taller than one with less, instead of every channel independently stretching to fill the same height.
+// One peak shared across every active channel, not an independent peak per channel, so a channel with genuinely more
+// signal reads taller rather than every channel filling the same height.
 std::uint32_t sharedPeak(const std::array<std::array<std::uint32_t, 256>, 3>& bins,
                           const std::array<bool, 3>& active) {
     std::uint32_t peak = 1;
@@ -189,7 +198,8 @@ std::uint32_t sharedPeak(const std::array<std::array<std::uint32_t, 256>, 3>& bi
     return peak;
 }
 
-// Each channel drawn as one smooth filled+outlined curve layered back-to-front B/G/R, then a "floor" curve (the min across active channels) on top wherever they overlap. All compositing is ImGui's ordinary alpha-over blending -- no additive/custom GL blend state -- so an overlap like R-over-G reads as a muted brown/olive rather than a saturated additive colour.
+// Each channel drawn as one smooth filled and outlined curve, layered back to front B/G/R, then a floor curve -- the
+// min across active channels -- on top wherever they overlap.
 void drawRgbHistogram(ImDrawList* drawList, ImVec2 origin, float histogramWidth,
                        const std::array<std::array<std::uint32_t, 256>, 3>& bins) {
     const std::array<bool, 3> active = activeChannels(bins);
@@ -240,7 +250,8 @@ void drawRgbHistogram(ImDrawList* drawList, ImVec2 origin, float histogramWidth,
     }
 }
 
-// Renders the current AOV's per-channel histogram. Width matches the panel's content width so it lines up with every other section. overRangeFraction/overRangePeakMultiple are the histogram's blind spot made visible: it bins the post-display-transform, post-8-bit-clamp framebuffer, where 1.01 and 100.0 both pin bin 255 identically -- these two numbers come from the pre-display-transform float image instead (see main.cpp's updateOverRangeStats).
+// Renders the current AOV's per-channel histogram. Width matches the panel's content width so it lines up with every
+// other section.
 void drawHistogramPanel(const std::array<std::array<std::uint32_t, 256>, 3>& bins,
                          float overRangeFraction, float overRangePeakMultiple) {
     ImGui::TextColored(kCyan, "Histogram");
@@ -262,7 +273,8 @@ void drawHistogramPanel(const std::array<std::array<std::uint32_t, 256>, 3>& bin
     ImGui::Text("Over-range: %.1f%%, peak %.1fx", overRangeFraction * 100.0F, overRangePeakMultiple);
 }
 
-// Centre crosshair framing overlay: drawn on the foreground draw list, over the whole viewport, independent of the ##hud panel, so it never contaminates the AOV buffers being debugged.
+// Centre crosshair framing overlay, drawn on the foreground draw list over the whole viewport and independent of the
+// panel, so it never contaminates the AOV buffers being debugged.
 void drawFramingOverlays(const FramingOverlayState& state, ImVec2 displaySize) {
     if (!state.crosshair) {
         return;
@@ -338,7 +350,8 @@ void drawAovSection(int& aov) {
     ImGui::Separator();
 }
 
-// pos/rot/clip: read-only text. filmback: preset dropdown + read-only resolved mm/aspect-ratio text. focalLength/aperture/shutter/iso/aberrationStrength: editable sliders.
+// pos/rot/clip are read-only text; filmback is a preset dropdown plus resolved mm and aspect ratio; focal length,
+// aperture, shutter, ISO and aberration strength are editable sliders.
 void drawCameraSection(const HudFrameData& frame, float& focalLengthMm, float& aperture,
                         float& shutterSeconds, float& iso, int& filmBackPresetIndex,
                         const std::vector<const char*>& filmBackPresetNames,
@@ -348,7 +361,7 @@ void drawCameraSection(const HudFrameData& frame, float& focalLengthMm, float& a
     ImGui::Text("pos  x %.2f  y %.2f  z %.2f", camPos.x, camPos.y, camPos.z);
     ImGui::Text("rot  x %.1f  y %.1f", frame.cameraPitchDegrees, frame.cameraYawDegrees);
     const pathtracer::scene::Camera::FilmBack filmBack = frame.camera.filmBack();
-    // heightMm > 0 is guaranteed by loadFilmBackPresets's boundary validation (profile_config.cpp), so this division is always well-defined.
+    // heightMm > 0 is guaranteed by loadFilmBackPresets's boundary validation, so this division is well-defined.
     ImGui::Text("Filmback  %.2f x %.2f mm  (%.2f:1)", filmBack.widthMm, filmBack.heightMm,
                 filmBack.widthMm / filmBack.heightMm);
     ImGui::Text("Near  %.2f  Far  %.1f", frame.camera.nearClip(), frame.camera.farClip());
@@ -368,7 +381,8 @@ void drawCameraSection(const HudFrameData& frame, float& focalLengthMm, float& a
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
     ImGui::SliderFloat("##iso", &iso, 50.0F, 6400.0F, "ISO  %.0f", ImGuiSliderFlags_Logarithmic);
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
-    // Beauty only (main.cpp zeroes this for every other AOV) -- range picked so the full slider sweep stays a subtle-to-strong lens effect, not an unreadable smear.
+    // Beauty only -- main.cpp zeroes this for every other AOV -- with a range picked so the full slider sweep stays a
+    // subtle-to-strong lens effect rather than an unreadable smear.
     ImGui::SliderFloat("##aberrationStrength", &aberrationStrength, 0.0F, 0.05F, "Aberration  %.3f");
     ImGui::Separator();
 }
@@ -381,7 +395,8 @@ void drawHdriSection(bool& showSky, bool& envLightEnabled, int& envRotationDegre
     // classic Goral 1984 Cornell (light-panel-only, no IBL) reachable interactively.
     ImGui::Checkbox("Environment Light", &envLightEnabled);
     ImGui::BeginDisabled(!envLightEnabled);
-    // Beauty-AOV-only (main.cpp gates the sky draw on aov==0); no-op elsewhere, and no-op with Environment Light off since that already removes the environment from every miss.
+    // Beauty only, main.cpp gating the sky draw on it. A no-op elsewhere, and a no-op with Environment Light off,
+    // which already removes the environment from every miss.
     ImGui::Checkbox("Show/Hide Background", &showSky);
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
     ImGui::SliderInt("##envRotation", &envRotationDegrees, 0, 359, "Y-Axis  %d deg");

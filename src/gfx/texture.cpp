@@ -73,7 +73,8 @@ Texture Texture::createFromFloatPixels(int width, int height, const float* rgba,
     return texture;
 }
 
-// Not wrapped in GL_CALL on the in-place path: runs every frame the displayed image changes, and glGetError is a driver sync point -- same convention as bind() below. The resize path is rare enough to check.
+// Not wrapped in GL_CALL on the in-place path: it runs every frame the displayed image changes and glGetError is a
+// driver sync point. The resize path is rare enough to check.
 void Texture::upload(int width, int height, const float* rgba) {
     // GL_UNPACK_ALIGNMENT untouched: RGBA float rows are always a multiple of the default 4-byte alignment.
     if (width == width_ && height == height_) {

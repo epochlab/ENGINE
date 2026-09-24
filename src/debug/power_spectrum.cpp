@@ -47,10 +47,9 @@ void makeTwiddle(int n, std::vector<double>& cosTable, std::vector<double>& sinT
     }
 }
 
-// Which octave a lattice point falls in, band 0 being the top one (Nyquist/2 to Nyquist). Axis frequencies are
-// normalised independently, so a non-square field bins by true radial frequency in cycles/pixel. The clamp folds the
-// corners past Nyquist into band 0 and anything below the eighth octave into the last band, so every point is counted
-// exactly once and octaveBandPower and whiteNoiseBandShare cannot disagree about where a point belongs.
+// Which octave a lattice point falls in, band 0 being the top (Nyquist/2 to Nyquist). Axis frequencies are normalised
+// independently, so a non-square field bins by true radial frequency. The clamp folds the corners past Nyquist into
+// band 0 and anything below the eighth octave into the last, so every point is counted exactly once.
 int bandOf(int kx, int ky, int width, int height) {
     const double fx = static_cast<double>(kx <= width / 2 ? kx : kx - width) / width;
     const double fy = static_cast<double>(ky <= height / 2 ? ky : ky - height) / height;

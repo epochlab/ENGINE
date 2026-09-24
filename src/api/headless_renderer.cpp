@@ -22,7 +22,8 @@ using pathtracer::debug::AovId;
 using pathtracer::debug::AovSource;
 using pathtracer::gfx::HdrImage;
 
-// Scene-level placement, order X,Y,Z -- must stay identical to main.cpp's and render_beauty's composition or a headless render places the scene differently from the viewer.
+// Scene-level placement, order X,Y,Z -- must stay identical to main.cpp's and render_beauty's composition, or a
+// headless render places the scene differently from the viewer.
 [[nodiscard]] glm::mat4 rootTransformOf(const pathtracer::config::SceneConfig& scene) {
     return glm::translate(glm::mat4(1.0F), scene.model.position) *
            glm::rotate(glm::mat4(1.0F), glm::radians(scene.model.rotation.z), glm::vec3(0.0F, 0.0F, 1.0F)) *
@@ -30,7 +31,8 @@ using pathtracer::gfx::HdrImage;
            glm::rotate(glm::mat4(1.0F), glm::radians(scene.model.rotation.x), glm::vec3(1.0F, 0.0F, 0.0F));
 }
 
-// samplesPerPixel is 1 here and convergence comes from accumulating passes, which is how the progressive driver and render_beauty both drive the integrator; the field is left in PathTraceSettings for the viewer's single-shot mode.
+// samplesPerPixel is 1 here and convergence comes from accumulating passes, as the progressive driver and
+// render_beauty both drive the integrator.
 [[nodiscard]] pathtracer::scene::PathTraceSettings baseSettingsOf(const pathtracer::config::ProfileConfig& profile,
                                                                const pathtracer::config::MaterialConfig& material) {
     return pathtracer::scene::PathTraceSettings{
@@ -55,7 +57,8 @@ using pathtracer::gfx::HdrImage;
     };
 }
 
-// profile.json names a film-back preset; assets/config/camera.json supplies its dimensions. Resolved exactly as main.cpp's initializeApp and render_beauty do.
+// profile.json names a film-back preset; assets/config/camera.json supplies its dimensions. Resolved exactly as
+// main.cpp's initializeApp and render_beauty do.
 [[nodiscard]] std::optional<pathtracer::scene::Camera> resolveCamera(const std::string& assetRoot,
                                                                  const pathtracer::config::ProfileConfig& profile,
                                                                  std::string& error) {
@@ -80,7 +83,8 @@ using pathtracer::gfx::HdrImage;
                                   camera.shutterSeconds, camera.iso);
 }
 
-// Gathers `channels` of each texel out of HdrImage's fixed RGBA layout into a tightly packed destination. The one copy the boundary costs: a scalar AOV is stored broadcast to three channels, and a consumer reading the data wants the one that carries it.
+// Gathers `channels` of each texel out of HdrImage's fixed RGBA layout into a tightly packed destination. The one
+// copy the boundary costs: a scalar AOV is stored broadcast to RGB, and a caller asked for one channel.
 void packChannels(const HdrImage& source, int channels, float* destination,
                   pathtracer::scene::ThreadPool& threadPool) {
     const int width = source.width;
@@ -197,7 +201,8 @@ void HeadlessRenderer::resizeBuffers(int width, int height) {
         return;
     }
     pathTraced_ = pathtracer::scene::makePathTraceResult(width, height);
-    // renderRasterGBuffer reallocates its own 14 images when the size changes and clears them per row otherwise; resetting the generation stamp is what tells it this buffer holds nothing yet.
+    // renderRasterGBuffer reallocates its own 14 images on a size change and clears them per row otherwise;
+    // resetting the generation stamp is what tells it this buffer holds nothing it can reuse.
     gbuffer_ = pathtracer::scene::RasterGBuffer{};
     accumulators_.clear();
     bufferWidth_ = width;
@@ -258,7 +263,8 @@ bool HeadlessRenderer::render(const Request& request, std::string& error) {
         return pathtracer::debug::aovSource(aov) == AovSource::GBuffer;
     });
 
-    // The path-traced lanes this request needs summed. Beauty joins the set whenever a filter is asked for, because every filter reads the accumulated Beauty rather than a per-pass one.
+    // The path-traced lanes this request needs. Beauty joins the set whenever a filter is asked for, every filter
+    // reading the accumulated Beauty rather than a per-filter buffer.
     accumulatedAovs_.clear();
     for (const AovId aov : request.aovs) {
         if (pathtracer::debug::aovSource(aov) == AovSource::PathTraced &&
@@ -281,7 +287,8 @@ bool HeadlessRenderer::render(const Request& request, std::string& error) {
                                                      std::vector<float>(static_cast<std::size_t>(request.width) *
                                                                             static_cast<std::size_t>(request.height) * 4,
                                                                         0.0F)});
-        // A direct synchronous caller does not use PathTraceDriver's cooperative cancellation, so generation is held at the value requestedGeneration asks for and never goes stale.
+        // A direct synchronous caller does not use PathTraceDriver's cooperative cancellation, so generation is held
+        // at the value requestedGeneration asks for and never goes stale.
         const std::atomic<std::uint64_t> generation{1};
         pathtracer::debug::PassStats stats;
         const pathtracer::scene::LightSet& lights =
@@ -290,7 +297,8 @@ bool HeadlessRenderer::render(const Request& request, std::string& error) {
         for (int pass = 0; pass < request.samples; ++pass) {
             // Only the trace is timed: the accumulation below it is O(pixels) and identical across revisions.
             const auto passStart = std::chrono::steady_clock::now();
-            // scrambleSeed fixed, sampleBase advancing: the pair that keeps the accumulated samples an Owen-scrambled Sobol sequence stratified against each other rather than independent draws (sampler.h).
+            // scrambleSeed fixed, sampleBase advancing: the pair that keeps accumulated samples an Owen-scrambled
+            // Sobol sequence stratified against each other rather than N independent draws.
             pathtracer::scene::renderPathTraced(request.camera, accel_, model_.shadingTriangles, model_.instances,
                                              instanceLightIndex_, lights, request.width, request.height,
                                              /*showSky=*/true, baseSettings_, perInstanceSettings_,
@@ -326,7 +334,8 @@ bool HeadlessRenderer::render(const Request& request, std::string& error) {
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - rasterStart).count();
     }
 
-    // Filters read the accumulated Beauty, so they run after the accumulation loop, and each distinct one is evaluated once however many AOVs ask for it.
+    // Filters read the accumulated Beauty, so they run after the accumulation loop, and each distinct one is
+    // evaluated once however many AOVs ask for it.
     filteredAovs_.clear();
     filtered_.clear();
     if (wantsFilter) {

@@ -94,31 +94,36 @@ std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
         const float aoMaxDistance = pathTracer.at("aoMaxDistance").get<float>();
         const float lookaheadDistance = pathTracer.at("lookaheadDistance").get<float>();
 
-        // These feed Camera::verticalFovRadians()/ev100() as denominators or bases of a physically meaningful quantity -- a zero/negative value would silently produce inf/NaN there instead of failing at this asset-load boundary. filmBack itself is validated by loadFilmBackPresets, not here -- this function never loads that file.
+        // These feed Camera::verticalFovRadians() and ev100() as denominators or bases of a physical quantity, so a
+        // zero or negative value would silently produce inf or NaN rather than a wrong-but-finite render.
         if (focalLengthMm <= 0.0F || aperture <= 0.0F || shutterSeconds <= 0.0F || iso <= 0.0F) {
             std::cerr << "loadProfileConfig: " << path
                        << " has a non-positive focalLengthMm/aperture/shutterSeconds/iso\n";
             return std::nullopt;
         }
-        // Bounded at (0,1] rather than merely positive: above 1 would render above the framebuffer and hand the display blit a downscale it has no filter for, and at or below 0 the render target collapses.
+        // Bounded at (0,1] rather than merely positive: above 1 renders above the framebuffer and hands the display
+        // blit a downscale it has no filter for; at or below 0 the render target has no pixels.
         if (renderScale <= 0.0F || renderScale > 1.0F || interactiveRenderScale <= 0.0F ||
             interactiveRenderScale > 1.0F) {
             std::cerr << "loadProfileConfig: " << path
                        << " has a renderScale/interactiveRenderScale outside (0,1]\n";
             return std::nullopt;
         }
-        // A raw index into kAovNames, dereferenced unchecked by main.cpp's startup spec block and cast to AovId by the HUD, so an out-of-range value here is an out-of-bounds read rather than a wrong picture. Checked at the load boundary like every other field, not trusted as an internal invariant.
+        // A raw index into kAovNames, dereferenced unchecked by the startup spec block and cast to AovId by the HUD,
+        // so an out-of-range value here is an out-of-bounds read rather than a wrong picture.
         if (defaultAov < 0 || defaultAov >= static_cast<int>(pathtracer::debug::AovId::Count)) {
             std::cerr << "loadProfileConfig: " << path << " has a defaultAOV outside [0, "
                        << static_cast<int>(pathtracer::debug::AovId::Count) - 1 << "]\n";
             return std::nullopt;
         }
-        // AO ray tfar. At or below zero every occlusion ray is degenerate (tfar < tnear), Embree reports no hit, and the AO AOV reads a uniform 1.0 -- the inert white this feature exists to replace.
+        // AO ray tfar. At or below zero every occlusion ray is degenerate, Embree reports no hit, and the AO AOV
+        // reads a uniform 1.0 -- inert white rather than an error.
         if (aoMaxDistance <= 0.0F) {
             std::cerr << "loadProfileConfig: " << path << " has a non-positive aoMaxDistance\n";
             return std::nullopt;
         }
-        // The Lookahead AOV's ramp divisor: at or below zero every covered pixel divides by it, so the lane is inf/NaN rather than the [0,1] gradient it is defined to be.
+        // The Lookahead AOV's ramp divisor: at or below zero every covered pixel divides by it, so the lane is
+        // inf or NaN rather than the [0,1] gradient it is defined to be.
         if (lookaheadDistance <= 0.0F) {
             std::cerr << "loadProfileConfig: " << path << " has a non-positive lookaheadDistance\n";
             return std::nullopt;
@@ -187,7 +192,8 @@ std::optional<std::vector<pathtracer::scene::Camera::FilmBackPreset>> loadFilmBa
             std::string name = presetJson.at("name").get<std::string>();
             const float widthMm = presetJson.at("widthMm").get<float>();
             const float heightMm = presetJson.at("heightMm").get<float>();
-            // widthMm/heightMm are physical sensor dimensions -- feed Camera::verticalFovRadians() and the HUD's aspect-ratio display as denominators, so a non-positive value must fail here rather than surface as inf/NaN later.
+            // widthMm and heightMm are physical sensor dimensions feeding verticalFovRadians() and the HUD aspect
+            // ratio as denominators, so a non-positive value is inf or NaN rather than an odd-looking frame.
             if (widthMm <= 0.0F || heightMm <= 0.0F) {
                 std::cerr << "loadFilmBackPresets: " << path << " has a non-positive filmBack for \""
                            << name << "\"\n";

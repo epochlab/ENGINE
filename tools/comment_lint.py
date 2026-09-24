@@ -45,6 +45,7 @@ class Stats:
     files: int = 0
     lines: int = 0
     comment_lines: int = 0
+    comment_bytes: int = 0
     over_cols: int = 0
     over_run: int = 0
     longest: int = 0
@@ -171,6 +172,7 @@ def check(path: Path, name: Path | None = None) -> tuple[list[Violation], Stats]
     if lines and lines[-1] == "":
         lines.pop()
     carries, owns = scan(text)
+    comment_bytes = sum(end - begin for begin, end, _ in comment_spans(text))
     found: list[Violation] = []
     longest = 0
     over_cols = 0
@@ -195,7 +197,7 @@ def check(path: Path, name: Path | None = None) -> tuple[list[Violation], Stats]
                 over_run += 1
                 found.append(Violation(name, run_start + 1, f"comment spans {length} lines, budget is {MAX_RUN}"))
             run_start = None
-    stats = Stats(1, len(lines), len(carries), over_cols, over_run, longest, longest_run)
+    stats = Stats(1, len(lines), len(carries), comment_bytes, over_cols, over_run, longest, longest_run)
     return found, stats
 
 
@@ -227,6 +229,7 @@ def main() -> int:
             total.files + stats.files,
             total.lines + stats.lines,
             total.comment_lines + stats.comment_lines,
+            total.comment_bytes + stats.comment_bytes,
             total.over_cols + stats.over_cols,
             total.over_run + stats.over_run,
             max(total.longest, stats.longest),
@@ -236,8 +239,8 @@ def main() -> int:
     density = 100.0 * total.comment_lines / total.lines if total.lines else 0.0
     print(
         f"comment_lint: {total.files} files, {total.lines} lines, {total.comment_lines} comment "
-        f"({density:.1f}%), {total.over_cols} over {MAX_COLS} cols (longest {total.longest}), "
-        f"{total.over_run} over {MAX_RUN} lines (longest {total.longest_run})"
+        f"({density:.1f}%, {total.comment_bytes} bytes), {total.over_cols} over {MAX_COLS} cols "
+        f"(longest {total.longest}), {total.over_run} over {MAX_RUN} lines (longest {total.longest_run})"
     )
     if args.report:
         return 0

@@ -14,7 +14,8 @@
 namespace pathtracer::debug {
 
 namespace {
-// sysctlbyname is a system boundary: a key can be absent (hw.perflevel1.* on a uniform-core machine) or report an unexpected width, so both are surfaced as an empty/zero result rather than leaving the destination uninitialized.
+// sysctlbyname is a system boundary: a key can be absent (hw.perflevel1.* on a uniform-core machine) or report an
+// unexpected width, so both are surfaced as an empty or zero result rather than asserted.
 std::string sysctlString(const char* name) {
     std::size_t size = 0;
     if (sysctlbyname(name, nullptr, &size, nullptr, 0) != 0 || size == 0) {
@@ -28,7 +29,8 @@ std::string sysctlString(const char* name) {
     return value;
 }
 
-// Reads a 32- or 64-bit integer key. The width is not fixed across keys (hw.logicalcpu is 32-bit, hw.perflevel0.l2cachesize 64-bit), so it is taken from the size sysctl itself reports rather than assumed.
+// Reads a 32- or 64-bit integer key. The width is not fixed across keys -- hw.logicalcpu is 32-bit,
+// hw.perflevel0.l2cachesize 64-bit -- so it is taken from the size sysctl itself reports.
 std::uint64_t sysctlUint(const char* name) {
     std::uint64_t value = 0;
     std::size_t size = sizeof(value);

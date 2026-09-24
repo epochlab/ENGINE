@@ -24,7 +24,8 @@ int wrapPixel(int coord, int size) {
     return wrapped < 0 ? wrapped + size : wrapped;
 }
 
-// The engine assumes every linear EXR is Rec.709-primaried (ocio_display_transform.cpp's kSceneColorSpace) but never checked -- a linear ACEScg or P3 asset would read back with systematically wrong saturation/hue and nothing would catch it. Imf::Chromaticities' default constructor is itself Rec.709 primaries, so this is a direct comparison against that default rather than a separate hardcoded constant.
+// The engine assumes every linear EXR is Rec.709-primaried (ocio_display_transform.cpp's kSceneColorSpace) and never
+// checked: a linear ACEScg or P3 asset would read back with systematically wrong saturation and hue, silently.
 bool chromaticitiesMismatchRec709(const Imf::Chromaticities& c) {
     constexpr float kTolerance = 1e-3F;
     const Imf::Chromaticities rec709;
@@ -56,7 +57,8 @@ std::size_t texelIndex(int x, int y, int width) {
     return ((static_cast<std::size_t>(y) * static_cast<std::size_t>(width)) + static_cast<std::size_t>(x)) * 4;
 }
 
-// Calls f with the stored texel vector through a two-way branch on the variant's fixed index, so f inlines; std::visit dispatches through libc++'s function-pointer table (__fmatrix), an indirect call per sample.
+// Calls f with the stored texel vector through a two-way branch on the variant's fixed index, so f inlines.
+// std::visit dispatches through libc++'s function-pointer table instead, an indirect call per sample.
 template <typename F>
 glm::vec4 withTexels(const ImageTexture& image, F&& f) {
     if (const auto* half = std::get_if<std::vector<Half>>(&image.texels)) {
@@ -71,7 +73,8 @@ glm::vec4 widenTexel(const std::vector<T>& rgba, std::size_t idx) {
             static_cast<float>(rgba[idx + 3])};
 }
 
-// Reads path's R/G/B/A as interleaved T (missing alpha = 1). nullopt, reported, on I/O failure or a non-finite texel -- callers like EnvironmentMap build importance-sampling CDFs from these values with no further validation.
+// Reads path's R/G/B/A as interleaved T, missing alpha reading 1. nullopt, reported, on I/O failure or a non-finite
+// texel: callers like EnvironmentMap build importance-sampling CDFs from these with no further validation.
 template <typename T>
 std::optional<ExrPixels<T>> readExrRgba(const std::string& path) {
     try {
@@ -82,7 +85,8 @@ std::optional<ExrPixels<T>> readExrRgba(const std::string& path) {
             return std::nullopt;
         }
 
-        // Primaries, not transfer: "linear" says nothing about which gamut the numbers are linear IN. Absence is left as the documented Rec.709 assumption; a present-but-different attribute is a real defect in the source asset (systematically wrong saturation/hue) but the image data itself is still usable, so this warns rather than rejecting the load the way the non-finite check below does.
+        // Primaries, not transfer: "linear" says nothing about which gamut the numbers are linear in. Absence is
+        // left as the documented Rec.709 assumption; a present-but-different attribute is a real defect in the asset.
         if (Imf::hasChromaticities(file.header()) &&
             chromaticitiesMismatchRec709(Imf::chromaticities(file.header()))) {
             std::cerr << "readExrRgba: " << path
@@ -100,7 +104,8 @@ std::optional<ExrPixels<T>> readExrRgba(const std::string& path) {
             image.rgba[i] = T(1);
         }
 
-        // Interleaved RGBA read straight into T: OpenEXR converts each source channel to kExrPixelType<T>, so a Float16 read turns a source at or above binary16's overflow threshold into Inf, caught by the finiteness check below rather than reaching EnvironmentMap's CDFs. base offset by dw.min handles a non-zero data-window origin, same idiom RgbaInputFile used internally.
+        // Interleaved RGBA read straight into T: OpenEXR converts each source channel to kExrPixelType<T>, so a
+        // Float16 read turns a source at or above binary16's overflow threshold into Inf, caught by the check below.
         char* base = reinterpret_cast<char*>(image.rgba.data()) -
                      ((static_cast<std::size_t>(dw.min.x) + (static_cast<std::size_t>(dw.min.y) * width)) *
                       4 * sizeof(T));
