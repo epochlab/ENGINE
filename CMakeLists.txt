@@ -80,6 +80,17 @@ if(CPPCHECK_EXE)
         COMMENT "cppcheck over src/ and tools/")
 endif()
 
+# The comment budget of notes/architect.md section 7, which had no gate on the C++ side: python/pyproject.toml's
+# ruff line-length enforced it for Python only, so the C++ tree drifted to 12.3% comments and a 3143-column line.
+# Reporting-only for now; it becomes a ctest gate once the tree is clean.
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+    add_custom_target(comment_lint
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/comment_lint.py --report
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        COMMENT "comment budget over src/, include/ and tools/")
+endif()
+
 # Opt-in (default off, zero effect on a normal build): the pathtracer parses external glTF/JSON/EXR files, where memory-safety tooling earns its keep. `cmake -B build -DPATHTRACER_SANITIZE=ON`.
 option(PATHTRACER_SANITIZE "Build with AddressSanitizer + UndefinedBehaviorSanitizer" OFF)
 if(PATHTRACER_SANITIZE)

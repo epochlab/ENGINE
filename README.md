@@ -14,6 +14,7 @@
 | [Material Library](#material-library) | Shipped presets and every `MaterialConfig` field |
 | [AOV](#aov) | All 28 debug outputs, by category |
 | [References](#references) | The literature each technique implements |
+| [Derivations](DERIVATIONS.md) | Long-form reasoning behind the implementation choices |
 
 ## Build
 
