@@ -4,6 +4,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <exception>
 #include <functional>
 #include <mutex>
 #include <thread>
@@ -19,6 +20,7 @@ public:
         return std::max(1U, std::thread::hardware_concurrency());
     }
 
+    // threadCount is floored at 1: a pool of zero workers would let parallelFor return having run nothing, silently.
     explicit ThreadPool(unsigned int threadCount = defaultThreadCount());
     ~ThreadPool();
 
@@ -27,7 +29,7 @@ public:
     ThreadPool(ThreadPool&&) = delete;
     ThreadPool& operator=(ThreadPool&&) = delete;
 
-    // Blocks until fn(i) has run for every i in [0, count), order unspecified. fn must be safe to call concurrently; not reentrant.
+    // Runs fn(i) over [0, count), unspecified order; not reentrant, fn must be concurrency-safe, an exception escaping fn is rethrown here.
     void parallelFor(int count, const std::function<void(int)>& fn);
 
     // Worker count, for callers partitioning into per-worker buckets rather than one index per output element.
@@ -49,6 +51,8 @@ private:
     std::atomic<int> nextIndex_{0};
     int count_ = 0;
     unsigned int workersRemaining_ = 0;
+    // First exception escaping fn this dispatch, held under mutex_ and rethrown by parallelFor once every worker has decremented.
+    std::exception_ptr firstException_;
 };
 
 }  // namespace pathtracer::scene

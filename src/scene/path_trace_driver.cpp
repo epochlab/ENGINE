@@ -12,7 +12,8 @@ namespace pathtracer::scene {
 
 namespace {
 
-constexpr std::chrono::milliseconds kIdlePollInterval{5};
+// Only the buffer-starvation retry still polls: nothing signals a shared_ptr release, so there is no event for a wait to key on.
+constexpr std::chrono::milliseconds kBufferRetryInterval{5};
 
 // Incremental running mean computed in the fresh pass buffer, so the published set is only read and publish is a pointer swap.
 void accumulateMean(PathTraceResult& sample, const PathTraceResult& previousMean, int n,
@@ -109,13 +110,30 @@ PathTraceDriver::PathTraceDriver(const EmbreeAccel& accel,
 PathTraceDriver::~PathTraceDriver() = default;  // jthread requests stop + joins automatically
 
 std::uint64_t PathTraceDriver::requestTrace(const Request& request) {
-    const std::lock_guard<std::mutex> lock(requestMutex_);
-    pendingRequest_.emplace(request);
-    return generation_.fetch_add(1, std::memory_order_relaxed) + 1;
+    std::uint64_t generation = 0;
+    {
+        const std::lock_guard<std::mutex> lock(requestMutex_);
+        pendingRequest_.emplace(request);
+        generation = generation_.fetch_add(1, std::memory_order_relaxed) + 1;
+        ++wakeEpoch_;
+    }
+    wakeCv_.notify_all();
+    return generation;
 }
 
 void PathTraceDriver::setSuspended(bool suspended) {
-    suspended_.store(suspended, std::memory_order_relaxed);
+    {
+        // Under the same lock as the epoch bump, so a driver about to idle on the old value sees the change instead of sleeping through it.
+        const std::lock_guard<std::mutex> lock(requestMutex_);
+        suspended_.store(suspended, std::memory_order_relaxed);
+        ++wakeEpoch_;
+    }
+    wakeCv_.notify_all();
+}
+
+void PathTraceDriver::idleUntilWake(const std::stop_token& stopToken, std::uint64_t seen) {
+    std::unique_lock<std::mutex> lock(requestMutex_);
+    wakeCv_.wait(lock, stopToken, [this, seen] { return wakeEpoch_ != seen; });
 }
 
 std::shared_ptr<const PathTraceResult> PathTraceDriver::latestResult() const {
@@ -173,9 +191,15 @@ void PathTraceDriver::driverLoop(std::stop_token stopToken) {
     int accumulated = 0;  // passes in currentMean; driver-thread-only, readers see it only as the published result's samples
 
     while (!stopToken.stop_requested()) {
+        // Read before any idle decision below: whatever makes those decisions stale also bumps this, so no wake can be missed.
+        std::uint64_t wakeSeen = 0;
+        {
+            const std::lock_guard<std::mutex> lock(requestMutex_);
+            wakeSeen = wakeEpoch_;
+        }
         const std::uint64_t requestedGeneration = generation_.load(std::memory_order_relaxed);
         if (requestedGeneration == 0 || suspended_.load(std::memory_order_relaxed)) {
-            std::this_thread::sleep_for(kIdlePollInterval);
+            idleUntilWake(stopToken, wakeSeen);
             continue;
         }
 
@@ -193,19 +217,20 @@ void PathTraceDriver::driverLoop(std::stop_token stopToken) {
 
         // NOLINTBEGIN(bugprone-unchecked-optional-access)
         if (activeRequest->width <= 0 || activeRequest->height <= 0) {
-            std::this_thread::sleep_for(kIdlePollInterval);
+            idleUntilWake(stopToken, wakeSeen);
             continue;
         }
 
+        // Converged: nothing changes until a new request or a suspend, both of which bump the epoch this wait keys on.
         if (activeRequest->maxSamples > 0 && accumulated >= activeRequest->maxSamples) {
-            std::this_thread::sleep_for(kIdlePollInterval);
+            idleUntilWake(stopToken, wakeSeen);
             continue;
         }
 
         const std::shared_ptr<PathTraceResult> pass =
             acquireFreeBuffer(activeRequest->width, activeRequest->height);
         if (pass == nullptr) {
-            std::this_thread::sleep_for(kIdlePollInterval);
+            std::this_thread::sleep_for(kBufferRetryInterval);
             continue;  // every buffer still referenced by the render thread -- retry rather than allocate
         }
 

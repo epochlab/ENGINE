@@ -1,10 +1,14 @@
 #include "pathtracer/scene/thread_pool.h"
 
+#include <algorithm>
+#include <utility>
+
 namespace pathtracer::scene {
 
 ThreadPool::ThreadPool(unsigned int threadCount) {
-    workers_.reserve(threadCount);
-    for (unsigned int i = 0; i < threadCount; ++i) {
+    const unsigned int count = std::max(1U, threadCount);
+    workers_.reserve(count);
+    for (unsigned int i = 0; i < count; ++i) {
         workers_.emplace_back([this] { workerLoop(); });
     }
 }
@@ -37,6 +41,10 @@ void ThreadPool::parallelFor(int count, const std::function<void(int)>& fn) {
     lock.lock();
     doneCv_.wait(lock, [this] { return workersRemaining_ == 0; });
     fn_ = nullptr;
+    // Rethrown on the caller's thread, after every worker is accounted for: the pass is invalid, and swallowing it would publish it.
+    if (firstException_) {
+        std::rethrow_exception(std::exchange(firstException_, nullptr));
+    }
 }
 
 void ThreadPool::workerLoop() {
@@ -52,9 +60,17 @@ void ThreadPool::workerLoop() {
         const int count = count_;
         lock.unlock();
 
-        int index = 0;
-        while ((index = nextIndex_.fetch_add(1, std::memory_order_relaxed)) < count) {
-            (*fn)(index);
+        // A throwing task must still reach the decrement below, which parallelFor waits on -- an escape would hang the caller forever.
+        try {
+            int index = 0;
+            while ((index = nextIndex_.fetch_add(1, std::memory_order_relaxed)) < count) {
+                (*fn)(index);
+            }
+        } catch (...) {
+            const std::lock_guard<std::mutex> guard(mutex_);
+            if (!firstException_) {
+                firstException_ = std::current_exception();
+            }
         }
 
         lock.lock();

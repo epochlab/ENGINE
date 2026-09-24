@@ -31,6 +31,29 @@ std::optional<pathtracer::gfx::ScalarType> parseBitDepth(const nlohmann::json& b
     return bitDepth.is_number_integer() ? pathtracer::gfx::scalarTypeFromBitDepth(bitDepth.get<int>()) : std::nullopt;
 }
 
+// The counts loadProfileConfig otherwise takes on trust. Nothing downstream re-checks them, and each has a concrete failure mode.
+bool validCounts(const WindowConfig& window, const PathTracerConfig& pathTracer, const std::string& path) {
+    bool ok = true;
+    const auto atLeast = [&](const char* name, int v, int low) {
+        if (v < low) {
+            std::cerr << "loadProfileConfig: " << path << ": " << name << " is " << v << ", expected >= " << low << "\n";
+            ok = false;
+        }
+    };
+    // At zero the per-sample loop never runs, so renderPathTraced divides by a zero filter weight and writes NaN to every AOV texel.
+    atLeast("samplesPerPixel", pathTracer.samplesPerPixel, 1);
+    // Zero is direct lighting only, a legitimate render; negative makes the depth cap reject the primary hit before it is shaded.
+    atLeast("maxBounces", pathTracer.maxBounces, 0);
+    // Negative starts roulette before the primary ray, killing paths at full throughput.
+    atLeast("russianRouletteStartBounce", pathTracer.russianRouletteStartBounce, 0);
+    // Zero is the documented unbounded case; negative would cap accumulation below the first pass.
+    atLeast("maxSamples", pathTracer.maxSamples, 0);
+    // The framebuffer the render scale multiplies, and the denominator of the primary ray's aspect ratio.
+    atLeast("window.width", window.width, 1);
+    atLeast("window.height", window.height, 1);
+    return ok;
+}
+
 }  // namespace
 
 std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
@@ -124,11 +147,24 @@ std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
             return std::nullopt;
         }
 
+        const WindowConfig windowConfig{
+            windowWidth,
+            windowHeight,
+        };
+        const PathTracerConfig pathTracerConfig{
+            samplesPerPixel,
+            maxBounces,
+            russianRouletteStartBounce,
+            maxSamples,
+            aoMaxDistance,
+            lookaheadDistance,
+        };
+        if (!validCounts(windowConfig, pathTracerConfig, path)) {
+            return std::nullopt;
+        }
+
         return ProfileConfig{
-            WindowConfig{
-                windowWidth,
-                windowHeight,
-            },
+            windowConfig,
             CameraConfig{
                 position,
                 yawDegrees,
@@ -154,14 +190,7 @@ std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
                 *displayFormat,
                 *textureType,
             },
-            PathTracerConfig{
-                samplesPerPixel,
-                maxBounces,
-                russianRouletteStartBounce,
-                maxSamples,
-                aoMaxDistance,
-                lookaheadDistance,
-            },
+            pathTracerConfig,
         };
     } catch (const nlohmann::json::exception& e) {
         std::cerr << "loadProfileConfig: " << path << ": " << e.what() << '\n';

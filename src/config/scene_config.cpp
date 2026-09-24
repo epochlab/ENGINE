@@ -58,6 +58,66 @@ std::optional<std::vector<QuadLightConfig>> parseQuadLights(const nlohmann::json
     return lights;
 }
 
+// Authored material bounds. Every field here reaches the BSDF unclamped, where out-of-range input is NaN or a negative lobe weight.
+bool validMaterialConfig(const MaterialConfig& m, const std::string& path) {
+    bool ok = true;
+    // Negated comparisons throughout, as parseQuadLights uses: a NaN fails every one of them instead of slipping through.
+    const auto unit = [&](const char* name, float v) {
+        if (!(v >= 0.0F && v <= 1.0F)) {
+            std::cerr << "loadMaterialConfig: " << path << ": " << name << " is " << v << ", expected [0,1]\n";
+            ok = false;
+        }
+    };
+    const auto unitRgb = [&](const char* name, const glm::vec3& v) {
+        if (!glm::all(glm::greaterThanEqual(v, glm::vec3(0.0F))) || !glm::all(glm::lessThanEqual(v, glm::vec3(1.0F)))) {
+            std::cerr << "loadMaterialConfig: " << path << ": " << name << " is (" << v.x << ", " << v.y << ", " << v.z
+                      << "), expected [0,1] per channel\n";
+            ok = false;
+        }
+    };
+    const auto atLeast = [&](const char* name, float v, float low) {
+        if (!(v >= low)) {
+            std::cerr << "loadMaterialConfig: " << path << ": " << name << " is " << v << ", expected >= " << low << "\n";
+            ok = false;
+        }
+    };
+
+    // Energy fractions: metallic and transmissionFactor weight lobe probabilities, which glm::mix extrapolates negative outside [0,1].
+    unit("roughnessMin", m.roughnessMin);
+    unit("roughnessMax", m.roughnessMax);
+    unit("metallicFactor", m.metallicFactor);
+    unit("transmissionFactor", m.transmissionFactor);
+    // EON's quartic albedo fit and eonUniformMixWeight's pow(r, 0.1) are defined on [0,1] only; a negative r makes that pow NaN.
+    unit("diffuseRoughness", m.diffuseRoughness);
+    // Reflectance, transmittance and Gulbrandsen edgetint are all fractions; above 1 the EON albedo inversion leaves rho unbounded.
+    unitRgb("diffuseColour", m.diffuseColour);
+    unitRgb("transmissionColor", m.transmissionColor);
+    unitRgb("edgeTint", m.edgeTint);
+    // Not bounded above: it multiplies the texture sample before the roughnessMin/Max clamp, which bounds the result anyway.
+    atLeast("roughnessFactor", m.roughnessFactor, 0.0F);
+    // A negative depth is rejected rather than treated as "no medium", which is what transmissionDepth == 0 already means.
+    atLeast("transmissionDepth", m.transmissionDepth, 0.0F);
+    // abbe <= 0 is the documented "no dispersion" case cauchyIor tests for, so only a non-finite value is wrong here.
+    atLeast("abbe", m.abbe, 0.0F);
+    // Denominator of dielectricF0's (ior-1)/(ior+1) and the etaI/etaT ratio every dielectric lobe divides by.
+    if (!(m.ior > 0.0F)) {
+        std::cerr << "loadMaterialConfig: " << path << ": ior is " << m.ior << ", expected > 0\n";
+        ok = false;
+    }
+    // Scales a raw height difference either way, so sign is free; only a non-finite value would reach normalize() as NaN.
+    if (!std::isfinite(m.bumpStrength)) {
+        std::cerr << "loadMaterialConfig: " << path << ": bumpStrength is not finite\n";
+        ok = false;
+    }
+    // resolveRoughness clamps with these as lo/hi, and std::clamp has undefined behaviour when lo > hi.
+    if (!(m.roughnessMin <= m.roughnessMax)) {
+        std::cerr << "loadMaterialConfig: " << path << ": roughnessMin " << m.roughnessMin << " exceeds roughnessMax "
+                  << m.roughnessMax << "\n";
+        ok = false;
+    }
+    return ok;
+}
+
 }  // namespace
 
 std::optional<SceneConfig> loadSceneConfig(const std::string& path) {
@@ -116,7 +176,7 @@ std::optional<MaterialConfig> loadMaterialConfig(const std::string& path) {
         nlohmann::json j;
         file >> j;
 
-        return MaterialConfig{
+        const MaterialConfig material{
             j.at("bumpStrength").get<float>(),
             j.at("roughnessMin").get<float>(),
             j.at("roughnessMax").get<float>(),
@@ -131,6 +191,10 @@ std::optional<MaterialConfig> loadMaterialConfig(const std::string& path) {
             j.value("transmissionDepth", 0.0F),
             j.value("edgeTint", glm::vec3(1.0F)),
         };
+        if (!validMaterialConfig(material, path)) {
+            return std::nullopt;
+        }
+        return material;
     } catch (const nlohmann::json::exception& e) {
         std::cerr << "loadMaterialConfig: " << path << ": " << e.what() << '\n';
         return std::nullopt;

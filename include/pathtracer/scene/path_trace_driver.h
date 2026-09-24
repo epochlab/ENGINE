@@ -2,9 +2,12 @@
 
 #include <array>
 #include <atomic>
+#include <condition_variable>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <stop_token>
 #include <thread>
 #include <vector>
 
@@ -62,6 +65,8 @@ public:
 
 private:
     void driverLoop(std::stop_token stopToken);
+    // Blocks until requestTrace or setSuspended bumps wakeEpoch_ past `seen`, or the driver stops. Replaces polling for new work.
+    void idleUntilWake(const std::stop_token& stopToken, std::uint64_t seen);
     // width/height come from the rendered buffer, not the Request that asked: the numbers describing the image that actually exists.
     void publishPassRecord(std::uint64_t generation, int passIndex, int width, int height,
                             double traceMs, double accumulateMs, double overRangeMs,
@@ -79,6 +84,10 @@ private:
     std::mutex requestMutex_;
     // Camera has no default constructor, so this cannot be a plain Request. nullopt until the first requestTrace().
     std::optional<Request> pendingRequest_;
+    // condition_variable_any, not condition_variable: only it takes the jthread stop token, so destruction interrupts the wait.
+    std::condition_variable_any wakeCv_;
+    // Bumped under requestMutex_ by anything that gives the driver work, so an idle driver waits on it instead of polling.
+    std::uint64_t wakeEpoch_ = 0;
 
     // Bumped by requestTrace, polled lock-free by the dispatch loop and by every in-flight pass's tile workers.
     std::atomic<std::uint64_t> generation_{0};
