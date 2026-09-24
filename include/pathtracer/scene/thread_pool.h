@@ -11,10 +11,12 @@
 
 namespace pathtracer::scene {
 
-// Persistent worker-thread pool for parallel rendering. Spawning and joining hardware_concurrency() std::threads on every renderPathTraced call would repeat the OS thread-creation/join cost on every progressive pass under PathTraceDriver; this pool spawns its threads once at construction and parks them (condition_variable wait, no busy-spin) between dispatches instead.
+// Persistent worker-thread pool. Spawning and joining hardware_concurrency() threads on every renderPathTraced call
+// would pay the OS thread creation cost per pass, which at interactive pass rates is a measurable share of the frame.
 class ThreadPool {
 public:
-    // One worker per hardware thread, floored at 1 (hardware_concurrency is documented to be allowed to return 0). Named rather than written inline as the default argument so callers that need to REPORT the pool size before a pool exists -- the startup spec block -- read it from here instead of restating the expression.
+    // One worker per hardware thread, floored at 1 (hardware_concurrency may return 0). Named rather than written as
+    // a default argument so the startup spec block can report the same number the pool actually used.
     [[nodiscard]] static unsigned int defaultThreadCount() {
         return std::max(1U, std::thread::hardware_concurrency());
     }
@@ -27,10 +29,12 @@ public:
     ThreadPool(ThreadPool&&) = delete;
     ThreadPool& operator=(ThreadPool&&) = delete;
 
-    // Blocks the calling thread until fn(i) has run (on some worker) for every i in [0, count) -- which worker handles which index, and the order, are unspecified; only that all complete before this returns. fn must be safe to call concurrently for different i. Index, not row: the rasterizer dispatches over rows and the path tracer over tiles (path_tracer.cpp), and the pool is indifferent to what the index means. Not reentrant: only one parallelFor call may be in flight at a time (true of every current caller -- PathTraceDriver runs one pass at a time on its single driver thread).
+    // Blocks until fn(i) has run on some worker for every i in [0, count); which worker takes which index, and in
+    // what order, is unspecified. fn must be safe to call concurrently for different i. Not reentrant: only one
+    // parallelFor may be in flight at a time. Index, not row -- the rasterizer uses rows, the path tracer tiles.
     void parallelFor(int count, const std::function<void(int)>& fn);
 
-    // Worker count, for callers that partition work into per-worker buckets rather than dispatching one index per output element -- the rasterizer's parallel clip/project builds one vector per chunk and needs to size that split to the pool.
+    // Worker count, for callers partitioning into per-worker buckets rather than one index per output element.
     [[nodiscard]] unsigned int threadCount() const { return static_cast<unsigned int>(workers_.size()); }
 
 private:
@@ -41,7 +45,8 @@ private:
     std::condition_variable dispatchCv_;
     std::condition_variable doneCv_;
 
-    // Bumped by parallelFor to hand off a new dispatch; each worker remembers the last epoch it acted on so predicate-based waiting can't miss a notification (the epoch, not the notify signal itself, is the source of truth -- immune to the lost-wakeup races a bare notify would risk).
+    // Bumped by parallelFor to hand off a dispatch; each worker remembers the last epoch it acted on, so a
+    // predicate-based wait cannot miss a notification.
     std::uint64_t epoch_ = 0;
     bool shuttingDown_ = false;
 

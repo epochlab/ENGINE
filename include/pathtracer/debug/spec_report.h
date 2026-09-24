@@ -6,7 +6,8 @@ namespace pathtracer::debug {
 
 struct GpuInfo;
 
-// Everything the startup spec block reports that isn't queryable from the host itself -- the scene that loaded, the settings it loaded under, and the one-shot costs of loading it. Bundled rather than passed as 25 parameters, same convention as HudFrameData (hud_overlay.h). Pointers are to strings owned by the caller's config, which outlive the printSpec call.
+// Everything the startup spec block reports that is not queryable from the host: the scene that loaded, the settings
+// it loaded under, and the one-shot costs of loading it.
 struct EngineSpec {
     const char* scenePath;
     const char* hdriPath;
@@ -34,8 +35,9 @@ struct EngineSpec {
     double refreshHz;  // the window's display, measured by DisplayLink
 };
 
-// One-shot provenance block on stdout, printed once at startup after the GL context exists (queryGpuInfo) and after the scene has loaded, so every number in it is real rather than a default.
-// Deliberately NOT the live dashboard: plain text, no ANSI, no redraw, so it survives being piped to a log file. Arnold prints the equivalent header at the top of every render log for the same reason -- a timing number without the machine and build it was measured on is not a measurement.
+// One-shot provenance block on stdout, printed once at startup after the GL context exists and the scene has loaded,
+// so every number in it is real rather than a default.
+// Deliberately not the live dashboard: plain text, no ANSI, no redraw, so it survives being piped to a log file.
 void printSpec(const EngineSpec& spec, const GpuInfo& gpu);
 
 }  // namespace pathtracer::debug

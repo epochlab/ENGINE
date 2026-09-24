@@ -13,6 +13,7 @@ as over-length comments of this file.
 from __future__ import annotations
 
 import argparse
+import bisect
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -66,10 +67,10 @@ def _continues(text: str, newline: int) -> bool:
     return j >= 0 and text[j] == "\\"
 
 
-def scan(text: str) -> tuple[set[int], set[int]]:
-    """Lex C++ and return (0-based lines carrying a comment, those whose comment owns the line)."""
-    carries: set[int] = set()
-    owns: set[int] = set()
+def comment_spans(text: str) -> list[tuple[int, int, bool]]:
+    """Lex C++ and return each comment as (start, end, owns_its_first_line) in character offsets."""
+    spans: list[tuple[int, int, bool]] = []
+    start = 0
     state = _CODE
     raw_close = ""
     line = 0
@@ -77,13 +78,10 @@ def scan(text: str) -> tuple[set[int], set[int]]:
     span_owns = False
     i, n = 0, len(text)
     while i < n:
-        if state in (_LINE, _BLOCK):
-            carries.add(line)
-            if span_owns:
-                owns.add(line)
         c = text[i]
         if c == "\n":
             if state == _LINE and not _continues(text, i):
+                spans.append((start, i, span_owns))
                 state = _CODE
             elif state in (_STRING, _CHAR):
                 state = _CODE
@@ -95,9 +93,7 @@ def scan(text: str) -> tuple[set[int], set[int]]:
             if c == "/" and i + 1 < n and text[i + 1] in "/*":
                 state = _LINE if text[i + 1] == "/" else _BLOCK
                 span_owns = only_space
-                carries.add(line)
-                if only_space:
-                    owns.add(line)
+                start = i
                 i += 2
                 continue
             if c == "R" and i + 1 < n and text[i + 1] == '"':
@@ -120,6 +116,7 @@ def scan(text: str) -> tuple[set[int], set[int]]:
             if c == "*" and i + 1 < n and text[i + 1] == "/":
                 state = _CODE
                 i += 2
+                spans.append((start, i, span_owns))
                 continue
             i += 1
             continue
@@ -143,6 +140,26 @@ def scan(text: str) -> tuple[set[int], set[int]]:
             i += 1
             continue
         i += 1
+    if state in (_LINE, _BLOCK):
+        spans.append((start, n, span_owns))
+    return spans
+
+
+def scan(text: str) -> tuple[set[int], set[int]]:
+    """(0-based lines carrying a comment, those whose comment owns its first line), from the spans."""
+    carries: set[int] = set()
+    owns: set[int] = set()
+    starts = [0]
+    for i, c in enumerate(text):
+        if c == "\n":
+            starts.append(i + 1)
+    for begin, end, span_owns in comment_spans(text):
+        first = bisect.bisect_right(starts, begin) - 1
+        last = bisect.bisect_right(starts, max(end - 1, begin)) - 1
+        for ln in range(first, last + 1):
+            carries.add(ln)
+            if span_owns:
+                owns.add(ln)
     return carries, owns
 
 

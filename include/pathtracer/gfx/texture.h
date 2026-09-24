@@ -16,15 +16,17 @@ public:
     Texture(Texture&& other) noexcept;
     Texture& operator=(Texture&& other) noexcept;
 
-    // Creates the texture and uploads width*height RGBA float texels (row-major, no padding) in format -- binary16 is a linear EXR's native precision but overflows to Inf above 65504, binary32 stores the source exactly. Clamped to edge, not repeated: this is a single fixed-scale image (the path tracer's display texture), not a tiled texture. No mip chain: the only consumer is a 1:1 fullscreen blit that samples LOD 0 exclusively, so generating one cost a full extra pass over the image per upload and was never read.
+    // Creates the texture and uploads width*height RGBA float texels, row-major and unpadded, in format. binary16 is
+    // a linear EXR's native precision but overflows above 65504, so scene-referred data may need Float32.
     static Texture createFromFloatPixels(int width, int height, const float* rgba, ScalarType format);
 
-    // Replaces the texel contents. Storage is reallocated only when the dimensions actually change; a same-size update is a glTexSubImage2D into the existing storage, with no allocation and nothing to re-parameterize. The distinction earns its keep because a resize is now routine rather than window-only -- the render resolution switches between the interactive and settled scales (profile_config.h) -- while the common case is the same size frame after frame as the path tracer converges.
+    // Replaces the texel contents. Storage is reallocated only when the dimensions change; a same-size update is a
+    // glTexSubImage2D into the existing storage.
     void upload(int width, int height, const float* rgba);
 
     void bind(unsigned int unit) const;
 
-    // Raw GL texture id, for callers that need it directly (e.g. PostProcessPass::draw's unsigned-int parameter) rather than through bind()'s implicit active-unit state.
+    // Raw GL texture id, for callers needing it directly (PostProcessPass::draw) rather than through bind().
     [[nodiscard]] unsigned int id() const { return id_; }
 
 private:

@@ -22,7 +22,8 @@ struct CameraConfig {
     float yawDegrees;
     float pitchDegrees;
 
-    // Resolved against assets/config/camera.json by name at startup (main.cpp) -- loadProfileConfig alone can't validate this, since it doesn't load that file.
+    // Resolved against assets/config/camera.json by name at startup. loadProfileConfig cannot validate it alone,
+    // since it does not load that file.
     std::string defaultFilmBackPresetName;
     float focalLengthMm;
     float nearClip;
@@ -38,14 +39,17 @@ struct ControlsConfig {
 };
 
 struct RenderConfig {
-    // Fraction of the framebuffer the path tracer and rasterizer actually render at, upscaled to the window by the display blit's GL_LINEAR filter. On a Retina display a 1024x576 window is a 2048x1152 framebuffer, so 1.0 traces 4x the paths the window implies. renderScale applies once the camera settles, interactiveRenderScale while it is moving -- the standard progressive-renderer trade of resolution for latency during interaction. Both in (0,1].
+    // Fraction of the framebuffer actually rendered, upscaled to the window by the display blit's GL_LINEAR filter.
     float renderScale;
     float interactiveRenderScale;
     // Index into pathtracer::debug::AovId / kAovNames (aov.h) (0 = Beauty).
     int defaultAov;
     pathtracer::gfx::OcioDisplayTransform::Lut defaultLut;
-    bool vsync;  // true paces each frame to the display's vblank (DisplayLink); false runs uncapped, bounded only by the one-frame-in-flight fence
-    // profile.json bit depths, 16 -> Float16, 32 -> Float32; 8-bit UNORM is not offered, it clamps scene-referred data to [0,1] before exposure.
+    // true paces each frame to the display's vblank (DisplayLink); false runs uncapped, bounded only by the
+    // one-frame-in-flight fence.
+    bool vsync;
+    // profile.json bit depths: 16 -> Float16, 32 -> Float32. 8-bit UNORM is not offered, as it clamps scene-referred
+    // data to [0,1] before exposure.
     pathtracer::gfx::ScalarType displayFormat;  // displayBitDepth: the path-traced display texture's GL storage
     pathtracer::gfx::ScalarType textureType;    // textureBitDepth: environment HDRI and every material texture's CPU storage
 };
@@ -59,7 +63,8 @@ struct PathTracerConfig {
     float lookaheadDistance;  // horizon of the Lookahead AOV's ramp, scene units; geometry at or beyond it reads 0
 };
 
-// Session-wide defaults: pathtracer::scene::DebugCameraController's initial (and reset-to) pose, lens/exposure params, and interactive tuning constants, plus everything else main.cpp needs at startup that isn't specific to one scene/asset (that's SceneConfig, which also owns the HDRI path) -- window size, initial debug-view state, and path-tracer settings. Externalized so these can be edited without recompiling; see assets/config/profile.json for the checked-in defaults. Grouped into window/camera/controls/render/pathTracer sub-objects, matching profile.json's shape.
+// Session-wide defaults: DebugCameraController's initial and reset pose, lens and exposure, interactive tuning
+// constants, and everything else main.cpp needs that is not specific to one scene.
 struct ProfileConfig {
     WindowConfig window;
     CameraConfig camera;
@@ -68,10 +73,12 @@ struct ProfileConfig {
     PathTracerConfig pathTracer;
 };
 
-// Reads and parses path. Returns nullopt and logs to stderr if the file is missing, unreadable, or any required field can't be found/parsed. User-editable input, not an internal invariant: failure is expected and surfaced rather than defaulted around.
+// Reads and parses path. Returns nullopt and logs to stderr if the file is missing, unreadable, or a required field
+// cannot be parsed. User-editable input, not an internal invariant: failure is expected and surfaced, not asserted.
 [[nodiscard]] std::optional<ProfileConfig> loadProfileConfig(const std::string& path);
 
-// Reads and parses the film-back preset catalogue (assets/config/camera.json): a JSON array of {name, widthMm, heightMm}. Same failure contract as loadProfileConfig, plus every entry's widthMm/heightMm must be > 0 (they feed Camera::verticalFovRadians()/an aspect-ratio display as physically meaningful denominators/ratios).
+// Reads the film-back preset catalogue (assets/config/camera.json), a JSON array of {name, widthMm, heightMm}. Same
+// failure contract as loadProfileConfig, plus a positivity check on every entry.
 [[nodiscard]] std::optional<std::vector<pathtracer::scene::Camera::FilmBackPreset>> loadFilmBackPresets(
     const std::string& path);
 

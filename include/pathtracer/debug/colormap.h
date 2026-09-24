@@ -7,11 +7,9 @@
 
 namespace pathtracer::debug {
 
-// Turbo (Mikhailov/Google 2019), a perceptually-ordered blue->green->yellow->red palette that (unlike
-// jet) has no readback ambiguity between its ends and no perceptual flat spot in the middle. 11 stops
-// at t=0,0.1,...,1.0, linearly interpolated -- a small fixed table rather than the full published
-// 256-entry LUT or a polynomial fit, since a debug AOV heatmap doesn't need colorimetric precision,
-// only a stable, recognisable gradient. t is clamped to [0,1]; out-of-range input saturates to an end colour.
+// Turbo (Mikhailov/Google 2019), a perceptually-ordered blue->green->yellow->red palette with, unlike jet, no
+// readback ambiguity between its ends and no perceptual flat spot in the middle. 11 stops at t=0,0.1,...,1.0,
+// linearly interpolated: a debug heatmap needs a stable recognisable gradient, not colorimetric precision.
 [[nodiscard]] inline glm::vec3 turbo(float t) {
     static constexpr std::array<glm::vec3, 11> kStops = {{
         {0.18995F, 0.07176F, 0.23217F},

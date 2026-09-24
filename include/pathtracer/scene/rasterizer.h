@@ -12,11 +12,13 @@
 
 namespace pathtracer::scene {
 
-// Primary-hit-only G-buffer AOVs computed by a standalone CPU rasterizer instead of tracing an Embree primary ray per pixel -- no lighting model, no BSDF sampling, no recursion, just geometry projection plus gbuffer_shading.h's material/texture sampling. Sole producer of all 14: main.cpp's selectPathTracedImage routes every one of these AOVs here, and the path tracer computes none of them (path_tracer.h). Fresnel is not among them: its path-traced form is a microfacet expectation, not a primary-hit constant, so it lives in PathTraceResult instead.
+// Primary-hit-only G-buffer AOVs from a standalone CPU rasterizer rather than an Embree primary ray per pixel: no
+// lighting, no BSDF sampling, no recursion, just geometry and material lookups at the first surface.
 struct RasterGBuffer {
     pathtracer::gfx::HdrImage iorAov;
     pathtracer::gfx::HdrImage depth;
-    // `depth` on a fixed, declared scale: 1 at the camera plane falling linearly to 0 at PathTraceSettings::lookaheadDistance, clamped, so a consumer reads proximity without sourcing a range of its own. Geometry past the horizon reads 0, the same value the row clear leaves on a miss -- `alpha` is what separates "too far" from "nothing there".
+    // `depth` on a fixed declared scale: 1 at the camera plane falling linearly to 0 at lookaheadDistance, clamped,
+    // so a consumer reads proximity without sourcing a near/far pair.
     pathtracer::gfx::HdrImage lookahead;
     pathtracer::gfx::HdrImage worldPos;
     pathtracer::gfx::HdrImage uv;
@@ -28,15 +30,17 @@ struct RasterGBuffer {
     pathtracer::gfx::HdrImage tangent;
     pathtracer::gfx::HdrImage objectId;
     pathtracer::gfx::HdrImage alpha;
-    // Color-coded, not a plain 0/1 mask: white (1,1,1) near a mesh triangle edge, each instance's falseColorForId hue (false_color.h, the same hue its pixels carry in ObjectID) near that instance's own bounding-box edge (drawn on top, so the box wins where both apply), black elsewhere.
+    // Colour-coded, not a plain 0/1 mask: white near a mesh triangle edge, each instance's falseColorForId hue
+    // (false_color.h, the hue its ObjectID pixels carry) near the instance boundary.
     pathtracer::gfx::HdrImage wireframe;
-    // Bumped by every renderRasterGBuffer call. The buffer is reused in place rather than republished, so its address no longer changes between renders and a consumer caching by pointer identity (main.cpp's display texture) would never see an update -- this is what it keys on instead. 0 means no render has run yet and the images are still empty.
+    // Bumped by every renderRasterGBuffer call. The buffer is reused in place rather than republished, so a consumer
+    // caching by pointer needs this to know the contents changed.
     std::uint64_t generation = 0;
 };
 
-// Row-parallel (ThreadPool, dispatched over rows -- each worker owns disjoint rows, so no synchronization is needed on the shared z-buffer/output images) watertight edge-function rasterization (Pineda 1988): Sutherland-Hodgman frustum clip, vertices snapped to a fixed-point grid, exact integer edge functions and the top-left fill rule, so triangles sharing an edge cover every pixel centre along it exactly once. Runs synchronously on the render thread, so these AOVs are correct on the frame a rasterizer-backed AOV is selected; Beauty and the light-transport AOVs are untouched, still converging asynchronously through PathTraceDriver. threadPool: owned by the caller and reused across calls, same convention as renderPathTraced's own parameter.
-// out: owned by the caller and reused across calls, like threadPool. Its 14 images are reallocated only when width/height change and are otherwise cleared per row inside the parallel loop -- the same bytes the old per-call makeImage zeroing touched, but written in parallel, in the row about to be overwritten, instead of as 14 sequential full-image memsets beforehand. At 2048x1152 that allocate-and-zero was 566 MB per call.
-// instanceBounds: one world-space AABB per instance (computeInstanceBounds, shading_scene.h), parallel to `instances`. Computed once at load rather than per frame -- the geometry is static and its positions are already world-space.
+// Watertight edge-function rasterization, row-parallel over ThreadPool: workers own disjoint rows, so the shared
+// z-buffer and output images need no synchronization. out is caller-owned and reused, reallocated only on a size
+// change. instanceBounds is one world-space AABB per instance (computeInstanceBounds), computed once at load.
 void renderRasterGBuffer(const Camera& camera, const std::vector<ShadingTriangle>& shadingTriangles,
                           const std::vector<MeshInstance>& instances,
                           const std::vector<PathTraceSettings>& perInstanceSettings,

@@ -5,7 +5,8 @@
 
 namespace pathtracer::gfx {
 
-// Owns one linked GL program object, move-only. Compile/link failure is surfaced via std::optional rather than std::exit: a bad shader during active development is a common, recoverable-at-the-call-site failure, unlike Window's/HudOverlay's internal-configuration failures, which have no meaningful recovery path.
+// Owns one linked GL program object, move-only. Compile and link failure is surfaced through std::optional rather
+// than std::exit: a bad shader during development is recoverable, and the caller decides.
 class ShaderProgram {
 public:
     ~ShaderProgram();
@@ -19,13 +20,14 @@ public:
     static std::optional<ShaderProgram> loadFromFiles(const std::string& vertPath,
                                                         const std::string& fragPath);
 
-    // First-class entry point, not just loadFromFiles's implementation detail: OCIO's runtime-generated GLSL text never exists as a file on disk, so it must compile from source directly.
+    // First-class entry point, not loadFromFiles's implementation detail: OCIO's runtime-generated GLSL never exists
+    // as a file, so it must compile from a string.
     static std::optional<ShaderProgram> loadFromSource(const std::string& vertSrc,
                                                         const std::string& fragSrc);
 
     void use() const;
 
-    // -1 (GL's own sentinel) if name doesn't match an active uniform. Not cached: each uniform is looked up once at startup, so a cache would solve a cost that doesn't exist.
+    // -1, GL's own sentinel, if name matches no active uniform. Not cached: each is looked up once at startup.
     [[nodiscard]] int uniformLocation(const std::string& name) const;
 
 private:

@@ -1,18 +1,9 @@
 #ifndef PATHTRACER_API_PATHTRACER_C_H
 #define PATHTRACER_API_PATHTRACER_C_H
 
-/* Flat C ABI over api/headless_renderer.h, for runtimes that cannot speak C++ -- python/pathtracer loads this
- * library with ctypes and hands numpy's own buffers straight through.
- *
- * A C ABI rather than a Python extension module on purpose: it adds no third-party dependency, needs no Python
- * headers to build, and one dylib serves every interpreter and every version of it. ctypes also drops the GIL
- * around each foreign call by construction, which is what a render taking milliseconds to seconds needs.
- *
- * Two rules hold everywhere below. Every function is safe to call on distinct PtRenderer instances from
- * distinct threads, and none is safe to call concurrently on the SAME instance -- one renderer owns one thread
- * pool and one set of reused buffers. And every output buffer is allocated by the caller: nothing here returns
- * memory that must be handed back for freeing, so there is no ownership protocol to get wrong across the
- * boundary. */
+/* Flat C ABI over api/headless_renderer.h, for runtimes that cannot speak C++; python/pathtracer loads this library
+ * with ctypes and hands numpy's own buffers straight through. Distinct PtRenderer instances are safe on distinct
+ * threads, one instance never is, and every output buffer is caller-allocated. See DERIVATIONS.md "Flat C ABI". */
 
 #ifdef __cplusplus
 extern "C" {
@@ -73,9 +64,8 @@ typedef struct {
 } PtRenderRequest;
 
 /* Renders every requested AOV. out is parallel to request->aovs, and out[i] must hold
- * width * height * pt_aov_channels(aovs[i]) floats, row-major from the top-left, tightly packed.
- * Values are scene-referred linear, unclamped and with no display transform applied.
- * Returns PT_OK, or PT_ERROR with a reason in err. */
+ * width * height * pt_aov_channels(aovs[i]) floats, row-major from the top-left, tightly packed and scene-referred
+ * linear. Returns PT_OK, or PT_ERROR with a reason in err. */
 int pt_render(PtRenderer* renderer, const PtRenderRequest* request, float* const* out, char* err, int err_cap);
 
 #ifdef __cplusplus

@@ -12,14 +12,16 @@
 
 namespace pathtracer::gfx {
 
-// CPU-side decode of a linear scanline EXR, shared by Texture's GPU upload path and any CPU-side consumer needing the same pixel data without a GPU round-trip (SH irradiance projection, path tracer material/environment lookups). Row 0 is the top, matching EXR/glTF's v=0-at-top convention.
+// CPU-side decode of a linear scanline EXR, shared by Texture's GPU upload path and any CPU consumer wanting the same
+// pixels without a GPU round trip.
 struct HdrImage {
     int width = 0;
     int height = 0;
     std::vector<float> rgba;  // row-major, 4 floats/texel, linear light
 };
 
-// A scene input image (environment HDRI, material texture) stored at a chosen ScalarType: RGBA interleaved, row-major, row 0 = top. The component type is a runtime tag fixed per image, so each sample dispatches once and the branch is perfectly predicted (PBRT-v4 Image's PixelFormat design).
+// A scene input image (environment HDRI, material texture) at a chosen ScalarType: RGBA interleaved, row-major,
+// row 0 at the top. The component type is a runtime tag fixed at load.
 struct ImageTexture {
     int width = 0;
     int height = 0;
@@ -29,13 +31,18 @@ struct ImageTexture {
     [[nodiscard]] glm::vec4 texel(int x, int y) const;
 };
 
-// Loads path's R/G/B/A straight into type's storage (OpenEXR HALF or FLOAT slices, no float intermediate). Same failure contract as loadExr; at Float16 a source at or above binary16's overflow threshold (the tie point one half-ulp above kHalfMax) becomes Inf and is rejected by that same all-finite check, naming the type; the half-ulp band below it rounds to kHalfMax like any other value.
+// Loads R/G/B/A straight into type's storage (OpenEXR HALF or FLOAT slices, no float intermediate). Same failure and
+// all-finite contract as loadExr; at Float16 a source at or above binary16's overflow threshold (the tie point one
+// half-ulp above kHalfMax) becomes Inf and is rejected by that check, while the band below it rounds to kHalfMax.
 [[nodiscard]] std::optional<ImageTexture> loadImageTexture(const std::string& path, ScalarType type);
 
-// Loads path via OpenEXR's InputFile, reading R/G/B/A directly as float -- no half round-trip, so a legitimate source value above half's 65504 ceiling survives instead of becoming inf. Every returned image is guaranteed all-finite: a non-finite texel (already inf/NaN in the source, or otherwise malformed) is rejected at load rather than propagated, since callers like EnvironmentMap build importance-sampling CDFs from these values with no further validation. OpenEXR's C++ API throws Iex-derived (std::exception-derived) exceptions on I/O failure; failures are caught here and translated to nullopt, mirroring ShaderProgram::loadFromFiles's precedent for recoverable bad external input. A source file missing an alpha channel reads back as 1.0.
+// Loads via OpenEXR's InputFile, reading R/G/B/A as float -- no half round trip, so a source value above half's 65504
+// ceiling survives. nullopt on I/O failure (Iex exceptions caught here); a file with no alpha channel reads back 1.0.
+// Every returned image is all-finite: a non-finite texel is rejected at load, since EnvironmentMap's CDFs never check.
 [[nodiscard]] std::optional<HdrImage> loadExr(const std::string& path);
 
-// Writes image as a linear scanline EXR, the inverse of loadExr and written with the same full-float channels, so a round trip through the pair is lossless. Exists for measurement rather than for asset output: comparing two renders through the 8-bit display-transformed PNG render_beauty writes cannot measure convergence, because the display transform compresses highlights and clamps everything above display range -- exactly the bright, high-variance regions a sampling change moves most, which read as zero difference once clamped. Returns false and reports on I/O failure, mirroring loadExr's nullopt.
+// Writes a linear scanline EXR, the inverse of loadExr and with the same full-float channels, so a round trip is
+// lossless. Exists for measurement: an EXR is what a comparison reads, not a display encode.
 [[nodiscard]] bool writeExr(const std::string& path, const HdrImage& image);
 
 // Bilinear sample at uv, wrapping both axes (GL_REPEAT equivalent), filtered in float after widening each texel.

@@ -32,14 +32,17 @@ struct ShadingTriangle {
 [[nodiscard]] ShadingVertex interpolateShading(const ShadingTriangle& tri, float u, float v);
 
 // Chiang/Li/Burley 2019 shadow-terminator fix: per-vertex tangent-plane projection, barycentric-blended, for use as a secondary ray origin.
-// normalSide: which side the secondary ray leaves on. The projection moves the hit along the vertex normals, so a ray going the other way (refraction entering a dielectric, TIR inside one) needs it mirrored or the origin lands past the interface it just crossed.
+// normalSide: which side the secondary ray leaves on. The projection moves the hit along the vertex normals, so a
+// ray going the other way -- refraction entering a dielectric -- must offset against the opposite side.
 [[nodiscard]] glm::vec3 shadowTerminatorOffset(const ShadingTriangle& tri, float u, float v,
                                                bool normalSide);
 
-// True for the inverted box computeInstanceBounds leaves on an instance that contributed no triangles -- the identity of a min/max reduction over nothing, not a sentinel value.
+// True for the inverted box computeInstanceBounds leaves on an instance that contributed no triangles: the identity
+// of a min/max reduction over nothing, not a sentinel.
 [[nodiscard]] bool isEmpty(const AabbBounds& box);
 
-// World-space AABB per instance, indexed by ShadingTriangle::instanceIndex (instanceCount entries). Positions are already world-space, so this is one linear pass with no transform work -- computed once at load, never per frame. Feeds the Wireframe AOV's per-object box edges (rasterizer.h).
+// World-space AABB per instance, indexed by ShadingTriangle::instanceIndex. Positions are already world-space, so
+// this is one linear pass with no transform.
 [[nodiscard]] std::vector<AabbBounds> computeInstanceBounds(const std::vector<ShadingTriangle>& triangles,
                                                              int instanceCount);
 

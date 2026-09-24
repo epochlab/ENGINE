@@ -11,7 +11,8 @@ using RTCSceneTy = struct RTCSceneTy;
 
 namespace pathtracer::scene {
 
-// Ray-scene intersection backed by Intel Embree's SIMD BVH build/traversal. One RTC_GEOMETRY_TYPE_TRIANGLE geometry over a static triangle soup, built once at scene load -- no refit/update API, the scene is static. Backs the path tracer's primary/shadow/bounce rays via single-ray rtcIntersect1/rtcOccluded1, called from tracePath (path_tracer.cpp). Correctness is exercised by tools/embree_validate.cpp against bruteForceIntersect (ray_types.h).
+// Ray-scene intersection over Intel Embree's SIMD BVH. One RTC_GEOMETRY_TYPE_TRIANGLE geometry over a static
+// triangle soup, built once at scene load.
 class EmbreeAccel {
 public:
     ~EmbreeAccel();
@@ -21,12 +22,14 @@ public:
     EmbreeAccel(EmbreeAccel&& other) noexcept;
     EmbreeAccel& operator=(EmbreeAccel&& other) noexcept;
 
-    // nullopt if the Embree device or scene fails to initialize (logged to stderr) -- a real failure mode (native library/driver init), surfaced at the call site rather than assumed to always succeed.
+    // nullopt if the Embree device or scene fails to initialize, logged to stderr: a real failure mode in native
+    // library init, surfaced at the call site rather than aborting.
     static std::optional<EmbreeAccel> build(std::vector<Triangle> triangles);
 
     [[nodiscard]] std::optional<Hit> intersect(const Ray& ray) const;
 
-    // Any-hit query for shadow rays (NEE): true if anything blocks [ray.tMin, ray.tMax], without finding the *closest* blocker -- cheaper than intersect() for this use since occlusion doesn't care which occluder is nearest.
+    // Any-hit query for shadow rays: true if anything blocks [ray.tMin, ray.tMax], without finding the closest
+    // blocker -- cheaper than intersect(), which is all NEE needs.
     [[nodiscard]] bool occluded(const Ray& ray) const;
 
     [[nodiscard]] int triangleCount() const { return triangleCount_; }
@@ -41,7 +44,8 @@ private:
     int triangleCount_ = 0;
 };
 
-// Bytes Embree has allocated for BVH/geometry data, via its own device memory monitor (rtcSetDeviceMemoryMonitorFunction) rather than an estimate from triangle count. Device-global, so it counts everything built on any device this process created -- exact today, since build() creates one device holding one scene, and it stops being exact the moment a second scene is attached.
+// Bytes Embree has allocated for BVH and geometry data, through its own device memory monitor rather than an
+// estimate from triangle count.
 [[nodiscard]] std::size_t embreeAllocatedBytes();
 
 }  // namespace pathtracer::scene

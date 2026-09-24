@@ -4,12 +4,14 @@
 #include <string>
 #include <utility>
 
-// Forward-declared rather than #include <GLFW/glfw3.h>: a pointer to an incomplete type is sufficient here, and keeping GLFW out of this public header means consumers that only need shouldClose()/pollEvents()/etc. don't drag GLFW/GL declarations in with them.
+// Forward-declared rather than including <GLFW/glfw3.h>: a pointer to an incomplete type suffices, and keeping GLFW
+// out of this public header means consumers needing only the size or the cursor do not pull it in.
 struct GLFWwindow;
 
 namespace pathtracer::platform {
 
-// Owns a single GLFWwindow and its OpenGL 4.1 core, forward-compatible context. glfwInit()/glfwSetErrorCallback()/glfwTerminate() bracket every Window's lifetime but are the caller's responsibility (main.cpp): a Window represents one window, not the GLFW library instance.
+// Owns one GLFWwindow and its OpenGL 4.1 core forward-compatible context. glfwInit, glfwSetErrorCallback and
+// glfwTerminate bracket every Window's lifetime but remain the caller's responsibility.
 class Window {
 public:
     Window(int width, int height, const std::string& title);
@@ -28,13 +30,16 @@ public:
     // For backends that need the raw GLFW handle (e.g. ImGui's GLFW backend); everything else should use the typed accessors above.
     [[nodiscard]] GLFWwindow* nativeHandle() const noexcept { return window_; }
 
-    // {width, height} in framebuffer pixels (glfwGetFramebufferSize), not screen points: the two differ by 2x on Retina displays. Queried fresh each call, not cached from a resize event.
+    // {width, height} in framebuffer pixels (glfwGetFramebufferSize), not screen points: the two differ by 2x on
+    // Retina. Queried fresh each call rather than cached from a resize event.
     [[nodiscard]] std::pair<int, int> framebufferSize() const;
 
-    // {width, height} in screen points (glfwGetWindowSize), same units as cursorPosition(). Use to scale cursor into framebufferSize()/image pixel space; don't divide cursorPosition() by framebufferSize() directly.
+    // {width, height} in screen points (glfwGetWindowSize), the units cursorPosition() uses. Scale the cursor into
+    // framebufferSize() space with this; never divide cursorPosition() by the framebuffer size.
     [[nodiscard]] std::pair<int, int> windowSize() const;
 
-    // Invoked on GLFW's key event (GLFW_PRESS/GLFW_RELEASE/GLFW_REPEAT). Scancode/mods aren't forwarded: no consumer needs them. Single callback slot, shared by every edge-triggered hotkey; WASD/QE need continuous per-frame state instead, so they use isKeyDown() below.
+    // Invoked on GLFW key events. Scancode and mods are not forwarded because no consumer needs them. One callback
+    // slot, shared by every edge-triggered hotkey.
     using KeyCallback = std::function<void(int key, int action)>;
     void setKeyCallback(KeyCallback callback);
 
@@ -45,10 +50,11 @@ public:
     using MouseButtonCallback = std::function<void(int button, int action)>;
     void setMouseButtonCallback(MouseButtonCallback callback);
 
-    // Polled cursor position in screen coordinates (glfwGetCursorPos). Orbit only needs a once-per-frame delta between consecutive polls, so a callback (like resize/key) isn't needed here.
+    // Polled cursor position in screen coordinates. Orbit needs only a once-per-frame delta between polls, so unlike
+    // resize and key this needs no callback.
     [[nodiscard]] std::pair<double, double> cursorPosition() const;
 
-    // Hides and locks the cursor to the window (GLFW_CURSOR_DISABLED) while true, e.g. during an LMB-drag orbit; restores the normal cursor when false.
+    // Hides and locks the cursor to the window (GLFW_CURSOR_DISABLED) while true, as during an LMB-drag orbit.
     void setCursorLocked(bool locked);
 
 private:

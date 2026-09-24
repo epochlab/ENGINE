@@ -19,7 +19,8 @@
 
 namespace pathtracer::scene {
 
-// Drives renderPathTraced() continuously on a dedicated background thread, off the render/UI thread, running short passes and accumulating them into a running-mean PathTraceResult that converges over time while the requested state (camera/scene) stays unchanged. The render thread only ever calls requestTrace() (a mutex-guarded struct copy + an atomic bump) and latestResult() (one mutex-guarded shared_ptr copy) -- it never blocks on a trace. A request superseded before the driver picks it up is simply never run; a request superseded while a pass is in flight is discarded (renderPathTraced's generation/requestedGeneration cancellation) rather than merged, so the accumulator never mixes samples from two different camera poses.
+// Drives renderPathTraced() on a dedicated background thread, off the render/UI thread, running short passes and
+// accumulating them into a running-mean PathTraceResult that converges while the UI stays responsive.
 class PathTraceDriver {
 public:
     struct Request {
@@ -36,7 +37,9 @@ public:
         int maxSamples = 0;  // accumulated-pass cap; 0 = unbounded
     };
 
-    // accel/shadingTriangles/instances/instanceLightIndex/environmentMap/quadLights/perInstanceSettings must already be at their final, permanent address and must outlive the driver (EmbreeAccel has no refit/update API -- the scene is static) -- held by reference, not copied per-request. Do not construct this as part of the same aggregate-initialization expression that also constructs those referenced objects (e.g. AppResources's designated-initializer list): a bare identifier there would still name the pre-move local, and AppResources's return-type conversion to std::optional<AppResources> move-constructs once more regardless -- either way a reference captured that early would dangle. Construct this only after the referenced object is confirmed at its final address (main.cpp emplaces AppResources::pathTraceDriver, itself a std::optional, right after initializeApp() returns).
+    // Every referenced scene object must already be at its final address and outlive the driver: EmbreeAccel has no
+    // refit, and LightSet stores a pointer and a reference rather than copies. Never construct this inside the same
+    // aggregate initialization that builds those objects -- a reference captured that early dangles after the move.
     PathTraceDriver(const EmbreeAccel& accel, const std::vector<ShadingTriangle>& shadingTriangles,
                      const std::vector<MeshInstance>& instances,
                      const std::vector<int>& instanceLightIndex,
@@ -49,22 +52,27 @@ public:
     PathTraceDriver(PathTraceDriver&&) = delete;
     PathTraceDriver& operator=(PathTraceDriver&&) = delete;
 
-    // Render-thread-only. Bumps the generation counter and replaces the pending request -- does not queue. Returns the new generation, which every PassRecord of this request's accumulation carries.
+    // Render-thread-only. Bumps the generation and replaces the pending request -- it does not queue. Returns the new
+    // generation, which every PassRecord of this request's accumulation carries.
     std::uint64_t requestTrace(const Request& request);
 
-    // Render-thread-only, call at most once per rendered frame. Null until the first pass of the app's life completes. Cheap (one mutex-guarded shared_ptr copy) -- safe to call every frame, and the strong ref keeps that pass's images alive for as long as the caller holds it, however many newer passes the driver publishes meanwhile. The result carries its own generation and sample count, the only convergence readout: a count kept beside the pointer would be a second variable a reader could pair with the wrong image.
+    // Render-thread-only, at most once per rendered frame. Null until the first pass completes. One mutex-guarded
+    // shared_ptr copy, so it is safe every frame and the strong reference keeps the image alive while it is read.
     [[nodiscard]] std::shared_ptr<const PathTraceResult> latestResult() const;
 
-    // Render-thread-only. Parks the driver while nothing can read its output -- a rasterizer-backed AOV is selected, so no pass this thread completes will ever be displayed. Takes effect at the next pass boundary: driverLoop polls the flag where it dispatches, and idles instead.
-    // NON-DESTRUCTIVE, and that is the whole contract. generation_ is both the restart signal and the sampler's scramble seed (renderPathTraced), so bumping it here -- which is what this used to do, to cancel the pass in flight -- threw away the accumulation along with the pass, and a converged image cost a full restart just to look at a G-buffer AOV and come back. Resuming now continues the same generation from the same sample count. The price is that the in-flight pass runs to completion rather than being cancelled: at most one pass of latency, for work that is valid and is accumulated.
+    // Render-thread-only. Parks the driver while nothing can read its output -- a rasterizer-backed AOV is selected.
+    // Takes effect at the next pass boundary. Non-destructive, and that is the whole contract: generation_ is both the
+    // restart signal and the sampler scramble seed, so bumping it here would restart the accumulation, not pause it.
     void setSuspended(bool suspended);
 
-    // Render-thread-only. The most recent pass's phase timings and ray counts, including one that was cancelled mid-flight -- generation == 0 until the first pass of the app's life finishes. One POD copy under statsMutex_, cheap enough to call per frame, though the dashboard only asks at its own refresh rate.
+    // Render-thread-only. The most recent pass's phase timings and ray counts, a cancelled one included; generation is
+    // 0 until the first pass finishes. One POD copy under the stats mutex.
     [[nodiscard]] pathtracer::debug::PassRecord lastPassRecord() const;
 
 private:
     void driverLoop(std::stop_token stopToken);
-    // width/height come from the rendered buffer, not the Request that asked for it: the same numbers, and it describes the image that actually exists.
+    // width/height come from the rendered buffer, not the Request that asked: the same numbers, describing the image
+    // that actually exists.
     void publishPassRecord(std::uint64_t generation, int passIndex, int width, int height,
                             double traceMs, double accumulateMs, double overRangeMs,
                             double publishMs, double passMs, bool cancelled);
@@ -79,18 +87,21 @@ private:
     const std::vector<PathTraceSettings>& perInstanceSettings_;
 
     std::mutex requestMutex_;
-    // Camera has no default constructor, so this can't be a plain Request -- std::nullopt until the first requestTrace() call, which is fine: driverLoop never reads it before generation_ (whose first bump happens in the same requestTrace call, under the same lock) has gone non-zero.
+    // Camera has no default constructor, so this cannot be a plain Request. nullopt until the first requestTrace(),
+    // which driverLoop never reads before generation_ is first bumped.
     std::optional<Request> pendingRequest_;
 
-    // Bumped by requestTrace, polled lock-free by both the driver's dispatch loop and (via renderPathTraced's cancellation parameter) every in-flight pass's tile workers.
+    // Bumped by requestTrace, polled lock-free by the dispatch loop and by every in-flight pass's tile workers.
     std::atomic<std::uint64_t> generation_{0};
     // Set by setSuspended; polled by driverLoop, which idles instead of dispatching while it is true.
     std::atomic<bool> suspended_{false};
 
-    // Ray/tile counters for the pass in flight, reset before each dispatch and read after it returns -- driver-thread-owned, reused for the driver's life, so a pass allocates nothing. Declared before thread_, like threadPool_, so it exists before driverLoop starts.
+    // Ray/tile counters for the pass in flight, reset before each dispatch and read after: driver-thread-owned and
+    // reused for the driver's life, so a pass allocates nothing. Declared before thread_ so it outlives driverLoop.
     pathtracer::debug::PassStats passStats_;
 
-    // Republished on every finished pass, cancelled ones included, guarded against the render thread's lastPassRecord() read. Separate from resultMutex_ so a dashboard read never contends with the image publish.
+    // Republished on every finished pass, cancelled ones included, guarded against the render thread's read. Separate
+    // from resultMutex_ so a dashboard read never contends with the image publish.
     mutable std::mutex statsMutex_;
     pathtracer::debug::PassRecord lastPass_;
 
@@ -98,17 +109,21 @@ private:
     mutable std::mutex resultMutex_;
     std::shared_ptr<const PathTraceResult> result_;
 
-    // Driver-thread-only rotation of buffer sets, allocated on first use and reused for the process's life -- renderPathTraced writes into one of these instead of allocating 8 fresh images per pass. Four, because up to three can be pinned at once: the mean the driver just published, the frame-local snapshot the render thread holds for the duration of a frame, and the older result app.pathTraceDisplayedOwner still holds because the display texture was built from it. The fourth is the one being written.
+    // Driver-thread-only rotation of buffer sets, allocated on first use and reused for the process life, so
+    // renderPathTraced writes into one of these rather than allocating 10 fresh images per pass.
     std::array<std::shared_ptr<PathTraceResult>, 4> bufferPool_;
 
-    // Per-chunk private accumulators for reduceOverRange, driver-thread-owned and reused across passes -- the same convention as passStats_ and the buffer pool, and the reason a steady-state pass allocates nothing. 128 KiB per worker, which stays a per-core working set because no chunk ever touches another's.
+    // Per-chunk private accumulators for reduceOverRange, driver-thread-owned and reused across passes -- the same
+    // convention as passStats_ and the buffer pool, and why a steady-state pass allocates nothing.
     std::vector<OverRangeHistogram> overRangeHistograms_;
     std::vector<float> overRangePeaks_;
 
-    // Persistent parallel dispatch for renderPathTraced and its accumulate step, reused across every pass -- see ThreadPool's own doc comment. Declared before thread_ so it's fully constructed (and its workers parked and ready) before driverLoop starts, and outlives every renderPathTraced call driverLoop makes (destroyed only after thread_ has stopped and joined).
+    // Persistent parallel dispatch for renderPathTraced and its accumulate step, reused across every pass. Declared
+    // before thread_ so its workers exist before driverLoop can dispatch to them.
     ThreadPool threadPool_;
 
-    // Declared last: constructed last (starts driverLoop only once every member above exists), destroyed first (std::jthread's destructor requests a stop and joins before any member above -- or, per the constructor's own precondition, the objects accel_/shadingTriangles_/instances_/environmentMap_/perInstanceSettings_ reference -- could be invalidated by outer teardown).
+    // Declared last so it is constructed last (driverLoop starts only once every member exists) and destroyed first
+    // (jthread's destructor requests a stop and joins before any member above is torn down).
     std::jthread thread_;
 };
 

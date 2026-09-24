@@ -10,8 +10,9 @@
 
 namespace pathtracer::scene {
 
-// A rectangular emitter: origin is one corner, edge0/edge1 span the two sides. Urena/Fajardo/King's spherical-rectangle sampling below is exact only for a rectangle, so edge0 must be perpendicular to edge1 -- enforced for authored scenes by loadSceneConfig (scene_config.h), assumed for lights built directly in the validators.
-// Emits uniformly from the face whose outward normal is normalize(cross(edge0, edge1)); the back face emits nothing unless twoSided (Arnold quad_light semantics).
+// A rectangular emitter: origin is one corner, edge0/edge1 span the sides. Urena/Fajardo/King's spherical-rectangle
+// sampling is exact only for a rectangle, so edge0 must be perpendicular to edge1. Emits from the face whose outward
+// normal is normalize(cross(edge0, edge1)); the back face is dark unless twoSided (Arnold quad_light semantics).
 struct QuadLight {
     QuadLight(glm::vec3 origin, glm::vec3 edge0, glm::vec3 edge1, glm::vec3 radiance, bool twoSided = false)
         : origin(origin), edge0(edge0), edge1(edge1), radiance(radiance), twoSided(twoSided),
@@ -22,18 +23,14 @@ struct QuadLight {
     glm::vec3 edge1;
     glm::vec3 radiance;  // constant Le over the emitting face, colour * intensity
     bool twoSided;
-    // Derived from edge0/edge1 once here rather than per query: quadRadianceToward runs on every NEE sample and every emitter hit, and appendQuadLights needs the same vector again when it injects the light's triangles. Production light types precompute their frame at build for the same reason.
+    // Derived from edge0/edge1 once here rather than per query: quadRadianceToward runs on every NEE sample and
+    // every emitter hit, and appendQuadLights needs the same vector.
     glm::vec3 normal;
 };
 
-// Ureña, Fajardo & King, "An Area-Preserving Parametrization for Spherical Rectangles" (EGSR 2013),
-// as given in Pharr/Jakob/Humphreys, Physically Based Rendering (4th ed.) Sec 12.5.3 -- an exact,
-// constant-pdf solid-angle sampler for a rectangular light, avoiding the variance a naive uniform-
-// area sample-then-reweight strategy pays wherever the rectangle subtends very different solid
-// angles across its own extent (a receiver near one edge, say). buildSphericalRectangle and
-// sample()/LightSet::pdfQuad below all derive the SAME solid angle, so a light's pdf can never
-// describe a different measure than the direction its own sampler actually drew -- the same f/pdf
-// discipline environment_map.cpp's equirectTexelOf already enforces for the environment light.
+// Ureña, Fajardo & King, "An Area-Preserving Parametrization for Spherical Rectangles" (EGSR 2013), as given in
+// PBRT 4th ed. 12.5.3: an exact constant-pdf solid-angle sampler, avoiding the variance a uniform-area
+// sample-then-reweight pays. buildSphericalRectangle, sample() and pdfQuad all derive the same solid angle.
 struct SphericalRectangle {
     glm::vec3 referencePoint;
     glm::vec3 x, y, z;  // local orthonormal frame, z chosen so the reference point has z0 < 0
@@ -59,13 +56,9 @@ struct LightSample {
     float distance;       // Euclidean distance to the sampled point; FLT_MAX for the environment
 };
 
-// The set of lights NEE can sample from in one renderPathTraced() pass: the environment map (or none
-// -- the HUD's environment-light toggle off) plus zero or more rectangular emitters. Selection is
-// uniform over whichever of these are present -- one categorical draw when there are 2+ lights, no
-// draw at all when there is exactly 1 (a degenerate one-element categorical needs no random
-// variate), which is what keeps a single-environment/no-quad scene's sample sequence -- and
-// therefore its rendered image -- bit-identical to a renderer with no light-selection mechanism at
-// all. Built once per renderPathTraced() pass from that pass's env/quad state and held by const reference through the whole tile loop -- a non-owning view, not a value type: it holds references, so it is non-assignable and every referent must outlive it.
+// The set of lights NEE can sample from in one renderPathTraced() pass: the environment map, or none when the HUD
+// toggle is off, plus zero or more rectangular emitters. Selection is uniform, and a single-light scene draws no
+// variate at all, which keeps its sample sequence bit-identical to a renderer with no selection mechanism.
 class LightSet {
 public:
     // environment == nullptr excludes it from the set entirely (no NEE, no MIS, no miss radiance at

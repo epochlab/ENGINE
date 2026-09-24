@@ -5,7 +5,8 @@
 
 namespace pathtracer::debug {
 
-// Fixed-size ring buffer of recent frame times (ms). 120 entries is a sparkline-width choice (~2s at 60fps), not a precision one: fps()/avgMs()/minMs()/maxMs() scan the whole buffer each call, cheap at this size, so no running-aggregate bookkeeping is needed.
+// Fixed-size ring buffer of recent frame times in ms. 120 entries is a sparkline-width choice (~2s at 60fps), not a
+// precision one: the accessors scan the whole ring, which at this size is cheaper than maintaining incremental state.
 class FrameStats {
 public:
     static constexpr int kHistoryLength = 120;
@@ -23,8 +24,9 @@ public:
     [[nodiscard]] float minMs() const;
     [[nodiscard]] float maxMs() const;
 
-    // Percentile of the recorded frame times, fraction in [0,1] (0.5 = median). Copies the filled span onto the stack and nth_elements it: no allocation, at most kHistoryLength floats. A mean hides hitches by construction -- one 50ms frame in 120 moves a 60fps average by 0.4fps and is exactly the frame a user feels -- so the dashboard leads with p50/p95 and keeps the mean as a courtesy number.
-    // kHistoryLength samples cannot express a p99: the 99th percentile of 120 is the second-largest value, not a tail estimate. Callers should ask for p95 and read maxMs() for the tail.
+    // Percentile of the recorded frame times, fraction in [0,1] (0.5 = median). Copies the filled span onto the
+    // stack and nth_elements it, so no allocation. kHistoryLength cannot express a p99 -- the 99th percentile of
+    // 120 is the second-largest value, not a tail estimate -- so ask for p95 and read it as "worst few frames".
     [[nodiscard]] float percentileMs(float fraction) const;
 
     // Raw buffer + write cursor, for ImGui::PlotLines's values_offset.

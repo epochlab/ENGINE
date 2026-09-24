@@ -5,7 +5,8 @@
 
 namespace pathtracer::debug {
 
-// GL_RENDERER/GL_VERSION; the refresh rate is the window's own display's, measured by DisplayLink. No GL_VENDOR: on this project's sole target (macOS/Apple Silicon), GL_RENDERER already reads "Apple M1" etc. -- a separate vendor string would just repeat it. None of these change at runtime, so queryGpuInfo() is meant to be called once at startup, not per frame.
+// GL_RENDERER and GL_VERSION; the refresh rate is the window's own display's, measured by DisplayLink. No GL_VENDOR:
+// on this project's sole target, GL_RENDERER already names the part.
 struct GpuInfo {
     std::string renderer;
     std::string version;
@@ -13,7 +14,8 @@ struct GpuInfo {
 
 [[nodiscard]] GpuInfo queryGpuInfo();
 
-// Host CPU/memory topology from sysctl, for the startup spec block. No CPU brand string: GL_RENDERER (GpuInfo) already reads "Apple M1" on a unified-memory part, so machdep.cpu.brand_string was a verbatim duplicate of a field the spec block prints anyway. Apple Silicon reports two performance levels; perfLevel1* stay zeroed on a uniform-core machine, where hw.perflevel1.* simply does not exist. Total RAM is deliberately absent -- memory_tracker.h's totalSystemBytes() already reads hw.memsize and is its single owner. Needs no GL context, unlike queryGpuInfo, so it can be called before the window exists.
+// Host CPU and memory topology from sysctl, for the startup spec block. No CPU brand string: GL_RENDERER already
+// reads "Apple M1" on a unified-memory part.
 struct HostInfo {
     std::string perfLevel0Name;         // hw.perflevel0.name -- "Performance" on Apple Silicon
     int perfLevel0LogicalCpu = 0;       // hw.perflevel0.logicalcpu
@@ -29,7 +31,8 @@ struct HostInfo {
 
 [[nodiscard]] HostInfo queryHostInfo();
 
-// Compile-time build identity. Nothing here can change after link, so nothing is queried at runtime. gitSha/buildType/march/ipo come from the PATHTRACER_* defines CMakeLists.txt sets; compiler comes from __VERSION__, which needs no build-system support at all. Pointers to string literals, never freed.
+// Compile-time build identity. Nothing here can change after link, so nothing is queried at runtime; the fields come
+// from the PATHTRACER_* defines CMakeLists sets.
 struct BuildInfo {
     const char* compiler;
     const char* buildType;
@@ -40,10 +43,12 @@ struct BuildInfo {
 
 [[nodiscard]] BuildInfo buildInfo();
 
-// The running executable's Mach-O LC_UUID as 32 lowercase hex digits, empty if the image carries none. Identifies the exact binary measured, which the git SHA cannot on a dirty tree. queryHostInfo/buildInfo/executableUuid live in host_info.cpp, which needs no GL, so headless tools can link them.
+// The running executable's Mach-O LC_UUID as 32 lowercase hex digits, empty if the image carries none. Identifies the
+// exact binary measured, which a git SHA cannot on a dirty tree.
 [[nodiscard]] std::string executableUuid();
 
-// Dependency versions. GLFW/GLEW are queried at runtime because they are dynamically loaded, so a header constant could lie about what actually got loaded; glm is header-only, so its macro IS the truth. Embree/OpenEXR/OCIO report their compile-time header versions -- a swapped dylib would go unreported, an accepted limitation, since the runtime alternatives need a live RTCDevice or OCIO config this function does not own.
+// Dependency versions. GLFW and GLEW are queried at runtime because they are dynamically loaded and a header constant
+// could lie about what was actually loaded; glm is header-only, so its macro is the truth.
 struct LibraryVersions {
     std::string embree;
     std::string openexr;
