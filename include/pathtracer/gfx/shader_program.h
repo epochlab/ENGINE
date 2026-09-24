@@ -5,8 +5,7 @@
 
 namespace pathtracer::gfx {
 
-// Owns one linked GL program object, move-only. Compile and link failure is surfaced through std::optional rather
-// than std::exit: a bad shader during development is recoverable, and the caller decides.
+// Owns one linked GL program object, move-only. Compile and link failure returns nullopt rather than exiting: the caller decides.
 class ShaderProgram {
 public:
     ~ShaderProgram();
@@ -20,8 +19,7 @@ public:
     static std::optional<ShaderProgram> loadFromFiles(const std::string& vertPath,
                                                         const std::string& fragPath);
 
-    // First-class entry point, not loadFromFiles's implementation detail: OCIO's runtime-generated GLSL never exists
-    // as a file, so it must compile from a string.
+    // First-class entry point, not loadFromFiles's detail: OCIO's runtime-generated GLSL never exists as a file.
     static std::optional<ShaderProgram> loadFromSource(const std::string& vertSrc,
                                                         const std::string& fragSrc);
 

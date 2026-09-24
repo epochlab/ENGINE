@@ -25,42 +25,33 @@
 
 namespace pathtracer::api {
 
-// A scene loaded once and rendered many times, with no window, no GL and no progressive driver -- the synchronous half
-// of what PathTraceDriver does asynchronously for the viewer. Neither copyable nor movable: lights_ holds a pointer to
-// environmentMap_ and a reference to quadLights_, and ThreadPool owns running threads.
+// A scene loaded once and rendered many times, no window or GL: the synchronous half of PathTraceDriver. Neither copyable nor movable.
 class HeadlessRenderer {
 public:
     struct Request {
         pathtracer::scene::Camera camera;
         int width = 0;
         int height = 0;
-        // Path-traced passes at one sample each, averaged. Ignored when every requested AOV comes from the rasterizer,
-        // which is not a sampled estimator and converges in one pass.
+        // Path-traced passes at one sample each, averaged. Ignored when every requested AOV comes from the rasterizer.
         int samples = 1;
-        // Randomizes the sampler's Owen scramble, held fixed across the passes of one render (sampler.h). Callers choose
-        // the seed, never the per-pass sample index: supplying that pair wrongly degrades stratified sampling silently.
+        // Randomizes the sampler's Owen scramble, fixed across one render's passes. Callers choose the seed, never the per-pass index.
         std::uint32_t scrambleSeed = 1;
         std::vector<pathtracer::debug::AovId> aovs;
-        // nullopt keeps the scene's authored environment.lightEnabled; true/false override it, which is what renders both
-        // the lit and the classic unlit Cornell from one scene.json.
+        // nullopt keeps the scene's authored environment.lightEnabled; true/false override it, so one scene.json renders lit and unlit.
         std::optional<bool> envLightEnabled;
     };
 
-    // Per-pass wall clock and ray counts for the most recent render(), so a benchmark measures what the renderer did
-    // rather than re-deriving it.
+    // Per-pass wall clock and ray counts for the most recent render(), so a benchmark measures the renderer rather than re-deriving it.
     struct RenderStats {
-        // One entry per path-traced pass. Empty when the request needed no light transport, the normal case for a
-        // rasterizer-backed AOV -- not an error, and a consumer must not assume a pass happened.
+        // One entry per path-traced pass. Empty when the request needed no light transport -- not an error; do not assume a pass happened.
         std::vector<double> passMilliseconds;
-        // Wall clock of the one scan-conversion and of the Beauty-filter evaluations, zero when that producer did not
-        // run. Separate from passMilliseconds: they measure different work, so averaging them together means nothing.
+        // Wall clock of the scan-conversion and Beauty-filter work, 0 when it did not run; averaging it with passes would mean nothing.
         double rasterMilliseconds = 0.0;
         double filterMilliseconds = 0.0;
         pathtracer::debug::RayCounts rays;
     };
 
-    // nullptr on any load failure, with the reason in `error`. assetRoot holds config/, scenes/, geometry/ and
-    // materials/; scenePath is relative to it.
+    // nullptr on any load failure, reason in `error`. assetRoot holds config/, scenes/, geometry/ and materials/; scenePath is relative.
     [[nodiscard]] static std::unique_ptr<HeadlessRenderer> open(const std::string& assetRoot,
                                                                  const std::string& scenePath,
                                                                  std::string& error);
@@ -76,17 +67,14 @@ public:
     [[nodiscard]] int defaultWidth() const { return profile_.window.width; }
     [[nodiscard]] int defaultHeight() const { return profile_.window.height; }
 
-    // Blocking. outputs is parallel to request.aovs, and outputs[i] must hold width * height * aovChannels(aovs[i])
-    // floats -- caller-allocated, so no buffer ownership crosses the boundary (the C ABI passes numpy memory straight
-    // through). Each producer runs at most once however many of its AOVs are asked for.
+    // Blocking. outputs parallels request.aovs, caller-allocated at width * height * aovChannels(aovs[i]); each producer runs at most once.
     [[nodiscard]] bool render(const Request& request, std::span<float* const> outputs,
                                std::string& error);
 
     // Same render with no packing step, for a C++ caller reading results through lastImage() as 4-channel HdrImage.
     [[nodiscard]] bool render(const Request& request, std::string& error);
 
-    // The full 4-channel buffer behind one AOV of the most recent render(), for a consumer wanting HdrImage itself --
-    // an EXR write or a display encode. Valid until the next render(), and the AOV must have been requested.
+    // The full 4-channel buffer behind one requested AOV of the most recent render(), valid until the next -- for an EXR write or encode.
     [[nodiscard]] const pathtracer::gfx::HdrImage& lastImage(pathtracer::debug::AovId aov) const;
     [[nodiscard]] const RenderStats& lastStats() const { return stats_; }
 
@@ -117,8 +105,7 @@ private:
     // Declaration order is load-bearing: lights_ captures &environmentMap_ and a reference to quadLights_.
     pathtracer::scene::EnvironmentMap environmentMap_;
     std::vector<pathtracer::scene::QuadLight> quadLights_;
-    // Both light sets are built at load and chosen per request: LightSet stores only a pointer and a reference, so the
-    // environment-off variant costs nothing and keeps "constructed once" true.
+    // Both light sets are built at load and chosen per request: LightSet stores only a pointer and a reference, so the off variant is free.
     pathtracer::scene::LightSet lights_;
     pathtracer::scene::LightSet lightsEnvOff_;
     bool defaultEnvLightEnabled_ = true;
@@ -131,8 +118,7 @@ private:
     // One running sum per path-traced lane this request needs, parallel to accumulatedAovs_.
     std::vector<pathtracer::debug::AovId> accumulatedAovs_;
     std::vector<pathtracer::gfx::HdrImage> accumulators_;
-    // One evaluated filter per distinct BeautyFilter AOV this request needs, parallel to filteredAovs_. Held rather
-    // than computed into a temporary so lastImage() can return one, and so two AOVs sharing a filter evaluate it once.
+    // One evaluated filter per distinct BeautyFilter AOV, so lastImage() can return one and two AOVs sharing a filter evaluate it once.
     std::vector<pathtracer::debug::AovId> filteredAovs_;
     std::vector<pathtracer::gfx::HdrImage> filtered_;
     RenderStats stats_;

@@ -8,9 +8,7 @@
 
 namespace pathtracer::scene {
 
-// A camera's pose, lens and exposure, immutable once constructed; DebugCameraController owns mutation and builds a
-// fresh one each frame. Right-handed, +Y up, -Z forward, matching GLM and glTF; at yaw=pitch=0 it looks down world -Z.
-// Orientation is yaw/pitch Euler, so pitch +/-90 degenerates the basis -- DebugCameraController clamps to +/-89.
+// Pose, lens and exposure, immutable once constructed. Right-handed, +Y up, -Z forward; yaw/pitch Euler, clamped to +/-89 upstream.
 class Camera {
 public:
     // Sensor gate size in mm ({36.0F, 24.0F} for 35mm full-frame), paired with focal length to derive vertical FOV.
@@ -25,16 +23,14 @@ public:
         FilmBack filmBack;
     };
 
-    // Authored in degrees, more ergonomic at call sites, converted once here and stored as radians because every
-    // consumer is trigonometric.
+    // Authored in degrees, more ergonomic at call sites, stored as radians because every consumer is trigonometric.
     Camera(const glm::vec3& position, float yawDegrees, float pitchDegrees, FilmBack filmBack,
            float focalLengthMm, float nearClip, float farClip, float aperture,
            float shutterSeconds, float iso);
 
     [[nodiscard]] glm::vec3 position() const { return position_; }
 
-    // Orientation in the degrees it was authored in, completing the accessors that return every constructor argument
-    // as given. Stored as radians because every consumer of the angles is trigonometric.
+    // Orientation in the degrees it was authored in, completing the accessors that return every constructor argument as given.
     [[nodiscard]] float yawDegrees() const { return glm::degrees(yawRadians_); }
     [[nodiscard]] float pitchDegrees() const { return glm::degrees(pitchRadians_); }
 
@@ -51,8 +47,7 @@ public:
     // Vertical FOV from focal length and film-back height, not set directly: what a real lens and sensor determine.
     [[nodiscard]] float verticalFovRadians() const;
 
-    // Orthonormal forward/right/up and view-plane half-extents: everything primaryRay() needs bar the per-pixel ndc
-    // weight. Exposed so a screen-space projector can share the basis rather than rebuild it.
+    // Orthonormal basis and view-plane half-extents, all primaryRay() needs bar the ndc weight, so a projector can share it.
     struct ViewBasis {
         glm::vec3 forward;
         glm::vec3 right;
@@ -65,12 +60,10 @@ public:
     // Pinhole primary ray for a point in normalized device coordinates (ndcX/ndcY in [-1,1], +Y up). tMin/tMax are nearClip()/farClip().
     [[nodiscard]] Ray primaryRay(float ndcX, float ndcY, float aspect) const;
 
-    // Same ray from a basis the caller already built. The aspect-taking overload rebuilds it every call -- two sin,
-    // two cos, an atan, a tan, two normalize and two cross -- which is constant across a whole image.
+    // Same ray from a basis the caller already built; the aspect-taking overload rebuilds two sin, two cos, an atan and a tan every call.
     [[nodiscard]] Ray primaryRay(const ViewBasis& basis, float ndcX, float ndcY) const;
 
-    // Photographic exposure value at ISO 100 (log2): log2(aperture^2 / shutterSeconds * (100/iso)). The static
-    // overload is the single definition of the formula, callable without a Camera.
+    // Exposure value at ISO 100 (log2): log2(aperture^2 / shutterSeconds * (100/iso)). The static overload is the formula's one definition.
     [[nodiscard]] float ev100() const;
     [[nodiscard]] static float ev100(float aperture, float shutterSeconds, float iso);
 

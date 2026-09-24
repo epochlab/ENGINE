@@ -7,9 +7,7 @@
 
 namespace pathtracer::debug {
 
-// AovId to the buffer lane holding it, for the two producers that keep their AOVs in a struct of named HdrImages.
-// Separate from aov.h so that header stays free of Embree and OpenEXR. Member pointers rather than references so
-// both are total functions: null for an AovId the producer does not own, so a caller resolves once and branches.
+// AovId to the buffer lane holding it. Member pointers, so both are total functions: null for an AovId the producer does not own.
 using PathTracedLane = pathtracer::gfx::HdrImage pathtracer::scene::PathTraceResult::*;
 using GBufferLane = pathtracer::gfx::HdrImage pathtracer::scene::RasterGBuffer::*;
 

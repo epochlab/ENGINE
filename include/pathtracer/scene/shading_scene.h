@@ -31,18 +31,14 @@ struct ShadingTriangle {
 // Barycentric interpolation (u/v = Hit's Moller-Trumbore convention, w=1-u-v on v0); normal/tangent renormalized after blending.
 [[nodiscard]] ShadingVertex interpolateShading(const ShadingTriangle& tri, float u, float v);
 
-// Chiang/Li/Burley 2019 shadow-terminator fix: per-vertex tangent-plane projection, barycentric-blended, for use as a secondary ray origin.
-// normalSide: which side the secondary ray leaves on. The projection moves the hit along the vertex normals, so a
-// ray going the other way -- refraction entering a dielectric -- must offset against the opposite side.
+// Chiang/Li/Burley 2019 shadow-terminator fix, barycentric-blended tangent-plane projection. normalSide: which side the ray leaves on.
 [[nodiscard]] glm::vec3 shadowTerminatorOffset(const ShadingTriangle& tri, float u, float v,
                                                bool normalSide);
 
-// True for the inverted box computeInstanceBounds leaves on an instance that contributed no triangles: the identity
-// of a min/max reduction over nothing, not a sentinel.
+// True for the inverted box computeInstanceBounds leaves on an instance with no triangles: a min/max identity, not a sentinel.
 [[nodiscard]] bool isEmpty(const AabbBounds& box);
 
-// World-space AABB per instance, indexed by ShadingTriangle::instanceIndex. Positions are already world-space, so
-// this is one linear pass with no transform.
+// World-space AABB per instance, indexed by instanceIndex. Positions are already world-space, so this is one linear pass.
 [[nodiscard]] std::vector<AabbBounds> computeInstanceBounds(const std::vector<ShadingTriangle>& triangles,
                                                              int instanceCount);
 

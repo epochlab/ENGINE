@@ -5,8 +5,7 @@
 
 namespace pathtracer::debug {
 
-// Fixed-size ring buffer of recent frame times in ms. 120 entries is a sparkline-width choice (~2s at 60fps), not a
-// precision one: the accessors scan the whole ring, which at this size is cheaper than maintaining incremental state.
+// Fixed-size ring of recent frame times in ms. 120 entries is a sparkline width (~2s at 60fps); accessors scan the whole ring.
 class FrameStats {
 public:
     static constexpr int kHistoryLength = 120;
@@ -14,9 +13,7 @@ public:
     // Call exactly once per frame, right after window.pollEvents().
     void tick();
 
-    // The same tick with the clock supplied by the caller. Exists so the ring buffer, its warm-up bound and the
-    // percentiles are testable exactly rather than by sleeping: reading steady_clock internally made every assertion
-    // about this class a timing race. tick() above forwards to it, so there is one implementation.
+    // The same tick with a caller-supplied clock, so the ring and its percentiles are testable exactly rather than by sleeping.
     void tick(std::chrono::steady_clock::time_point now);
 
     [[nodiscard]] float fps() const;
@@ -24,9 +21,7 @@ public:
     [[nodiscard]] float minMs() const;
     [[nodiscard]] float maxMs() const;
 
-    // Percentile of the recorded frame times, fraction in [0,1] (0.5 = median). Copies the filled span onto the
-    // stack and nth_elements it, so no allocation. kHistoryLength cannot express a p99 -- the 99th percentile of
-    // 120 is the second-largest value, not a tail estimate -- so ask for p95 and read it as "worst few frames".
+    // Percentile of recorded frame times, fraction in [0,1]. 120 entries cannot express a p99, so ask p95 and read "worst few frames".
     [[nodiscard]] float percentileMs(float fraction) const;
 
     // Raw buffer + write cursor, for ImGui::PlotLines's values_offset.

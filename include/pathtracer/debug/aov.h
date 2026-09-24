@@ -4,9 +4,7 @@
 
 namespace pathtracer::debug {
 
-// Single source of truth for every AOV the HUD can select and the path tracer can produce. AppResources.aov stays a
-// plain int because ImGui::Combo needs int&, and is cast to AovId at every use.
-// Grouped by category (docs/aovs.md): Utility, Material, Transport, Lighting.
+// Single source of truth for every selectable AOV. AppResources.aov stays int because ImGui::Combo needs int&. Grouped by README.md "AOV".
 enum class AovId : int {
     // Utility.
     Beauty = 0,
@@ -43,8 +41,7 @@ enum class AovId : int {
     Count  // sentinel, == array size, not itself a selectable value
 };
 
-// Display name, index-parallel to AovId -- the array HudOverlay's combo box binds to. Reordering must keep the two
-// parallel; the static_assert below is the gate on that.
+// Display name, index-parallel to AovId -- the array the HUD combo box binds to. The static_assert below gates that parallelism.
 inline constexpr const char* kAovNames[] = {
     "Beauty",       "Wireframe",      "Alpha",           "Depth",
     "Lookahead",    "HSV",            "Luminance",       "Sobel",
@@ -58,27 +55,20 @@ inline constexpr const char* kAovNames[] = {
 static_assert(sizeof(kAovNames) / sizeof(kAovNames[0]) == static_cast<int>(AovId::Count),
               "kAovNames must stay index-parallel with AovId");
 
-// Which of the renderer's three producers computes each AOV. They are not interchangeable: 10 accumulated path-traced
-// lanes, 14 primary-hit rasterizer lanes, and 4 filters reading Beauty.
-// The single source of truth for producer selection, previously restated in four places that could disagree.
+// Which of the three producers computes each AOV: 10 accumulated path-traced lanes, 14 primary-hit rasterizer lanes, 4 filters over Beauty.
 enum class AovSource { PathTraced, GBuffer, BeautyFilter };
 
 [[nodiscard]] AovSource aovSource(AovId aov);
 
-// Channels the AOV actually carries: a property of what it means, not how it is stored. HdrImage is always 4
-// floats/texel and scalar AOVs are broadcast to RGB, so this is what a packed consumer must allocate for.
+// Channels the AOV means, not how it is stored: HdrImage is always 4 floats/texel, so this is what a packed consumer must allocate.
 [[nodiscard]] int aovChannels(AovId aov);
 
-// True for AOVs needing light transport -- Beauty, the transport components and the filters over Beauty -- false for
-// the 14 primary-hit-only AOVs the rasterizer covers.
-// Derived from aovSource rather than tabulated beside it, so the two cannot drift apart.
+// True for AOVs needing light transport, false for the 14 primary-hit ones. Derived from aovSource, so the two cannot drift apart.
 [[nodiscard]] inline bool aovNeedsLightTransport(AovId aov) {
     return aovSource(aov) != AovSource::GBuffer;
 }
 
-// Case- and separator-insensitive lookup against kAovNames, whose entries are HUD labels ("Bounce Count"), so
-// "bounce-count", "bounce_count" and "bouncecount" all name the same AOV.
-// AovId::Count when nothing matches -- the sentinel doubles as "unknown", since it is never itself a selectable AOV.
+// Case- and separator-insensitive lookup against kAovNames, so "bounce-count" and "bouncecount" match. AovId::Count doubles as "unknown".
 [[nodiscard]] AovId aovIdFromName(std::string_view name);
 
 }  // namespace pathtracer::debug

@@ -5,8 +5,7 @@
 
 namespace pathtracer::debug {
 
-// GL_RENDERER and GL_VERSION; the refresh rate is the window's own display's, measured by DisplayLink. No GL_VENDOR:
-// on this project's sole target, GL_RENDERER already names the part.
+// GL_RENDERER and GL_VERSION, plus the window's display refresh from DisplayLink. No GL_VENDOR: GL_RENDERER already names the part.
 struct GpuInfo {
     std::string renderer;
     std::string version;
@@ -14,8 +13,7 @@ struct GpuInfo {
 
 [[nodiscard]] GpuInfo queryGpuInfo();
 
-// Host CPU and memory topology from sysctl, for the startup spec block. No CPU brand string: GL_RENDERER already
-// reads "Apple M1" on a unified-memory part.
+// Host CPU and memory topology from sysctl, for the startup spec block. No CPU brand string: GL_RENDERER already reads "Apple M1".
 struct HostInfo {
     std::string perfLevel0Name;         // hw.perflevel0.name -- "Performance" on Apple Silicon
     int perfLevel0LogicalCpu = 0;       // hw.perflevel0.logicalcpu
@@ -31,8 +29,7 @@ struct HostInfo {
 
 [[nodiscard]] HostInfo queryHostInfo();
 
-// Compile-time build identity. Nothing here can change after link, so nothing is queried at runtime; the fields come
-// from the PATHTRACER_* defines CMakeLists sets.
+// Compile-time build identity, from the PATHTRACER_* defines CMakeLists sets; nothing here can change after link.
 struct BuildInfo {
     const char* compiler;
     const char* buildType;
@@ -43,12 +40,10 @@ struct BuildInfo {
 
 [[nodiscard]] BuildInfo buildInfo();
 
-// The running executable's Mach-O LC_UUID as 32 lowercase hex digits, empty if the image carries none. Identifies the
-// exact binary measured, which a git SHA cannot on a dirty tree.
+// The running executable's Mach-O LC_UUID as 32 lowercase hex digits, empty if absent. Identifies the exact binary on a dirty tree.
 [[nodiscard]] std::string executableUuid();
 
-// Dependency versions. GLFW and GLEW are queried at runtime because they are dynamically loaded and a header constant
-// could lie about what was actually loaded; glm is header-only, so its macro is the truth.
+// Dependency versions. GLFW and GLEW are queried at runtime, since a header constant could lie about what loaded; glm is header-only.
 struct LibraryVersions {
     std::string embree;
     std::string openexr;

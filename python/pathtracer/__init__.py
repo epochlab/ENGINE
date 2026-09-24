@@ -27,16 +27,14 @@ __all__ = ["AOVS", "Camera", "Renderer", "aov_channels", "aov_needs_samples"]
 
 _LIB = _ffi.load_library()
 
-#: Every AOV the renderer can produce, in the renderer's own order. Read from the library rather than restated here,
-#: so Python cannot hold a stale copy of a list the C++ side owns.
+#: Every AOV the renderer can produce, in its own order. Read from the library, so Python cannot hold a stale copy.
 AOVS: tuple[str, ...] = tuple(
     _LIB.pt_aov_name(index).decode() for index in range(_LIB.pt_aov_count())
 )
 
 
 def _aov_id(name: str) -> int:
-    # int() rather than a cast: ctypes types every foreign return as Any, and the restype declared in _ffi is the
-    # only thing that makes this an int at all, so converting is the honest way to re-enter the typed world.
+    # int() rather than a cast: ctypes types every foreign return as Any, and _ffi's restype is what makes this an int.
     identifier = int(_LIB.pt_aov_id(name.encode()))
     if identifier < 0:
         raise ValueError(f"unknown AOV {name!r}; known AOVs are: {', '.join(AOVS)}")
@@ -188,8 +186,7 @@ class Renderer:
             raise ValueError(f"resolution must be positive, got {width}x{height}")
 
         identifiers = [_aov_id(name) for name in names]
-        # Allocated here and handed down as bare pointers: numpy owns every byte, so nothing has to be freed across
-        # the ABI and the arrays outlive the call without a copy.
+        # numpy owns every byte, so nothing is freed across the ABI and the arrays outlive the call without a copy.
         buffers = [
             np.empty((height, width, _LIB.pt_aov_channels(identifier)), dtype=np.float32)
             for identifier in identifiers

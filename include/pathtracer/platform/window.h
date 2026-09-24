@@ -4,14 +4,12 @@
 #include <string>
 #include <utility>
 
-// Forward-declared rather than including <GLFW/glfw3.h>: a pointer to an incomplete type suffices, and keeping GLFW
-// out of this public header means consumers needing only the size or the cursor do not pull it in.
+// Forward-declared rather than including <GLFW/glfw3.h>: a consumer needing only the size or the cursor does not pull GLFW in.
 struct GLFWwindow;
 
 namespace pathtracer::platform {
 
-// Owns one GLFWwindow and its OpenGL 4.1 core forward-compatible context. glfwInit, glfwSetErrorCallback and
-// glfwTerminate bracket every Window's lifetime but remain the caller's responsibility.
+// Owns one GLFWwindow and its OpenGL 4.1 core forward-compatible context. glfwInit/glfwTerminate remain the caller's responsibility.
 class Window {
 public:
     Window(int width, int height, const std::string& title);
@@ -30,16 +28,13 @@ public:
     // For backends that need the raw GLFW handle (e.g. ImGui's GLFW backend); everything else should use the typed accessors above.
     [[nodiscard]] GLFWwindow* nativeHandle() const noexcept { return window_; }
 
-    // {width, height} in framebuffer pixels (glfwGetFramebufferSize), not screen points: the two differ by 2x on
-    // Retina. Queried fresh each call rather than cached from a resize event.
+    // {width, height} in framebuffer pixels, not screen points: the two differ by 2x on Retina. Queried fresh, never cached from a resize.
     [[nodiscard]] std::pair<int, int> framebufferSize() const;
 
-    // {width, height} in screen points (glfwGetWindowSize), the units cursorPosition() uses. Scale the cursor into
-    // framebufferSize() space with this; never divide cursorPosition() by the framebuffer size.
+    // {width, height} in screen points, the units cursorPosition() uses. Never divide cursorPosition() by the framebuffer size.
     [[nodiscard]] std::pair<int, int> windowSize() const;
 
-    // Invoked on GLFW key events. Scancode and mods are not forwarded because no consumer needs them. One callback
-    // slot, shared by every edge-triggered hotkey.
+    // Invoked on GLFW key events; scancode and mods are not forwarded because no consumer needs them. One slot for every hotkey.
     using KeyCallback = std::function<void(int key, int action)>;
     void setKeyCallback(KeyCallback callback);
 
@@ -50,8 +45,7 @@ public:
     using MouseButtonCallback = std::function<void(int button, int action)>;
     void setMouseButtonCallback(MouseButtonCallback callback);
 
-    // Polled cursor position in screen coordinates. Orbit needs only a once-per-frame delta between polls, so unlike
-    // resize and key this needs no callback.
+    // Polled cursor position in screen coordinates. Orbit needs only a per-frame delta, so unlike resize and key this needs no callback.
     [[nodiscard]] std::pair<double, double> cursorPosition() const;
 
     // Hides and locks the cursor to the window (GLFW_CURSOR_DISABLED) while true, as during an LMB-drag orbit.

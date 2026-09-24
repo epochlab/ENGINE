@@ -2,12 +2,10 @@
 
 namespace pathtracer::debug {
 
-// True if GLEW resolved ARB_timer_query's entry points. Core since GL 3.3 and this context is 4.1 core, so it should
-// hold; checked at runtime rather than assumed because a driver may still not export it.
+// True if GLEW resolved ARB_timer_query. Core since GL 3.3 and this context is 4.1, but checked because a driver may not export it.
 [[nodiscard]] bool gpuTimerQueryAvailable();
 
-// RAII pair of ping-ponged GL_TIME_ELAPSED queries. GL_TIME_ELAPSED, not GL_TIMESTAMP: it measures the interval
-// between begin() and end() directly, with no second marker to subtract.
+// RAII pair of ping-ponged GL_TIME_ELAPSED queries, not GL_TIMESTAMP: it measures begin()-to-end() with no second marker to subtract.
 class GpuTimer {
 public:
     GpuTimer();

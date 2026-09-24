@@ -7,9 +7,7 @@
 
 namespace pathtracer::debug {
 
-// Ray counts by type for one path, tile or pass. Plain integers, never atomic: tracePath increments the tile's own
-// instance and it reaches PassStats once per completed tile. tracePath takes it by `RayCounts& __restrict`, and that
-// qualifier is load-bearing -- returning the counts by value cost a reproducible +4.6% (render_beauty, 32 passes).
+// Ray counts per path/tile/pass, never atomic. tracePath takes `RayCounts& __restrict`: +4.6% by value, +0.3% by plain reference (noise).
 struct RayCounts {
     std::uint64_t primary = 0;  // one per sample: the camera ray at bounce 0
     std::uint64_t bounce = 0;   // BSDF-sampled continuation rays, bounce >= 1
@@ -26,9 +24,7 @@ struct RayCounts {
     [[nodiscard]] std::uint64_t total() const { return primary + bounce + ao + shadow; }
 };
 
-// Concurrent ray/tile accumulator for one renderPathTraced() call, caller-owned and reused across passes. A fetch_add
-// per ray would cost more than the pass it measures (~15M contended RMWs onto 4 lines), so workers accumulate into a
-// stack-local RayCounts and merge once. Relaxed ordering suffices: the merge precedes --workersRemaining_.
+// Concurrent ray/tile accumulator for one renderPathTraced() call. Workers merge once per tile: a fetch_add per ray is ~15M contended RMWs.
 class PassStats {
 public:
     // Driver thread only, before dispatch.
@@ -50,8 +46,7 @@ public:
         tilesCompleted_.fetch_add(1, std::memory_order_relaxed);
     }
 
-    // Worker threads, on the stale-generation early-out: the tile contributed no rays but must still be accounted
-    // for, or a cancelled pass reads as a short one.
+    // Worker threads, on the stale-generation early-out: no rays, but still counted, or a cancelled pass reads as a short one.
     void addCancelledTile() { tilesCancelled_.fetch_add(1, std::memory_order_relaxed); }
 
     // Valid only once parallelFor has returned -- see the ordering argument above.
@@ -72,8 +67,7 @@ private:
     std::atomic<std::uint64_t> tilesCancelled_{0};
 };
 
-// Immutable snapshot of one completed or cancelled path-trace pass. Plain values, no atomics: it is copied wholesale
-// under PathTraceDriver::statsMutex_, exactly as result_ is under resultMutex_.
+// Immutable snapshot of one finished or cancelled pass, copied wholesale under statsMutex_ exactly as result_ is under resultMutex_.
 struct PassRecord {
     std::uint64_t generation = 0;  // which request this pass belonged to; 0 = no pass has run yet
     int passIndex = 0;             // n, the accumulated sample count this pass produced
@@ -90,9 +84,7 @@ struct PassRecord {
     bool cancelled = false;  // superseded mid-flight and discarded; its rays were still traced and paid for
 };
 
-// Per-frame render-thread CPU stage times in milliseconds. Plain floats, unsynchronized because one thread is
-// involved: renderFrame writes them and the dashboard, called from renderFrame, reads them. Must be zeroed each
-// frame: a stage that did not run (rasterizer, texture upload on a cache hit) has to read 0, not its last value.
+// Per-frame render-thread stage times, ms; one thread writes and reads, so unsynchronized. Zeroed each frame, so a skipped stage reads 0.
 struct FrameStageTimes {
     float fenceMs = 0.0F;       // wait for the previous frame's GPU work: non-zero only when the GPU, not the display, bounds the frame
     float paceMs = 0.0F;        // DisplayLink::waitForNextVblank: slack, not engine cost
@@ -107,14 +99,11 @@ struct FrameStageTimes {
     float probeMs = 0.0F;       // samplePixelProbe, including its synchronous glReadPixels on the post-filter AOVs
     float hudMs = 0.0F;         // HUD draw + camera write-back + render, INCLUSIVE of hudRenderMs -- the build half is the difference
     float hudRenderMs = 0.0F;   // HudOverlay::render (ImGui::Render + RenderDrawData), unconditional so it is paid with the HUD hidden
-    // swapBuffers at swap interval 0: the flushBuffer hand-off to the compositor, no vblank wait. Its tail is
-    // WindowServer reply latency (README.md "Frame pacing"), not engine time.
+    // swapBuffers at swap interval 0: the hand-off to the compositor, no vblank wait. Its tail is WindowServer latency, not engine time.
     float swapMs = 0.0F;
 };
 
-// RAII steady_clock scope timer writing elapsed milliseconds into a caller-owned float.
-// Serial contexts only (render thread, driver thread): the destination is a plain float, so two threads must never
-// share one. Never inside a per-pixel, per-sample or per-ray loop -- steady_clock::now() is ~20ns.
+// RAII steady_clock scope timer into a caller-owned float. Serial contexts only, and never per-pixel or per-ray: now() is ~20ns.
 class ScopedCpuTimer {
 public:
     explicit ScopedCpuTimer(float& outMs) : outMs_(outMs), start_(std::chrono::steady_clock::now()) {}

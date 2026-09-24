@@ -6,8 +6,7 @@
 
 namespace pathtracer::debug {
 
-// Per-channel histogram of the displayed frame, captured every 4th frame by async GPU->CPU readback: the composited
-// frame is downsampled into a small target and read back through PBOs, so the render thread never blocks on GL.
+// Per-channel histogram of the displayed frame, every 4th frame by async PBO readback, so the render thread never blocks on GL.
 class Histogram {
 public:
     static constexpr int kWidth = 256;
@@ -23,8 +22,7 @@ public:
     Histogram(Histogram&& other) noexcept;
     Histogram& operator=(Histogram&& other) noexcept;
 
-    // Once per frame, after the composited image reaches the default framebuffer (PostProcessPass::draw) and before
-    // the HUD is drawn over it.
+    // Once per frame, after the composited image reaches the default framebuffer and before the HUD is drawn over it.
     void update(int windowWidth, int windowHeight);
 
     [[nodiscard]] const std::array<std::array<std::uint32_t, kBins>, 3>& bins() const {

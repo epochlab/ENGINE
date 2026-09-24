@@ -10,9 +10,7 @@
 
 namespace pathtracer::scene {
 
-// A rectangular emitter: origin is one corner, edge0/edge1 span the sides. Urena/Fajardo/King's spherical-rectangle
-// sampling is exact only for a rectangle, so edge0 must be perpendicular to edge1. Emits from the face whose outward
-// normal is normalize(cross(edge0, edge1)); the back face is dark unless twoSided (Arnold quad_light semantics).
+// Rectangular emitter, perpendicular edges from origin, emitting along normalize(cross(edge0, edge1)). Back face dark unless twoSided.
 struct QuadLight {
     QuadLight(glm::vec3 origin, glm::vec3 edge0, glm::vec3 edge1, glm::vec3 radiance, bool twoSided = false)
         : origin(origin), edge0(edge0), edge1(edge1), radiance(radiance), twoSided(twoSided),
@@ -23,14 +21,11 @@ struct QuadLight {
     glm::vec3 edge1;
     glm::vec3 radiance;  // constant Le over the emitting face, colour * intensity
     bool twoSided;
-    // Derived from edge0/edge1 once here rather than per query: quadRadianceToward runs on every NEE sample and
-    // every emitter hit, and appendQuadLights needs the same vector.
+    // Derived from edge0/edge1 once here, not per query: quadRadianceToward runs on every NEE sample and every emitter hit.
     glm::vec3 normal;
 };
 
-// Ureña, Fajardo & King, "An Area-Preserving Parametrization for Spherical Rectangles" (EGSR 2013), as given in
-// PBRT 4th ed. 12.5.3: an exact constant-pdf solid-angle sampler, avoiding the variance a uniform-area
-// sample-then-reweight pays. buildSphericalRectangle, sample() and pdfQuad all derive the same solid angle.
+// Urena, Fajardo & King (EGSR 2013), as given in PBRT 4th ed. 12.5.3: an exact constant-pdf solid-angle sampler for a rectangle.
 struct SphericalRectangle {
     glm::vec3 referencePoint;
     glm::vec3 x, y, z;  // local orthonormal frame, z chosen so the reference point has z0 < 0
@@ -44,8 +39,7 @@ struct SphericalRectangle {
     [[nodiscard]] glm::vec3 sample(glm::vec2 u) const;
 };
 
-// nullopt iff the rectangle subtends no solid angle at referencePoint: a degenerate quad (parallel
-// edges), or referencePoint exactly in the rectangle's own plane.
+// nullopt iff the rectangle subtends no solid angle at referencePoint: degenerate edges, or referencePoint in the rectangle's plane.
 [[nodiscard]] std::optional<SphericalRectangle> buildSphericalRectangle(const QuadLight& quad,
                                                                          const glm::vec3& referencePoint);
 
@@ -56,14 +50,10 @@ struct LightSample {
     float distance;       // Euclidean distance to the sampled point; FLT_MAX for the environment
 };
 
-// The set of lights NEE can sample from in one renderPathTraced() pass: the environment map, or none when the HUD
-// toggle is off, plus zero or more rectangular emitters. Selection is uniform, and a single-light scene draws no
-// variate at all, which keeps its sample sequence bit-identical to a renderer with no selection mechanism.
+// The lights NEE can sample in one pass: the environment (or none, per the HUD toggle) plus zero or more quads. Selection is uniform.
 class LightSet {
 public:
-    // environment == nullptr excludes it from the set entirely (no NEE, no MIS, no miss radiance at
-    // any bounce) -- the HUD's environment-light toggle. envRotationRadians/envExposure are read only
-    // when environment != nullptr. quads may be empty; the referenced vector must outlive this LightSet.
+    // environment == nullptr excludes it entirely: no NEE, MIS or miss radiance. The quads vector must outlive this LightSet.
     LightSet(const EnvironmentMap* environment, float envRotationRadians, float envExposure,
              const std::vector<QuadLight>& quads);
 
@@ -72,21 +62,16 @@ public:
     // nullopt iff count() == 0, or the one light selected (a quad) has zero solid angle at p.
     [[nodiscard]] std::optional<LightSample> sample(const glm::vec3& p, Sampler& sampler) const;
 
-    // MIS pdf of a BSDF-sampled ray having reached the environment in direction `dir` -- 0 if the
-    // environment is excluded from the set.
+    // MIS pdf of a BSDF-sampled ray having reached the environment in `dir` -- 0 if the environment is excluded from the set.
     [[nodiscard]] float pdfEnvironment(const glm::vec3& dir) const;
 
-    // MIS pdf of a BSDF-sampled ray from `p` having reached quad `quadIndex` -- the ray is presumed to
-    // have actually hit it (an Embree intersection already confirmed this), so no direction check is
-    // needed: the spherical-rectangle pdf is constant over the light's whole solid angle.
+    // MIS pdf of a BSDF-sampled ray from `p` that hit quad `quadIndex`; the hit is presumed, so the constant solid-angle pdf applies.
     [[nodiscard]] float pdfQuad(int quadIndex, const glm::vec3& p) const;
 
-    // Le toward `direction` (unit, pointing from the light toward the viewer's side, i.e. the same
-    // sense as a ray's own travel direction into the light) -- 0 on the non-emitting back face unless twoSided.
+    // Le toward `direction` (unit, from the light toward the viewer) -- 0 on the non-emitting back face unless twoSided.
     [[nodiscard]] glm::vec3 quadRadianceToward(int quadIndex, const glm::vec3& direction) const;
 
-    // Radiance sampled from the environment toward `direction` -- 0 if the environment is excluded.
-    // nearest: see EnvironmentMap::sampleDirectionNearest vs sampleDirection.
+    // Radiance from the environment toward `direction`, 0 if excluded. nearest picks sampleDirectionNearest over sampleDirection.
     [[nodiscard]] glm::vec3 environmentRadiance(const glm::vec3& direction, bool nearest) const;
 
 private:

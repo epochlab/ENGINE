@@ -12,12 +12,10 @@ class Window;
 
 namespace pathtracer::scene {
 
-// Mutable fly/orbit state producing a fresh immutable Camera each frame via snapshot(). Camera stays immutable by
-// design (see its header); this holds the debug rig that drives it.
+// Mutable fly/orbit state producing a fresh immutable Camera each frame via snapshot(); this holds the debug rig that drives it.
 class DebugCameraController {
 public:
-    // position/yawDegrees/pitchDegrees are both the initial pose and what resetToDefault() restores; the remaining
-    // lens parameters pass through unchanged to every snapshot().
+    // position/yaw/pitch are the initial pose and what resetToDefault() restores; the lens parameters pass through to every snapshot().
     DebugCameraController(const glm::vec3& position, float yawDegrees, float pitchDegrees,
                            Camera::FilmBack filmBack, float focalLengthMm, float nearClip,
                            float farClip, float aperture, float shutterSeconds, float iso,
@@ -26,14 +24,12 @@ public:
     // Builds an immutable Camera from the current pose. Call once per frame: this is the only point where a Camera value exists.
     [[nodiscard]] Camera snapshot() const;
 
-    // Polls WASD/QE and moves position_ in the horizontal view plane or along world up, scaled by dtSeconds and the
-    // configured fly speed. No-op while orbiting.
+    // Polls WASD/QE and moves position_ in the horizontal view plane or along world up, scaled by dtSeconds. No-op while orbiting.
     void applyFlyInput(const pathtracer::platform::Window& window, float dtSeconds);
 
     void beginOrbit(const glm::vec3& pivot);
 
-    // dxPixels/dyPixels are this frame's cursor delta; tumbles position_ around pivot_, yaw about world up and pitch
-    // about the local right vector, gated against the poles.
+    // dxPixels/dyPixels are this frame's cursor delta; tumbles position_ around pivot_, yaw about world up, pitch about local right.
     void applyOrbitDelta(float dxPixels, float dyPixels);
 
     void endOrbit();
@@ -56,8 +52,7 @@ public:
     void setShutterSeconds(float shutterSeconds) { shutterSeconds_ = shutterSeconds; }
     void setIso(float iso) { iso_ = iso; }
 
-    // EV100 delta against profile.json defaults, fed to OcioDisplayTransform::setExposureEv(). Display-stage
-    // pow(2,ev), never baked into radiance: the scene is not photometrically calibrated.
+    // EV100 delta against profile.json defaults, applied at the display stage as pow(2,ev): the scene is not photometrically calibrated.
     [[nodiscard]] float relativeExposureEv() const {
         const float defaultEv100 = Camera::ev100(defaultAperture_, defaultShutterSeconds_, defaultIso_);
         const float currentEv100 = Camera::ev100(aperture_, shutterSeconds_, iso_);

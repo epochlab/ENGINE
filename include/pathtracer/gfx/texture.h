@@ -16,12 +16,10 @@ public:
     Texture(Texture&& other) noexcept;
     Texture& operator=(Texture&& other) noexcept;
 
-    // Creates the texture and uploads width*height RGBA float texels, row-major and unpadded, in format. binary16 is
-    // a linear EXR's native precision but overflows above 65504, so scene-referred data may need Float32.
+    // Uploads width*height RGBA float texels, row-major and unpadded. binary16 overflows above 65504, so scene data may need Float32.
     static Texture createFromFloatPixels(int width, int height, const float* rgba, ScalarType format);
 
-    // Replaces the texel contents. Storage is reallocated only when the dimensions change; a same-size update is a
-    // glTexSubImage2D into the existing storage.
+    // Replaces the texel contents. Storage is reallocated only on a dimension change; a same-size update is a glTexSubImage2D.
     void upload(int width, int height, const float* rgba);
 
     void bind(unsigned int unit) const;

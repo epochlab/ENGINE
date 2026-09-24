@@ -6,8 +6,7 @@ namespace pathtracer::debug {
 
 struct GpuInfo;
 
-// Everything the startup spec block reports that is not queryable from the host: the scene that loaded, the settings
-// it loaded under, and the one-shot costs of loading it.
+// Everything the startup spec block reports that is not queryable from the host: the scene, its settings, and the cost of loading it.
 struct EngineSpec {
     const char* scenePath;
     const char* hdriPath;
@@ -35,9 +34,7 @@ struct EngineSpec {
     double refreshHz;  // the window's display, measured by DisplayLink
 };
 
-// One-shot provenance block on stdout, printed once at startup after the GL context exists and the scene has loaded,
-// so every number in it is real rather than a default.
-// Deliberately not the live dashboard: plain text, no ANSI, no redraw, so it survives being piped to a log file.
+// One-shot provenance block on stdout, after the GL context and scene exist. Plain text, no ANSI, so it survives being piped to a log.
 void printSpec(const EngineSpec& spec, const GpuInfo& gpu);
 
 }  // namespace pathtracer::debug

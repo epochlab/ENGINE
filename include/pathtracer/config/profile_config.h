@@ -22,8 +22,7 @@ struct CameraConfig {
     float yawDegrees;
     float pitchDegrees;
 
-    // Resolved against assets/config/camera.json by name at startup. loadProfileConfig cannot validate it alone,
-    // since it does not load that file.
+    // Resolved against assets/config/camera.json by name at startup; loadProfileConfig cannot validate it, not loading that file.
     std::string defaultFilmBackPresetName;
     float focalLengthMm;
     float nearClip;
@@ -39,17 +38,15 @@ struct ControlsConfig {
 };
 
 struct RenderConfig {
-    // Fraction of the framebuffer actually rendered, upscaled to the window by the display blit's GL_LINEAR filter.
+    // Fraction of the framebuffer rendered, upscaled by the display blit's GL_LINEAR filter. Both in (0,1].
     float renderScale;
-    float interactiveRenderScale;
+    float interactiveRenderScale;  // the same, while the camera is moving
     // Index into pathtracer::debug::AovId / kAovNames (aov.h) (0 = Beauty).
     int defaultAov;
     pathtracer::gfx::OcioDisplayTransform::Lut defaultLut;
-    // true paces each frame to the display's vblank (DisplayLink); false runs uncapped, bounded only by the
-    // one-frame-in-flight fence.
+    // true paces each frame to the display's vblank (DisplayLink); false runs uncapped, bounded only by the one-frame-in-flight fence.
     bool vsync;
-    // profile.json bit depths: 16 -> Float16, 32 -> Float32. 8-bit UNORM is not offered, as it clamps scene-referred
-    // data to [0,1] before exposure.
+    // profile.json bit depths: 16 -> Float16, 32 -> Float32. 8-bit UNORM is not offered: it clamps scene-referred data before exposure.
     pathtracer::gfx::ScalarType displayFormat;  // displayBitDepth: the path-traced display texture's GL storage
     pathtracer::gfx::ScalarType textureType;    // textureBitDepth: environment HDRI and every material texture's CPU storage
 };
@@ -63,8 +60,7 @@ struct PathTracerConfig {
     float lookaheadDistance;  // horizon of the Lookahead AOV's ramp, scene units; geometry at or beyond it reads 0
 };
 
-// Session-wide defaults: DebugCameraController's initial and reset pose, lens and exposure, interactive tuning
-// constants, and everything else main.cpp needs that is not specific to one scene.
+// Session-wide defaults: the controller's initial and reset pose, lens, exposure and tuning constants -- what is not specific to one scene.
 struct ProfileConfig {
     WindowConfig window;
     CameraConfig camera;
@@ -73,12 +69,10 @@ struct ProfileConfig {
     PathTracerConfig pathTracer;
 };
 
-// Reads and parses path. Returns nullopt and logs to stderr if the file is missing, unreadable, or a required field
-// cannot be parsed. User-editable input, not an internal invariant: failure is expected and surfaced, not asserted.
+// Reads and parses path; nullopt and a stderr log if missing, unreadable or unparseable. User input: failure is surfaced, not asserted.
 [[nodiscard]] std::optional<ProfileConfig> loadProfileConfig(const std::string& path);
 
-// Reads the film-back preset catalogue (assets/config/camera.json), a JSON array of {name, widthMm, heightMm}. Same
-// failure contract as loadProfileConfig, plus a positivity check on every entry.
+// Reads the film-back preset catalogue, a JSON array of {name, widthMm, heightMm}. loadProfileConfig's contract plus a positivity check.
 [[nodiscard]] std::optional<std::vector<pathtracer::scene::Camera::FilmBackPreset>> loadFilmBackPresets(
     const std::string& path);
 

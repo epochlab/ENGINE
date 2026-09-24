@@ -9,8 +9,7 @@
 
 namespace pathtracer::debug {
 
-// Schema version of the JSON Lines benchmark log; bump on any field rename or meaning change so a reader can refuse
-// a record it would misread.
+// Schema version of the JSON Lines benchmark log; bump on any field rename or meaning change so a reader can refuse a record.
 inline constexpr int kBenchLogSchema = 2;
 
 // One timing run's tool-specific content. appendBenchRecord adds provenance (build, host) and rusage itself, so no caller can omit them.
@@ -22,8 +21,7 @@ struct BenchRecord {
     nlohmann::json work;     // what was computed (ray counts, output CRC), so an A/B can tell whether both sides did identical work
 };
 
-// Appends `record` as one line to `path`, created if absent, with a single O_APPEND write(2), so a line is never
-// interleaved or half-written by this process.
+// Appends `record` as one line to `path`, created if absent, in a single O_APPEND write(2), so a line is never half-written.
 [[nodiscard]] bool appendBenchRecord(const std::string& path, const BenchRecord& record);
 
 // zlib CRC-32 of a float buffer's bytes: equal CRCs across an A/B mean both sides produced bit-identical output.

@@ -11,16 +11,29 @@ See also [References](README.md#references) for the literature each technique im
 
 | | |
 |---|---|
-| [Sobol padding and net quality](#sobol-padding-and-net-quality) | `include/pathtracer/scene/sampler.h` |
-| [Blue-noise shift in output space](#blue-noise-shift-in-output-space) | `src/scene/sampler.cpp` |
-| [Albedo table quadrature](#albedo-table-quadrature) | `tools/albedo_table.cpp` |
-| [Albedo table layout](#albedo-table-layout) | `src/scene/bsdf.cpp` |
-| [Multiple-scattering lobe sampling](#multiple-scattering-lobe-sampling) | `src/scene/bsdf.cpp` |
-| [Conductor Fresnel and F_avg](#conductor-fresnel-and-f_avg) | `tools/bsdf_validate.cpp` |
-| [Hemisphere integration estimator](#hemisphere-integration-estimator) | `tools/bsdf_validate.cpp` |
-| [Dispersion channel commitment](#dispersion-channel-commitment) | `src/scene/path_tracer.cpp` |
-| [Path-traced render contract](#path-traced-render-contract) | `include/pathtracer/scene/path_tracer.h` |
-| [Retrace trigger state](#retrace-trigger-state) | `src/main.cpp` |
+| [Sobol padding and net quality](#sobol-padding-and-net-quality) | `include/pathtracer/scene/sampler.h`, `src/scene/sampler.cpp` |
+| [BSDF lobe selection](#bsdf-lobe-selection) | `include/pathtracer/scene/bsdf.h`, `src/scene/bsdf.cpp` — `sampleBsdf` |
+| [Over-range readout binning](#over-range-readout-binning) | `include/pathtracer/scene/path_tracer.h` — `overRangeBin`, `OverRangeStats` |
+| [Transport AOV bucketing](#transport-aov-bucketing) | `include/pathtracer/scene/path_tracer.h` — `PathTraceResult` |
+| [Path-traced render contract](#path-traced-render-contract) | `include/pathtracer/scene/path_tracer.h` — `renderPathTraced` |
+| [Radially averaged power spectrum](#radially-averaged-power-spectrum) | `include/pathtracer/debug/power_spectrum.h` |
+| [Flat C ABI](#flat-c-abi) | `include/pathtracer/api/pathtracer_c.h` |
+| [GGX numerical forms](#ggx-numerical-forms) | `src/scene/bsdf.cpp` — `distributionGGX`, `smithRadical`, `smithVisibility` |
+| [Kulla-Conty energy tables](#kulla-conty-energy-tables) | `src/scene/bsdf.cpp` (`albedo_table.inc`), baked by `tools/albedo_table.cpp` |
+| [Multiple-scattering lobe sampling](#multiple-scattering-lobe-sampling) | `src/scene/bsdf.cpp` — `sampleMsReflect`, `sampleMsTransmit`, `msReflectPdf`, `msTransmitPdf` |
+| [Average Fresnel quadrature](#average-fresnel-quadrature) | `src/scene/bsdf.cpp` — `conductorFresnelAvg`, `dielectricFresnelAvg` |
+| [Dielectric coat coupling](#dielectric-coat-coupling) | `src/scene/bsdf.cpp` — `coatAlbedo`, `multiScatterTint` |
+| [Cauchy dispersion](#cauchy-dispersion) | `src/scene/bsdf.cpp` — `cauchyIor` |
+| [EON albedo inversion](#eon-albedo-inversion) | `src/scene/bsdf.cpp` — `eonAlbedoInversion` (Portsmouth, Kutz & Hill 2025, JCGT 14(1), App. A) |
+| [Smooth-transmission threshold](#smooth-transmission-threshold) | `src/scene/bsdf.cpp` |
+| [Conductor Fresnel](#conductor-fresnel) | `src/scene/bsdf.cpp` — `conductorIorFromReflectivity`, `fresnelConductorChannel` |
+| [Retrace trigger state](#retrace-trigger-state) | `src/main.cpp` — `PathTraceInputState`, `PathTraceTriggerState`, `RasterTriggerState` |
+| [Dispersion channel commitment](#dispersion-channel-commitment) | `src/scene/path_tracer.cpp` — `tracePath` |
+| [Transmission ray offset](#transmission-ray-offset) | `src/scene/path_tracer.cpp` |
+| [Rasterizer buffer reuse](#rasterizer-buffer-reuse) | `include/pathtracer/scene/rasterizer.h` |
+| [Static analysis policy](#static-analysis-policy) | `.clang-tidy` |
+| [Check discovery](#check-discovery) | `cmake/PathtracerChecks.cmake` |
+| [Build flag policy](#build-flag-policy) | `CMakeLists.txt` |
 
 ## Sobol padding and net quality
 
@@ -727,3 +740,92 @@ absolute size, and grows with tessellation coarseness on genuinely curved geomet
 Scaling raw edge length alone, an earlier and broken version of this fix, has no such zero: it
 blew up on a flat 2000-unit slab quad, pushing the continuation ray origin far past the
 geometry it needed to traverse. `integrator_validate` caught it.
+
+## Rasterizer buffer reuse
+
+`include/pathtracer/scene/rasterizer.h`
+
+`out` is owned by the caller and reused across calls, exactly as `threadPool` is. Its 14 images
+are reallocated only when `width`/`height` change.
+
+**Cleared per row inside the parallel loop, not up front.** These are the same bytes the earlier
+per-call `makeImage` zeroing touched, but written in parallel, in the row that is about to be
+overwritten, rather than as 14 sequential full-image memsets beforehand. At 2048x1152 that
+allocate-and-zero was 566 MB per call.
+
+**`instanceBounds`** is one world-space AABB per instance (`computeInstanceBounds`,
+`shading_scene.h`), parallel to `instances`. It is computed once at load rather than per frame:
+the geometry is static and its positions are already world-space.
+
+## Static analysis policy
+
+`.clang-tidy`
+
+RAII and pointer discipline (`cppcoreguidelines-owning-memory`, the `pro-type-*` cast checks), the
+~60-line "one function, one screen" rule (`readability-function-size`, `LineThreshold: 60`), and
+general bug-pattern detection (`bugprone-*`).
+
+**Vendored sources are exempted twice.** Their translation units go through the `vendored_cgltf`
+and `vendored_imgui` OBJECT libraries, which never set `CXX_CLANG_TIDY` — that property is
+target-level only in CMake, so there is no per-source override — and their headers go through
+`ExcludeHeaderFilterRegex`.
+
+**Three checks are disabled as false-positive noise** for this codebase's conventions, not because
+the underlying concern is invalid elsewhere:
+
+- `cppcoreguidelines-pro-type-union-access` fires on glm's internal union-based vector and matrix
+  component access (`.x`/`.y`/`.z`). That is ordinary, well-tested library usage, not a union-safety
+  hazard.
+- `cppcoreguidelines-pro-type-vararg` fires on every `ImGui::Text`/`TextColored` call, ImGui's
+  whole rendering API being printf-style vararg.
+- `bugprone-exception-escape` flags `main()` simply for calling anything that is not `noexcept`
+  (`std::string` and `std::vector` allocation, and so on) — true of nearly every C++ program's
+  `main()`, not a specific defect.
+
+## Check discovery
+
+`cmake/PathtracerChecks.cmake`
+
+Registers one ctest entry per check in a validator built on `tools/check.h`, by asking the binary
+itself what it contains. CMake cannot run a target at configure time, so this uses the same
+POST_BUILD mechanism as CMake's own `gtest_discover_tests`: the binary writes a CMake fragment and
+`TEST_INCLUDE_FILES` pulls it into the test set. The consequence worth having is that adding a
+check adds a ctest entry with no CMake edit at all.
+
+**`PATHTRACER_TEST_THREADS`** keeps `ctest -j` from oversubscribing. Every render-driving check
+would otherwise build a pool sized to `hardware_concurrency()`, so N concurrent checks would spawn
+N*cores threads on cores. The binary emits a matching `PROCESSORS` property so ctest's own job pool
+accounts for what each test will actually use.
+
+## Build flag policy
+
+`CMakeLists.txt`
+
+`pathtracer_target_defaults` gates NATIVE, IPO and TIDY behind opt-in flags rather than applying
+them everywhere.
+
+**NATIVE and IPO are opt-in because two codegen tools must be reproducible.** `albedo_table` and
+`metal_fit_core` write committed source (`albedo_table.inc`, and the conductor fits a material JSON
+carries), so their output has to reproduce bit-for-bit on any machine. `-march=native` and FMA
+contraction under IPO would both break that. Those two link no native library for the same reason —
+only `glm::glm` — because `pathtracer_core` is itself built `-march=native`, which is exactly what
+they must avoid. The bake runs in seconds either way.
+
+`bluenoise_mask` writes a committed artifact too (`blue_noise_mask.inc`) but is **not** in that
+group: it takes `NATIVE IPO` and links `pathtracer_core`, because it is convolution-bound and only
+ever run by hand.
+
+**TIDY is opt-in** because only the three shipping targets are gated; the tools are covered by
+cppcheck and ctest instead.
+
+**Everything else does take NATIVE and IPO**, including the validators, so that they exercise the
+exact codegen that ships rather than a differently-optimized build of the same math.
+
+### pathtracer_core membership
+
+Every source that does not touch GL, GLFW or imgui. The rule is exactly "does this file include a
+GL, GLFW or imgui header" — nothing in it can open a window, which is what lets a foreign runtime
+(`tools/`, and the C ABI in `src/api/`) link it.
+
+`cie.cpp` is deliberately absent: it belongs to `metal_fit_core`, built without `-march=native` and
+IPO so its committed output reproduces exactly, and having it in both would be a duplicate symbol.
