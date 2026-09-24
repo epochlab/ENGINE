@@ -1,6 +1,7 @@
 // Correctness gate for PathTraceDriver, driven only through its public API; also pins the request invariant driverLoop relies on.
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -8,6 +9,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -255,6 +257,38 @@ OracleMean oracleBatchMean(DriverFixture& fixture, const Camera& camera, int pas
 }
 
 // --- Checks ------------------------------------------------------------------------------------------------------
+
+// A task that throws must not strand parallelFor on its worker count. The pool stays usable afterwards, the dispatch being what failed.
+PT_CHECK(thread_pool_rethrows_and_stays_usable, Fast, Exact) {
+    pathtracer::scene::ThreadPool pool;
+    ctx.plan(3);
+
+    bool rethrown = false;
+    try {
+        // Thrown from one index only: the others still run, and the hang this guards against was the decrement being skipped.
+        pool.parallelFor(256, [](int index) {
+            if (index == 101) {
+                throw std::runtime_error("task failure");
+            }
+        });
+    } catch (const std::runtime_error&) {
+        rethrown = true;
+    }
+    PT_EXPECT(ctx, rethrown, "parallelFor swallowed an exception escaping fn, or never returned at all");
+
+    // The captured exception must not survive into the next dispatch, which would fail a caller that did nothing wrong.
+    std::atomic<int> count{0};
+    bool secondThrew = false;
+    try {
+        pool.parallelFor(256, [&count](int) { count.fetch_add(1, std::memory_order_relaxed); });
+    } catch (...) {
+        secondThrew = true;
+    }
+    PT_EXPECT(ctx, !secondThrew, "a later dispatch inherited the previous dispatch's exception");
+    char detail[160];
+    std::snprintf(detail, sizeof(detail), "the dispatch after a throwing one ran %d of 256 indices", count.load());
+    PT_EXPECT(ctx, count.load() == 256, detail);
+}
 
 // The core accumulation property, on all ten images; bound E_k from docs/DERIVATIONS.md "Running-mean forward error".
 PT_CHECK(running_mean_matches_batch_mean, Slow, Exact) {
