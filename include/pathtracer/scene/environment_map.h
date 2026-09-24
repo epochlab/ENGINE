@@ -14,13 +14,9 @@ public:
     // Builds the 2D piecewise-constant importance-sampling CDFs (marginal over rows, conditional over columns) once at load.
     explicit EnvironmentMap(pathtracer::gfx::ImageTexture image);
 
-    // Direction -> equirect UV -> bilinear sample, matching sky.frag, so the camera-visible background agrees with what is sampled.
+    // Direction -> equirect UV -> bilinear sample, matching sky.frag. The renderer's only Le: pdf() below is merely its importance.
     [[nodiscard]] glm::vec3 sampleDirection(const glm::vec3& direction,
                                              float envRotationRadians = 0.0F) const;
-
-    // Nearest-texel radiance from the same cell pdf() derives its density from. NEE only, where the two must agree exactly.
-    [[nodiscard]] glm::vec3 sampleDirectionNearest(const glm::vec3& direction,
-                                                    float envRotationRadians = 0.0F) const;
 
     struct EnvSample {
         glm::vec3 direction;

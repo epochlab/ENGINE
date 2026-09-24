@@ -3,6 +3,7 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstdio>
 #include <cstdlib>
 #include <iostream>
 #include <optional>
@@ -11,6 +12,7 @@
 
 #include <glm/glm.hpp>
 #include <glm/gtc/constants.hpp>
+#include <glm/gtc/epsilon.hpp>
 
 #include "pathtracer/gfx/hdr_image.h"
 #include "check.h"
@@ -167,6 +169,75 @@ float misCombinedLo(const BsdfParams& params, const glm::vec3& wo, const Environ
         }
     }
     return std::max({accum.x, accum.y, accum.z}) / static_cast<float>(sampleCount);
+}
+
+// An equirect map's v axis is polar, not periodic: the top and bottom rows are opposite poles, so wrapping v blends them together.
+PT_CHECK(environment_poles_do_not_blend_opposite_rows, Fast, Exact) {
+    constexpr int kWidth = 16;
+    constexpr int kHeight = 8;
+    const glm::vec3 north(1.0F, 0.0F, 0.0F);
+    const glm::vec3 south(0.0F, 0.0F, 1.0F);
+    std::vector<float> rgba(static_cast<std::size_t>(kWidth) * kHeight * 4, 0.0F);
+    for (int y = 0; y < kHeight; ++y) {
+        // Row 0 is theta = 0 (the zenith) and the last row theta = pi; the band between them is mid grey, so a blend is unmistakable.
+        const glm::vec3 row = y == 0 ? north : (y == kHeight - 1 ? south : glm::vec3(0.5F));
+        for (int x = 0; x < kWidth; ++x) {
+            const std::size_t idx = ((static_cast<std::size_t>(y) * kWidth) + static_cast<std::size_t>(x)) * 4;
+            rgba[idx + 0] = row.x;
+            rgba[idx + 1] = row.y;
+            rgba[idx + 2] = row.z;
+            rgba[idx + 3] = 1.0F;
+        }
+    }
+    const EnvironmentMap env(
+        tools::fixtures::makeImageTexture(kWidth, kHeight, rgba, pathtracer::gfx::ScalarType::Float32));
+
+    const glm::vec3 zenith = env.sampleDirection(glm::vec3(0.0F, 1.0F, 0.0F), 0.0F);
+    const glm::vec3 nadir = env.sampleDirection(glm::vec3(0.0F, -1.0F, 0.0F), 0.0F);
+    ctx.plan(2);
+    char detail[224];
+    std::snprintf(detail, sizeof(detail), "zenith reads (%.4f, %.4f, %.4f), expected the top row (1, 0, 0)",
+                  static_cast<double>(zenith.x), static_cast<double>(zenith.y), static_cast<double>(zenith.z));
+    PT_EXPECT(ctx, glm::all(glm::epsilonEqual(zenith, north, 1e-6F)), detail);
+    std::snprintf(detail, sizeof(detail), "nadir reads (%.4f, %.4f, %.4f), expected the bottom row (0, 0, 1)",
+                  static_cast<double>(nadir.x), static_cast<double>(nadir.y), static_cast<double>(nadir.z));
+    PT_EXPECT(ctx, glm::all(glm::epsilonEqual(nadir, south, 1e-6F)), detail);
+}
+
+// MIS weights sum to 1, so both strategies must evaluate ONE Le. Structured, not uniform: on a uniform map every lookup agrees.
+PT_CHECK(environment_nee_and_miss_share_one_radiance, Fast, Exact) {
+    const EnvironmentMap env = makeStructuredEnvironment(pathtracer::gfx::ScalarType::Float32);
+    const std::vector<QuadLight> noQuads;
+    const LightSet lights(&env, /*envRotationRadians=*/0.0F, /*envExposure=*/1.0F, noQuads);
+
+    constexpr int kSamples = 4096;
+    int drawn = 0;
+    int mismatches = 0;
+    float worstRelative = 0.0F;
+    for (int i = 0; i < kSamples; ++i) {
+        Sampler sampler(i % 64, i / 64, i, kSamples, 0x9E3779B9U);
+        const std::optional<LightSample> sample = lights.sample(glm::vec3(0.0F), sampler);
+        if (!sample.has_value()) {
+            continue;
+        }
+        ++drawn;
+        const glm::vec3 miss = lights.environmentRadiance(sample->direction);
+        const glm::vec3 difference = glm::abs(miss - sample->radiance);
+        const float scale = std::max({std::fabs(miss.x), std::fabs(miss.y), std::fabs(miss.z), 1e-6F});
+        const float relative = std::max({difference.x, difference.y, difference.z}) / scale;
+        if (relative > 0.0F) {
+            ++mismatches;
+            worstRelative = std::max(worstRelative, relative);
+        }
+    }
+
+    ctx.plan(2);
+    PT_EXPECT(ctx, drawn > 0, "LightSet::sample returned nothing, so the comparison below is vacuous");
+    char detail[224];
+    std::snprintf(detail, sizeof(detail),
+                  "NEE and the miss path disagree on Le at %d of %d sampled directions, worst relative %.3e",
+                  mismatches, drawn, static_cast<double>(worstRelative));
+    PT_EXPECT(ctx, mismatches == 0, detail);
 }
 
 // MIS estimator vs brute-force reference, both noisy: differenced as independent estimators, variances adding (Welch 1947).

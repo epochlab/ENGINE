@@ -1,5 +1,6 @@
 #include "pathtracer/gfx/hdr_image.h"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <exception>
@@ -160,6 +161,7 @@ std::optional<ImageTexture> loadImageTexture(const std::string& path, ScalarType
         case ScalarType::Float32:
             return load.template operator()<float>();
     }
+    // Not dead: a scoped enum holds any value of its underlying type, so falling off a covered switch is still undefined behaviour.
     return std::nullopt;
 }
 
@@ -198,7 +200,7 @@ bool writeExr(const std::string& path, const HdrImage& image) {
     }
 }
 
-glm::vec4 sampleBilinear(const ImageTexture& image, glm::vec2 uv) {
+glm::vec4 sampleBilinear(const ImageTexture& image, glm::vec2 uv, WrapMode wrap) {
     // Texel-center convention, matching GL_LINEAR.
     const float fx = (uv.x * static_cast<float>(image.width)) - 0.5F;
     const float fy = (uv.y * static_cast<float>(image.height)) - 0.5F;
@@ -208,8 +210,12 @@ glm::vec4 sampleBilinear(const ImageTexture& image, glm::vec2 uv) {
     const float ty = fy - static_cast<float>(y0);
     const int wx0 = wrapPixel(x0, image.width);
     const int wx1 = wrapPixel(x0 + 1, image.width);
-    const int wy0 = wrapPixel(y0, image.height);
-    const int wy1 = wrapPixel(y0 + 1, image.height);
+    // Clamping v holds the pole row instead of fetching the opposite pole, which wrapping v does at both ends of an equirect map.
+    const auto resolveV = [&](int y) {
+        return wrap == WrapMode::ClampV ? std::clamp(y, 0, image.height - 1) : wrapPixel(y, image.height);
+    };
+    const int wy0 = resolveV(y0);
+    const int wy1 = resolveV(y0 + 1);
 
     return withTexels(image, [&](const auto& rgba) {
         const auto texel = [&](int x, int y) { return widenTexel(rgba, texelIndex(x, y, image.width)); };

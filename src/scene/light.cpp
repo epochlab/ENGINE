@@ -109,13 +109,11 @@ int LightSet::count() const {
     return (environment_ != nullptr ? 1 : 0) + static_cast<int>(quads_.size());
 }
 
-glm::vec3 LightSet::environmentRadiance(const glm::vec3& direction, bool nearest) const {
+glm::vec3 LightSet::environmentRadiance(const glm::vec3& direction) const {
     if (environment_ == nullptr) {
         return glm::vec3(0.0F);
     }
-    return (nearest ? environment_->sampleDirectionNearest(direction, envRotationRadians_)
-                     : environment_->sampleDirection(direction, envRotationRadians_)) *
-           envExposure_;
+    return environment_->sampleDirection(direction, envRotationRadians_) * envExposure_;
 }
 
 float LightSet::pdfEnvironment(const glm::vec3& dir) const {
@@ -159,9 +157,8 @@ std::optional<LightSample> LightSet::sample(const glm::vec3& p, Sampler& sampler
     if (envPresent && index == 0) {
         const EnvironmentMap::EnvSample envSample =
             environment_->importanceSampleDirection(sampler.next2D(), envRotationRadians_);
-        return LightSample{envSample.direction,
-                            environment_->sampleDirectionNearest(envSample.direction, envRotationRadians_) *
-                                envExposure_,
+        // The miss path's lookup, not the nearest texel: MIS weights sum to 1 across strategies, so both must evaluate one Le.
+        return LightSample{envSample.direction, environmentRadiance(envSample.direction),
                             envSample.pdf * selectionPdf, std::numeric_limits<float>::max()};
     }
 
