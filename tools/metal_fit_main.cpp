@@ -1,5 +1,4 @@
-// Authoring tool: prints the reflectivity/edgeTint a material JSON should carry for a measured conductor, e.g. ./build/metal_fit --nk tools/data/chromium_johnson_christy_1974.csv.
-// Values print as the float the renderer loads, at max_digits10, so pasting them into JSON reproduces it bit-exactly; colour_validate's drift check relies on that.
+// Prints the reflectivity/edgeTint a material JSON should carry for a measured conductor, at max_digits10 so pasting round-trips exactly.
 
 #include <cstdio>
 #include <iostream>

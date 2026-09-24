@@ -16,7 +16,7 @@ constexpr float kMinAlpha = 0.02F * 0.02F;  // roughness floor, avoids a degener
 // Perceptual roughness to GGX alpha, in one place: the three consumers must agree, or the Fresnel AOV reports an unevaluated term.
 float alphaForRoughness(float roughness) { return std::max(roughness * roughness, kMinAlpha); }
 
-// GGX D, cancellation-free (Filament 4.4.2); no denominator floor, kPi*d*d >= 8e-14. See DERIVATIONS.md "GGX numerical forms".
+// GGX D, cancellation-free (Filament 4.4.2); no denominator floor, kPi*d*d >= 8e-14. See docs/DERIVATIONS.md "GGX numerical forms".
 float distributionGGX(const glm::vec3& nh, float alpha) {
     const float alpha2 = alpha * alpha;
     const float d = (alpha2 * nh.z * nh.z) + (nh.x * nh.x) + (nh.y * nh.y);
@@ -37,7 +37,7 @@ float smithVisibility(float cosO, float cosI, float alpha) {
 // G1(c)/c, the VNDF pdf's projected-area factor, in the same division-free form: 2/alpha at grazing rather than 0/0.
 float smithG1OverCos(float cosTheta, float alpha) { return 2.0F / (cosTheta + smithRadical(cosTheta, alpha)); }
 
-// --- Conductor Fresnel (Gulbrandsen 2014, JCGT 3(4)), replacing Schlick. See DERIVATIONS.md "Conductor Fresnel".
+// --- Conductor Fresnel (Gulbrandsen 2014, JCGT 3(4)), replacing Schlick. See docs/DERIVATIONS.md "Conductor Fresnel".
 
 // Reflectivity is clamped: f0 is an unbounded product. 0.9999 needs the factored k^2 below; the literal form needs 0.99, 1% at f0=1.
 constexpr float kMinReflectivity = 1e-4F;
@@ -105,7 +105,7 @@ glm::vec3 sampleGGXVNDF(const glm::vec3& wo, float alpha, glm::vec2 u) {
     return glm::normalize(glm::vec3(alpha * nh.x, alpha * nh.y, std::max(0.0F, nh.z)));
 }
 
-// Kulla-Conty energy tables, baked by tools/albedo_table.cpp (Kulla & Conty 2017). See DERIVATIONS.md "Kulla-Conty energy tables".
+// Kulla-Conty energy tables, baked by tools/albedo_table.cpp (Kulla & Conty 2017). See docs/DERIVATIONS.md "Kulla-Conty energy tables".
 #include "albedo_table.inc"
 
 // Refract wo about microfacet normal ht. Returns false on total internal reflection at that facet.
@@ -156,7 +156,7 @@ AlbedoSplit averageAlbedo(float roughness) {
              lerp1(kAlbedoAvgB[r0], kAlbedoAvgB[r0 + 1], rt)};
 }
 
-// --- Reflected multiple-scattering lobe; cosine sampling costs up to +17.3 relative variance at low roughness. See DERIVATIONS.md.
+// --- Reflected multiple-scattering lobe; cosine sampling costs up to +17.3 relative variance at low roughness. See docs/DERIVATIONS.md.
 struct MsReflectRow {
     int base;
     float blend;
@@ -187,7 +187,7 @@ float msReflectPdf(float mu, float roughness) {
     return lerp1(msReflectDensity(row, m0), msReflectDensity(row, m0 + 1), mt) / (2.0F * kPi);
 }
 
-// Exact inversion of a tabulated piecewise-linear density over mu. See DERIVATIONS.md "Multiple-scattering lobe sampling".
+// Exact inversion of a tabulated piecewise-linear density over mu. See docs/DERIVATIONS.md "Multiple-scattering lobe sampling".
 template <typename Density, typename Cdf>
 float invertPiecewiseLinearDensity(Density density, Cdf cdf, int resolution, float u) {
     int low = 0;
@@ -335,7 +335,7 @@ glm::vec3 sampleCosineHemisphere(glm::vec2 u) {
     return {r * std::cos(phi), r * std::sin(phi), std::sqrt(std::max(0.0F, 1.0F - u.x))};
 }
 
-// Cosine-weighted average Fresnel, 2*int_0^1 F(mu)*mu dmu, one 3-node rule for both. See DERIVATIONS.md "Average Fresnel quadrature".
+// Cosine-weighted average Fresnel, 2*int_0^1 F(mu)*mu dmu, one 3-node rule for both. See docs/DERIVATIONS.md "Average Fresnel quadrature".
 constexpr float kFresnelAvgNodes[3] = {0.105319802F, 0.382154433F, 0.796427281F};
 constexpr float kFresnelAvgWeights[3] = {0.038972482F, 0.280518736F, 0.680508783F};
 
@@ -384,7 +384,7 @@ constexpr float kLambdaDNm = 587.56F;
 constexpr float kLambdaFNm = 486.13F;
 constexpr float kLambdaCNm = 656.27F;
 
-// Cauchy n(lambda) = A + B/lambda^2, (A,B) from (n_d, V_d) per KHR_materials_dispersion. See DERIVATIONS.md "Cauchy dispersion".
+// Cauchy n(lambda) = A + B/lambda^2, (A,B) from (n_d, V_d) per KHR_materials_dispersion. See docs/DERIVATIONS.md "Cauchy dispersion".
 float cauchyIor(float iorD, float abbe, float lambdaNm) {
     if (abbe <= 0.0F) {
         return iorD;
@@ -420,7 +420,7 @@ float coatFresnelRatio(float cosTheta, float etaI, float etaT, float f0) {
     return fresnelDielectric(cosTheta, etaI, etaT) / std::max(schlickScalar(cosTheta, f0), 1e-6F);
 }
 
-// Coat albedo, not the macro-facet F(mu_o): 4x at roughness 1, mu 0.4, 10% energy lost. See DERIVATIONS.md "Dielectric coat coupling".
+// Coat albedo, not the macro-facet F(mu_o): 4x at roughness 1, mu 0.4, 10% energy lost. See docs/DERIVATIONS.md "Dielectric coat coupling".
 float coatAlbedo(const AlbedoSplit& split, float albedoAvg, float f0, float fresnelRatio,
                   float fresnelAvg) {
     return (split.at(f0) * fresnelRatio) +
@@ -430,7 +430,7 @@ float coatAlbedo(const AlbedoSplit& split, float albedoAvg, float f0, float fres
 // Below this the GGX transmission lobe is a delta (PBRT's EffectivelySmooth); kMinAlpha sits inside it, so smooth glass stays exact.
 constexpr float kSmoothAlpha = 1e-3F;
 
-// ior == 1 is a delta at every roughness: the half-vector normalizes zero. See DERIVATIONS.md "Smooth-transmission threshold".
+// ior == 1 is a delta at every roughness: the half-vector normalizes zero. See docs/DERIVATIONS.md "Smooth-transmission threshold".
 bool transmissionIsRough(const BsdfParams& params, float alpha) {
     return params.transmissionFactor > 0.0F && alpha >= kSmoothAlpha && params.ior != 1.0F;
 }
@@ -509,7 +509,7 @@ float evalFonAlbedoApprox(float mu, float r) {
 
 }  // namespace
 
-// Paper Appendix A: the rho giving a desired observed albedo, via the stable root, not eq. 30's. See DERIVATIONS.md "EON albedo inversion".
+// Paper Appendix A: rho for a desired observed albedo, by the stable root not eq. 30. See docs/DERIVATIONS.md "EON albedo inversion".
 glm::vec3 eonAlbedoInversion(const glm::vec3& albedo, float r) {
     const float eFonNormal = 1.0F / (1.0F + (kConstant1Fon * r));
     const float avgEFon = eFonNormal * (1.0F + (kConstant2Fon * r));

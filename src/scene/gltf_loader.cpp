@@ -205,7 +205,7 @@ std::optional<std::vector<unsigned int>> readIndices(const cgltf_accessor* indic
     return indices;
 }
 
-    // A slot referencing no texture substitutes the fallback; one referencing a texture it cannot decode is an error and propagates.
+// A slot referencing no texture substitutes the fallback; one referencing a texture it cannot decode is an error and propagates.
 std::optional<pathtracer::gfx::ImageTexture> resolveTexture(const cgltf_texture* texture, const std::string& dir,
                                                          pathtracer::gfx::ScalarType textureType, pathtracer::gfx::ImageTexture fallback) {
     if (texture == nullptr) {

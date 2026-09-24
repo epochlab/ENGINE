@@ -1,15 +1,4 @@
-// Correctness gate for the CPU-evaluable parts of the display and statistics path: the OCIO display transform
-// (gfx/ocio_cpu_transform.cpp) and the frame-time ring buffer (debug/frame_stats.cpp).
-//
-// The OCIO half turns a comment into a check. ocio_display_transform.h pins its config by name rather than by
-// "-latest", on the stated grounds that this config's "Un-tone-mapped" view is a pure colorimetric pass -- "empirically
-// verified (compiled + ran against the installed library)", which is to say verified once, by hand, and never again.
-// A brew upgrade that changed the built-in registry under that name would silently alter every rendered PNG and every
-// displayed frame. These checks assert the property the pin exists to guarantee.
-//
-// Not covered, deliberately: debug/histogram.cpp is FBO/PBO-bound with no CPU-reachable binning function, so there is
-// nothing to assert without a GL context. A test that only confirmed it constructs would be worse than none, because
-// it would report coverage that does not exist.
+// Correctness gate for the CPU-evaluable display and statistics path: the OCIO display transform and the frame-time ring buffer.
 
 #include <algorithm>
 #include <chrono>
@@ -23,22 +12,17 @@
 
 namespace {
 
-// Applies the transform to one RGB triple and returns the red channel; the transform is per-channel identical for a
-// neutral input, so one channel is the whole story for a grey ramp.
+// Applies the transform to one RGB triple and returns red; it is per-channel identical for a neutral input, so one channel suffices.
 float transformScalar(float value) {
     std::vector<float> rgb{value, value, value};
     pathtracer::gfx::applyOcioDisplayTransform(rgb, 1, 1);
     return rgb[0];
 }
 
-// The anchors the pin exists to guarantee. "Un-tone-mapped" is claimed to be a pure colorimetric pass, which fixes
-// exactly two points: scene-referred 0 must display as 0, and scene-referred 1 (diffuse white) must display as 1.
-// A filmic view would roll 1.0 off to roughly 0.8 and lift 0 off the floor, so these two rows alone separate the
-// pinned config from every tone-mapped alternative a registry change could substitute.
+// The anchors the pin exists to guarantee: scene-referred 0 must display as 0 and 1 as 1, which a filmic view would roll off.
 PT_CHECK(ocio_view_is_colorimetric_at_its_anchors, Fast, Exact) {
     ctx.plan(2);
-    // sRGB's encoding curve is steep near zero but passes exactly through the origin; the tolerance here is float
-    // round-trip noise through the processor, not a tone-curve allowance.
+    // sRGB's curve is steep near zero but passes exactly through the origin; this tolerance is round-trip noise, not a tone allowance.
     constexpr float kAnchorTolerance = 1e-5F;
     const float atZero = transformScalar(0.0F);
     const float atOne = transformScalar(1.0F);
@@ -53,9 +37,7 @@ PT_CHECK(ocio_view_is_colorimetric_at_its_anchors, Fast, Exact) {
     PT_EXPECT(ctx, std::fabs(atOne - 1.0F) <= kAnchorTolerance, oneDetail);
 }
 
-// A display transform must be order-preserving: if it were not, a brighter scene value could display darker, which is
-// a visible inversion rather than a subtle grade. Swept across the whole working range including well above display
-// white, where a tone curve would compress but must still not fold back on itself.
+// A display transform must be order-preserving, or a brighter scene value could display darker. Swept well above display white.
 PT_CHECK(ocio_transform_is_monotone, Slow, Exact) {
     constexpr int kSteps = 256;
     ctx.plan(1);
@@ -63,8 +45,7 @@ PT_CHECK(ocio_transform_is_monotone, Slow, Exact) {
     int inversions = 0;
     float worstAt = 0.0F;
     for (int i = 1; i <= kSteps; ++i) {
-        // Geometric-ish sweep to 16.0: linear steps would spend almost every sample above display white, where the
-        // curve is flattest, and almost none in the toe where an inversion is most likely.
+        // Geometric-ish sweep to 16.0: linear steps would spend nearly every sample above display white and none in the toe.
         const float x = 16.0F * std::pow(static_cast<float>(i) / static_cast<float>(kSteps), 3.0F);
         const float y = transformScalar(x);
         if (!(y >= previous)) {
@@ -81,8 +62,7 @@ PT_CHECK(ocio_transform_is_monotone, Slow, Exact) {
     PT_EXPECT(ctx, inversions == 0, detail);
 }
 
-// The transform must act per channel and identically on each: a channel swap or a matrix applied where a curve was
-// intended would leave a neutral grey looking neutral while tinting everything else, so a grey input cannot detect it.
+// The transform must act per channel and identically on each: a matrix where a curve was intended leaves grey neutral but tints the rest.
 PT_CHECK(ocio_transform_is_channel_independent, Fast, Exact) {
     ctx.plan(3);
     std::vector<float> rgb{0.25F, 0.5F, 0.75F};
@@ -100,8 +80,7 @@ PT_CHECK(ocio_transform_is_channel_independent, Fast, Exact) {
     PT_EXPECT(ctx, std::fabs(rgb[2] - b) <= kTolerance, detail);
 }
 
-// Exercises the packed-image path at a real stride rather than the 1x1 the rows above use: a wrong stride or channel
-// ordering in PackedImageDesc would transform the right values in the wrong places, which a single texel cannot show.
+// Exercises the packed-image path at a real stride: a wrong stride or channel order transforms right values in wrong places.
 PT_CHECK(ocio_transform_handles_a_real_image, Slow, Exact) {
     constexpr int kWidth = 13;  // deliberately not a multiple of any SIMD width
     constexpr int kHeight = 7;
@@ -124,9 +103,7 @@ PT_CHECK(ocio_transform_handles_a_real_image, Slow, Exact) {
     PT_EXPECT(ctx, mismatched == 0, detail);
 }
 
-// --- FrameStats ---------------------------------------------------------------------------------------------------
-// Testable exactly only because tick() now takes an injectable clock: reading steady_clock internally made every
-// assertion below a race against the machine's own speed.
+// --- FrameStats: testable exactly only because tick() takes an injectable clock, steady_clock having made every assertion a race.
 
 pathtracer::debug::FrameStats tickedWith(const std::vector<float>& millisecondGaps) {
     pathtracer::debug::FrameStats stats;
@@ -139,8 +116,7 @@ pathtracer::debug::FrameStats tickedWith(const std::vector<float>& millisecondGa
     return stats;
 }
 
-// The first tick has no predecessor, so it must record no interval: counting it would enter a garbage frame time at
-// startup, which is exactly when a dashboard is being read.
+// The first tick has no predecessor, so it must record no interval: counting it enters a garbage frame time at startup.
 PT_CHECK(frame_stats_ignores_the_first_tick, Fast, Exact) {
     ctx.plan(2);
     pathtracer::debug::FrameStats stats;
@@ -159,8 +135,7 @@ PT_CHECK(frame_stats_reports_exact_intervals, Fast, Exact) {
     PT_EXPECT(ctx, std::fabs(stats.maxMs() - 30.0F) <= 1e-3F, "maximum interval must be 30 ms");
 }
 
-// The ring buffer's wrap is where an off-by-one would silently mix a stale frame time into the current window. Feeding
-// more than kHistoryLength intervals, all identical after the first batch, makes any survivor visible in the extremes.
+// The ring's wrap is where an off-by-one would mix a stale frame time into the window; identical intervals make a survivor visible.
 PT_CHECK(frame_stats_ring_buffer_wraps_cleanly, Fast, Exact) {
     ctx.plan(2);
     std::vector<float> gaps;
@@ -179,8 +154,7 @@ PT_CHECK(frame_stats_ring_buffer_wraps_cleanly, Fast, Exact) {
     PT_EXPECT(ctx, std::fabs(stats.minMs() - 5.0F) <= 1e-3F, detail);
 }
 
-// p50 and p95 against a known distribution. The header is explicit that 120 samples cannot express a p99, so the
-// assertion stops where the data does.
+// p50 and p95 against a known distribution. 120 samples cannot express a p99, so the assertion stops where the data does.
 PT_CHECK(frame_stats_percentiles_are_correct, Fast, Exact) {
     ctx.plan(2);
     std::vector<float> gaps;

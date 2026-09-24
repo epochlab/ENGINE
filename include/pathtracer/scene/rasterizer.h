@@ -34,7 +34,7 @@ struct RasterGBuffer {
     std::uint64_t generation = 0;
 };
 
-// Watertight edge-function rasterization (Pineda 1988), row-parallel over disjoint rows. See DERIVATIONS.md "Rasterizer buffer reuse".
+// Watertight edge-function rasterization (Pineda 1988), row-parallel over disjoint rows. See docs/DERIVATIONS.md "Rasterizer buffer reuse".
 void renderRasterGBuffer(const Camera& camera, const std::vector<ShadingTriangle>& shadingTriangles,
                           const std::vector<MeshInstance>& instances,
                           const std::vector<PathTraceSettings>& perInstanceSettings,

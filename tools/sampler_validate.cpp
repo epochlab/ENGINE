@@ -1,15 +1,4 @@
-// Standalone correctness gate for sampler.cpp's padded, Owen-scrambled Sobol sampler. Distinct from the other
-// validators in that it asserts EXACT combinatorial properties rather than Monte Carlo tolerances: a digital
-// (t,m,s)-net's defining property is an integer count per elementary interval, and Owen scrambling is a digit-tree
-// permutation that preserves it exactly, so most checks here are deterministic with no tolerance to tune.
-// Same standalone-CLI convention as the other validate tools: no test framework, non-zero exit on failure.
-//
-// This suite exists because the sampler it replaces was white noise in the shipped configuration and no test noticed.
-// The renderer accumulates one sample per pass, so the pass direction -- Sampler's sampleIndex -- is the only axis along
-// which stratification can reduce variance, and every pre-existing validator happened to drive that axis correctly
-// (Sampler(0, 0, i, seed), index advancing) while the renderer held it at 0 and varied the seed instead. Constant plus a
-// fresh per-pass rotation is a uniform variate, so the low-discrepancy structure never applied to a single shipped
-// pixel. checkPassDirectionOccupancy below is the specific regression test for that class of mistake.
+// Correctness gate for sampler.cpp, asserting EXACT combinatorial net properties rather than Monte Carlo tolerances.
 
 #include <array>
 #include <cmath>
@@ -36,30 +25,22 @@ constexpr std::uint32_t kSeed = 0x9E3779B9U;
 constexpr int kSampleCount = 128;
 constexpr int kPixelX = 37;
 constexpr int kPixelY = 41;
-// Must match sampler.cpp's kMaskSize: the mask is baked into that translation unit and reached only through
-// blueNoiseDither, so this is the one place the size is restated and the permutation check is what would catch a drift.
-// 2^7 = 128 points, matching profile.json's maxSamples accumulation cap.
+// Must match sampler.cpp's kMaskSize, the one place it is restated. 2^7 = 128 points, matching profile.json's maxSamples cap.
 constexpr int kM = 7;
-// A 12-bounce path (integrator_validate's slab case) consumes ~5 sets per bounce plus 2 at the camera, so set 64+ is
-// genuinely reached in practice and is where an unpadded sampler would have degraded.
+// A 12-bounce path consumes ~5 sets per bounce plus 2 at the camera, so set 64+ is reached and is where an unpadded sampler degraded.
 constexpr int kSetCount = 72;
-// Depths spanning the padded range, including the last two sets, where a shuffle that ran out of distinct scrambles
-// would show first.
+// Depths spanning the padded range, including the last two sets, where a shuffle running out of distinct scrambles shows first.
 constexpr std::array<int, 7> kNetDepths = {0, 1, 2, 7, 31, 64, 71};
 constexpr int kMaskSize = 128;
 constexpr int kMaskPixels = kMaskSize * kMaskSize;
 
-// Every draw comes out toroidally shifted by its pixel's blue-noise dither (sampler.h), so recovering the underlying
-// sequence means subtracting that shift back off, modulo 1. Exact, not approximate: the shift and the drawn value are
-// both multiples of 2^-24 in [0,1), so the difference is representable and IEEE returns it exactly -- which is what lets
-// the net checks below stay tolerance-free assertions on integer counts rather than becoming statistical ones.
+// Recovers the underlying sequence by subtracting the dither shift: both are multiples of 2^-24, so the difference is exact.
 float unshift(float value, int pixelX, int pixelY, int ditherChannel) {
     const float dither = pathtracer::scene::blueNoiseDither(pixelX, pixelY, ditherChannel);
     return value >= dither ? value - dither : (value - dither) + 1.0F;
 }
 
-// Draws the 1D value of dimension set `set` at an arbitrary pixel, exactly as the renderer would: a fresh Sampler per
-// sample, index advancing, scramble seed fixed. Shift removed, so this is the shared sequence every pixel draws from.
+// Draws dimension set `set` exactly as the renderer would -- fresh Sampler per sample, index advancing, seed fixed -- shift removed.
 float draw1DAt(int pixelX, int pixelY, int sampleIndex, int set) {
     Sampler sampler(pixelX, pixelY, sampleIndex, kSampleCount, kSeed);
     float value = 0.0F;
@@ -86,10 +67,7 @@ std::size_t binOf(float value, int binCount) {
     return bin >= static_cast<std::size_t>(binCount) ? static_cast<std::size_t>(binCount) - 1 : bin;
 }
 
-// (0,m,1)-net: the first 2^m samples of any dimension set put exactly one point in each of the 2^m equal intervals.
-// Guaranteed by the direction vectors forming a nonsingular generator matrix and preserved by both the Owen scramble
-// and the per-set index shuffle -- so this fails on a mis-derived recurrence, a mistranscribed seed row, or a shuffle
-// that moved a power-of-two prefix off its strata.
+// (0,m,1)-net: the first 2^m samples put exactly one point in each of the 2^m intervals, which the scramble and shuffle preserve.
 PT_CHECK(one_dimensional_net, Fast, Exact) {
     const int m = kM;
     const int setCount = kSetCount;
@@ -117,8 +95,7 @@ PT_CHECK(one_dimensional_net, Fast, Exact) {
     PT_EXPECT(ctx, worstSet < 0, detail);
 }
 
-// Net quality t of a 2D set: the smallest t for which the first 2^m samples form a (t,m,2)-net, i.e. every 2^a x 2^b
-// cell with a + b = m - t holds exactly 2^t points. t = 0 is a perfect net; m means no stratification at all.
+// Net quality t: the smallest t for which the first 2^m samples form a (t,m,2)-net. t = 0 is perfect; m means no stratification.
 int measureNetQuality(int m, int set) {
     const int n = 1 << m;
     std::vector<glm::vec2> points(static_cast<std::size_t>(n));
@@ -149,10 +126,7 @@ int measureNetQuality(int m, int set) {
     return m;
 }
 
-// The property padding buys, and the reason this sampler pads at all: EVERY 2D set is a perfect (0,m,2)-net, including
-// the sets a deep path reaches. Drawing dimension pairs out of one high-dimensional sequence instead would degrade with
-// depth -- Sobol's (62,63) projection is only a (4,m,2)-net, sixteen points per cell -- so a 12-bounce path would
-// sample its last bounces worse than white noise. Asserted at depths a path actually reaches, exactly, no tolerance.
+// What padding buys: EVERY 2D set is a perfect (0,m,2)-net, where Sobol's (62,63) projection is only (4,m,2), sixteen points per cell.
 PT_CHECK(every_set_is_perfect_net, Fast, Exact) {
     const int m = kM;
     const std::array<int, 7>& sets = kNetDepths;
@@ -177,9 +151,7 @@ PT_CHECK(every_set_is_perfect_net, Fast, Exact) {
     PT_EXPECT(ctx, worstSet < 0, detail);
 }
 
-// The regression test for the defect this sampler replaces. Drives it exactly as PathTraceDriver does -- one sample per
-// pass, index advancing, seed fixed -- and requires the accumulated points to be stratified. Under the old white-noise
-// behaviour every dimension left ~N/e (36.8%) of bins empty; a correct sequence leaves none.
+// The regression test for the defect this sampler replaces: the old white noise left ~N/e (36.8%) of bins empty, a correct sequence none.
 PT_CHECK(pass_direction_occupancy, Fast, Exact) {
     const int m = kM;
     const int setCount = kSetCount;
@@ -211,12 +183,7 @@ PT_CHECK(pass_direction_occupancy, Fast, Exact) {
     PT_EXPECT(ctx, worstSet < 0, detail);
 }
 
-// Sobol's index-0 point is all zeros before scrambling, and the renderer's very first displayed pass is index 0 for
-// every pixel -- unscrambled, that would put every pixel's jitter exactly on its pixel corner. Every pixel now draws the
-// same scrambled sequence, so what has to spread index 0 across pixels is the dither shift; this reads the shifted value
-// deliberately, since the shift is the mechanism under test. A chi-square well BELOW its 15 dof is the expected result
-// rather than a suspicious one: a blue-noise mask distributes its values more evenly over any local region than the
-// independent draws the statistic is defined against.
+// Sobol's index-0 point is all zeros before scrambling, so the dither shift is what must spread the first pass across pixels.
 PT_CHECK(index_zero_is_scrambled, Fast, Statistical) {
     constexpr int kPixels = 4096;
     constexpr int kBins = 16;
@@ -225,19 +192,14 @@ PT_CHECK(index_zero_is_scrambled, Fast, Statistical) {
         Sampler sampler(i % 64, i / 64, 0, kSampleCount, kSeed);
         ++bins[binOf(sampler.next1D(), kBins)];
     }
-    // Chi-square against uniform over 16 bins. A correct scramble sits near its 15 dof; the degenerate all-zeros case
-    // would pile every sample into bin 0 (chi2 = kPixels * 15).
+    // Chi-square against uniform over 16 bins: a correct scramble sits near its 15 dof, the all-zeros case at kPixels * 15.
     double chiSquare = 0.0;
     const double expected = static_cast<double>(kPixels) / kBins;
     for (const int count : bins) {
         const double delta = count - expected;
         chiSquare += delta * delta / expected;
     }
-    // One-sided upper tail: only an excessive statistic is evidence against uniformity. A chi2 well BELOW its dof is
-    // the EXPECTED result here rather than a suspicious one -- a blue-noise mask distributes its values more evenly over
-    // any local region than the independent draws the statistic is defined against -- so a two-sided test would reject
-    // correct code. The critical value now comes from the distribution at the suite's corrected significance, replacing
-    // a transcribed constant that silently fixed both the level and the degrees of freedom.
+    // One-sided upper tail: a chi2 well BELOW its dof is EXPECTED here, a blue-noise mask being more even than independent draws.
     constexpr int kDof = kBins - 1;
     ctx.plan(1);
     const double p = tools::stats::chiSquareUpperTail(chiSquare, kDof);
@@ -247,8 +209,7 @@ PT_CHECK(index_zero_is_scrambled, Fast, Statistical) {
     PT_EXPECT(ctx, p >= ctx.alpha(), detail);
 }
 
-// Padding's other requirement: consecutive sets must be uncorrelated, or a path's successive decisions would move in
-// lockstep. Two sets sharing one shuffled index and scramble would return identical values.
+// Padding's other requirement: consecutive sets must be uncorrelated, or a path's successive decisions would move in lockstep.
 PT_CHECK(sets_are_decorrelated, Fast, Exact) {
     constexpr int kSamples = 128;
     int identical = 0;
@@ -261,9 +222,7 @@ PT_CHECK(sets_are_decorrelated, Fast, Exact) {
     PT_EXPECT(ctx, identical == 0, detail);
 }
 
-// Neighbouring pixels must not draw the same values, or every pixel would share one noise realization. What separates
-// them is now the dither shift rather than a per-pixel scramble, and the mask being a permutation is what guarantees it:
-// adjacent cells hold distinct ranks, so adjacent pixels are shifted by distinct amounts.
+// Neighbouring pixels must not draw the same values; the mask being a permutation is what guarantees adjacent pixels differ.
 PT_CHECK(pixels_are_decorrelated, Fast, Exact) {
     constexpr int kSamples = 128;
     int identical = 0;
@@ -278,12 +237,7 @@ PT_CHECK(pixels_are_decorrelated, Fast, Exact) {
     PT_EXPECT(ctx, identical == 0, detail);
 }
 
-// The shift must be a property of the pixel ALONE -- one value, reused at every sample index and in every dimension set.
-// A shift that drifted per sample index would be a fresh random rotation per sample, which is plain Monte Carlo with the
-// stratification thrown away -- a failure that still produces plausible-looking noise and so is invisible in an image.
-// It must vary per channel, and separately does: see checkChannelsAreDecorrelated.
-// Asserted directly and exactly: with each pixel's own shift removed, two different pixels must recover bit-identical
-// values everywhere, which is true only if they share one sequence and each shift is rigid.
+// The shift must be a property of the pixel ALONE: one drifting per sample index is plain Monte Carlo with stratification thrown away.
 PT_CHECK(shift_is_rigid, Fast, Exact) {
     const int setCount = kSetCount;
     constexpr int kSamples = 64;
@@ -301,13 +255,7 @@ PT_CHECK(shift_is_rigid, Fast, Exact) {
     PT_EXPECT(ctx, mismatches == 0, detail);
 }
 
-// Distinct dither channels must carry distinct, uncorrelated shift fields. This is the direct regression test for the
-// defect measured during this work: when every channel shared one shift, a pixel's whole sample vector lay on the
-// diagonal of the d-torus, a neighbourhood of pixels integrated the path integrand along a line rather than over the
-// torus, and the residual showed up as low-frequency error at 199x white noise -- the exact opposite of the intent.
-// Two channels landing on the same translation would reintroduce it silently, since the image would still look like
-// noise. Gate at |r| < 0.1: two independent fields of kMaskPixels samples have a sample correlation of SD 1/128, so 0.1
-// is ~13 SD and cannot fire by chance, while a repeated translation reads exactly 1.
+// Distinct dither channels must be uncorrelated: one shared shift put the error at 199x white noise. Gate |r| < 0.1, about 13 SD.
 PT_CHECK(channels_are_decorrelated, Fast, Statistical) {
     const int channelCount = (2 * kSetCount) + 2;
     std::vector<std::vector<double>> fields(static_cast<std::size_t>(channelCount));
@@ -351,9 +299,7 @@ PT_CHECK(channels_are_decorrelated, Fast, Statistical) {
     PT_EXPECT(ctx, worst < 0.1, detail);
 }
 
-// The mask must be a permutation of [0, kMaskPixels): every shift used exactly once, so the set of shifts is precisely
-// the uniform grid a toroidal shift needs -- no value doubled, none missing. The rank is recovered exactly rather than
-// rounded, since (rank + 0.5) / kMaskPixels is a multiple of 2^-24 and scaling it back is a power-of-two multiply.
+// The mask must be a permutation of [0, kMaskPixels): every shift used exactly once, recovered exactly rather than rounded.
 PT_CHECK(mask_is_permutation, Fast, Exact) {
     std::vector<int> seen(kMaskPixels, 0);
     int bad = 0;
@@ -374,16 +320,7 @@ PT_CHECK(mask_is_permutation, Fast, Exact) {
     PT_EXPECT(ctx, bad == 0, detail);
 }
 
-// The mask must actually be blue noise, which is a statement about its spectrum and nothing else: a permutation with the
-// right value distribution but a white spectrum would pass every check above and buy nothing at all, because the entire
-// point of the construction is where the error lands in frequency, not how the shifts are distributed.
-// Measured against the analytic white-noise null (whiteNoiseBandShare), not against a shuffled control. A sampled null
-// was tried first and was wrong in a way worth recording: shuffling 16384 elements with mt19937(1) reproduces the exact
-// permutation bluenoise_mask.cpp uses to place its initial binary pattern, so the "control" was a rearrangement of the
-// mask by the mask's own generator sequence and read eightfold high. A control has to be independent of the thing it
-// controls for, and the flat spectrum white noise is DEFINED by needs no sampling at all.
-// The gate is a factor of two below the null: a wide margin, since void-and-cluster suppresses this band by four orders
-// of magnitude and the failure guarded against -- a mask that degenerated toward white noise -- sits at 1.0x.
+// The mask must be blue noise, measured against the analytic null: a sampled control reproduced the mask's own generator sequence.
 PT_CHECK(mask_is_blue_noise, Fast, Statistical) {
     std::vector<double> mask(kMaskPixels);
     for (int y = 0; y < kMaskSize; ++y) {
@@ -393,8 +330,7 @@ PT_CHECK(mask_is_blue_noise, Fast, Statistical) {
         }
     }
 
-    // Bands 3 and up are everything below an eighth of Nyquist -- the low-frequency error a blue-noise mask exists to
-    // suppress, and the band a subsequent filter or the eye integrates over.
+    // Bands 3 and up are everything below an eighth of Nyquist: the low-frequency error a blue-noise mask exists to suppress.
     constexpr int kLowBand = 3;
     const std::array<double, pathtracer::debug::kSpectrumBands> bands =
         pathtracer::debug::octaveBandPower(mask, kMaskSize, kMaskSize);

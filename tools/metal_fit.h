@@ -6,7 +6,7 @@
 
 #include <glm/glm.hpp>
 
-// Measured conductor (lambda, n, k) to Gulbrandsen 2014 (reflectivity, edgeTint) per linear Rec.709 channel, by CIE 1931 integration of the spectral Fresnel reflectance.
+// Measured conductor (lambda,n,k) to Gulbrandsen 2014 (reflectivity,edgeTint) per Rec.709 channel by CIE 1931 Fresnel integration.
 namespace tools::metal_fit {
 
 struct NkSample {
@@ -15,10 +15,10 @@ struct NkSample {
     double k;
 };
 
-// Rows "lambda_um,n,k" ('#' starts a comment); rejects a table that is unsorted, unphysical (n <= 0 or k < 0) or does not span the CIE observer's 360-830 nm, since extrapolating measured optical constants is not measurement.
+// Rows "lambda_um,n,k", '#' comments; rejects unsorted, unphysical (n<=0,k<0) or short of CIE's 360-830 nm: extrapolation is not data.
 [[nodiscard]] std::optional<std::vector<NkSample>> loadNkTable(const std::string& path);
 
-// Johnson & Christy tabulate at uniform photon energy, so both linear-in-wavelength and linear-in-energy are defensible; the fit uses Wavelength and reports the other as a sensitivity.
+// Johnson & Christy tabulate in uniform photon energy, so both domains are defensible: the fit uses Wavelength, energy as a sensitivity.
 enum class Interpolation { Wavelength, PhotonEnergy };
 
 struct Fit {

@@ -54,7 +54,7 @@ struct PathTraceSettings {
     glm::vec3 edgeTint = glm::vec3(1.0F);
 };
 
-// Stops either side of unity the readout is exact over; exposure reaches +/-13.95 EV. See DERIVATIONS.md "Over-range readout binning".
+// Stops either side of unity the readout is exact over; exposure reaches +/-13.95 EV. See docs/DERIVATIONS.md "Over-range readout binning".
 inline constexpr int kOverRangeEvRadius = 16;
 inline constexpr float kOverRangeMin = 1.0F / static_cast<float>(1U << kOverRangeEvRadius);
 
@@ -65,7 +65,7 @@ inline constexpr int kOverRangeBinCount = 2 * kOverRangeEvRadius * (1 << kOverRa
 inline constexpr int kOverRangeBinOrigin =
     static_cast<int>(std::bit_cast<std::uint32_t>(kOverRangeMin) >> kOverRangeBinShift);
 
-// Bin of `value`: positive IEEE-754 floats are monotone under integer bit comparison, so a shift bins them. See DERIVATIONS.md.
+// Bin of `value`: positive IEEE-754 floats are monotone under integer bit comparison, so a shift bins them. See docs/DERIVATIONS.md.
 [[nodiscard]] inline int overRangeBin(float value) {
     if (std::signbit(value)) {
         return 0;
@@ -92,7 +92,7 @@ struct PathTraceResult {
     // Fraction of the primary hit's env NEE samples occluded: 1.0 = fully shadowed, 0.0 = lit or background; converges to penumbra.
     pathtracer::gfx::HdrImage shadow;
 
-    // Light-transport breakdown: the five buckets plus background sum to beauty exactly. See DERIVATIONS.md "Transport AOV bucketing".
+    // Light-transport breakdown: the five buckets plus background sum to beauty exactly. See docs/DERIVATIONS.md "Transport AOV bucketing".
     pathtracer::gfx::HdrImage directDiffuse;
     pathtracer::gfx::HdrImage indirectDiffuse;
     pathtracer::gfx::HdrImage directSpecular;
@@ -111,7 +111,7 @@ struct PathTraceResult {
 // All 10 images zeroed at width x height -- what renderPathTraced's `out` must be, allocated once and reused.
 [[nodiscard]] PathTraceResult makePathTraceResult(int width, int height);
 
-// Blocking multithreaded path trace: BSDF bounces, NEE with MIS power heuristic, RR. See DERIVATIONS.md "Path-traced render contract".
+// Blocking multithreaded path trace: BSDF bounces, NEE with MIS power heuristic, RR. See docs/DERIVATIONS.md "Path-traced render contract".
 void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                        const std::vector<ShadingTriangle>& shadingTriangles,
                        const std::vector<MeshInstance>& instances,

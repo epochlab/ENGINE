@@ -12,8 +12,7 @@
 namespace tools::check {
 namespace {
 
-// SplitMix64 (Steele, Lea & Flood, OOPSLA 2014): a full-avalanche finalizer, so a small structured input produces a
-// well-separated seed without needing a warm-up.
+// SplitMix64 (Steele, Lea & Flood, OOPSLA 2014): a full-avalanche finalizer, so a small structured input gives a well-separated seed.
 std::uint64_t splitmix64(std::uint64_t x) {
     x += 0x9E3779B97F4A7C15ULL;
     x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ULL;
@@ -55,8 +54,7 @@ std::uint64_t Context::subSeed(std::string_view label) const { return splitmix64
 void Context::plan(int assertions) { planned_ = assertions; }
 
 double Context::alpha() const {
-    // Corrected across ALL registered checks, not the filtered subset: otherwise `--check=x` would run at a different
-    // significance than the full suite and a check's verdict would depend on how it was invoked.
+    // Corrected across ALL registered checks, not the filtered subset, or `--check=x` would run at a different significance than the suite.
     const double perCheck = stats::sidak(kFamilyAlpha, static_cast<int>(registry().size()));
     return stats::sidak(perCheck, planned_ > 0 ? planned_ : 1);
 }
@@ -109,13 +107,11 @@ int run(int argc, char** argv, const char* suiteName) {
         return EXIT_SUCCESS;
     }
 
-    // Emits the ctest fragment the build consumes through TEST_INCLUDE_FILES, so adding a check adds a test with no
-    // CMake edit. Same mechanism CMake's own gtest_discover_tests uses in POST_BUILD mode.
+    // Emits the ctest fragment TEST_INCLUDE_FILES consumes, the mechanism CMake's own gtest_discover_tests uses in POST_BUILD mode.
     if (listCtest) {
         for (const Registration& check : registry()) {
             const int perTest = check.speed == Speed::Slow ? threads : 1;
-            // Old-style positional add_test: the NAME/COMMAND signature exists only at configure time, not in the
-            // script ctest include files are read as.
+            // Old-style positional add_test: the NAME/COMMAND signature exists only at configure time, not in an include script.
             std::cout << "add_test(" << suiteName << "." << check.name << " \"" << exePath << "\" --check="
                       << check.name << " --seed=" << suiteSeed << " --threads=" << perTest << ")\n"
                       << "set_tests_properties(" << suiteName << "." << check.name << " PROPERTIES LABELS \""
@@ -142,8 +138,7 @@ int run(int argc, char** argv, const char* suiteName) {
         const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
 
         int checkFailures = ctx.failures();
-        // A check whose realized assertion count disagrees with plan() has been corrected for the wrong number of
-        // tests, so its bands are wrong even if every one of them passed.
+        // A realized assertion count disagreeing with plan() was corrected for the wrong number of tests, so its bands are wrong.
         if (ctx.planned() >= 0 && ctx.asserted() != ctx.planned()) {
             std::cout << "    FAIL " << check.name << " planned " << ctx.planned() << " assertions but made "
                       << ctx.asserted() << "\n";

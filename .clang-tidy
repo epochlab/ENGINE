@@ -1,5 +1,5 @@
 ---
-# Static-analysis policy; see DERIVATIONS.md "Static analysis policy" for the vendored exemptions and the three disabled checks.
+# Static-analysis policy; see docs/DERIVATIONS.md "Static analysis policy" for the vendored exemptions and the three disabled checks.
 Checks: >
   bugprone-*,
   cppcoreguidelines-owning-memory,

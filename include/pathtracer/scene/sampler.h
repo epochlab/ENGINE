@@ -6,7 +6,7 @@
 
 namespace pathtracer::scene {
 
-// Owen-scrambled shuffled Sobol (Burley 2020), blue-noise dithered (Georgiev 2016). See DERIVATIONS.md "Sobol padding and net quality".
+// Owen-scrambled shuffled Sobol (Burley 2020), blue-noise dithered (Georgiev 2016). docs/DERIVATIONS.md "Sobol padding and net quality".
 class Sampler {
 public:
     // sampleIndex advances per sample; scrambleSeed is fixed across an accumulation. Swapping the two degrades this to white noise.

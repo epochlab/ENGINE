@@ -163,7 +163,7 @@ HdrImage hsvAov(const HdrImage& beauty, ThreadPool& threadPool) {
             const float b = beauty.rgba[texel + 2];
             const float value = std::max({r, g, b});
             const float chroma = value - std::min({r, g, b});
-            // Exact degenerate branches, not the shader's 1e-10 guard: hue is undefined on the achromatic axis, saturation on black.
+            // Exact branches, not the shader's 1e-10 guard: hue is undefined on the achromatic axis, saturation on black (Smith 1978).
             const float saturation = value > 0.0F ? chroma / value : 0.0F;
             float hue = 0.0F;
             if (chroma > 0.0F) {

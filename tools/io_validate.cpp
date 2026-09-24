@@ -1,13 +1,4 @@
-// Correctness gate for the engine's file-boundary code: the EXR round trip (gfx/hdr_image.cpp), the JSON scene and
-// profile parsers (config/scene_config.cpp, config/profile_config.cpp), and the benchmark log writer (debug/bench_log.cpp).
-//
-// These are the places the engine ingests data it did not produce, which is exactly where validation earns its keep --
-// and none of them had any. hdr_image.cpp is linked into three validators and was invoked by none of them: its round
-// trip was asserted only by a comment claiming losslessness. profile_config.cpp had no coverage at all.
-//
-// Both halves of each parser's contract are asserted, and the rejection half is the load-bearing one: a parser that
-// accepts valid input but silently accepts invalid input too will not fail here on the happy path, and a malformed
-// asset then reaches the renderer as a plausible-looking wrong number rather than an error.
+// Correctness gate for the engine's file boundaries: the EXR round trip and the JSON scene, profile and bench-log parsers.
 
 #include <algorithm>
 #include <cmath>
@@ -36,14 +27,12 @@
 
 namespace {
 
-// Written under the system temp directory rather than the source tree: a validator must not need a writable checkout,
-// and must leave nothing behind for the next run to accidentally pass against.
+// Written under the system temp directory: a validator must not need a writable checkout, nor leave anything for the next run.
 std::filesystem::path scratchPath(const char* name) {
     return std::filesystem::temp_directory_path() / name;
 }
 
-// Values chosen to be hostile to a lossy or narrowing round trip: denormal-scale, exact halves, a value far outside
-// display range, and a negative -- all representable in float32 and all preserved by a full-float EXR channel.
+// Values hostile to a lossy or narrowing round trip: denormal-scale, exact halves, far outside display range, and a negative.
 pathtracer::gfx::HdrImage makeProbeImage() {
     pathtracer::gfx::HdrImage image;
     image.width = 7;   // deliberately not a power of two or a multiple of any tile size
@@ -62,9 +51,7 @@ pathtracer::gfx::HdrImage makeProbeImage() {
     return image;
 }
 
-// The losslessness hdr_image.h claims in prose. Bit-exact, not approximate: both directions write full-float channels,
-// so any difference at all means a channel type or a stride is wrong. The 1e-20 and 65504 rows are what would expose a
-// half-float channel, which would round both to something else entirely while leaving the ordinary values intact.
+// The losslessness hdr_image.h claims in prose, bit-exact: the 1e-20 and 65504 rows are what would expose a half-float channel.
 PT_CHECK(exr_round_trip_is_lossless, Fast, Exact) {
     ctx.plan(4);
     const pathtracer::gfx::HdrImage original = makeProbeImage();
@@ -104,8 +91,7 @@ PT_CHECK(exr_round_trip_is_lossless, Fast, Exact) {
     std::filesystem::remove(path);
 }
 
-// A missing file must be reported, not treated as an empty image: loadExr's contract is nullopt on failure, and a
-// caller that received a zero-sized image instead would render black and never know why.
+// A missing file must be reported, not treated as an empty image: a caller given a zero-sized image renders black and never knows.
 PT_CHECK(exr_load_rejects_bad_input, Fast, Exact) {
     ctx.plan(2);
     const std::filesystem::path missing = scratchPath("engine_io_validate_does_not_exist.exr");
@@ -113,8 +99,7 @@ PT_CHECK(exr_load_rejects_bad_input, Fast, Exact) {
     PT_EXPECT(ctx, !pathtracer::gfx::loadExr(missing.string()).has_value(),
                   "loadExr accepted a path that does not exist");
 
-    // A file that exists but is not an EXR at all -- the realistic corruption, and the one a magic-number check alone
-    // would catch while a truncated-header check would not.
+    // A file that exists but is not an EXR: the realistic corruption, which a magic-number check catches and a header check does not.
     const std::filesystem::path garbage = scratchPath("engine_io_validate_garbage.exr");
     {
         std::ofstream out(garbage, std::ios::binary);
@@ -125,8 +110,7 @@ PT_CHECK(exr_load_rejects_bad_input, Fast, Exact) {
     std::filesystem::remove(garbage);
 }
 
-// Writes `text` to a scratch .json and hands back the path, so each rejection row states its own malformation inline
-// rather than needing a checked-in fixture file per case.
+// Writes `text` to a scratch .json and returns the path, so each rejection row states its own malformation inline.
 std::filesystem::path writeJson(const char* name, const std::string& text) {
     const std::filesystem::path path = scratchPath(name);
     std::ofstream out(path);
@@ -144,18 +128,14 @@ PT_CHECK(scene_config_accepts_the_shipped_scene, Fast, Exact) {
     PT_EXPECT(ctx, loaded.has_value(), detail);
 }
 
-// The rejection half of the contract. Each row is a malformation a real authoring mistake produces, and each must be
-// reported rather than absorbed into a default -- a quad light with non-perpendicular edges, for instance, would be
-// sampled by a spherical-rectangle sampler that is exact only for rectangles, producing a quietly wrong image.
+// The rejection half of the contract: each row is a malformation a real authoring mistake produces, and each must be reported.
 PT_CHECK(scene_config_rejects_malformed_input, Fast, Exact) {
     struct Case {
         const char* name;
         const char* file;
         std::string text;
     };
-    // Built by mutating a base that loads, so each row fails for the reason it names. Stating a malformed scene
-    // outright risks a vacuous pass: an earlier draft of the two light rows below omitted "environment" and was
-    // rejected for THAT, never reaching the light validation they exist to test.
+    // Built by mutating a base that loads, so each row fails for the reason it names rather than passing vacuously on an earlier error.
     const auto scene = [](const std::string& lights) {
         return std::string(
                    "{\"model\":{\"gltfPath\":\"geometry/cornell/cornell_v001.gltf\",\"texturePath\":\"\","
@@ -178,8 +158,7 @@ PT_CHECK(scene_config_rejects_malformed_input, Fast, Exact) {
         {"negative light intensity", "engine_io_scene_negintensity.json",
          scene(",\"lights\":[{\"type\":\"quad\",\"origin\":[0,0,0],\"edge0\":[1,0,0],\"edge1\":[0,0,1],"
                "\"color\":[1,1,1],\"intensity\":-5.0,\"twoSided\":false}]")},
-        // The spherical-rectangle sampler (Urena et al. 2013) is exact only for a RECTANGLE, so skewed edges would be
-        // sampled against geometry the light does not have -- a quietly wrong image rather than an error.
+        // The spherical-rectangle sampler (Urena et al. 2013) is exact only for a RECTANGLE, so skewed edges sample geometry it lacks.
         {"quad light with non-perpendicular edges", "engine_io_scene_skewlight.json",
          scene(",\"lights\":[{\"type\":\"quad\",\"origin\":[0,0,0],\"edge0\":[1,0,0],\"edge1\":[1,1,0],"
                "\"color\":[1,1,1],\"intensity\":5.0,\"twoSided\":false}]")},
@@ -215,9 +194,7 @@ PT_CHECK(profile_config_accepts_the_shipped_profile, Fast, Exact) {
     PT_EXPECT(ctx, pathtracer::config::loadProfileConfig(profile.string()).has_value(), detail);
 }
 
-// profile_config.cpp had no coverage of any kind. These rows are the boundary values it is responsible for: a
-// zero-or-negative resolution divides an aspect ratio, and a zero film-back dimension is a denominator inside
-// Camera::verticalFovRadians().
+// The boundary values profile_config.cpp is responsible for: a resolution divides an aspect ratio, a film-back dimension the FOV.
 PT_CHECK(profile_config_rejects_malformed_input, Fast, Exact) {
     struct Case {
         const char* name;
@@ -245,7 +222,7 @@ PT_CHECK(profile_config_rejects_malformed_input, Fast, Exact) {
                   "loadProfileConfig accepted a path that does not exist");
 }
 
-// render.vsync, displayBitDepth and textureBitDepth, each varied alone on the shipped profile: every accepted value must map to its own setting and leave the other two alone, every other value must be refused rather than coerced (16.5 would otherwise truncate to 16).
+// render.vsync and the two bit depths, each varied alone: every accepted value maps to its own setting, every other is refused.
 PT_CHECK(profile_config_render_display_settings, Fast, Exact) {
     using pathtracer::gfx::ScalarType;
     struct Case {
@@ -272,7 +249,7 @@ PT_CHECK(profile_config_render_display_settings, Fast, Exact) {
         }
     }
 
-    // Each accepted row varies one key against the shipped profile, so the expectation is the shipped setting with that one key overridden -- no assumption about what the shipped depths are.
+    // Each accepted row varies one key against the shipped profile, so the expectation assumes nothing about what the shipped depths are.
     const std::filesystem::path shippedPath = std::filesystem::path(ASSET_ROOT_DIR) / "config" / "profile.json";
     const std::optional<pathtracer::config::ProfileConfig> shippedConfig = pathtracer::config::loadProfileConfig(shippedPath.string());
     std::ifstream shippedFile(shippedPath);
@@ -314,7 +291,7 @@ PT_CHECK(profile_config_render_display_settings, Fast, Exact) {
     }
 }
 
-// render.defaultAOV is a raw index into kAovNames that main.cpp's startup spec block dereferences unchecked, so the bound has to hold at load. Both ends plus the first value past the top, which is the one an AOV insertion moves.
+// render.defaultAOV is a raw index main.cpp dereferences unchecked, so the bound holds at load: both ends plus the first past the top.
 PT_CHECK(profile_config_default_aov_is_in_range, Fast, Exact) {
     const int aovCount = static_cast<int>(pathtracer::debug::AovId::Count);
     const std::vector<std::pair<nlohmann::json, bool>> cases = {
@@ -345,7 +322,7 @@ PT_CHECK(profile_config_default_aov_is_in_range, Fast, Exact) {
     }
 }
 
-// The two scene-scale distances in `pathTracer`, each a divisor at its point of use: aoMaxDistance normalizes the AO obscurance falloff (path_tracer.cpp), lookaheadDistance the Lookahead AOV's ramp (rasterizer.cpp). At or below zero the lane is inf/NaN rather than the bounded gradient it is defined to be, and a missing or non-numeric key must fail at this asset-load boundary rather than default silently. Each varied alone against the shipped profile, so an accepted row also proves the value reaches the struct unaltered and leaves the other distance alone.
+// The two scene-scale distances, each a divisor at its point of use: at or below zero the lane is inf/NaN, not a bounded gradient.
 PT_CHECK(profile_config_scene_scale_distances, Fast, Exact) {
     struct Case {
         std::string name;
@@ -406,7 +383,7 @@ PT_CHECK(profile_config_scene_scale_distances, Fast, Exact) {
     }
 }
 
-// loadImageTexture's typed read: binary16-exact data loads bit-identically at both types, arbitrary data at Float16 equals the IEEE round-to-nearest-even cast (IEEE 754-2008 4.3.1) that OpenEXR's float-to-half conversion must perform, and a finite source above kHalfMax overflows and is rejected at Float16 only.
+// loadImageTexture's typed read: Float16 must equal the IEEE round-to-nearest-even cast, and a source above kHalfMax is rejected there.
 PT_CHECK(image_texture_half_load, Fast, Exact) {
     using pathtracer::gfx::ScalarType;
     const auto writeProbe = [](const char* name, const std::vector<float>& values) {
@@ -439,7 +416,7 @@ PT_CHECK(image_texture_half_load, Fast, Exact) {
                            sameTexels(*exact32, exact),
                   "binary16-exact values did not load bit-identically at Float16 and Float32");
 
-    // Arbitrary: needs rounding, including the exact midpoint above 1.0 (ties to even -> 1.0), a subnormal, and one below the smallest subnormal (-> 0).
+    // Arbitrary: needs rounding, including the exact midpoint above 1.0 (ties to even), a subnormal, and one below the smallest subnormal.
     const std::vector<float> arbitrary = {0.1F, 1.0F + pathtracer::gfx::kHalfUnitRoundoff, 3.14159265F, 1.0e-6F, 1.0e-20F, 60000.5F};
     std::vector<float> rounded;
     for (const float v : arbitrary) {
@@ -467,7 +444,7 @@ PT_CHECK(image_texture_half_load, Fast, Exact) {
     }
 }
 
-// sampleBilinear at Float16 against Float32 on the same non-negative, normal-range data. Each stored texel is t(1 + d) with |d| <= u = 2^-11, and bilinear weights are non-negative and sum to 1, so the storage error is at most u * s32; each path's float arithmetic (two mix levels, 3 roundings each) adds at most gamma_6 * s (Higham 2002, 3.1). The bound is derived, not fitted; a zero observed difference would mean the Float16 path was never exercised.
+// sampleBilinear at Float16 against Float32: the bound is derived from u = 2^-11 and gamma_6 (Higham 2002, 3.1), never fitted.
 PT_CHECK(image_texture_bilinear_half_bound, Fast, Exact) {
     using pathtracer::gfx::ScalarType;
     constexpr int kWidth = 13;
@@ -507,8 +484,7 @@ PT_CHECK(image_texture_bilinear_half_bound, Fast, Exact) {
     PT_EXPECT(ctx, largest > 0.0, "Float16 and Float32 samples never differed: the half path was not exercised");
 }
 
-// The film-back catalogue's own contract: every preset's dimensions feed Camera::verticalFovRadians() as a
-// denominator and an aspect ratio, so a zero or negative entry is not a cosmetic defect.
+// The film-back catalogue's contract: every preset's dimensions feed verticalFovRadians() as a denominator and an aspect ratio.
 PT_CHECK(film_back_presets_are_physically_valid, Fast, Exact) {
     ctx.plan(2);
     const std::filesystem::path camera = std::filesystem::path(ASSET_ROOT_DIR) / "config" / "camera.json";

@@ -8,8 +8,7 @@
 // Shared statistics for the validators: quadrature, survival functions, quantiles and confidence bands.
 namespace tools::stats {
 
-// Composite Simpson's rule over `panels` (even) intervals. Generic in the integrand's return type so it composes with
-// itself for nested quadrature -- the outer call's integrand returns the inner call's value, not a scalar.
+// Composite Simpson's rule over `panels` (even) intervals, generic in the return type so it composes for nested quadrature.
 template <typename Integrand>
 auto simpson(double lower, double upper, int panels, Integrand f) -> decltype(f(0.0)) {
     const double h = (upper - lower) / panels;
@@ -20,9 +19,7 @@ auto simpson(double lower, double upper, int panels, Integrand f) -> decltype(f(
     return (h / 3.0) * sum;
 }
 
-// Regularized upper incomplete gamma Q(a, x): series below the crossover, continued fraction above (Numerical Recipes
-// 3rd ed. 6.2). Supplies the chi-square survival function so a test can state a significance level rather than carry a
-// critical-value table indexed by degrees of freedom.
+// Regularized upper incomplete gamma Q(a, x): series below the crossover, continued fraction above (Numerical Recipes 3rd ed. 6.2).
 inline double regularizedGammaQ(double a, double x) {
     constexpr int kMaxIterations = 300;
     constexpr double kEpsilon = 1e-14;
@@ -61,22 +58,15 @@ inline double chiSquareUpperTail(double chi2, int dof) {
     return regularizedGammaQ(0.5 * dof, 0.5 * chi2);
 }
 
-// Per-test significance holding a family-wise error rate of `familyAlpha` across `tests` independent tests
-// (Sidak 1967). Exact under independence; Bonferroni's familyAlpha/tests is the arbitrary-dependence alternative and
-// agrees with this to better than one part in 10^4 at the levels used here, so the choice is documentation.
+// Per-test significance holding familyAlpha across `tests` independent tests (Sidak 1967); agrees with Bonferroni to 1e-4 here.
 inline double sidak(double familyAlpha, int tests) {
     return 1.0 - std::pow(1.0 - familyAlpha, 1.0 / static_cast<double>(tests));
 }
 
 
-// --- Quantiles --------------------------------------------------------------------------------------------------
-// These are what retire "6 sigma" as a written constant. 6 sigma two-sided is p = 1.97e-9, a number nobody chose
-// deliberately; a quantile evaluated at a stated error rate is a number that moves correctly when the sample count or
-// the number of tests changes.
+// --- Quantiles: these retire "6 sigma" as a written constant, p = 1.97e-9 being a number nobody chose deliberately.
 
-// Inverse standard normal CDF. Wichura 1988, Algorithm AS 241 (Applied Statistics 37(3)), the PPND16 variant:
-// relative accuracy ~1e-16 over the whole range, which is far more than any band here needs, but it is a closed
-// rational form with no iteration and no convergence caveat to document.
+// Inverse standard normal CDF (Wichura 1988, AS 241, PPND16): relative accuracy ~1e-16, a closed rational form with no iteration.
 inline double normalQuantile(double p) {
     const double q = p - 0.5;
     if (std::fabs(q) <= 0.425) {
@@ -157,10 +147,7 @@ inline double regularizedBetaI(double a, double b, double x) {
                                           : 1.0 - (front * betaContinuedFraction(b, a, 1.0 - x) / b);
 }
 
-// Two-sided Student-t quantile: the multiplier t such that P(|T| <= t) = 1 - alpha at `dof` degrees of freedom.
-// Student-t rather than a normal quantile because the variance is ESTIMATED, not known. At the replicate counts used
-// here (R = 16, so 15 dof) the difference from the normal quantile is a factor of ~1.6 at these alphas -- exactly the
-// regime where using the normal would produce a band that is too tight and a check that flakes.
+// Two-sided Student-t quantile, not normal, because the variance is ESTIMATED: at R = 16 (15 dof) the difference is a factor of ~1.6.
 inline double studentTTwoSided(double alpha, double dof) {
     // Monotone in t, so bisection is both correct and immune to the convergence caveats an inverse-series would carry.
     const auto tailProbability = [dof](double t) {
@@ -176,9 +163,7 @@ inline double studentTTwoSided(double alpha, double dof) {
     return 0.5 * (low + high);
 }
 
-// Replicate count for randomized-QMC estimators. Sampler output is one Owen-scrambled Sobol set, so sqrt(N) error does
-// not apply; independent scrambles make replicate means iid regardless (Owen 1997b; L'Ecuyer & Lemieux 2002).
-// 16: below ~10 the t-quantile inflates the band, above ~32 extra dof buy nothing; a power of two dividing every count.
+// Replicate count for randomized-QMC: independent scrambles make replicate means iid (Owen 1997b; L'Ecuyer & Lemieux 2002).
 inline constexpr int kReplicates = 16;
 
 // --- Estimators and bands ---------------------------------------------------------------------------------------
@@ -191,8 +176,7 @@ struct Band {
     [[nodiscard]] double halfWidth() const { return 0.5 * (hi - lo); }
 };
 
-// Welford's online variance (Welford 1962, Technometrics 4(3); numerics per Chan, Golub & LeVeque 1983): one pass, and
-// it does not form the catastrophic sum-of-squares-minus-square-of-sum difference a naive accumulator would.
+// Welford's online variance (Welford 1962; numerics per Chan, Golub & LeVeque 1983): one pass, no catastrophic difference of sums.
 class Welford {
 public:
     void add(double x) {
@@ -217,10 +201,7 @@ private:
     double m2_ = 0.0;
 };
 
-// Band for the DIFFERENCE of two independent estimators, centred at zero: the null "both estimate the same quantity".
-// Their variances add, which a flat "x% of one side" tolerance gets wrong by modelling one side as exact. Welch 1947
-// (Biometrika 34) supplies the effective degrees of freedom when the two variances differ, which they generally do --
-// a Russian-roulette render is materially noisier than the same render without it.
+// Band for the DIFFERENCE of two independent estimators at the null they estimate the same thing; Welch 1947 for the effective dof.
 inline Band differenceBand(const Welford& a, const Welford& b, double alpha) {
     const double va = a.sampleVariance() / static_cast<double>(a.count());
     const double vb = b.sampleVariance() / static_cast<double>(b.count());
@@ -235,9 +216,7 @@ inline Band differenceBand(const Welford& a, const Welford& b, double alpha) {
     return Band{-half, half};
 }
 
-// Wilson score interval for a binomial proportion (Wilson 1927, JASA 22(158)). NOT Wald: Brown, Cai & DasGupta 2001
-// (Statistical Science 16(2)) show Wald's coverage is erratic and its width collapses to zero as p approaches 0 or 1,
-// which is precisely the degenerate case an occlusion or hit-fraction check can land in.
+// Wilson score interval for a binomial proportion (Wilson 1927), NOT Wald, whose width collapses to zero as p approaches 0 or 1.
 inline Band wilsonBand(long long successes, long long trials, double alpha) {
     const double n = static_cast<double>(trials);
     const double z = normalQuantile(1.0 - (0.5 * alpha));
@@ -249,11 +228,9 @@ inline Band wilsonBand(long long successes, long long trials, double alpha) {
     return Band{centre - half, centre + half};
 }
 
-// --- Distribution-free location shift (Hollander, Wolfe & Chicken, Nonparametric Statistical Methods, 3rd ed.) -----
-// Timing noise is skewed and heavy-tailed, so normal-theory intervals understate it; these need only continuity (plus symmetry, paired form) and take exact coverage from the discrete null.
+// --- Distribution-free location shift (Hollander, Wolfe & Chicken, 3rd ed.): timing noise is skewed, so normal bands understate it.
 
-// Null pmf of the Wilcoxon signed-rank T+ over 0..n(n+1)/2: the subset-sum distribution of {1..n} under fair-coin signs.
-// Built in probability space, halving per rank, so it cannot overflow and needs no normal approximation at any n.
+// Null pmf of the Wilcoxon signed-rank T+ over 0..n(n+1)/2, built in probability space, so it cannot overflow at any n.
 inline std::vector<double> signedRankNull(int n) {
     std::vector<double> pmf{1.0};
     for (int rank = 1; rank <= n; ++rank) {
@@ -267,7 +244,7 @@ inline std::vector<double> signedRankNull(int n) {
     return pmf;
 }
 
-// Null pmf of Mann-Whitney U (pairs with y > x) over 0..mn, recursing on whether the largest observation is an x or a y: p(i,j,u) = i/(i+j) p(i-1,j,u) + j/(i+j) p(i,j-1,u-i).
+// Null pmf of Mann-Whitney U over 0..mn: p(i,j,u) = i/(i+j) p(i-1,j,u) + j/(i+j) p(i,j-1,u-i), recursing on the largest observation.
 inline std::vector<double> rankSumNull(int m, int n) {
     std::vector<std::vector<double>> previous(static_cast<std::size_t>(n) + 1, std::vector<double>{1.0});  // i = 0
     for (int i = 1; i <= m; ++i) {
@@ -301,7 +278,7 @@ inline std::size_t upperCritical(const std::vector<double>& pmf, double tail) {
     return t;
 }
 
-// Point estimate with a two-sided interval of coverage >= 1 - alpha; (-inf, +inf) when the sample is too small for any interval at alpha to exist.
+// Point estimate with a two-sided interval of coverage >= 1 - alpha; (-inf, +inf) when no interval at alpha exists.
 struct ShiftEstimate {
     double estimate = 0.0;
     double lower = -std::numeric_limits<double>::infinity();
@@ -336,7 +313,7 @@ inline ShiftEstimate orderStatisticInterval(const std::vector<double>& sorted, c
     return result;
 }
 
-// Hodges-Lehmann centre of a symmetric distribution from paired differences: median of the n(n+1)/2 Walsh averages, Wilcoxon signed-rank interval (Hodges & Lehmann 1963; Hollander et al. 3.2).
+// Hodges-Lehmann centre from paired differences: median of the n(n+1)/2 Walsh averages (Hodges & Lehmann 1963; Hollander et al. 3.2).
 inline ShiftEstimate hodgesLehmannPaired(const std::vector<double>& d, double alpha) {
     std::vector<double> walsh;
     walsh.reserve(d.size() * (d.size() + 1) / 2);
@@ -349,7 +326,7 @@ inline ShiftEstimate hodgesLehmannPaired(const std::vector<double>& d, double al
     return orderStatisticInterval(walsh, signedRankNull(static_cast<int>(d.size())), alpha);
 }
 
-// Hodges-Lehmann two-sample shift of y relative to x: median of all y_j - x_i, Mann-Whitney interval (Hollander et al. 4.3); assumes only that y is x shifted.
+// Hodges-Lehmann two-sample shift of y over x: median of all y_j - x_i (Hollander et al. 4.3); assumes only that y is x shifted.
 inline ShiftEstimate hodgesLehmannShift(const std::vector<double>& x, const std::vector<double>& y, double alpha) {
     std::vector<double> differences;
     differences.reserve(x.size() * y.size());

@@ -14,7 +14,7 @@
 | [Material Library](#material-library) | Shipped presets and every `MaterialConfig` field |
 | [AOV](#aov) | All 28 debug outputs, by category |
 | [References](#references) | The literature each technique implements |
-| [Derivations](DERIVATIONS.md) | Long-form reasoning behind the implementation choices |
+| [Derivations](docs/DERIVATIONS.md) | Long-form reasoning behind the implementation choices |
 
 ## Build
 
@@ -134,9 +134,9 @@ Timing runs append one JSON Lines record each to a local log: `pathtracer -bench
 | Feature | Mechanism |
 |---|---|
 | Stochastic BSDF | EON rough-diffuse (Portsmouth, Kutz, Hill 2025), GGX microfacet specular, Walter 2007 rough dielectric transmission (delta Snell + TIR below the smooth-roughness threshold, and at `ior` 1 at every roughness), Kulla-Conty multiple-scattering compensation on both interfaces; four-lobe stochastic selection, one-sample mixture estimator — real physical response, energy-conserving at every roughness |
-| Volumetric absorption | Beer-Lambert extinction (`transmissionColor` over `transmissionDepth`, Arnold/OpenPBR convention) on a single-level medium stack inside a `transmissionFactor>0` material (a constant on-surface tint at `transmissionDepth 0`) — tinted glass, thick or thin, without participating-media in-scattering ([roadmap](ROADMAP.md) transport #1) |
+| Volumetric absorption | Beer-Lambert extinction (`transmissionColor` over `transmissionDepth`, Arnold/OpenPBR convention) on a single-level medium stack inside a `transmissionFactor>0` material (a constant on-surface tint at `transmissionDepth 0`) — tinted glass, thick or thin, without participating-media in-scattering ([roadmap](docs/ROADMAP.md) transport #1) |
 | Per-object materials | `SceneConfig::materialOverrides` (glTF node name → `materials/*.json` path) builds a per-instance settings vector, indexed by `ShadingTriangle::instanceIndex` through both render paths — different objects in one scene can carry different materials |
-| Area lights | Rectangular emitters (`scene.json`'s `lights`), one-sided by default, with their own geometry in the BVH and solid-angle NEE sampling (Ureña, Fajardo & King 2013), MIS'd against BSDF sampling like the environment — the classic emissive-panel Cornell box ([roadmap](ROADMAP.md) transport #2), and ReSTIR's ([roadmap](ROADMAP.md)) prerequisite light set |
+| Area lights | Rectangular emitters (`scene.json`'s `lights`), one-sided by default, with their own geometry in the BVH and solid-angle NEE sampling (Ureña, Fajardo & King 2013), MIS'd against BSDF sampling like the environment — the classic emissive-panel Cornell box ([roadmap](docs/ROADMAP.md) transport #2), and ReSTIR's ([roadmap](docs/ROADMAP.md)) prerequisite light set |
 | Environment lighting | Equirect HDR map, BSDF-sampled misses + luminance-importance-sampled NEE, MIS-combined — image-based lighting, one member of `LightSet` alongside any area lights (still no punctual/directional lights, which have no hittable geometry) |
 | Environment-light toggle | HUD "Environment Light" checkbox (`environment.lightEnabled` in `scene.json`, `--env-light` on `render_beauty`) — removes the environment from NEE/MIS/every miss including the background, unlike "Show/Hide Background" which only hides the camera-visible sky; lets an HDRI+area-light scene isolate the panel-only look |
 | Russian roulette | Survival probability clamped from running throughput past `russianRouletteStartBounce`, reweighted by `1/p` — keeps recursion finite without biasing the estimator |
@@ -243,33 +243,33 @@ Add a new material by dropping a JSON file in `assets/materials/` and pointing `
 
 - Kajiya, J.T. (1986). The rendering equation. SIGGRAPH.
 - Veach, E. (1997). Robust Monte Carlo Methods for Light Transport Simulation. PhD thesis, Stanford: MIS, its support condition (§9.2, asserted by `bsdf_validate`'s `strategy_coverage`), and NEE.
-- Veach, E., Guibas, L.J. (1995). Bidirectional estimators for light transport. EGRW: vertex connection — [roadmap](ROADMAP.md) transport #4, not implemented.
+- Veach, E., Guibas, L.J. (1995). Bidirectional estimators for light transport. EGRW: vertex connection — [roadmap](docs/ROADMAP.md) transport #4, not implemented.
 - Arvo, J., Kirk, D. (1990). Particle Transport and Image Synthesis: Russian roulette termination.
 - Christensen, P.H., Jarosz, W. (2016). The Path to Path-Traced Movies. FnT CGV: production grounding.
 - Sobol, I.M. (1967); Joe, S., Kuo, F.Y. (2008). SIAM JSC 30(5); Bratley, P., Fox, B.L. (1988). ACM Alg. 659: the sequence, its direction numbers (`sobol_direction_seeds.inc`) and the expanding recurrence.
 - Burley, B. (2020). Practical Hash-based Owen Scrambling. JCGT 9(4): the scramble, set-index shuffling and padding in `Sampler`, using Vegdahl's constants as shipped by Cycles.
 - Cranley, R., Patterson, T.N.L. (1976). Randomization of number theoretic methods: the per-pixel toroidal shift blue-noise dithering drives.
-- Georgiev, I., Fajardo, M. (2016). Blue-noise Dithered Sampling. SIGGRAPH Talks: the tiled blue-noise shift, adopted at d = 1; the annealed d-dimensional matrix is open in the [roadmap](ROADMAP.md).
+- Georgiev, I., Fajardo, M. (2016). Blue-noise Dithered Sampling. SIGGRAPH Talks: the tiled blue-noise shift, adopted at d = 1; the annealed d-dimensional matrix is open in the [roadmap](docs/ROADMAP.md).
 - Ulichney, R.A. (1993). The void-and-cluster method for dither array generation. SPIE 1913: the mask's construction, re-runnable in `tools/bluenoise_mask.cpp` rather than a lifted tile.
 - Dupuy, J., Jakob, W. (2018). An Adaptive Parameterization for Efficient Material Acquisition and Rendering. ACM ToG 37(6): one interpolant for value and density, the construction both transmissive multiple-scattering shares use.
-- Zwicker, M. et al. (2015). Adaptive Sampling and Reconstruction for Monte Carlo Rendering. CGF STAR: denoising survey — [roadmap](ROADMAP.md) transport #6, not implemented.
-- Xiao, L. et al. (2020). Neural supersampling for real-time rendering. SIGGRAPH — [roadmap](ROADMAP.md) transport #7, not implemented.
-- Ho, J. et al. (2020). NeurIPS; Rombach, R. et al. (2022). CVPR: diffusion foundations — [roadmap](ROADMAP.md) transport #8, not implemented.
-- Novák, J. et al. (2018). Monte Carlo Methods for Volumetric Light Transport. CGF STAR — [roadmap](ROADMAP.md) transport #1, not implemented.
-- Jensen, H.W. et al. (2001). SIGGRAPH; Christensen, P.H., Burley, B. (2015): BSSRDF and diffusion profiles — [roadmap](ROADMAP.md) transport #1, not implemented.
+- Zwicker, M. et al. (2015). Adaptive Sampling and Reconstruction for Monte Carlo Rendering. CGF STAR: denoising survey — [roadmap](docs/ROADMAP.md) transport #6, not implemented.
+- Xiao, L. et al. (2020). Neural supersampling for real-time rendering. SIGGRAPH — [roadmap](docs/ROADMAP.md) transport #7, not implemented.
+- Ho, J. et al. (2020). NeurIPS; Rombach, R. et al. (2022). CVPR: diffusion foundations — [roadmap](docs/ROADMAP.md) transport #8, not implemented.
+- Novák, J. et al. (2018). Monte Carlo Methods for Volumetric Light Transport. CGF STAR — [roadmap](docs/ROADMAP.md) transport #1, not implemented.
+- Jensen, H.W. et al. (2001). SIGGRAPH; Christensen, P.H., Burley, B. (2015): BSSRDF and diffusion profiles — [roadmap](docs/ROADMAP.md) transport #1, not implemented.
 - Cook, R.L., Torrance, K.E. (1982). ACM ToG: BRDF and Fresnel foundations.
 - Walter, B. et al. (2007). Microfacet models for refraction through rough surfaces: GGX, the rough-refraction BTDF, and the per-microfacet reflect/refract choice `facetReflectProbability` implements.
-- Heitz, E. (2014). Understanding the Masking-Shadowing Function: the height-correlated Smith term (`smithVisibility`). Its transmissive Beta form is deliberately not used — see the [roadmap](ROADMAP.md)'s Smith-exact entry.
+- Heitz, E. (2014). Understanding the Masking-Shadowing Function: the height-correlated Smith term (`smithVisibility`). Its transmissive Beta form is deliberately not used — see the [roadmap](docs/ROADMAP.md)'s Smith-exact entry.
 - Heitz, E. (2018). Sampling the GGX Distribution of Visible Normals. JCGT 7(4): the VNDF routine the specular lobe uses.
 - Heitz, E. et al. (2016). Multiple-scattering microfacet BSDFs with the Smith model: the reference instrument for exit distributions, and the statement of the energy single scatter discards.
 - Kulla, C., Conty, A. (2017). Revisiting Physically Based Shading at Imageworks. SIGGRAPH course: the shipped directional-albedo multiple-scattering compensation, on both interfaces.
-- Turquin, E. (2019). Practical multiple scattering compensation: evaluated against Heitz 2016 and not adopted; crossover in the [roadmap](ROADMAP.md).
+- Turquin, E. (2019). Practical multiple scattering compensation: evaluated against Heitz 2016 and not adopted; crossover in the [roadmap](docs/ROADMAP.md).
 - Guy, R., Agopian, M. (2018). Filament §4.4.2: the cancellation-free Trowbridge-Reitz denominator `distributionGGX` evaluates.
 - Gulbrandsen, O. (2014). Artist Friendly Metallic Fresnel. JCGT 3(4): the conductor reflectivity/edge-tint parameterisation, with two documented departures from its listing (see `bsdf.cpp`).
 - Portsmouth, J., Kutz, P., Hill, S. (2025, rev. 2026-02-04). EON: A Practical Energy-Preserving Rough Diffuse BRDF. JCGT 14(1): the rough-diffuse lobe, its compensation, CLTC sampling, and Appendix A's albedo inversion (`eonAlbedoInversion`).
 - Pharr, M., Jakob, W., Humphreys, G. Physically Based Rendering: `FrDielectric`, `EffectivelySmooth`, and the index-matched delta routing `transmissionIsRough` implements.
 - OpenPBR Surface specification; Autodesk Arnold `standard_surface`: the transmission-tint convention this pipeline follows, and the meaning of `base_color`.
-- Adobe. OpenPBR BSDF reference implementation, `openpbr_constants.h`: the 620/540/450 nm triple `kRgbWavelengthsNm` takes, and the "discrete RGB bands" limitation ([roadmap](ROADMAP.md) transport #5).
+- Adobe. OpenPBR BSDF reference implementation, `openpbr_constants.h`: the 620/540/450 nm triple `kRgbWavelengthsNm` takes, and the "discrete RGB bands" limitation ([roadmap](docs/ROADMAP.md) transport #5).
 - OpenPBR: Novel Features and Implementation Details (arXiv:2512.23696): the throughput-weighted channel selection the dispersive path uses.
 - Khronos. `KHR_materials_dispersion`: Cauchy's relation inverted from an Abbe number, implemented by `cauchyIor`.
 - Dupuy, J., Benyoub, A. (2023); Tokuyoshi, Y., Eto, K. (2023): newer VNDF refinements, surveyed, not implemented (Heitz 2018 used instead).
@@ -282,16 +282,16 @@ Add a new material by dropping a JSON file in `assets/materials/` and pointing `
 - Lambert, J.H. (1760). Photometria; Baum, D.R. et al. (1989). SIGGRAPH: the closed-form Lambertian-polygon irradiance `integrator_validate` uses as an independent analytic reference.
 - Miller, G. (1994); Landis, H. (2002): the cosine-weighted distance-bounded AO the AO AOV path-traces, whose pdf cancels to the mean of the visibility term.
 - Zhukov, S. et al. (1998); Iones, A. et al. (2003); surveyed in Mendez-Feliu, A., Sbert, M. (2009): obscurance, the distance falloff rho(x) = 1 - (1-x)^2 the AO AOV uses.
-- Bitterli, B. et al. (2020). ReSTIR. SIGGRAPH — [roadmap](ROADMAP.md) transport #2, not implemented: reservoir resampling needs many lights to be worth it.
+- Bitterli, B. et al. (2020). ReSTIR. SIGGRAPH — [roadmap](docs/ROADMAP.md) transport #2, not implemented: reservoir resampling needs many lights to be worth it.
 - Sobel filtering: the edge-detection AOV computed from Luminance, arXiv:2601.16806.
 - CIE 018:2019 Table 6 (ISO/CIE 11664-1:2019): the 1931 2° colour-matching functions at 1 nm, `cie_1931.inc`.
 - ISO/CIE 11664-2:2022 Table B.1: D65 at 1 nm, `cie_1931.inc`.
 - CIE 015:2018: tristimulus integration at the 1 nm interval, `cie::reflectanceToRec709`.
 - ITU-R BT.709-6 (2015); SMPTE RP 177-1993: the primaries and the matrix derivation, `cie::xyzToRec709`.
 - Johnson, P.B., Christy, R.W. (1974). Phys. Rev. B 9, 5056: the measured chromium `(n, k)` behind `chrome.json`.
-- Wilkie, A. et al. (2014). Hero wavelength spectral sampling. CGF — [roadmap](ROADMAP.md) transport #5, not implemented; the shipped dispersion commits to one RGB channel instead.
+- Wilkie, A. et al. (2014). Hero wavelength spectral sampling. CGF — [roadmap](docs/ROADMAP.md) transport #5, not implemented; the shipped dispersion commits to one RGB channel instead.
 - OpenEXR / Academy Software Foundation: the linear HDR pipeline and exposure.
-- Chandrasekhar, S. (1960). Radiative Transfer. Dover: polarised transport, underlying a CPL filter — [roadmap](ROADMAP.md), physical camera filters, not implemented.
+- Chandrasekhar, S. (1960). Radiative Transfer. Dover: polarised transport, underlying a CPL filter — [roadmap](docs/ROADMAP.md), physical camera filters, not implemented.
 - Khronos. glTF 2.0 specification: the scene/mesh/material interchange format.
 - Mikkelsen, M.S. (2008). MikkTSpace: not implemented (glTF-supplied tangents only).
 - Wald, I. et al. (2014). Embree. ACM ToG: the CPU ray-scene intersection kernels behind `EmbreeAccel`.
@@ -300,9 +300,9 @@ Add a new material by dropping a JSON file in `assets/materials/` and pointing `
 - Blinn, J.F., Newell, M.E. (1978). SIGGRAPH: the per-vertex outcodes ahead of that clip.
 - Microsoft. Direct3D 11.3 Functional Spec §3.4; Khronos. Vulkan, Rasterization: fixed-point snapping and the top-left fill rule, with precision derived per frame from the int64 exactness bound.
 - Giesen, F. (2013). Triangle rasterization in practice: integer edge functions, the top-left bias, incremental row stepping.
-- Williams, L. (1983). Pyramidal Parametrics. SIGGRAPH: MIP-mapping — [roadmap](ROADMAP.md), texture minification, not implemented.
-- Cook, R.L., Porter, T., Carpenter, L. (1984). Distributed Ray Tracing. SIGGRAPH — [roadmap](ROADMAP.md), depth of field and motion blur, not implemented.
-- Kannala, J., Brandt, S.S. (2006). IEEE TPAMI: the fisheye projection families — [roadmap](ROADMAP.md), fisheye lens, not implemented.
+- Williams, L. (1983). Pyramidal Parametrics. SIGGRAPH: MIP-mapping — [roadmap](docs/ROADMAP.md), texture minification, not implemented.
+- Cook, R.L., Porter, T., Carpenter, L. (1984). Distributed Ray Tracing. SIGGRAPH — [roadmap](docs/ROADMAP.md), depth of field and motion blur, not implemented.
+- Kannala, J., Brandt, S.S. (2006). IEEE TPAMI: the fisheye projection families — [roadmap](docs/ROADMAP.md), fisheye lens, not implemented.
 - Kalibera, T., Jones, R. (2013). Rigorous Benchmarking in Reasonable Time. ISMM: the process invocation as the unit of replication.
 - Abedi, A., Brecht, T. (2017). ICPE: randomized multiple interleaved trials, which `bench_compare run` automates; Mytkowicz, T. et al. (2009). ASPLOS: the ordering and environment bias randomization removes.
 - Hodges, J.L., Lehmann, E.L. (1963); Hollander, M., Wolfe, D.A., Chicken, E. (2014) 3.2/4.3: the shift estimators and exact rank intervals in `tools/stats.h`, on the log scale so a shift is a ratio (Fleming, P.J., Wallace, J.J. (1986). CACM 29(3)); Hoefler, T., Belli, R. (2015). SC: nonparametric intervals for performance data.

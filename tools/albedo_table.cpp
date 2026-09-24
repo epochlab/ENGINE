@@ -1,15 +1,4 @@
-// Offline generator for src/scene/albedo_table.inc, the Kulla-Conty energy tables bsdf.cpp bakes in ("Revisiting
-// Physically Based Shading at Imageworks", SIGGRAPH 2017 Course Notes). Same standalone-CLI convention as the other
-// tools, and grouped with bluenoise_mask/gltf_tangent rather than the validate tools: it produces a committed artifact,
-// it does not check one, so it stays out of the ctest loop.
-// This used to run at every process start (bsdf.cpp's `const AlbedoTable kAlbedo = buildAlbedoTable()`), which sized
-// the grid and the quadrature by startup latency rather than by the accuracy the energy tests need. Offline that bound
-// is gone, so the reflect side is resolved to the point where E is an instrument rather than a floor -- bsdf_validate's
-// energy tests pin F_avg against a 2.0e-4 signal, and the old table's own error was ~1.5e-3; this reports 1.1e-6 on
-// the cosine-weighted means and 3.0e-5 on the directional grid.
-// Determinism is why this target is built with neither -march=native nor IPO, unlike every other tool here: the output
-// is committed source, so it must reproduce bit-for-bit on any machine, and FMA contraction is free to differ. The bake
-// runs in seconds, so there is nothing to buy back.
+// Offline generator for src/scene/albedo_table.inc, the Kulla-Conty energy tables; see docs/DERIVATIONS.md "Albedo table bake".
 
 #include <algorithm>
 #include <array>
@@ -39,31 +28,24 @@ using pathtracer::scene::fresnelDielectric;
 
 constexpr double kPi = 3.14159265358979323846;
 
-// Must match bsdf.cpp's roughness floor: the table row for perceptual roughness r stores the albedo of the lobe that
-// actually ships at r, which is alpha = max(r*r, kMinAlpha), not of an unclamped alpha the shading never evaluates.
+// Must match bsdf.cpp's roughness floor: each row stores the albedo of the lobe that ships at r, alpha = max(r*r, kMinAlpha).
 constexpr float kMinAlpha = 0.02F * 0.02F;
 
-// Reflect side, three resolutions rather than one square grid, each sized by what checkAlbedoTableInterpolation measures on that axis (tools/bsdf_validate.cpp). The bilinear read of the stored grid is a second error source beside the quadrature's, and it is the one that dominates: at 128x128 uniform it was 4.2e-2 in the first mu cell against a 3.0e-5 quadrature residual.
-// Roughness 256: that axis' error is a smooth single-signed hump, not a boundary layer, so only resolution touches it. At 128 it measured 1.1e-3, and it enters every shade as a bias rather than as noise a render averages out. Quartering it puts the axis under the quadrature's own residual, which is the stopping criterion -- past that the stored values are the limit and further rows buy nothing.
-// mu 256, uniform in sqrt(mu) (reflectMu). The warp is what the grazing layer needs: a uniform mu axis puts that whole layer inside one cell for roughness below ~0.1, where the error saturates at the layer's full amplitude (measured 4.2e-2), and the layer's width is ~alpha in mu and so ~sqrt(alpha) in the warped axis, which is what lets one fixed warp serve every roughness row rather than an alpha-dependent one.
-// The doubling is what the warp COSTS, measured rather than assumed. A warp moves cells, it does not add them: cell width in mu becomes 2 sqrt(mu)/(res-1), so at mu = 0.4 the cells are 1.27x a uniform axis' and the error there rose with them. At 128 that turned checkCoatFresnelAvg's worst row from 5.1e-5 into 8.7e-5 -- a regression on the very instrument this table is read by, whose worst rows all sit at mu 0.4. 256 buys the working band back at 0.63x the original uniform width and quarters the grazing layer at the same time.
-// An alpha-dependent warp was measured and rejected instead of assumed: Smith G1 as the axis coordinate resolves each row's own layer exactly, but at alpha 0.25 it compresses mu in [0.3, 1] into 12% of the axis, for 5.3e-4 against a uniform axis' 1.2e-5 in exactly the band that matters -- two extra sqrt in a hot lookup to buy a 40x regression where E is not flat.
+// Reflect side, three resolutions sized by checkAlbedoTableInterpolation; the axis choices and measurements are in docs/DERIVATIONS.md.
 constexpr int kAlbedoRoughnessRes = 256;
 constexpr int kAlbedoMuRes = 256;
 
-// The reflected multiple-scattering lobe's sampling grid, uniform in mu and deliberately its own constant rather than kAlbedoMuRes: bsdf.cpp's piecewise-linear inversion depends on one step width, so this axis cannot carry the albedo table's warp, and a later change to that warp's resolution must not silently resize a sampling density. The transmit side already keeps its msTransmit shape uniform for the same reason.
+// The reflected MS lobe's sampling grid, uniform in mu and its own constant: bsdf.cpp's inversion needs one step width, not that warp.
 constexpr int kMsReflectMuRes = 128;
 
-// Transmit side, sized by the energy closure it buys: linear interpolation in mu (the steep grazing rise) and in eta (curvature through the TIR onset) sets the per-vertex error once the quadrature is converged.
-// Measured on a white ior-1.5 interface: 32 mu nodes lose 2% at mu 0.02, and 32 eta nodes lose 9e-4 midway between eta nodes against 1e-4 on them; 64 x 64 closes to within 3e-4. Roughness keeps 32 nodes, where node and midpoint already agree to that level.
-// Uniform in mu, 64 nodes still left 1e-2 at mu 0.01 at roughness 0.15, where E climbs over mu ~ alpha; the escape tables' mu axis is uniform in sqrt(mu) (escapeMu).
+// Transmit side, sized by the energy closure it buys; the mu/eta/roughness node counts are in docs/DERIVATIONS.md "Albedo table bake".
 constexpr int kTransmitRoughnessRes = 32;
 constexpr int kTransmitMuRes = 64;
 constexpr int kEtaRes = 64;
 constexpr double kEtaMin = 1.0 / 2.5;  // exiting a 2.5-ior medium; the reciprocal end is entering one
 constexpr double kEtaMax = 2.5;
 
-// Gauss-Legendre nodes per panel on the transmit side, in phi and in each psi panel; verifyTransmit reports the table's residual against a doubled rule on every bake.
+// Gauss-Legendre nodes per transmit panel, in phi and each psi panel; verifyTransmit reports the residual against a doubled rule.
 constexpr int kTransmitNodes = 48;
 
 double smithRadical(double cosTheta, double alpha) {
@@ -71,47 +53,18 @@ double smithRadical(double cosTheta, double alpha) {
     return std::sqrt(alpha2 + ((1.0 - alpha2) * cosTheta * cosTheta));
 }
 
-// Height-correlated G2 divided by cosO, 2 cosI/(cosI s(cosO) + cosO s(cosI)) (bsdf.cpp's smithVisibility times 4 cosI): no cosine divides, so it holds to cosO = 0, where it is 2/alpha.
-// Both sides use it, and the reflect side now MUST. The lambda form it replaced there carries a max(cos^2, 1e-8) clamp, which was harmless while the reflect grid started at mu = 1e-3 (cos^2 = 1e-6, clear of it) and is not once reflectMu's node 1 is mu = 6.2e-5: the clamp would silently substitute a different cosine on the grazing rows with no diagnostic at all. It also supplies the exact grazing limit the warp's node 0 needs, which a form that divides by cosO cannot.
+// Height-correlated G2 over cosO, 2 cosI/(cosI s(cosO) + cosO s(cosI)): no cosine divides, so it holds to cosO = 0, where it is 2/alpha.
 double smithG2OverCosO(double cosO, double cosI, double alpha) {
     return 2.0 * cosI / ((cosI * smithRadical(cosO, alpha)) + (cosO * smithRadical(cosI, alpha)));
 }
 
-// --- Reflect side: exact-domain Gauss-Legendre, not Monte Carlo.
-//
-// The quantity is the directional albedo of the single-scattering GGX lobe with Fresnel forced to 1, the fraction of
-// energy G2 lets through, so 1-E is exactly what the multiple-scattering lobe must return. It depends on nothing
-// but (mu, alpha): Fresnel, metallic, baseColor and lobe-selection probabilities are all applied by the caller.
-//
-// Sampling it (VNDF draws, discarding wi.z <= 0) puts a jump discontinuity -- the horizon -- inside the integration
-// domain, which caps any quadrature at first order in the sample count no matter how smooth the rest of the integrand
-// is. That, not the sample budget, is what held the old table at ~1.5e-3. The fix is to integrate over a domain whose
-// boundary IS the horizon, and both halves of that are available in closed form:
-//
-//   1. Measure. GGX NDF sampling (Walter et al. 2007, "Microfacet Models for Refraction through Rough Surfaces",
-//      eq. 35) is tan(theta_h) = alpha*tan(psi) with u = sin^2(psi) uniform, and its density is exactly D(h)*cos(h),
-//      so D(h) cos(theta_h) dw_h = du dphi / (2*pi) = sin(psi) cos(psi) dpsi dphi / pi. Changing variable to psi
-//      absorbs the peak D would otherwise have -- at alpha = 4e-4 that peak is 4e-4 radians wide and no fixed grid in
-//      theta_h could resolve it -- and leaves an integrand that is analytic in psi.
-//
-//   2. Domain. With wo = (sin tv, 0, cos tv) and h at (theta_h, phi), both cosines collapse to a single harmonic:
-//      wo.h = R cos(theta_h - d) and wi.z = R cos(2 theta_h - d), where R = hypot(sin tv cos phi, cos tv) and
-//      d = atan2(sin tv cos phi, cos tv). So the horizon clip wi.z > 0 is exactly theta_h < (d + pi/2)/2, one bound
-//      per phi, and wo.h > 0 holds throughout it. Nothing is discarded, because nothing invalid is ever evaluated.
-//
-// The integrand that remains -- (wo.h/cos theta_h) * G2 * sin psi cos psi -- is analytic on the closed interval
-// (G2 vanishes linearly at the upper limit, where wi.z does), so Gauss-Legendre converges geometrically and the node
-// count below is a measured choice, reported against a doubled rule on every run.
-//
-// Split by Schlick's form F(c) = f0*(1 - (1-c)^5) + (1-c)^5 so one table serves any f0 (the standard environment-BRDF
-// split): Ess(mu, f0) = f0*a + b, and with f0 = 1 that collapses to a + b = E, the Fresnel-free albedo above.
+// --- Reflect side: exact-domain Gauss-Legendre, not Monte Carlo. Measure and horizon domain in docs/DERIVATIONS.md "Albedo table bake".
 struct Split {
     double a;
     double b;
 };
 
-// Gauss-Legendre nodes and weights mapped to [0,1], by Newton iteration on P_n through Bonnet's recurrence (Press et
-// al., Numerical Recipes 3rd ed., sec. 4.6.1). Weights sum to 1, so a node array doubles as the [0,1] average.
+// Gauss-Legendre nodes/weights on [0,1] by Newton on P_n through Bonnet's recurrence (Numerical Recipes 3rd ed. 4.6.1); weights sum to 1.
 struct GaussLegendre {
     std::vector<double> node;
     std::vector<double> weight;
@@ -149,10 +102,7 @@ Split reflectAlbedo(double mu, double alpha, const GaussLegendre& phiRule, const
     const double sinTv = std::sqrt(std::max(0.0, 1.0 - (mu * mu)));
     double a = 0.0;
     double b = 0.0;
-    // phi is even about 0, so half the circle is integrated and the result doubled by the scale below. Two panels
-    // meeting at pi/2, where cos(phi) changes sign: d(phi) sweeps the full -pi/2..pi/2 of its range within |cos phi| <
-    // mu there, a boundary layer that narrows with mu and would otherwise be missed entirely by the grazing rows. As a
-    // panel endpoint it is resolved instead, Gauss-Legendre placing its outermost node O(1/n^2) from the edge.
+    // phi is even about 0, so half the circle is integrated and doubled; the panels meet at pi/2, resolving the |cos phi| < mu layer.
     for (int panel = 0; panel < 2; ++panel) {
         const double phiBase = 0.5 * kPi * panel;
         for (std::size_t p = 0; p < phiRule.node.size(); ++p) {
@@ -174,22 +124,11 @@ Split reflectAlbedo(double mu, double alpha, const GaussLegendre& phiRule, const
             }
         }
     }
-    // The 1/mu that used to divide out here is inside smithG2OverCosO, which is what lets mu = 0 be a real node.
-    // It is never 0/0 there, by two separate arguments. On the first phi panel delta is +pi/2, so wiZ vanishes only at
-    // psiMax, which Gauss-Legendre's strictly interior nodes never reach. On the second delta is -pi/2 and psiMax is
-    // exactly 0, so every node sits at psi = 0 and the weight carries psiMax and sin(psi) as exact zero factors -- the
-    // panel contributes nothing, which is correct: no facet reflects a grazing wo above the horizon on that side.
+    // The 1/mu is inside smithG2OverCosO, which is what lets mu = 0 be a node; never 0/0, by the two panel arguments in docs/DERIVATIONS.
     return {a, b};
 }
 
-// --- Transmit side: Gauss-Legendre in the reflect side's NDF measure, panelled at the interface's own boundaries.
-//
-// Its energy curve is not the reflect side's: the below-horizon reflections that drive E down are the valid side for refraction (measured 0.559 combined vs 0.307 reflect-only at roughness 1.0).
-// It depends on eta (G2 uses the refracted |wt.z|, and TIR gates validity), so the Schlick split cannot factor it out; one axis in log(eta) covers entering and exiting, since the two are reciprocals.
-// Same measure as reflectAlbedo, D(h)cos(theta_h) dw = sin(psi)cos(psi) dpsi dphi / pi with tan(theta_h) = alpha*tan(psi), which flattens the peak and resolves the GGX slope tail; a stratified VNDF midpoint rule lumped that tail into its last stratum and converged first order (3.6e-3 at roughness 0.19, mu 1, eta 1.56).
-// Same closed forms too: wo.h = R cos(theta_h - d) and wi.z = R cos(2 theta_h - d), so per phi the visibility bound, the reflection horizon and the TIR onset wo.h = sqrt(1 - 1/eta^2) are all exact theta_h breakpoints, the TIR circle's tangency R = sqrt(1 - 1/eta^2) is an exact phi breakpoint, and each panel between them is integrated on its own.
-// That matters most at TIR, where 1-F has a square-root singularity no fixed rule resolves (3.9e-3 residual at a doubled rule without the split); the one boundary left unaligned, wt.z = 0, is a kink where G2 vanishes linearly.
-// VNDF weight G1*(wo.h)*D/mu divided by G1 per escaping path leaves (wo.h)/(mu*cos(theta_h)) * G2 in this measure; Fresnel and the TIR predicate are the shipped fresnel_dielectric.h, so the table is baked against the interface it is shaded against.
+// --- Transmit side: the reflect measure, panelled at the interface's own boundaries; see docs/DERIVATIONS.md "Albedo table bake".
 
 // log-spaced so eta and 1/eta are symmetric about index kEtaRes/2.
 double etaAtIndex(int index) {
@@ -202,8 +141,7 @@ struct EscapeSums {
     std::array<double, kEtaRes> transmit;
 };
 
-// Escaping fraction of a dielectric interface, split into the reflected and transmitted shares, with exact dielectric Fresnel: inside the TIR cone Fresnel is 1.0 where Schlick reads ~0.1, so no Schlick-basis rescale can stand in for it.
-// A facet reflects with probability F and refracts with 1-F, so the two shares are Fresnel-weighted complements of one throughput, never independent quantities.
+// Escaping fraction of a dielectric interface, reflected and transmitted shares: exact Fresnel, 1.0 inside TIR where Schlick reads ~0.1.
 EscapeSums escapeAlbedo(double mu, double alpha, const GaussLegendre& rule) {
     const double sinTv = std::sqrt(std::max(0.0, 1.0 - (mu * mu)));
     const glm::dvec3 wo(sinTv, 0.0, mu);
@@ -213,7 +151,7 @@ EscapeSums escapeAlbedo(double mu, double alpha, const GaussLegendre& rule) {
         const auto eta = static_cast<float>(etaAtIndex(ei));
         // wo.h below which a facet totally internally reflects; zero when entering, where there is no cone.
         const double criticalCos = eta > 1.0F ? std::sqrt(1.0 - (1.0 / (static_cast<double>(eta) * eta))) : 0.0;
-        // phi is even about 0, so half the circle is integrated and doubled. Split at pi/2 as reflectAlbedo is, for the grazing boundary layer, and where the TIR circle turns tangent (R = criticalCos), where the inner integral has a square-root kink in phi.
+        // phi is even about 0, so half the circle is integrated and doubled; split at pi/2 and at the TIR tangency R = criticalCos.
         std::array<double, 5> phiBreaks{0.0, 0.5 * kPi, kPi, 0.0, 0.0};
         int phiCount = 3;
         if (criticalCos > mu && sinTv > 0.0) {
@@ -251,7 +189,7 @@ EscapeSums escapeAlbedo(double mu, double alpha, const GaussLegendre& rule) {
                         const double thetaH = std::atan(alpha * std::tan(psi));
                         const glm::dvec3 h(std::sin(thetaH) * std::cos(phi), std::sin(thetaH) * std::sin(phi), std::cos(thetaH));
                         const double woDotH = glm::dot(wo, h);
-                        // phi and psi panel widths, measure sin(psi)cos(psi)/pi doubled for the half circle; the escape's 1/mu is in smithG2OverCosO.
+                        // phi and psi panel widths, measure sin(psi)cos(psi)/pi doubled; the 1/mu is in smithG2OverCosO.
                         const double weight = rule.weight[p] * rule.weight[q] * (phiHi - phiLo) * (psiHi - psiLo) *
                                               (2.0 * std::sin(psi) * std::cos(psi) / kPi) * (woDotH / h.z);
                         const double fresnel = fresnelDielectric(static_cast<float>(woDotH), eta, 1.0F);
@@ -274,8 +212,7 @@ EscapeSums escapeAlbedo(double mu, double alpha, const GaussLegendre& rule) {
     return sums;
 }
 
-// Rows are independent and each writes only its own slice of the table, so the split is a pure speedup with no
-// effect on the values -- the whole point of moving the bake offline is that it can afford the node counts.
+// Rows are independent and each writes only its own slice, so the split is a pure speedup with no effect on the values.
 template <typename Row>
 void parallelRows(int rows, Row row) {
     const unsigned workers = std::max(1U, std::thread::hardware_concurrency());
@@ -311,15 +248,13 @@ struct AlbedoTable {
     std::vector<float> msTransmitCdf;
 };
 
-// The reflect table's mu axis, uniform in sqrt(mu) as the escape tables' escapeMu already is, and for the same reason one axis down: E climbs from its grazing limit over mu ~ alpha, a layer a uniform grid spans with well under one cell at low roughness. bsdf.cpp's directionalAlbedo indexes it by sqrt(mu) to match.
-// Node 0 is mu = 0 itself, not a nudge off it: E(0, alpha) = 1 exactly for every alpha, and smithG2OverCosO holds to that limit, so the column that used to be the table's worst is now its sharpest. buildReflect asserts the identity on every row.
+// The reflect table's mu axis, uniform in sqrt(mu); node 0 is mu = 0 itself, where E = 1 exactly and buildReflect asserts it on every row.
 double reflectMu(int index) {
     const double t = static_cast<double>(index) / static_cast<double>(kAlbedoMuRes - 1);
     return t * t;
 }
 
-// The escape tables' mu axis, uniform in sqrt(mu): E climbs from its grazing limit over mu ~ alpha (G1 ~ 2mu/alpha below it), which a uniform mu grid spans with under two cells at roughness 0.15, so nodes crowd toward grazing as sqrt spacing puts them. bsdf.cpp's escapeAlbedo indexes by sqrt(mu) to match.
-// Node 0 is mu = 0 itself, the grazing limit smithG2OverCosO holds to.
+// The escape tables' mu axis, uniform in sqrt(mu), node 0 being mu = 0 itself: the grazing limit smithG2OverCosO holds to.
 double escapeMu(int index) {
     const double t = static_cast<double>(index) / static_cast<double>(kTransmitMuRes - 1);
     return t * t;
@@ -330,9 +265,7 @@ double gridAlpha(int index, int resolution) {
     return std::max(roughness * roughness, static_cast<double>(kMinAlpha));
 }
 
-// Directional tables at the stored grid, plus their cosine-weighted means. The mean is a Gauss-Legendre integral over
-// mu in its own right, not a trapezoid over the stored columns: Eavg is the denominator of the multiple-scattering
-// normalisation, so its error enters every compensated shade directly rather than being smoothed by interpolation.
+// Directional tables at the stored grid plus cosine-weighted means, each mean a Gauss-Legendre integral in mu, not a trapezoid.
 void buildReflect(AlbedoTable& table, int phiNodes, int psiNodes, int muNodes) {
     const GaussLegendre phiRule = gaussLegendre(phiNodes);
     const GaussLegendre psiRule = gaussLegendre(psiNodes);
@@ -341,8 +274,7 @@ void buildReflect(AlbedoTable& table, int phiNodes, int psiNodes, int muNodes) {
     table.b.assign(static_cast<std::size_t>(kAlbedoRoughnessRes) * kAlbedoMuRes, 0.0F);
     table.aavg.assign(kAlbedoRoughnessRes, 0.0F);
     table.bavg.assign(kAlbedoRoughnessRes, 0.0F);
-    // One roughness row per worker. Rows share no accumulator and each writes only its own slice, so the result is
-    // identical to the serial order -- the determinism the committed artifact needs survives the threading.
+    // One roughness row per worker, sharing no accumulator, so the result is identical to serial order: the artifact stays deterministic.
     parallelRows(kAlbedoRoughnessRes, [&](int ri) {
         const double alpha = gridAlpha(ri, kAlbedoRoughnessRes);
         for (int mi = 0; mi < kAlbedoMuRes; ++mi) {
@@ -350,10 +282,7 @@ void buildReflect(AlbedoTable& table, int phiNodes, int psiNodes, int muNodes) {
             table.a[static_cast<std::size_t>((ri * kAlbedoMuRes) + mi)] = static_cast<float>(split.a);
             table.b[static_cast<std::size_t>((ri * kAlbedoMuRes) + mi)] = static_cast<float>(split.b);
         }
-        // E(0, alpha) = 1 exactly, for every alpha: at mu = 0 the integrand collapses to 2 cos(phi) sin^2(psi), whose
-        // normalised integral over the domain is 1 -- a grazing surface loses no energy to masking. An analytic
-        // identity on the axis' new endpoint, so it costs nothing and is sharp. A bake-time abort rather than a
-        // shading-time guard: a row that misses it means the quadrature is wrong at the limit the warp exists to reach.
+        // E(0, alpha) = 1 for every alpha, analytic at the axis' endpoint; a bake-time abort, since a miss means the quadrature is wrong.
         const double grazing = static_cast<double>(table.a[static_cast<std::size_t>(ri * kAlbedoMuRes)]) +
                                 static_cast<double>(table.b[static_cast<std::size_t>(ri * kAlbedoMuRes)]);
         if (!(std::abs(grazing - 1.0) < 1e-6)) {
@@ -413,9 +342,7 @@ void buildTransmit(AlbedoTable& table, int nodes) {
     });
 }
 
-// Reflect-side E at a uniform-mu density node, read through the sqrt(mu) axis exactly as bsdf.cpp's directionalAlbedo
-// reads it at that roughness row, float arithmetic included. The escape side's escapeAtUniformMu is the same operation
-// one axis wider; they stay separate because their strides, resolutions and channel pairs all differ.
+// Reflect-side E at a uniform-mu density node, read through the sqrt(mu) axis as directionalAlbedo does, float arithmetic included.
 float reflectAtUniformMu(const AlbedoTable& table, int ri, int mi) {
     const float mf = std::sqrt(static_cast<float>(mi) / static_cast<float>(kMsReflectMuRes - 1)) * (kAlbedoMuRes - 1);
     const int m0 = std::min(static_cast<int>(mf), kAlbedoMuRes - 2);
@@ -427,21 +354,7 @@ float reflectAtUniformMu(const AlbedoTable& table, int ri, int mi) {
     return at(m0) + (mt * (at(m0 + 1) - at(m0)));
 }
 
-// --- Sampling shape for the reflected multiple-scattering lobe: the exact (1-E)cos sampler.
-// That lobe's value is fms*(1-E(mu_o))*(1-E(mu_i))/(pi*(1-Eavg)), so its own zero-variance density is
-// (1-E(mu_i))*cos / (pi*(1-Eavg)), and cosine sampling pays the ratio (1-E(mu_i))/(1-Eavg) as weight variance.
-// Measured off the table above rather than assumed, and the answer inverts the intuition: the ratio is harmless at
-// high roughness (relative variance 0.029 at roughness 1, 0.042 at 0.5) and severe at low, where 1-Eavg and 1-E(mu)
-// are both small and their quotient is not -- +1.66 at roughness 0.25 and +17.3 at 0.126, with weights reaching 92x.
-// Stored as a piecewise-linear density over mu with its exact prefix integrals beside it, NOT as the mu-at-quantile
-// inverse CDF the roadmap names. A sampler and a pdf must agree on the density itself; a quantile table defines it
-// only implicitly, leaving the pdf to reconstruct it by differencing and biasing the estimator by whatever the two
-// then disagree about. With the density stored, bsdf.cpp inverts it exactly (one quadratic per segment) and evaluates
-// the same interpolant for its pdf, so the pair is consistent by construction at any resolution and the remaining
-// approximation is only how closely the interpolant tracks (1-E)*mu -- variance, never bias.
-// Uniform in mu, unlike the albedo table's sqrt(mu) axis, so bsdf.cpp's piecewise-linear inversion keeps one step
-// width; each node reads E through that warp exactly as the shading does, so the shape is still built from the values
-// the shading actually sees. The transmit twin below is the same arrangement one axis wider.
+// --- Sampling shape for the reflected multiple-scattering lobe, the exact (1-E)cos sampler; see docs/DERIVATIONS.md "Albedo table bake".
 void buildMultipleScatteringShape(AlbedoTable& table) {
     const double step = 1.0 / (kMsReflectMuRes - 1);
     table.msDensity.assign(static_cast<std::size_t>(kAlbedoRoughnessRes) * kMsReflectMuRes, 0.0F);
@@ -456,7 +369,7 @@ void buildMultipleScatteringShape(AlbedoTable& table) {
         for (int mi = 0; mi + 1 < kMsReflectMuRes; ++mi) {
             norm += 0.5 * (raw[static_cast<std::size_t>(mi)] + raw[static_cast<std::size_t>(mi) + 1]) * step;
         }
-        // 1-E is strictly positive at every roughness the table reaches (measured minimum 1.4e-7, at roughness 0), so this is a bake-time assertion and not a shading-time guard: a non-positive row would mean the albedo table itself is wrong, and silently substituting cosine would hide that.
+        // 1-E is positive at every roughness the table reaches (measured minimum 1.4e-7 at roughness 0), so this is a bake-time abort.
         if (!(norm > 0.0)) {
             std::cerr << "albedo_table: roughness row " << ri << " has non-positive energy deficit " << norm
                       << " -- the reflect table is wrong, not this shape\n";
@@ -475,7 +388,7 @@ void buildMultipleScatteringShape(AlbedoTable& table) {
     }
 }
 
-// Escape total at a uniform-mu density node, read through the sqrt(mu) axis exactly as bsdf.cpp's escapeAlbedo reads it at that roughness and eta node, float arithmetic included.
+// Escape total at a uniform-mu density node, read through the sqrt(mu) axis as bsdf.cpp's escapeAlbedo does, float arithmetic included.
 float escapeAtUniformMu(const AlbedoTable& table, int ri, int mi, int ei) {
     const float mf = std::sqrt(static_cast<float>(mi) / static_cast<float>(kTransmitMuRes - 1)) * (kTransmitMuRes - 1);
     const int m0 = std::min(static_cast<int>(mf), kTransmitMuRes - 2);
@@ -487,11 +400,7 @@ float escapeAtUniformMu(const AlbedoTable& table, int ri, int mi, int ei) {
     return at(m0) + (mt * (at(m0 + 1) - at(m0)));
 }
 
-// Escape-deficit shape for the transmissive multiple-scattering lobes, the far-hemisphere twin of the shape above, one axis wider because the escape it is built from is eta-dependent and the Schlick split cannot factor that out.
-// bsdf.cpp reads it as both value and density: each transmissive share is its energy times this normalised (1-Escape(mu_i))*cos density divided by cos, so the density is the zero-variance one and the share integrates to its energy exactly -- cosine sampling paid relative variance 25 at roughness 0.13.
-// Unlike the reflect shape this is stored UNNORMALISED: bsdf.cpp blends four rows over (roughness, eta) and divides by the blended total, which reproduces the raw-deficit interpolation escapeAlbedo itself performs, where a blend of per-row-normalised shapes would not commute with it.
-// Uniform in mu, unlike the escape tables' sqrt(mu) axis, so bsdf.cpp's piecewise-linear inversion keeps one step width; each node reads the escape through that axis as the shading does.
-// Unnormalised storage is also what removes the degenerate row: a row whose deficit is numerically zero carries near-zero weight into the blend rather than a unit-mass shape of amplified noise, so this needs neither the reflect side's bake-time abort nor a substituted fallback.
+// Escape-deficit shape for the transmissive MS lobes, stored UNNORMALISED and uniform in mu; see docs/DERIVATIONS.md "Albedo table bake".
 void buildTransmitMultipleScatteringShape(AlbedoTable& table) {
     const double step = 1.0 / (kTransmitMuRes - 1);
     const auto size = static_cast<std::size_t>(kTransmitRoughnessRes) * kTransmitMuRes * kEtaRes;
@@ -502,12 +411,11 @@ void buildTransmitMultipleScatteringShape(AlbedoTable& table) {
             double cdf = 0.0;
             for (int mi = 0; mi < kTransmitMuRes; ++mi) {
                 const auto index = static_cast<std::size_t>((((ri * kTransmitMuRes) + mi) * kEtaRes) + ei);
-                // Clamped: the quadrature can land a few 1e-8 past unity, and a negative segment would break the CDF monotonicity the exact inversion depends on.
-                // bsdf.cpp derives each share's value from this same density, so value and pdf share one support by construction.
+                // Clamped: quadrature can land a few 1e-8 past unity, and a negative segment breaks the CDF monotonicity inversion needs.
                 const double deficit = std::max(1.0 - static_cast<double>(escapeAtUniformMu(table, ri, mi, ei)), 0.0);
                 const auto density = static_cast<float>(deficit * mi * step);
                 if (mi > 0) {
-                    // Trapezoid over the float density as emitted, not the double behind it, so the stored pair is exactly consistent at the precision bsdf.cpp reads them back at.
+                    // Trapezoid over the float density as emitted, not the double behind it, so the stored pair agrees at read precision.
                     cdf += 0.5 * (table.msTransmitDensity[index - kEtaRes] + density) * step;
                 }
                 table.msTransmitDensity[index] = density;
@@ -517,9 +425,7 @@ void buildTransmitMultipleScatteringShape(AlbedoTable& table) {
     }
 }
 
-// Largest disagreement between the shipped reflect rule and one at doubled order, over the stored grid and the means.
-// The rule's own error, measured rather than asserted: the integrand is analytic on the domain built for it, so the
-// doubled rule is exact to well past float32 and the printed number is the committed table's accuracy.
+// Largest disagreement between the shipped reflect rule and one at doubled order, over the grid and means: the rule's own measured error.
 struct Residual {
     double value;
     const char* channel;
@@ -557,7 +463,7 @@ Residual verifyReflect(const AlbedoTable& table, int phiNodes, int psiNodes, int
     return worst;
 }
 
-// Largest disagreement between the shipped transmit tables and a rebake at twice the nodes per axis: the quadrature's own error, measured on every bake as verifyReflect measures the reflect side's.
+// Largest disagreement between the shipped transmit tables and a rebake at twice the nodes per axis: the quadrature's own error.
 double verifyTransmit(const AlbedoTable& table, int nodes) {
     AlbedoTable reference;
     buildTransmit(reference, nodes * 2);
@@ -589,8 +495,7 @@ double verifyTransmit(const AlbedoTable& table, int nodes) {
     return worst;
 }
 
-// %.9g is FLT_DECIMAL_DIG digits, which round-trips float32 exactly, so the committed values are the computed ones.
-// It drops the point on a whole number though ("1"), and "1F" is not a literal, so one is restored where needed.
+// %.9g is FLT_DECIMAL_DIG, round-tripping float32 exactly; it drops the point on a whole number, so "1" gets its F restored where needed.
 void writeArray(std::ofstream& out, const char* name, const std::vector<float>& values) {
     out << "\nconstexpr std::array<float, " << values.size() << "> " << name << " = {{";
     std::array<char, 32> buffer{};
@@ -662,8 +567,7 @@ bool writeInc(const std::string& path, const AlbedoTable& table, double residual
 
 int main(int argc, char** argv) {
     std::string outPath = "src/scene/albedo_table.inc";
-    // Measured against the doubled rule, which is what --verify reports: at 96 the mean channels agree to 1.1e-6 and
-    // the directional ones to 3.0e-5, that worst case confined to the mu = 0 column every consumer weights by cos.
+    // At 96 the mean channels agree to 1.1e-6 and the directional ones to 3.0e-5 against the doubled rule, worst at the mu = 0 column.
     int phiNodes = 96;
     int psiNodes = 96;
     int muNodes = 96;

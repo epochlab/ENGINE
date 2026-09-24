@@ -1,16 +1,4 @@
-// Correctness gate for the headless render path a foreign runtime binds to: the AOV classification tables
-// (debug/aov.cpp), the four CPU Beauty filters (debug/aov_filters.cpp), and api/headless_renderer.cpp's request
-// dispatch.
-//
-// The filters are asserted ANALYTICALLY rather than against a GPU readback of assets/shaders/edge_filter.frag.
-// Reading back the shader would need a GL context, which is the one thing this path exists to avoid, and it would
-// only establish that two implementations agree -- not that either is right. A step edge has a closed-form Sobel
-// magnitude, an odd-carrier Gabor bank has exactly zero DC response, and the Rec.709 weights are the definition of
-// luminance; those are properties of the filters, checkable with no reference image and no tolerance to tune.
-//
-// Not covered here, deliberately: that HeadlessRenderer's accumulation equals a direct renderPathTraced loop. The
-// image-level bit-identity of render_beauty, which is now built on HeadlessRenderer, asserts exactly that against a
-// real scene, and restating it against a synthetic fixture would be weaker, not additional.
+// Correctness gate for the headless path: the AOV tables, the four CPU Beauty filters, and headless_renderer's dispatch.
 
 #include <algorithm>
 #include <cmath>
@@ -52,8 +40,7 @@ void setTexel(HdrImage& image, int x, int y, float r, float g, float b) {
                        static_cast<std::size_t>(x)) * 4];
 }
 
-// The bank's DC response. An odd (sine) carrier is antisymmetric about the envelope's centre, so every orientation's
-// 25 weights must cancel exactly -- this is why a constant field produces no Gabor response, asserted one level down.
+// The bank's DC response: an odd carrier is antisymmetric about the envelope's centre, so every orientation's 25 weights must cancel.
 [[nodiscard]] float worstOrientationWeightSum() {
     const auto kernel = pathtracer::debug::buildGaborKernel();
     float worst = 0.0F;
@@ -69,9 +56,7 @@ void setTexel(HdrImage& image, int x, int y, float r, float g, float b) {
 
 }  // namespace
 
-// Every AovId must be classified, sized, and owned by exactly the producer its classification names. A new AOV added
-// without a row in one of the three tables is the failure this catches, and nothing else would notice it: an
-// unclassified AOV silently routes to the rasterizer and renders as whatever that buffer last held.
+// Every AovId must be classified, sized and owned by the producer its classification names; an unclassified one routes to the rasterizer.
 PT_CHECK(aov_tables_are_total_and_consistent, Fast, Exact) {
     ctx.plan(kAovCount * 3);
     for (int i = 0; i < kAovCount; ++i) {
@@ -95,8 +80,7 @@ PT_CHECK(aov_tables_are_total_and_consistent, Fast, Exact) {
     }
 }
 
-// The display names are the vocabulary every consumer spells an AOV in, so each must resolve, and the separator- and
-// case-insensitivity the CLI documents must actually hold for the multi-word ones.
+// The display names are the vocabulary every consumer spells an AOV in, so each must resolve, case- and separator-insensitively.
 PT_CHECK(aov_names_round_trip, Fast, Exact) {
     ctx.plan(kAovCount + 4);
     for (int i = 0; i < kAovCount; ++i) {
@@ -109,9 +93,7 @@ PT_CHECK(aov_names_round_trip, Fast, Exact) {
     PT_EXPECT(ctx, pathtracer::debug::aovIdFromName("not an aov") == AovId::Count, "unknown name must not resolve");
 }
 
-// A Gaussian envelope times an odd carrier integrates to zero over a symmetric support. Asserted on the weights
-// themselves rather than inferred from a filtered image, because it is the reason the constant-field check below
-// holds and it localises a regression to the kernel rather than to the convolution.
+// A Gaussian envelope times an odd carrier integrates to zero over symmetric support. Asserted on the weights, so a regression localises.
 PT_CHECK(gabor_bank_rejects_dc, Fast, Exact) {
     ctx.plan(1);
     const float worst = worstOrientationWeightSum();
@@ -119,15 +101,13 @@ PT_CHECK(gabor_bank_rejects_dc, Fast, Exact) {
     PT_EXPECT(ctx, worst < 1e-6F, "worst orientation weight sum " + std::to_string(worst));
 }
 
-// No gradient and no AC content anywhere, so both neighbourhood filters must read exactly zero -- including at the
-// border, where edge clamping means the out-of-bounds taps repeat the same constant.
+// No gradient and no AC content, so both filters must read exactly zero, including at the border where clamping repeats the constant.
 PT_CHECK(filters_are_zero_on_a_constant_field, Fast, Exact) {
     ctx.plan(2);
     pathtracer::scene::ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
     const HdrImage flat = makeImage(24, 16, 0.375F);
 
-    // Read the response channel per texel, not the raw rgba span: alpha is 1 by the broadcast convention, so a
-    // whole-buffer reduction measures the alpha channel rather than the filter.
+    // Read the response channel per texel, not the raw rgba span: alpha is 1 by the broadcast convention and would dominate a reduction.
     const HdrImage sobel = pathtracer::debug::sobelAov(flat, pool);
     float worstSobel = 0.0F;
     for (int y = 0; y < sobel.height; ++y) {
@@ -148,9 +128,7 @@ PT_CHECK(filters_are_zero_on_a_constant_field, Fast, Exact) {
     PT_EXPECT(ctx, worstGabor < 1e-6F, "peak Gabor response " + std::to_string(worstGabor));
 }
 
-// A unit step edge has a closed-form Sobel magnitude. For a vertical edge the Gx kernel sums to 4 over the three
-// taps that straddle it and Gy cancels row-wise, so both columns adjacent to the edge read exactly 4 and every
-// column two or more pixels away reads exactly 0. No tolerance: these are small integers in float.
+// A unit step edge has a closed-form Sobel magnitude: both adjacent columns read exactly 4 and everything further exactly 0.
 PT_CHECK(sobel_step_edge_matches_closed_form, Fast, Exact) {
     ctx.plan(4);
     pathtracer::scene::ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
@@ -179,8 +157,7 @@ PT_CHECK(sobel_step_edge_matches_closed_form, Fast, Exact) {
                   "far right " + std::to_string(texelR(sobel, kEdge + 3, midRow)));
 }
 
-// Luminance IS the Rec.709 weighted sum, so each primary must return its own weight exactly. This is the definition
-// (ITU-R BT.709-6), not a measurement, which is what makes equality the right assertion.
+// Luminance IS the Rec.709 weighted sum (ITU-R BT.709-6), so each primary returns its own weight exactly: a definition, not a measurement.
 PT_CHECK(luminance_returns_rec709_weights, Fast, Exact) {
     ctx.plan(4);
     pathtracer::scene::ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
@@ -199,9 +176,7 @@ PT_CHECK(luminance_returns_rec709_weights, Fast, Exact) {
                   "white luminance " + std::to_string(texelR(luminance, 3, 0)));
 }
 
-// HSV is a bijection on the RGB cube away from the achromatic axis, so inverting it must return the original triple.
-// Exercised over the interior and over the degenerate rows (greys, and values above display white) that the shader's
-// 1e-10 denominator guard only approximates.
+// HSV is a bijection on the RGB cube away from the achromatic axis, so inverting must return the original triple, degenerate rows included.
 PT_CHECK(hsv_inverts_to_rgb, Fast, Exact) {
     pathtracer::scene::ThreadPool pool(static_cast<unsigned int>(ctx.threads()));
     const std::vector<glm::vec3> samples = {
@@ -223,8 +198,7 @@ PT_CHECK(hsv_inverts_to_rgb, Fast, Exact) {
         const float h = hsv.rgba[texel];
         const float s = hsv.rgba[texel + 1];
         const float v = hsv.rgba[texel + 2];
-        // Standard HSV-to-RGB inverse (Smith 1978), stated here rather than imported so the check does not depend on
-        // the same code it is checking.
+        // Standard HSV-to-RGB inverse (Smith 1978), stated here rather than imported, so the check does not depend on the code it checks.
         const float sector = h * 6.0F;
         const auto index = static_cast<int>(std::floor(sector)) % 6;
         const float f = sector - std::floor(sector);
@@ -248,8 +222,7 @@ PT_CHECK(hsv_inverts_to_rgb, Fast, Exact) {
     }
 }
 
-// Every AOV must render, at its declared channel count, with no NaN or infinity anywhere. This is the check that a
-// newly added AOV cannot pass without actually being produced by something.
+// Every AOV must render at its declared channel count with no NaN or infinity: a new AOV cannot pass without being produced.
 PT_CHECK(every_aov_renders_finite, Slow, Exact) {
     ctx.plan(kAovCount);
     std::string error;
@@ -285,9 +258,7 @@ PT_CHECK(every_aov_renders_finite, Slow, Exact) {
     }
 }
 
-// Sharing one path-trace accumulation, one rasterizer pass and one Beauty across a multi-AOV request must not change
-// any AOV's values. This is the property the sharing optimisation has to preserve, and the one a bug in the dispatch
-// would break: bit-identity against the same AOVs requested one at a time.
+// Sharing one accumulation, one rasterizer pass and one Beauty across a multi-AOV request must be bit-identical to requesting them singly.
 PT_CHECK(multi_aov_request_matches_single_aov_requests, Slow, Exact) {
     const std::vector<AovId> combined = {AovId::Beauty, AovId::Depth, AovId::Normal, AovId::Sobel, AovId::AO};
     ctx.plan(static_cast<int>(combined.size()));

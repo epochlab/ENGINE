@@ -1,6 +1,4 @@
-// Standalone correctness check for pathtracer::scene::bsdf: the combined pdf never integrates to more than the total
-// lobe-selection mass, and a furnace test never returns more energy than it received. Upper bound only, VNDF
-// reflection discarding below-horizon samples. Same standalone-CLI convention as the other validators.
+// Upper-bound checks on scene::bsdf: the combined pdf never exceeds the lobe-selection mass, no furnace returns more energy than it got.
 
 #include <array>
 #include <atomic>
@@ -40,16 +38,13 @@ using tools::reference::referenceConductorFresnel;
 using tools::reference::referenceConductorFresnelAt;
 using tools::reference::referenceConductorIor;
 
-// Each check keeps its own `ok` accumulator and its per-row stderr diagnostics -- those carry the parameters, the
-// measured value and the reference, which is what makes a failure diagnosable -- and reports one verdict. The detail
-// is in the rows, not in the assertion count.
+// Each check keeps its own `ok` accumulator and per-row diagnostics carrying parameters, measurement and reference, reporting one verdict.
 void finish(tools::check::Context& ctx, bool ok, const char* what) {
     ctx.plan(1);
     PT_EXPECT(ctx, ok, what);
 }
 
-// edgeTint defaults to white, the no-dip edge Schlick always produced, so every pre-existing case here
-// is a strict subset of the swept coverage rather than a shifted version of it.
+// edgeTint defaults to white, the no-dip edge Schlick always produced, so every pre-existing case is a strict subset of the swept coverage.
 BsdfParams makeParams(float roughness, float metallic, float transmissionFactor,
                        float diffuseRoughness = 0.0F, glm::vec3 edgeTint = glm::vec3(1.0F)) {
     const glm::vec3 baseColor(1.0F);  // worst case: full white albedo
@@ -60,9 +55,7 @@ BsdfParams makeParams(float roughness, float metallic, float transmissionFactor,
                        /*transmissionTint=*/glm::vec3(1.0F)};
 }
 
-// A coloured, dark conductor (f0=0.5, not the white f0=1 makeParams gives at metallic=1). A white f0 clamps
-// specularProb to 0.95, leaving only 5% diffuse selection mass to hide a diffuse-pdf error under this tolerance;
-// f0=0.5 leaves ~50%, enough for the same error to fail loudly.
+// A coloured dark conductor (f0=0.5): white f0 clamps specularProb to 0.95, leaving only 5% diffuse mass to hide a diffuse-pdf error under.
 BsdfParams makeColoredMetalParams(float roughness, glm::vec3 edgeTint = glm::vec3(1.0F)) {
     const glm::vec3 baseColor(1.0F);
     return BsdfParams{baseColor,    1.0F, roughness, glm::vec3(0.5F), edgeTint,
@@ -71,9 +64,7 @@ BsdfParams makeColoredMetalParams(float roughness, glm::vec3 edgeTint = glm::vec
                        /*transmissionTint=*/glm::vec3(1.0F)};
 }
 
-// Uniform-solid-angle hemisphere sample (PBRT-style inversion): z=u1, r=sqrt(1-u1^2), phi=2*pi*u2. Used to integrate
-// pdfBsdf over the hemisphere, MIS-combined (Veach 1997 sec. 9.2) with sampleBsdf's own density, which IS the
-// integrand. Upper bound only; diffuseRoughness is swept because at 0 the uniform-mix branch goes untested.
+// Uniform-solid-angle hemisphere samples (z=u1, r=sqrt(1-u1^2)) integrate pdfBsdf, MIS-combined with sampleBsdf's density (Veach 1997 9.2).
 PT_CHECK(pdf_normalization, Slow, Statistical) {
     std::mt19937 rng(7);
     constexpr int kUniformSamples = 200000;
@@ -101,17 +92,14 @@ PT_CHECK(pdf_normalization, Slow, Statistical) {
                     double integral = 0.0;
                     for (int i = 0; i < kUniformSamples; ++i) {
                         glm::vec3 wi = sampleUniformHemisphere(rng);
-                        // pdfBsdf mirrors wi into wo's hemisphere, so for a below-surface wo the density over the +z
-                        // hemisphere is identically zero. Integrating there passed the assertion vacuously, so the
-                        // exiting-side rows tested nothing: flip the sampled hemisphere to match wo's side.
+                        // pdfBsdf mirrors wi into wo's hemisphere, so a below-surface wo has zero +z density; the sample flips to match.
                         if (ndotV < 0.0F) {
                             wi.z = -wi.z;
                         }
                         const double p = pathtracer::scene::pdfBsdf(params, wo, wi);
                         integral += p / combinedDensity(p);
                     }
-                    // sampleBsdf returns wi in woLocal's own convention and reports the density it drew from, so no
-                    // second pdfBsdf evaluation is needed and none of the mirroring above applies.
+                    // sampleBsdf returns wi in woLocal's convention with the density it drew, so no second pdfBsdf call and no mirroring.
                     for (int i = 0; i < kBsdfSamples; ++i) {
                         pathtracer::scene::Sampler sampler(0, 0, i, kBsdfSamples, kBsdfSeed);
                         const std::optional<pathtracer::scene::BsdfSample> sample =
@@ -138,9 +126,7 @@ PT_CHECK(pdf_normalization, Slow, Statistical) {
     return;
 }
 
-// sampleBsdf's reported density must equal pdfBsdf re-evaluated at the direction it returned, the contract
-// BsdfSample::pdf states and the one nothing else asserts. Exact equality, not a tolerance: both sides are the same
-// arithmetic over the same LobeProbabilities. Swept over checkPdfNormalization's grid plus the exiting rows.
+// sampleBsdf's density must equal pdfBsdf at the direction returned: exact, both being the same arithmetic over one LobeProbabilities.
 PT_CHECK(sample_density_consistency, Slow, Exact) {
     constexpr int kSampleCount = 8000;
     constexpr std::uint32_t kSeed = 11;
@@ -209,15 +195,12 @@ glm::vec3 furnaceLo(const BsdfParams& params, const glm::vec3& wo, int sampleCou
 float maxChannel(const glm::vec3& v) { return std::max({v.x, v.y, v.z}); }
 float minChannel(const glm::vec3& v) { return std::min({v.x, v.y, v.z}); }
 
-// Asserts the pass condition rather than the failure condition: NaN compares false against every ordered operator,
-// so a `min < lo || max > hi` form would be satisfied by a NaN and report success.
+// Asserts the pass condition, not the failure one: a `min < lo || max > hi` form would be satisfied by a NaN and report success.
 bool withinBand(const glm::vec3& value, float centre, float tolerance) {
     return minChannel(value) >= centre - tolerance && maxChannel(value) <= centre + tolerance;
 }
 
-// Support coverage: every direction the BSDF has value at must carry mixture density, the condition under which the
-// one-sample MIS estimator is unbiased (Veach 1997 sec. 9.2). Exact, not a tolerance -- f > 0 with pdf == 0 is a
-// support defect at any magnitude. Closes the gap where a strategy gated off entirely passes shape and total tests.
+// Support coverage: every direction with BSDF value must carry mixture density (Veach 1997 9.2 unbiasedness); exact, not a tolerance.
 PT_CHECK(strategy_coverage, Fast, Exact) {
     constexpr int kMuNodes = 16;
     constexpr int kPhiNodes = 8;
@@ -282,9 +265,7 @@ PT_CHECK(strategy_coverage, Fast, Exact) {
     return;
 }
 
-// Furnace test through sampleBsdf: uniform L0=1 from every direction, both hemispheres since transmission can
-// receive from the far side. The bound is 1.0 except on the exiting side below the critical angle, where the
-// non-symmetric eta^2 compression makes eta^2 the correct answer. The sweep reaches past the ior=1.5 critical angle.
+// Furnace through sampleBsdf over both hemispheres: bound 1.0, except on the exiting side below the critical angle where eta^2 is correct.
 PT_CHECK(furnace_energy_bound, Slow, Statistical) {
     constexpr int kSampleCount = 200000;
     constexpr float kTolerance = 0.1F;
@@ -319,8 +300,7 @@ PT_CHECK(furnace_energy_bound, Slow, Statistical) {
         }
     }
 
-    // Coloured conductor (f0=0.5): a white f0's clamped 95% specular probability leaves too little diffuse selection
-    // mass for this tolerance to resolve a diffuse-pdf error.
+    // Coloured conductor (f0=0.5): a white f0's clamped 95% specular probability leaves too little diffuse mass for this tolerance.
     for (float roughness : roughnesses) {
         for (float ndotV : ndotVs) {
             ++seed;
@@ -339,9 +319,7 @@ PT_CHECK(furnace_energy_bound, Slow, Statistical) {
     return;
 }
 
-// Two-sided white furnace: a white, non-absorbing surface under uniform L0=1 must return exactly 1.0. Single-scatter
-// GGX loses what Smith G2 masks away (Heitz et al. 2016) -- measured 0.307 at roughness 1.0 -- so this is what
-// Kulla-Conty has to return. Half the rows sit off the albedo table's grid to exercise its bilinear blend.
+// Two-sided white furnace must return exactly 1.0: single-scatter GGX loses what Smith G2 masks (0.307 at roughness 1, Heitz 2016).
 struct WhiteFurnaceCase {
     float roughness;
     float ndotV;
@@ -360,9 +338,7 @@ PT_CHECK(white_furnace_two_sided, Slow, Statistical) {
         {0.50F, 0.4F, false},
         {1.00F, 1.0F, false},
         {1.00F, 0.4F, false},
-        // Off-grid values, re-placed whenever the table's resolution changes: a row that drifted onto a node would
-        // measure nothing. Each is the exact float landing on index k+0.5, so the lookup blends two nodes at one
-        // half. Nothing derives them from albedoGridRes(), which would follow the grid and could never fail.
+        // Off-grid values, each the exact float at index k+0.5; deriving them from albedoGridRes() would follow the grid and never fail.
         {0.3666667F, 0.5464398F, true},
         {0.3666667F, 0.2949981F, true},
         {0.6333333F, 0.5464398F, true},
@@ -403,9 +379,7 @@ PT_CHECK(white_furnace_two_sided, Slow, Statistical) {
     return;
 }
 
-    // EON rough-diffuse energy preservation: the two-sided white furnace swept over diffuseRoughness. Classical
-    // Oren-Nayar variants lose energy as it rises, which EON's multiple-scattering term fixes, so this reads 1.0
-    // everywhere. Conductors are swept too and asserted exactly invariant, diffuseKd being zeroed at metallic=1.
+    // EON rough-diffuse energy preservation over diffuseRoughness: its multi-scatter term holds 1.0 where Oren-Nayar variants lose energy.
 PT_CHECK(eon_diffuse_furnace, Slow, Statistical) {
     constexpr int kSampleCount = 400000;
     constexpr float kTolerance = 0.02F;
@@ -424,8 +398,7 @@ PT_CHECK(eon_diffuse_furnace, Slow, Statistical) {
         for (float diffuseRoughness : diffuseRoughnesses) {
             for (std::size_t v = 0; v < ndotVs.size(); ++v) {
                 const float ndotV = ndotVs[v];
-                // Seeded by (metallic, ndotV) only, never by diffuseRoughness: the assertion below is exact
-                // equality, so the two readings it compares must draw the identical direction sequence.
+                // Seeded by (metallic, ndotV) only, not diffuseRoughness: the exact assertion needs both readings to draw one sequence.
                 const std::uint32_t seed = 20000 + static_cast<std::uint32_t>((m * ndotVs.size()) + v);
                 const BsdfParams params = makeParams(kRoughness, metallic, 0.0F, diffuseRoughness);
                 const glm::vec3 wo(std::sqrt(std::max(0.0F, 1.0F - (ndotV * ndotV))), 0.0F, ndotV);
@@ -455,9 +428,7 @@ PT_CHECK(eon_diffuse_furnace, Slow, Statistical) {
     return;
 }
 
-// Paper Listing 1's E_EON at normal incidence, the EON directional albedo rho*E_F + rho_ms*(1-E_F), transcribed
-// independently of evaluateEon so the two cannot share a mistake. Normal incidence needs no FON G-term: the exact
-// albedo's G and the renderer's quartic fit both vanish at mu=1, leaving AF = 1/(1+c1*r) on either path.
+// Listing 1's E_EON at normal incidence, rho*E_F + rho_ms*(1-E_F), transcribed independently of evaluateEon so neither shares a mistake.
 glm::vec3 referenceEonAlbedo(const glm::vec3& rho, float r) {
     const float c1 = 0.5F - (2.0F / (3.0F * kPi));
     const float c2 = (2.0F / 3.0F) - (28.0F / (15.0F * kPi));
@@ -467,9 +438,7 @@ glm::vec3 referenceEonAlbedo(const glm::vec3& rho, float r) {
     return (rho * eFon) + (rhoMs * (1.0F - eFon));
 }
 
-// A bare EON diffuse surface. ior=1 makes the measurement exact rather than approximate: exact dielectric Fresnel is
-// identically zero, so the coat contributes nothing, which checkIndexMatchedCoat asserts rather than assumes.
-// The specular roughness and f0 are inert here by the same argument, and swept to prove it.
+// A bare EON diffuse surface; ior=1 zeroes dielectric Fresnel, so the coat contributes nothing and roughness/f0 are swept to show it inert.
 BsdfParams makeDiffuseParams(const glm::vec3& baseColor, float diffuseRoughness,
                               float roughness = 0.5F, float ior = 1.0F) {
     return BsdfParams{baseColor,          /*metallic=*/0.0F,          roughness,
@@ -484,9 +453,7 @@ struct AlbedoEstimate {
     glm::vec3 stdError;
 };
 
-// Cosine-weighted hemispherical integral of the shipped diffuse lobe at normal incidence -- the directional albedo
-// the renderer produces, not a reimplementation. The second moment is accumulated alongside the first so the
-// assertion band is the estimator's own standard error, computed from the run rather than picked by hand.
+// Cosine-weighted integral of the shipped diffuse lobe at normal incidence; the second moment makes the band the estimator's own error.
 AlbedoEstimate measureDiffuseAlbedo(const BsdfParams& params, int sampleCount, std::mt19937& rng) {
     const glm::vec3 wo(0.0F, 0.0F, 1.0F);
     glm::vec3 sum(0.0F);
@@ -504,13 +471,10 @@ AlbedoEstimate measureDiffuseAlbedo(const BsdfParams& params, int sampleCount, s
     return {mean, glm::sqrt(variance / n)};
 }
 
-// The observed albedo must equal the authored albedo: the property EON's Appendix A inversion exists to provide.
-// Two assertions per row: the analytic one is closed form against closed form and catches an algebra error, the
-// Monte Carlo one runs through the shipped lobe. The chromatic row carries the weight, the saturation being per-channel.
+// The observed albedo must equal the authored one, EON Appendix A's purpose: closed form against closed form, then the shipped lobe.
 PT_CHECK(eon_albedo_inversion, Slow, Statistical) {
     constexpr int kSampleCount = 400000;
-    // Two named, bounded residuals and nothing else. kSigmaBand is a confidence level on the estimator's own measured
-    // standard error; kFitTolerance is the model residual. Neither is a tolerance picked to make a run pass.
+    // Two named bounded residuals: kSigmaBand is a confidence level on the measured standard error, kFitTolerance the model residual.
     constexpr float kSigmaBand = 5.0F;
     constexpr float kFitTolerance = 0.001F;
     constexpr float kAnalyticTolerance = 1e-5F;
@@ -562,9 +526,7 @@ PT_CHECK(eon_albedo_inversion, Slow, Statistical) {
     return;
 }
 
-// EON BRDF value (paper eq. 16-19) in double, transcribed independently of evaluateEon with c1 and c2 re-derived
-// from their literals. The quartic albedo fit's coefficients are the paper's data, so quoting them is transcription.
-// The 1e-7 floors are reproduced rather than dropped: they are the model's guarded evaluation at r=0.
+// EON BRDF value (eq. 16-19) in double, transcribed independently with c1/c2 re-derived; the 1e-7 floors are the model's guard at r=0.
 glm::vec3 referenceEon(const glm::vec3& rho, float r, const glm::vec3& wi, const glm::vec3& wo) {
     const double c1 = 0.5 - (2.0 / (3.0 * kPi));
     const double c2 = (2.0 / 3.0) - (28.0 / (15.0 * kPi));
@@ -593,24 +555,18 @@ glm::vec3 referenceEon(const glm::vec3& rho, float r, const glm::vec3& wi, const
     return result;
 }
 
-// The instrument for coatAlbedo's fresnelAvg argument: checkAverageFresnel pins dielectricFresnelAvg as a function,
-// this pins what coatAlbedo passes it. ior=1 is the only point resolvable without the albedo table at all, and the
-// tolerance is exactly zero from x*1.0F == x. The sweep reaches mu 1e-5, where the old Snell form falsely hit TIR.
+// The instrument for coatAlbedo's fresnelAvg argument: ior=1 is the only point resolvable without the albedo table, exact from x*1.0F == x.
 PT_CHECK(index_matched_coat, Fast, Exact) {
-    // Exact, from the collapse above. The second bound is a float32-against-double residual on the same closed form,
-    // about 15 operations deep.
+    // Exact, from the collapse above; the second bound is a float32-against-double residual on the same closed form, ~15 operations deep.
     constexpr float kInvarianceTolerance = 0.0F;
     constexpr float kValueTolerance = 1e-6F;
-    // 0.0 is the reference row every other is compared against. 0.3661 and 0.92 sit deliberately off the table's grid,
-    // the same device checkWhiteFurnaceTwoSided uses.
+    // 0.0 is the reference row every other is compared against; 0.3661 and 0.92 sit deliberately off the table's grid.
     const std::array<float, 8> roughnesses = {0.0F, 0.05F, 0.25F, 0.3661F, 0.5F, 0.75F, 0.92F, 1.0F};
-    // The tail below 2.44e-4 (2^-12, where 1.0F-mu*mu rounds to 1.0F) is where the old Snell transcription falsely
-    // reported TIR.
+    // The tail below 2.44e-4 (2^-12, where 1.0F-mu*mu rounds to 1.0F) is where the old Snell transcription falsely reported TIR.
     const std::array<float, 11> cosines = {1.0F,   0.8F,         0.6F,    0.4F,    0.2F, 0.05F,
                                            1e-2F, 1e-3F, 2.44e-4F, 1.7263349e-4F, 1e-5F};
     const std::array<float, 3> diffuseRoughnesses = {0.0F, 0.5F, 1.0F};
-    // The chromatic row carries the weight for the value assertion, for the reason checkEonAlbedoInversion gives: at
-    // baseColor 1 the inversion is the identity and proves nothing.
+    // The chromatic row carries the value assertion: at baseColor 1 the inversion is the identity and proves nothing.
     const std::array<glm::vec3, 2> albedos = {glm::vec3(1.0F), glm::vec3(0.8F, 0.3F, 0.1F)};
 
     bool ok = true;
@@ -698,9 +654,7 @@ PT_CHECK(index_matched_coat, Fast, Exact) {
     return;
 }
 
-// Mean throughput through sampleBsdf with every transmitted draw converted back from radiance to energy: dividing
-// those draws by eta^2 puts every sample in one domain with an analytic answer. Accumulated in double, since at
-// 200k samples a float sum carries an ulp of 0.008 and values just above 1 would round down into it.
+// Mean throughput with transmitted draws divided by eta^2, putting every sample in one domain; in double, a float ulp being 0.008 at 200k.
 glm::vec3 transmissiveEnergyLo(const BsdfParams& params, const glm::vec3& wo, int sampleCount,
                                 std::uint32_t seed) {
     const float eta = wo.z < 0.0F ? params.ior : 1.0F / params.ior;  // etaI/etaT, exiting vs entering
@@ -720,14 +674,10 @@ glm::vec3 transmissiveEnergyLo(const BsdfParams& params, const glm::vec3& wo, in
     return glm::vec3(accum / static_cast<double>(sampleCount));
 }
 
-// Two-sided energy balance for a transmissive interface, the counterpart to checkWhiteFurnaceTwoSided; in the energy
-// domain 1.0 is correct everywhere. Gates two failure modes the radiance checks cannot see: compensation delivered
-// over the wrong hemisphere, and an escape budget that double-counts. metallic=1 rows must transmit nothing.
+// Two-sided energy balance, 1.0 in the energy domain: catches compensation over the wrong hemisphere and a double-counted escape budget.
 PT_CHECK(transmissive_energy_balance, Slow, Statistical) {
     constexpr int kSampleCount = 200000;
-    // Same tolerance as the opaque white furnace: 1.0 is a correctness target, not a baseline, and the residual under
-    // it is deterministic model error rather than sampling noise. Measured worst 0.0036, at transmissionFactor 0.5
-    // entering, where the diffuse coat coupling renormalises by an averaged rescale.
+    // Same tolerance as the opaque white furnace; the residual is model error, measured worst 0.0036 at transmissionFactor 0.5 entering.
     constexpr float kTolerance = 0.02F;
     const std::array<float, 4> roughnesses = {0.05F, 0.4F, 0.7F, 1.0F};
     const std::array<float, 4> ndotVs = {1.0F, 0.6F, -0.9F, -0.4F};  // entering, entering, exiting, TIR
@@ -765,9 +715,7 @@ PT_CHECK(transmissive_energy_balance, Slow, Statistical) {
     return;
 }
 
-// Round-trip energy closure of a rough dielectric: a white, non-absorbing slab reads exactly 1.0 under a uniform
-// environment. Unlike transmissive_energy_balance it integrates the escape table over every transmitted direction,
-// through BSDF sampling alone. The floor is the table's accuracy against the generator, 1e-3 over a worst 6.2e-4.
+// Round-trip closure of a rough dielectric slab, 1.0 by BSDF sampling alone; the floor is the table's 1e-3 accuracy over a worst 6.2e-4.
 PT_CHECK(transmissive_slab_walk, Slow, Statistical) {
     // Sized so the band resolves the smallest shortfall the old table left, 0.6% at roughness 0.7, with room to spare.
     constexpr int kPathsPerReplicate = 1 << 20;
@@ -814,8 +762,7 @@ PT_CHECK(transmissive_slab_walk, Slow, Statistical) {
     }
 }
 
-// A white, non-absorbing transmissive dielectric with an explicit baseColor and transmissionTint -- the one
-// configuration this suite never had, since makeParams leaves both at their defaults.
+// A white non-absorbing transmissive dielectric with explicit baseColor and transmissionTint, the one configuration this suite never had.
 BsdfParams makeTransmissiveTintParams(float roughness, const glm::vec3& baseColor,
                                        const glm::vec3& transmissionTint) {
     return BsdfParams{baseColor,          /*metallic=*/0.0F,            roughness,
@@ -824,16 +771,14 @@ BsdfParams makeTransmissiveTintParams(float roughness, const glm::vec3& baseColo
                        pathtracer::scene::eonAlbedoInversion(baseColor, 0.0F), transmissionTint};
 }
 
-// Snell refraction of wo about +z, transcribed independently of bsdf.cpp: the direction the interface actually
-// refracts into, so a sign or eta error in either is visible as a disagreement.
+// Snell refraction of wo about +z, transcribed independently of bsdf.cpp, so a sign or eta error in either shows as a disagreement.
 glm::vec3 refractAboutZ(const glm::vec3& wo, float eta) {
     const float sin2ThetaT = eta * eta * std::max(0.0F, 1.0F - (wo.z * wo.z));
     const float cosThetaT = std::sqrt(std::max(0.0F, 1.0F - sin2ThetaT));
     return {-eta * wo.x, -eta * wo.y, -cosThetaT};
 }
 
-// Throughput of sampleBsdf's smooth delta transmission branch, which carries its tint on a different code path from
-// the continuous lobes. pdf == 0 identifies that branch, a rough sample returning a real density.
+// Throughput of sampleBsdf's smooth delta transmission branch, identified by pdf == 0, a rough sample returning a real density.
 std::optional<glm::vec3> deltaTransmitThroughput(const BsdfParams& params, const glm::vec3& wo,
                                                   std::uint32_t seed) {
     constexpr int kAttempts = 64;
@@ -849,9 +794,7 @@ std::optional<glm::vec3> deltaTransmitThroughput(const BsdfParams& params, const
     return std::nullopt;
 }
 
-// The transmission-tint convention, and the only instrument here that can see it: every other transmissive case runs
-// at baseColor 1, where the conventions agree. Two assertions per row -- independence of baseColor, exact, and
-// linearity in the tint at a few ULP -- across both the rough continuous lobe and the smooth delta branch.
+// The transmission-tint convention, the only instrument that sees it: every other transmissive case runs at baseColor 1, where they agree.
 PT_CHECK(transmission_tint, Fast, Exact) {
     constexpr float kUlpBand = 1e-6F;
     constexpr float kSmoothRoughness = 0.005F;   // below bsdf.cpp's smooth threshold, so transmission is the delta branch
@@ -865,8 +808,7 @@ PT_CHECK(transmission_tint, Fast, Exact) {
     int measured = 0;
     std::uint32_t seed = 31000;
 
-    // One row's pair of assertions, shared by the rough and smooth paths: T must not move with baseColor at all, and
-    // must scale exactly with the tint.
+    // One row's pair of assertions for both paths: T must not move with baseColor at all, and must scale exactly with the tint.
     const auto assertRow = [&](const char* lobe, float roughness, float ndotV,
                                 const glm::vec3& tWhite, const glm::vec3& tBaseColoured,
                                 const glm::vec3& tTinted, const glm::vec3& tBoth) {
@@ -914,8 +856,7 @@ PT_CHECK(transmission_tint, Fast, Exact) {
             assertRow("rough ", roughness, ndotV, rough(white, white), rough(baseColour, white),
                        rough(white, tint), rough(baseColour, tint));
         }
-        // The delta branch does not depend on the roughness sweep -- it is selected by being below the smooth
-        // threshold -- so it is measured once rather than per row.
+        // The delta branch is selected by being below the smooth threshold, not by the roughness sweep, so it is measured once.
         const auto smooth = [&](const glm::vec3& bc, const glm::vec3& tn) {
             return deltaTransmitThroughput(makeTransmissiveTintParams(kSmoothRoughness, bc, tn), wo,
                                             seed)
@@ -925,8 +866,7 @@ PT_CHECK(transmission_tint, Fast, Exact) {
                    smooth(white, tint), smooth(baseColour, tint));
     }
 
-    // Backstop: every assertion above is skipped where the interface transmits nothing, so a change that silently
-    // zeroed the transmission lobe would pass them all vacuously.
+    // Backstop: every assertion above is skipped where the interface transmits nothing, so a zeroed lobe would pass them all vacuously.
     if (measured == 0) {
         std::cerr << "bsdf_validate: FAILED transmission tint -- no row transmitted anything, so "
                      "nothing was asserted\n";
@@ -936,8 +876,7 @@ PT_CHECK(transmission_tint, Fast, Exact) {
     return;
 }
 
-// Exact unpolarized dielectric Fresnel, entering orientation, in double: the reference dielectricFresnelAvg's
-// quadrature rule is measured against.
+// Unpolarized dielectric Fresnel, entering orientation, in double: the reference dielectricFresnelAvg's quadrature is measured against.
 double referenceDielectricFresnel(double cosTheta, double ior) {
     const double c = std::clamp(cosTheta, 0.0, 1.0);
     const double sinT2 = (1.0 - (c * c)) / (ior * ior);
@@ -950,23 +889,18 @@ double referenceDielectricFresnel(double cosTheta, double ior) {
     return 0.5 * ((rs * rs) + (rp * rp));
 }
 
-// The instrument the suite never had: F_avg attenuates every repeated bounce of the Kulla-Conty lobe, and no energy
-// test resolves an error in it, the furnaces running where every candidate agrees. Truth is this file's own
-// reference. The conductor tolerance is the fit's measured bound, 4.0e-4; Karis' Schlick mean fails it by 216x.
+// F_avg attenuates every repeated Kulla-Conty bounce and no furnace resolves an error in it; the conductor tolerance is the fit's 4.0e-4.
 PT_CHECK(average_fresnel, Fast, Exact) {
     constexpr double kConductorTolerance = 5e-4;
-    // The working band, everything any material actually authors: measured worst 5.5e-5 at ior 1.0575 over a
-    // 0.0025-step scan of [1.05, 3.0].
+    // The working band, everything any material authors: measured worst 5.5e-5 at ior 1.0575 over a 0.0025-step scan of [1.05, 3.0].
     constexpr double kDielectricTolerance = 1e-4;
-    // The near-index-match band, stated separately rather than absorbed into the one above, which it would loosen 8x
-    // over a region no material occupies.
+    // The near-index-match band, stated separately rather than absorbed above, which it would loosen 8x over a region no material occupies.
     constexpr double kNearIndexMatchTolerance = 8e-4;
     constexpr double kNearIndexMatchIor = 1.05;
     const std::array<double, 12> reflectivities = {1e-4, 0.01, 0.1,  0.25, 0.4,  0.48,
                                                     0.555, 0.7, 0.85, 0.95, 0.99, 1.0};
     const std::array<double, 8> edgeTints = {0.0, 0.1, 0.25, 0.5, 0.6, 0.75, 0.9, 1.0};
-    // Both regimes, and the two iors that ship (glass.json 1.5168, clay.json 1.55). ior=1 is where an index-matched
-    // interface reflects nothing at all.
+    // Both regimes, and the two iors that ship (glass.json 1.5168, clay.json 1.55); ior=1 reflects nothing at all.
     const std::array<double, 14> iors = {1.0,  1.005, 1.02, 1.05,   1.1,  1.2, 1.33, 1.5,
                                           1.5168, 1.55,  1.8,  2.0, 2.5, 3.0};
 
@@ -1019,9 +953,7 @@ PT_CHECK(average_fresnel, Fast, Exact) {
     return;
 }
 
-// --- Independent reference for the reflect-side albedo table. Domain and measure are the generator's, which is why
-// a fixed rule works: with tan(theta_h) = alpha*tan(psi) (Walter 2007) the integrand flattens. The phi split at pi/2
-// resolves a boundary layer, and the inner rule is Gauss-Legendre because Simpson converges an order slower.
+// --- Independent reference for the reflect-side albedo table, on the generator's domain and measure; Gauss-Legendre, Simpson being slower.
 double referenceSmithG2OverCosO(double cosO, double cosI, double alpha) {
     const double alpha2 = alpha * alpha;
     const auto radical = [&](double c) { return std::sqrt(alpha2 + ((1.0 - alpha2) * c * c)); };
@@ -1030,9 +962,7 @@ double referenceSmithG2OverCosO(double cosO, double cosI, double alpha) {
 
 constexpr double kPiDouble = 3.14159265358979324;
 
-// Gauss-Legendre nodes and weights mapped to [0,1], by Newton iteration on P_n through Bonnet's recurrence
-// (Press et al., Numerical Recipes 3rd ed.).
-// Built once per node count: the rule is a constant, and 192 Newton solves per call would cost more than the integral it serves.
+// Gauss-Legendre nodes/weights on [0,1] by Newton on P_n via Bonnet's recurrence (Numerical Recipes 3rd ed.), built once per node count.
 struct GaussLegendreRule {
     std::vector<double> node;
     std::vector<double> weight;
@@ -1081,8 +1011,7 @@ auto gaussLegendre(double lower, double upper, F f) -> decltype(f(lower)) {
 
 // Composite Simpson over [lower, upper] with an even panel count, on any value type with + and scalar *.
 
-// bsdf.cpp's roughness floor, mirrored so every reference below evaluates the alpha the lobe actually ships at
-// rather than an unclamped one the renderer never sees.
+// bsdf.cpp's roughness floor, mirrored so every reference evaluates the alpha the lobe ships at rather than an unclamped one.
 double alphaAt(double roughness) {
     constexpr double kMinAlpha = 0.02 * 0.02;
     return std::max(roughness * roughness, kMinAlpha);
@@ -1113,8 +1042,7 @@ glm::dvec2 referenceDirectionalAlbedo(double mu, double alpha) {
     return (2.0 / kPiDouble) * half;
 }
 
-// Cosine-weighted mean, 2*int_0^1 E(mu)*mu dmu. The mu=0 endpoint contributes exactly 0, the mu weight killing a
-// bounded E.
+// Cosine-weighted mean, 2*int_0^1 E(mu)*mu dmu; the mu=0 endpoint contributes exactly 0, the mu weight killing a bounded E.
 glm::dvec2 referenceAverageAlbedo(double alpha) {
     constexpr int kPanels = 64;
     return 2.0 * simpson(0.0, 1.0, kPanels,
@@ -1122,9 +1050,7 @@ glm::dvec2 referenceAverageAlbedo(double alpha) {
 }
 
 
-// --- The instrument for albedo_table.inc's interpolation error, the table's second error source, which nothing else
-// resolves: the two-sided furnace bounds it only to 2%. Four measurements reported separately, each bound the
-// measured worst plus ~1.7x, against this file's own double-precision reference rather than the shipped lookup.
+// --- Instrument for albedo_table.inc's interpolation error, which only the 2% furnace otherwise bounds: four measurements, reported apart.
 struct InterpolationError {
     double worst;
     double roughness;
@@ -1146,9 +1072,7 @@ double directionalAlbedoError(double mu, double roughness) {
                      std::abs(static_cast<double>(shipped.y) - exact.y));
 }
 
-    // Evenly spread node indices over [first, last], endpoints included: the "held on exact nodes" coordinate, where
-    // that axis contributes no interpolation error and the other is isolated. The mu axis sweeps from node 0, a real
-    // node at mu = 0 where E = 1 is an exact identity, so it is the sharpest column rather than one to skip.
+    // Evenly spread node indices over [first, last]: the "held on exact nodes" coordinate, where that axis adds no interpolation error.
 std::vector<int> spreadNodes(int first, int last, int count) {
     std::vector<int> nodes(static_cast<std::size_t>(count));
     for (int k = 0; k < count; ++k) {
@@ -1157,8 +1081,7 @@ std::vector<int> spreadNodes(int first, int last, int count) {
     return nodes;
 }
 
-// Row-parallel over the swept axis: rows share no accumulator and are combined in index order, so the reported
-// worst is identical to the serial one and this check stays Exact rather than becoming schedule-dependent.
+// Row-parallel over the swept axis: rows share no accumulator and combine in index order, so the reported worst matches the serial one.
 template <typename Row>
 void parallelRows(int rows, int threads, Row row) {
     std::atomic<int> next{0};
@@ -1176,17 +1099,13 @@ void parallelRows(int rows, int threads, Row row) {
 }
 
 PT_CHECK(albedo_table_interpolation, Slow, Exact) {
-    // Each bound is the measured worst plus headroom, in the convention checkAverageFresnel already uses: thin
-    // enough that a regeneration losing accuracy on any one axis trips that axis' own row rather than passing
-    // under a combined figure. They are bounds on the COMMITTED table, so they move when it is rebaked.
+    // Each bound is the measured worst plus headroom, thin enough that a regeneration losing one axis trips that axis' own row.
     constexpr double kControlTolerance = 5e-5;
     constexpr double kRoughnessAxisTolerance = 1e-3;
     constexpr double kMuAxisTolerance = 3.7e-3;
     constexpr double kFirstMuCellTolerance = 3.1e-3;
     constexpr double kAverageAlbedoTolerance = 8e-6;
-    // Fractions across the first mu cell. Its error is not a midpoint maximum like a smooth cell's: the layer sits
-    // against the mu = 0 edge, so where inside the cell the worst falls depends on how the layer's width compares
-    // to the cell's, and the sweep says so rather than assuming.
+    // Fractions across the first mu cell: the layer sits at the mu = 0 edge, so where the worst falls depends on its width vs the cell's.
     const std::array<double, 4> firstCellFractions = {0.2, 0.4, 0.6, 0.8};
     constexpr int kSpread = 16;
 
@@ -1194,9 +1113,7 @@ PT_CHECK(albedo_table_interpolation, Slow, Exact) {
     const std::vector<int> muNodes = spreadNodes(0, res.y - 1, kSpread);
     const std::vector<int> roughnessNodes = spreadNodes(0, res.x - 1, kSpread);
 
-    // Control, listed first because every row below is only as trustworthy as this one: both axes on exact nodes, so
-    // the lookup returns a stored value verbatim and no interpolation happens. What is left is this file's Simpson
-    // against the generator's Gauss-Legendre. If it is not small, the instrument is the limit, not the table.
+    // Control first: both axes on exact nodes, so no interpolation happens and what is left is this file's Simpson against the generator.
     std::vector<InterpolationError> controlRows(static_cast<std::size_t>(res.x));
     parallelRows(res.x, ctx.threads(), [&](int ri) {
         const double roughness = pathtracer::scene::albedoGridRoughness(static_cast<float>(ri));
@@ -1220,8 +1137,7 @@ PT_CHECK(albedo_table_interpolation, Slow, Exact) {
         roughnessRows[static_cast<std::size_t>(ri)] = row;
     });
 
-    // mu axis: every cell midpoint on that axis EXCEPT the first, held on exact roughness nodes. The first cell is
-    // measured on its own below -- folding it in here would let one grazing boundary layer set the whole axis' bound.
+    // mu axis: every cell midpoint but the first, on exact roughness nodes; folding it in would let one boundary layer set the whole bound.
     std::vector<InterpolationError> muRows(roughnessNodes.size());
     parallelRows(static_cast<int>(roughnessNodes.size()), ctx.threads(), [&](int k) {
         const int ri = roughnessNodes[static_cast<std::size_t>(k)];
@@ -1246,8 +1162,7 @@ PT_CHECK(albedo_table_interpolation, Slow, Exact) {
         firstCellRows[static_cast<std::size_t>(ri)] = row;
     });
 
-    // Eavg's own 1-D lerp, which reaches coatAlbedoAvg and through it the 1/(1-coatAlbedoAvg) denominator of the
-    // whole diffuse coupling -- a different route into the shade than the directional lookups, so its own number.
+    // Eavg's own 1-D lerp, reaching coatAlbedoAvg and its 1/(1-coatAlbedoAvg) denominator: a different route in, so its own number.
     std::vector<InterpolationError> averageRows(static_cast<std::size_t>(res.x - 1));
     parallelRows(res.x - 1, ctx.threads(), [&](int ri) {
         const double roughness = pathtracer::scene::albedoGridRoughness(static_cast<float>(ri) + 0.5F);
@@ -1300,8 +1215,7 @@ double referenceCoatAlbedo(const glm::dvec2& split, double albedoAvg, double f0,
     return (((f0 * split.x) + split.y) * fresnelRatio) + (tint * (1.0 - (split.x + split.y)));
 }
 
-// The albedo-table reference is this check's whole cost -- a 96x96 Simpson and a 64-panel Simpson per row -- so both
-// are hoisted out of every loop that does not change them.
+// The albedo-table reference is this check's whole cost, a 96x96 and a 64-panel Simpson per row, so both hoist out of every fixed loop.
 struct CoatAlbedos {
     glm::dvec2 splitAvg;
     std::array<glm::dvec2, 3> split;   // parallel to the check's cosines
@@ -1342,8 +1256,7 @@ CoatGeometry coatGeometry(double ior, const CoatAlbedos& albedos, int indexO, in
              referenceDielectricFresnel(muI, ior) / std::max(schlick(muI), 1e-6)};
 }
 
-// The diffuse channel's full coupling, (1 - coat(wo))/(1 - coatAvg) * (1 - coat(wi)), as a function of the fresnelAvg
-// the three call sites pass.
+// The diffuse channel's full coupling, (1 - coat(wo))/(1 - coatAvg) * (1 - coat(wi)), as a function of the fresnelAvg its call sites pass.
 double referenceCoupling(const CoatGeometry& geometry, double fresnelAvg) {
     const double albedoAvg = geometry.splitAvg.x + geometry.splitAvg.y;
     const double coatAvg = referenceCoatAlbedo(geometry.splitAvg, albedoAvg, geometry.f0,
@@ -1356,24 +1269,19 @@ double referenceCoupling(const CoatGeometry& geometry, double fresnelAvg) {
     return (wo / std::max(1.0 - coatAvg, 1e-4)) * wi;
 }
 
-// The instrument for coatAlbedo's fresnelAvg value at working ior, which checkIndexMatchedCoat cannot supply: that
-// pins the argument, this pins what it evaluates to. Recovered by inverting the coat coupling -- never as
-// diffuse(ior)/diffuse(ior=1), which cancels the term being measured. Full ior range, every candidate mutated.
+// The instrument for coatAlbedo's fresnelAvg value, recovered by inverting the coupling, not as diffuse(ior)/diffuse(1), which cancels it.
 PT_CHECK(coat_fresnel_average, Slow, Exact) {
     constexpr double kTolerance = 6e-5;
-    // Residual of the recovered root, not an accuracy claim: it catches a coupling the model cannot reproduce at any
-    // fresnelAvg, such as a lost 1/(1-coatAvg) renormalisation.
+    // Residual of the recovered root, not an accuracy claim: it catches a coupling the model cannot reproduce at any fresnelAvg.
     constexpr double kResidualTolerance = 1e-6;
     const std::array<double, 9> iors = {1.1, 1.33, 1.5, 1.5168, 1.55, 1.8, 2.0, 2.5, 3.0};
-    // Roughness 0 is excluded: 1-E is ~0 there, so F_avg reaches nothing and is not observable. Nothing here is
-    // aligned to the table's grid, so the rows exercise its interpolation too.
+    // Roughness 0 is excluded, 1-E being ~0 so F_avg is unobservable; nothing is grid-aligned, so the rows exercise interpolation too.
     const std::array<double, 4> roughnesses = {0.25, 0.5, 0.75, 1.0};
     const std::array<double, 3> cosines = {0.4, 0.7, 1.0};
     const glm::vec3 albedo(0.8F, 0.3F, 0.1F);
     constexpr float kDiffuseRoughness = 0.5F;
 
-    // Hoisted out of the ior loop as well as the row loop: the albedo reference does not depend on ior, so the whole
-    // sweep costs four reference evaluations rather than four per ior.
+    // Hoisted out of the ior loop too: the albedo reference is ior-independent, so the sweep costs four evaluations, not four per ior.
     std::array<CoatAlbedos, roughnesses.size()> albedosByRoughness{};
     for (size_t r = 0; r < roughnesses.size(); ++r) {
         albedosByRoughness[r] = coatAlbedos(roughnesses[r], cosines);
@@ -1413,9 +1321,7 @@ PT_CHECK(coat_fresnel_average, Slow, Exact) {
                     const double measured =
                         static_cast<double>(maxChannel(diffuse)) / maxChannel(bare);
 
-                    // The bracket is the model's own monotone branch: referenceCoupling is unimodal in fresnelAvg,
-                    // so the extremum is located by ternary search and bisection then runs on the monotone side.
-                    // Monotone increasing, which is not obvious: F_avg raises coatAvg faster than coatAlbedo.
+                    // referenceCoupling is unimodal in fresnelAvg: ternary search finds the extremum, bisection runs the monotone side.
                     const CoatGeometry geometry = coatGeometry(ior, albedosByRoughness[r],
                                                                 static_cast<int>(o),
                                                                 static_cast<int>(i), muO, muI);
@@ -1444,8 +1350,7 @@ PT_CHECK(coat_fresnel_average, Slow, Exact) {
                     const double recovered = 0.5 * (low + high);
                     const double residual = std::abs(referenceCoupling(geometry, recovered) - measured);
                     const double error = std::abs(recovered - truth);
-                    // Central difference, wide enough to clear the bisection's own resolution and narrow enough that
-                    // the coupling is locally linear across it.
+                    // Central difference, wide enough to clear the bisection's resolution, narrow enough for local linearity.
                     constexpr double kSlopeStep = 1e-4;
                     const double slope = (referenceCoupling(geometry, recovered + kSlopeStep) -
                                            referenceCoupling(geometry, recovered - kSlopeStep)) /
@@ -1493,13 +1398,9 @@ PT_CHECK(coat_fresnel_average, Slow, Exact) {
     return;
 }
 
-// Cauchy dispersion, asserted against the contract it exists to satisfy rather than a restatement of its own formula:
-// (ior, abbe) means n_d at the d line with V_d = (n_d-1)/(n_F-n_C), so those two identities are the specification.
-// Nothing else in the suite can see an error here -- every render-based transmissive check runs at ior 1.0.
+// Cauchy dispersion against its contract: (ior, abbe) means n_d with V_d = (n_d-1)/(n_F-n_C), so those identities are the specification.
 PT_CHECK(cauchy_dispersion, Fast, Exact) {
-    // Both bands are float32 rounding headroom, not fit error: the algebra is exact. The Abbe band is
-    // relative because n_F - n_C is a ~0.008 difference of two ~1.5 quantities, so it carries the ~187x
-    // cancellation amplification of their own ulp; the d-line band is absolute since nothing cancels there.
+    // Both bands are rounding headroom, not fit error: the Abbe band is relative for n_F-n_C's ~187x cancellation, the d-line absolute.
     constexpr float kDLineTolerance = 1e-6F;
     constexpr float kAbbeRelativeTolerance = 1e-4F;
 
@@ -1508,8 +1409,7 @@ PT_CHECK(cauchy_dispersion, Fast, Exact) {
         float iorD;
         float abbe;
     };
-    // Real catalogue materials spanning the physical range: crown, dense flint, and the two the OpenPBR
-    // spec names as the common mid-dispersion cases. Nothing here is fitted; they are published constants.
+    // Real catalogue materials spanning the range, including the two OpenPBR names as mid-dispersion; published constants, not fits.
     const std::array<Glass, 4> glasses{{
         {"Schott N-BK7 (crown)", 1.5168F, 64.17F},
         {"Schott SF10 (dense flint)", 1.72825F, 28.53F},
@@ -1560,8 +1460,7 @@ PT_CHECK(cauchy_dispersion, Fast, Exact) {
                          " authored abbe does not mean what it says.\n";
             ok = false;
         }
-        // Normal dispersion: index falls with wavelength, so blue bends most. Pins the sign of B and the
-        // ordering of kRgbWavelengthsNm together, which is exactly the pair the refraction direction needs.
+        // Normal dispersion: index falls with wavelength, so blue bends most, pinning B's sign and kRgbWavelengthsNm's ordering together.
         if (!(nBlue > nGreen && nGreen > nRed)) {
             std::cerr << "bsdf_validate: FAILED normal dispersion ordering for " << glass.name
                       << " -- RGB indices [" << nRed << ", " << nGreen << ", " << nBlue
@@ -1571,8 +1470,7 @@ PT_CHECK(cauchy_dispersion, Fast, Exact) {
         }
     }
 
-    // abbe = 0 is the off switch every non-dispersive material in the repo relies on, and it must be
-    // exact rather than merely close: any drift here changes every existing render.
+    // abbe = 0 is the off switch every non-dispersive material relies on, and must be exact: any drift changes every existing render.
     std::cout << "  abbe 0 returns the authored ior unchanged at every wavelength\n";
     for (const Glass& glass : glasses) {
         for (float lambda : {kLambdaFNm, pathtracer::scene::kRgbWavelengthsNm.z, kLambdaDNm,
@@ -1590,29 +1488,19 @@ PT_CHECK(cauchy_dispersion, Fast, Exact) {
     return;
 }
 
-// Conductor Fresnel, verified through the public API. At metallic=1 evaluateBsdf is the specular lobe alone,
-// f(g) = K*F_g(woDotNh) + M, and M does not cancel across edgeTint since conductorFresnelAvg makes F_avg a function
-// of it. So the two halves split by roughness: 0.05 pins the ratio identity, 0.6 pins monotonicity in edgeTint.
+// Conductor Fresnel via the public API: at metallic=1 f(g) = K*F_g + M, so 0.05 pins the ratio identity and 0.6 pins edgeTint monotonicity.
 PT_CHECK(conductor_fresnel, Fast, Exact) {
     // The ratio is a quotient of differences of float BSDF values, so it carries the cancellation of both.
     constexpr float kRatioTolerance = 2e-3F;
     // Normal incidence is an exact identity, not a fit: R(theta=0) == r for every g (paper sec. 2.3.1).
     constexpr float kNormalIncidenceTolerance = 1e-5F;
-    // Roughness at or below which the multiple-scattering deficit (1-E) leaves M under the identity's own
-    // tolerance, so the two assertions that need M to vanish can use it. Measured: the identity holds to
-    // 1e-5 relative at 0.05 and is violated by 1.5e-2 at 0.6, so the split is decisive, not marginal.
+    // Roughness where the (1-E) deficit leaves M under tolerance: the identity holds to 1e-5 at 0.05 and breaks by 1.5e-2 at 0.6.
     constexpr float kMsNegligibleRoughness = 0.1F;
-    // The property Schlick structurally cannot have: at grazing a black edge tint must sit well below a
-    // white one. Schlick's (1-c)^5 tail forces every metal to exactly 1 there, so on the old code this
-    // separation is identically zero whatever edgeTint says.
+    // The property Schlick structurally cannot have: at grazing a black edge tint must sit well below a white one, where Schlick forces 1.
     constexpr float kMinGrazingSeparation = 0.05F;
-    // Below this relative span between edgeTint 0 and 1 the normalised ratio is a quotient of two
-    // near-equal tiny numbers. 1e-3 sits an order of magnitude under the smallest span that carries
-    // signal (0.0183, measured at r=0.95 cos=0.6) and three above float32's own precision.
+    // 1e-3 sits an order below the smallest span carrying signal (0.0183 at r=0.95 cos=0.6) and three above float32 precision.
     constexpr float kMinConditionedSpan = 1e-3F;
-    // 1.0 is the white case makeParams gives at metallic=1 and the one the white furnace runs on. It also
-    // drives n to ~5e-5, where the reflectance is the most numerically delicate: it is what caught the
-    // cancellation in fresnelConductor's `a`, which the 0.95 row passes straight over.
+    // 1.0 is makeParams' white case at metallic=1; it drives n to ~5e-5, where the cancellation in fresnelConductor's `a` was caught.
     const std::array<float, 4> reflectivities = {0.1F, 0.5F, 0.95F, 1.0F};
     const std::array<float, 5> edgeTints = {0.0F, 0.25F, 0.5F, 0.75F, 1.0F};
     const std::array<float, 2> roughnesses = {0.05F, 0.6F};
@@ -1653,15 +1541,12 @@ PT_CHECK(conductor_fresnel, Fast, Exact) {
                 }
                 continue;
             }
-            // Same conditioning guard the ratio below uses: at r=1 every edge tint gives the same mirror,
-            // so the span across edgeTint is float noise rather than signal (measured 6e-6 relative there
-            // against 1.5e-2 at r=0.1). monotonicRowsChecked keeps the skip honest.
+            // Same conditioning guard as below: at r=1 every edge tint gives one mirror, so the span is noise (6e-6, vs 1.5e-2 at r=0.1).
             if ((atWhite - atNormal.front()) / atWhite < kMinConditionedSpan) {
                 continue;
             }
             ++monotonicRowsChecked;
-    // Strict, with no epsilon: the guard above conditions the whole g=0->1 span, so the compare is between two
-    // readings of the same well-conditioned quantity.
+            // Strict, no epsilon: the guard above conditions the whole g=0->1 span, so this compares two conditioned readings.
             for (std::size_t i = 1; i < edgeTints.size(); ++i) {
                 if (!(atNormal[i] > atNormal[i - 1])) {
                     std::cerr << "bsdf_validate: FAILED conductor F_avg edgeTint dependence at r="
@@ -1687,8 +1572,7 @@ PT_CHECK(conductor_fresnel, Fast, Exact) {
                 const float atBlack =
                     maxChannel(pathtracer::scene::evaluateBsdf(params(roughness, glm::vec3(0.0F)), wo, wi));
                 const float span = atBlack - atWhite;
-                // The assertion that edgeTint reaches the lobe at all: a dropped edgeTint leaves every
-                // reading identical and span exactly zero. Holds at every r, including 1.
+                // The assertion that edgeTint reaches the lobe at all: a dropped edgeTint leaves span exactly zero. Holds at every r.
                 if (!(std::abs(span) > 0.0F)) {
                     std::cerr << "bsdf_validate: FAILED conductor Fresnel -- edgeTint 0 and 1 gave the "
                                  "identical value "
@@ -1697,14 +1581,11 @@ PT_CHECK(conductor_fresnel, Fast, Exact) {
                     ok = false;
                     continue;
                 }
-                // The exact ratio identity needs M to cancel across edgeTint, which it does only where the
-                // multiple-scattering deficit is negligible; the rough row's edgeTint dependence is real
-                // and is asserted at normal incidence above instead.
+                // The ratio identity needs M to cancel across edgeTint, true where the MS deficit is negligible; rough rows assert above.
                 if (roughness > kMsNegligibleRoughness) {
                     continue;
                 }
-    // The quotient below divides one span by another, so it only carries signal where the denominator span is large
-    // enough to be resolved above float32 noise.
+                // The quotient below divides one span by another, so it carries signal only where the denominator clears noise.
                 if (std::abs(span) / atWhite < kMinConditionedSpan) {
                     continue;
                 }
@@ -1725,8 +1606,7 @@ PT_CHECK(conductor_fresnel, Fast, Exact) {
                     }
                 }
             }
-            // Reported as reflectance, which the reference gives directly; the assertion is on the
-            // measured BSDF values, so it is the shipped code being tested and not the reference.
+            // Reported as reflectance, as the reference gives it; the assertion is on measured BSDF values, so shipped code is tested.
             const float atWhite =
                 maxChannel(pathtracer::scene::evaluateBsdf(params(0.05F, glm::vec3(1.0F)), wo, wi));
             const float atBlack =
@@ -1734,9 +1614,7 @@ PT_CHECK(conductor_fresnel, Fast, Exact) {
             const float separation = (atWhite - atBlack) / atWhite;
             std::cout << "  " << reflectivity << "   " << cosine << "   " << referenceBlack << "   "
                       << referenceWhite << "   " << separation << '\n';
-            // Not asserted at r=1: a perfect mirror reflects everything at every angle whatever its edge
-            // tint (measured 3.4e-4 separation, and the reference agrees), so there is no dip to require
-            // there. The dip is a mid-reflectivity property, which is where the rows above assert it.
+            // Not asserted at r=1: a perfect mirror reflects everything at every angle (3.4e-4 separation), so there is no dip to require.
             if (cosine == cosines.back() && reflectivity < 1.0F &&
                 !(separation >= kMinGrazingSeparation)) {
                 std::cerr << "bsdf_validate: FAILED conductor Fresnel grazing dip at r=" << reflectivity
@@ -1765,9 +1643,7 @@ PT_CHECK(conductor_fresnel, Fast, Exact) {
     return;
 }
 
-// The specular lobe's closed form at the mirrored pair, in double: nh is exactly +z there, so sin(theta_h) is 0 and
-// the GGX denominator collapses to alpha^2, leaving D = 1/(pi*alpha^2) exactly. G2 is Smith height-correlated with
-// both lambdas at the same cosine.
+// The specular lobe's closed form at the mirrored pair in double: nh is exactly +z, so D = 1/(pi*alpha^2) exactly and G2 uses one cosine.
 double specularGeometry(double alpha, double cosine) {
     const double alpha2 = alpha * alpha;
     const double d = 1.0 / (kPiDouble * alpha2);
@@ -1777,15 +1653,11 @@ double specularGeometry(double alpha, double cosine) {
     return (d * g2) / (4.0 * cosine * cosine);
 }
 
-// The only instrument in this file that reads the specular lobe's absolute magnitude, and the only one that can:
-// sampleBsdf returns f/pdf, where a common factor cancels. That gap let distributionGGX ship two errors invisible in
-// throughput. Dividing the measured lobe by the reference K isolates F; the grazing rows run to cos 1e-7.
+// The only instrument reading the specular lobe's absolute magnitude, sampleBsdf's f/pdf cancelling a common factor; grazing to cos 1e-7.
 PT_CHECK(dielectric_fresnel, Fast, Exact) {
-    // Float32 round-off in the shipped lobe against a double reference, relative to F since rounding is. M is not
-    // resolvable at these roughnesses.
+    // Float32 round-off against a double reference, relative to F since rounding is; M is not resolvable at these roughnesses.
     constexpr double kFresnelTolerance = 4.7e-7;
-    // Normal incidence is an exact identity, not a fit: referenceDielectricFresnel(1, n) is ((n-1)/(n+1))^2 with both
-    // polarisations equal.
+    // Normal incidence is an exact identity, not a fit: referenceDielectricFresnel(1, n) is ((n-1)/(n+1))^2, both polarisations equal.
     constexpr double kNormalIncidenceTolerance = 3e-8;
     constexpr float kMinAlpha = 0.02F * 0.02F;   // bsdf.cpp's roughness floor, mirrored so K uses the alpha the lobe actually used
     const std::array<double, 4> iors = {1.1, 1.5, 1.5168, 2.5};   // 1.5168 is glass.json's own N-BK7 value
@@ -1835,8 +1707,7 @@ PT_CHECK(dielectric_fresnel, Fast, Exact) {
                                  "error in any of the three\n";
                     ok = false;
                 }
-                // Strict, no epsilon: unpolarized external reflection is monotone in theta for every n > 1, and the
-                // smallest real step here is comfortably above float32 noise.
+                // Strict, no epsilon: unpolarized external reflection is monotone in theta for n > 1, and the smallest step clears noise.
                 if (previous >= 0.0 && !(measured > previous)) {
                     std::cerr << "bsdf_validate: FAILED dielectric Fresnel monotonicity at ior=" << ior
                               << " roughness=" << roughness << " cos=" << cosine << " gave " << measured
@@ -1850,9 +1721,7 @@ PT_CHECK(dielectric_fresnel, Fast, Exact) {
                       << " / " << referenceDielectricFresnel(cosines.back(), ior) << '\n';
         }
     }
-    // Index match, kept out of the sweep: at ior 1 the true curve is identically zero, so the monotonicity assertion
-    // would have nothing to compare. Asserted at exactly zero, F being the only ior-dependent factor. The cosines run
-    // to 1e-5 because below 2^-12 the old Snell form rounded to 1.0F and falsely reported TIR -- 6 of 8 rows failed.
+    // Index match, out of the sweep: at ior 1 the curve is identically zero; the cosines run to 1e-5, where the old Snell form hit TIR.
     const std::array<float, 8> indexMatchedCosines = {1.0F,     0.5F,          0.02F,  1e-3F,
                                                       2.44e-4F, 1.7263349e-4F, 1e-4F, 1e-5F};
     int indexMatchedRows = 0;
@@ -1883,24 +1752,20 @@ PT_CHECK(dielectric_fresnel, Fast, Exact) {
             }
         }
     }
-    // No anti-vacuity guard here, unlike checkIndexMatchedCoat and checkCoatFresnelAvg: both arrays are non-empty at
-    // compile time, every row is compared, and the count is fixed.
+    // No anti-vacuity guard here: both arrays are non-empty at compile time, every row is compared, and the count is fixed.
     std::cout << "  dielectric Fresnel: " << rowsChecked << " points vs reference, "
               << indexMatchedRows << " index-matched rows at exactly zero\n";
     finish(ctx, ok, "dielectric_fresnel failed; see the rows above");
     return;
 }
 
-// Helmholtz reciprocity: f(wo->wi) == f(wi->wo), symmetric by construction once the directional-albedo diffuse
-// coupling is applied on both sides. It fails hard on the pre-coupling code, which the furnace passed throughout.
-// Transmission is excluded: radiance transport across a refracting interface is genuinely non-symmetric.
+// Helmholtz reciprocity, symmetric once the diffuse coupling is applied on both sides; transmission is excluded as genuinely non-symmetric.
 PT_CHECK(reciprocity, Fast, Exact) {
     constexpr float kRelativeTolerance = 1e-4F;
     const std::array<float, 4> roughnesses = {0.05F, 0.25F, 0.5F, 1.0F};
     const std::array<float, 3> metallics = {0.0F, 0.5F, 1.0F};
     const std::array<float, 4> cosines = {1.0F, 0.7F, 0.4F, 0.15F};
-    // At 0 the diffuse lobe is Lambertian and reciprocal for free, so the sweep is what actually puts EON under this
-    // check.
+    // At 0 the diffuse lobe is Lambertian and reciprocal for free, so the sweep is what puts EON under this check.
     const std::array<float, 3> diffuseRoughnesses = {0.0F, 0.5F, 1.0F};
 
     bool ok = true;
@@ -1936,19 +1801,15 @@ PT_CHECK(reciprocity, Fast, Exact) {
     return;
 }
 
-// eta^2-corrected reciprocity for the transmission lobe: f_t(wo->wi)*eta_wi^2 == f_t(wi->wo)*eta_wo^2. Single
-// scatter only, permanently -- transmitMultiScatter reads its factors at orientations the swap exchanges, inherent
-// rather than a gap (ROADMAP.md transport #1). wi is constructed, not sampled, or the check passes vacuously.
+// eta^2-corrected transmission reciprocity, single scatter only (ROADMAP transport #1); wi is constructed, else the check passes vacuously.
 PT_CHECK(transmission_reciprocity, Fast, Exact) {
-    // Not checkReciprocity's 1e-4: D is sharply peaked at these alphas and the two queries build ht from differently
-    // scaled sums, so the float32 paths diverge more than a reflection pair does.
+    // Not checkReciprocity's 1e-4: D is sharply peaked at these alphas and the two queries build ht from differently scaled sums.
     constexpr float kRelativeTolerance = 1e-2F;
     const std::array<float, 2> roughnesses = {0.05F, 0.10F};
     const std::array<float, 3> iors = {1.2F, 1.5F, 2.0F};
     const std::array<float, 4> cosines = {1.0F, 0.9F, 0.7F, 0.5F};
     const std::array<float, 5> offsets = {0.0F, 0.5F, 1.0F, 2.0F, 4.0F};  // multiples of alpha
-    // Perturbation axes. Out-of-plane and diagonal put wo and wi at different azimuths, so a swapped-phi error
-    // cannot hide the way it would in a coplanar sweep.
+    // Perturbation axes: out-of-plane and diagonal put wo and wi at different azimuths, so a swapped-phi error cannot hide.
     const std::array<glm::vec3, 3> axes = {
         {{0.0F, 1.0F, 0.0F}, {1.0F, 0.0F, 0.0F}, {0.70710678F, 0.70710678F, 0.0F}}};
 
@@ -1969,8 +1830,7 @@ PT_CHECK(transmission_reciprocity, Fast, Exact) {
                 for (float offset : offsets) {
                     const float angle = offset * alpha;
                     for (std::size_t axisIndex = 0; axisIndex < axes.size(); ++axisIndex) {
-                        // A zero offset lands on the refracted direction whatever the axis is, so only the first
-                        // pass over it is a distinct pair.
+                        // A zero offset lands on the refracted direction whatever the axis, so only the first pass over it is distinct.
                         if (offset == 0.0F && axisIndex > 0) {
                             continue;
                         }
@@ -2010,14 +1870,10 @@ PT_CHECK(transmission_reciprocity, Fast, Exact) {
     return;
 }
 
-// Round trip through a transmissive interface: the non-symmetric eta^2 compression (Veach 1997 sec. 5.2) applies
-// entering and exiting, and the two must cancel exactly. checkFurnace tests each side separately against a per-side
-// bound, which passes even if they do not cancel; this asserts the product.
+// Round trip: the eta^2 compression (Veach 1997 5.2) applies entering and exiting and must cancel exactly, so this asserts the product.
 PT_CHECK(transmission_round_trip, Slow, Statistical) {
     constexpr int kSampleCount = 200000;
-    // Not tight to 1.0: each side's furnace value also contains that interface's reflected lobe, so the product
-    // carries a Fresnel cross-term that does not cancel. The band still discriminates: compounding factors would
-    // land near ior^2, under-cancelling ones well below 1.
+    // Not tight to 1.0: each side's furnace contains its reflected lobe too, so a Fresnel cross-term stays; compounding lands near ior^2.
     constexpr float kTolerance = 0.08F;
     constexpr float kIorRoundTrip = 1.5F;  // matches makeParams
     const std::array<float, 3> ndotVs = {1.0F, 0.8F, 0.5F};
@@ -2026,9 +1882,7 @@ PT_CHECK(transmission_round_trip, Slow, Statistical) {
     std::uint32_t seed = 4000;
     for (float ndotV : ndotVs) {
         ++seed;
-        // Snell-correct pairing: the exit angle is not the entry angle, and reusing thetaI would put the exit past
-        // the critical angle where no round trip exists. Two-sided deliberately: an upper bound alone is blind to
-        // the factors under-cancelling, which loses energy just as wrongly.
+        // Snell-correct pairing: the exit angle is not the entry angle, and reusing thetaI would put the exit past the critical angle.
         const BsdfParams params = makeParams(0.05F, 0.0F, 1.0F);
         const float sinThetaI = std::sqrt(std::max(0.0F, 1.0F - (ndotV * ndotV)));
         const float sinThetaT = sinThetaI / kIorRoundTrip;
@@ -2040,8 +1894,7 @@ PT_CHECK(transmission_round_trip, Slow, Statistical) {
         const float roundTrip = entering * exiting;
         std::cout << "  transmission round trip ndotV=" << ndotV << ": " << entering << " x "
                   << exiting << " = " << roundTrip << '\n';
-        // Two-sided deliberately: an upper bound alone catches the eta^2 factors compounding but is blind to them
-        // under-cancelling, which loses energy just as wrongly.
+        // Two-sided deliberately: an upper bound alone is blind to the factors under-cancelling, which loses energy just as wrongly.
         if (!(roundTrip >= 1.0F - kTolerance && roundTrip <= 1.0F + kTolerance)) {
             std::cerr << "bsdf_validate: FAILED transmission round trip at ndotV=" << ndotV
                       << " -- entering " << entering << " x exiting " << exiting << " = " << roundTrip
@@ -2054,26 +1907,19 @@ PT_CHECK(transmission_round_trip, Slow, Statistical) {
     return;
 }
 
-// Transmission through an index-matched interface, the one configuration needing no reference: at ior 1 a ray passes
-// straight through carrying only the tint. The only check reaching the Snell block's cos^2 TIR predicate at ior 1,
-// and the only one pinning it at every roughness. The existence assertion is binary and cannot be tuned.
+// Transmission at ior 1, needing no reference: the only check reaching the Snell block's cos^2 TIR predicate there, at every roughness.
 PT_CHECK(index_matched_transmission, Fast, Exact) {
-    // Straight-through is algebraic at r == 1 -- cos(thetaT) == cos(thetaI) and the tangential components scale by
-    // exactly 1 -- but it is reached through the shipped code path, not asserted of it.
+    // Straight-through is algebraic at r == 1, but it is reached through the shipped code path rather than asserted of it.
     constexpr float kDirectionTolerance = 1.2e-7F;
-    // Not throughput == tint: sampleBsdf returns f/pdf, so a draw carries tint/P. The noise-free invariant is
-    // chromaticity instead -- at ior 1 the only surviving factor is the tint, so throughput is a positive multiple
-    // of it. Chromatic on purpose: a white tint cannot tell preservation from mere brightness.
+    // Not throughput == tint: sampleBsdf returns f/pdf, so a draw carries tint/P; chromaticity is the noise-free invariant instead.
     constexpr float kChromaticityTolerance = 1.2e-7F;
     constexpr int kRoughDraws = 4096;
     constexpr float kSmoothRoughness = 0.02F;   // alpha 4e-4, below bsdf.cpp's kSmoothAlpha: the delta branch
     constexpr float kRoughRoughness = 0.3F;     // alpha 0.09, comfortably above it: the refractAbout branch
-    // Reaches 1e-5 for the same reason checkIndexMatchedCoat does: 2.44e-4 is 2^-12, and every row at or below it
-    // returned nullopt on the pre-fix code.
+    // Reaches 1e-5 as checkIndexMatchedCoat does: 2.44e-4 is 2^-12, and every row at or below it returned nullopt on the pre-fix code.
     const std::array<float, 8> cosines = {1.0F,     0.7F,          0.1F,   1e-3F,
                                           2.44e-4F, 1.7263349e-4F, 1e-4F, 1e-5F};
-    // Chromatic on purpose: a white tint cannot distinguish a preserved throughput from one that merely kept its
-    // brightness.
+    // Chromatic on purpose: a white tint cannot distinguish a preserved throughput from one that merely kept its brightness.
     const glm::vec3 tint(0.8F, 0.5F, 0.2F);
 
     bool ok = true;
@@ -2121,8 +1967,7 @@ PT_CHECK(index_matched_transmission, Fast, Exact) {
             ok = false;
         }
 
-        // The rough draws must select that same delta branch and carry that same throughput. Every draw is asserted,
-        // not merely counted.
+        // The rough draws must select that same delta branch and carry that same throughput; every draw is asserted, not merely counted.
         const BsdfParams roughParams{smoothParams.baseColor,  smoothParams.metallic,
                                       kRoughRoughness,         smoothParams.f0,
                                       smoothParams.edgeTint,   /*ior=*/1.0F,
@@ -2183,8 +2028,7 @@ PT_CHECK(index_matched_transmission, Fast, Exact) {
                          "no rough lobe to sample at any roughness\n";
             ok = false;
         }
-        // Nothing may reflect: exact dielectric Fresnel is identically zero at ior 1, so the reflection lobe has no
-        // value to carry.
+        // Nothing may reflect: exact dielectric Fresnel is identically zero at ior 1, so the reflection lobe has no value to carry.
         for (float wiZ : {0.9F, 0.5F, 0.15F}) {
             const glm::vec3 wi(std::sqrt(std::max(0.0F, 1.0F - (wiZ * wiZ))), 0.0F, wiZ);
             const glm::vec3 reflected = pathtracer::scene::evaluateBsdfSplit(roughParams, wo, wi).specular;
@@ -2199,8 +2043,7 @@ PT_CHECK(index_matched_transmission, Fast, Exact) {
             }
         }
 
-        // The same two backstops the smooth row carries, at the same tolerances: existing and finite is not enough,
-        // the sample must also point the right way.
+        // The same two backstops the smooth row carries: existing and finite is not enough, the sample must point the right way.
         if (!(roughDirection <= kDirectionTolerance)) {
             std::cerr << "bsdf_validate: FAILED index-matched rough transmission direction at cos="
                       << cosine << " -- worst |wi + wo| " << roughDirection
@@ -2215,8 +2058,7 @@ PT_CHECK(index_matched_transmission, Fast, Exact) {
                          "ray\n";
             ok = false;
         }
-        // The count of transmission samples, not of rejections: at ior 1 the reflection lobe is identically zero, so
-        // every draw is a transmission, and every row draws the identical sequence and selection.
+        // The count of transmission samples, not of rejections: at ior 1 the reflection lobe is zero, so every draw is a transmission.
         if (transmitted != transmittedAtNormal) {
             std::cerr << "bsdf_validate: FAILED index-matched rough transmission at cos=" << cosine
                       << " -- " << transmitted << " transmission samples against "
@@ -2226,15 +2068,13 @@ PT_CHECK(index_matched_transmission, Fast, Exact) {
             ok = false;
         }
     }
-    // The rough assertions are all per-draw, so a change that stopped the interface transmitting at all would satisfy
-    // every one of them vacuously.
+    // The rough assertions are all per-draw, so a change that stopped the interface transmitting would satisfy every one vacuously.
     if (transmittedAtNormal <= 0) {
         std::cerr << "bsdf_validate: FAILED index-matched transmission -- no rough draw transmitted, so "
                      "every rough assertion above was made about nothing\n";
         ok = false;
     }
-    // No anti-vacuity guard on the angle count: cosines is non-empty at compile time and the counter increments
-    // unconditionally.
+    // No anti-vacuity guard on the angle count: cosines is non-empty at compile time and the counter increments unconditionally.
     std::cout << "  " << rowsChecked << " angles asserted, worst direction error " << worstDirection
               << ", worst chromaticity spread " << worstChromaticity << ", rough rejections "
               << roughRejections << " of " << kRoughDraws * static_cast<int>(cosines.size()) << '\n';
@@ -2243,13 +2083,10 @@ PT_CHECK(index_matched_transmission, Fast, Exact) {
 }
 
 
-// --- Total internal reflection at a real critical angle: past it the interface must reflect exactly all of the
-// energy, cosThetaT being non-positive so no transmitted direction exists.
+// --- Total internal reflection past the critical angle: the interface reflects all the energy, no transmitted direction existing.
 namespace {
 
-// cos of the critical angle for a ray leaving the denser medium: sin(thetaC) = etaT/etaI, so cos(thetaC) =
-// sqrt(1 - (etaT/etaI)^2). Stated in this file independently of bsdf.cpp's cos2Transmitted, so a fault in that
-// predicate cannot define away the angle it is being measured against.
+// cos of the critical angle leaving the denser medium, sqrt(1 - (etaT/etaI)^2), stated independently of bsdf.cpp's cos2Transmitted.
 double criticalCosine(double iorDense) {
     const double ratio = 1.0 / iorDense;
     return std::sqrt(std::max(0.0, 1.0 - (ratio * ratio)));
@@ -2257,14 +2094,11 @@ double criticalCosine(double iorDense) {
 
 }  // namespace
 
-    // Inside the TIR cone the interface must reflect exactly all of it: at and past the critical angle there is no
-    // transmitted direction at all, so a draw that reports one is energy arriving where Snell cannot reach.
+    // Inside the TIR cone there is no transmitted direction at all, so a draw reporting one is energy arriving where Snell cannot reach.
 PT_CHECK(critical_angle_onset, Fast, Exact) {
-    // Spans the shipped range: glass.json is 1.5, clay.json's coat is 1.55, and 1.33/2.4 bracket it with water and
-    // diamond so the cone's width varies by more than a factor of two across the sweep.
+    // Spans the shipped range: glass.json 1.5, clay.json's coat 1.55, with 1.33/2.4 bracketing it so the cone width varies by over 2x.
     const std::array<double, 5> iors = {1.33, 1.5, 1.5168, 1.55, 2.4};
-    // Offsets in cos, straddling the critical cosine. The two smallest are below 2^-12, the scale at which the old
-    // 1 - cos^2 transcription lost the distinction entirely.
+    // Offsets in cos straddling the critical cosine; the two smallest are below 2^-12, where the old 1 - cos^2 form lost the distinction.
     const std::array<double, 6> offsets = {1e-5, 2.44e-4, 1e-3, 1e-2, 0.1, 0.3};
 
     bool ok = true;
@@ -2314,16 +2148,11 @@ PT_CHECK(critical_angle_onset, Fast, Exact) {
     return;
 }
 
-// The two sites deciding TIR from the macro normal now share one cos2Transmitted predicate rather than two
-// separately-rounded transcriptions. Deliberately not asserted against the rough branch: refractAbout decides per
-// microfacet, and the transmit-side multiple-scattering lobe is not a refraction at all (115/4096 draws inside).
+// The two macro-normal TIR sites share one cos2Transmitted predicate; not asserted on the rough branch, which decides per microfacet.
 PT_CHECK(tir_predicate_agreement, Fast, Exact) {
-    // Enough draws that "transmission is reachable" is not a statement about one lucky lobe selection: just outside the
-    // cone the transmitted share is already ~26% (measured 1068/4096 at ior 1.33), so a zero count over this many draws
-    // is a structural absence rather than a sampling accident.
+    // Enough draws that reachability is not one lucky selection: just outside the cone ~26% transmit (1068/4096 at ior 1.33).
     constexpr int kDraws = 4096;
-    // Angular resolution is set by the finest offset below: a divergence moving the critical cosine by less than
-    // that would fall between the rows and go unseen.
+    // Angular resolution is set by the finest offset below: a divergence moving the critical cosine less would fall between rows.
     constexpr float kSmoothRoughness = 0.02F;  // below bsdf.cpp's kSmoothAlpha: the delta branch
     const std::array<double, 3> iors = {1.33, 1.5, 2.4};
     const std::array<double, 4> offsets = {1e-3, 1e-2, 0.1, 0.25};
@@ -2344,12 +2173,10 @@ PT_CHECK(tir_predicate_agreement, Fast, Exact) {
                 const bool fresnelSaysTir =
                     pathtracer::scene::fresnelDielectric(muF, static_cast<float>(ior), 1.0F) == 1.0F;
 
-                // Exiting side: woLocal.z < 0 is the orientation in which the dense medium is the incident one, and the
-                // only one in which a critical angle exists at all.
+                // Exiting side: woLocal.z < 0 makes the dense medium incident, the only orientation where a critical angle exists.
                 const float sine = std::sqrt(std::max(0.0F, 1.0F - (muF * muF)));
                 const glm::vec3 wo(sine, 0.0F, -muF);
-                // ior taken from the row, not makeParams' fixed 1.5: the critical angle above is derived from this
-                // same value, and a material at a different ior would be measured against the wrong cone.
+                // ior from the row, not makeParams' fixed 1.5: the critical angle above derives from this same value.
                 const BsdfParams base = makeParams(kSmoothRoughness, 0.0F, 1.0F);
                 const BsdfParams params{base.baseColor,          base.metallic,
                                          base.roughness,          base.f0,
@@ -2366,8 +2193,7 @@ PT_CHECK(tir_predicate_agreement, Fast, Exact) {
                         sample.has_value() && sample->type == pathtracer::scene::LobeType::Transmission ? 1 : 0;
                 }
 
-                // The two sites must reach the same verdict from the same macro geometry. Stated as the agreement
-                // itself rather than as two independent thresholds, so the check cannot pass by both being wrong.
+                // Stated as the agreement itself rather than two independent thresholds, so the check cannot pass by both being wrong.
                 if (!(fresnelSaysTir == (transmitted == 0))) {
                     std::cerr << "bsdf_validate: FAILED TIR agreement at ior=" << ior << " cos=" << mu
                               << " (critical " << muC << ") -- fresnelDielectric "
@@ -2377,8 +2203,7 @@ PT_CHECK(tir_predicate_agreement, Fast, Exact) {
                                  "must agree\n";
                     ok = false;
                 }
-                // Inside the cone the count must be exactly zero, not merely small: a delta lobe has one Snell
-                // direction and inside the cone it does not exist, so any transmitted draw is unreachable energy.
+                // Inside the cone the count must be exactly zero: a delta lobe has one Snell direction and there it does not exist.
                 if (fresnelSaysTir && !(transmitted == 0)) {
                     std::cerr << "bsdf_validate: FAILED TIR agreement at ior=" << ior << " cos=" << mu
                               << " -- " << transmitted << " transmitted draws inside the critical cone\n";
@@ -2398,9 +2223,7 @@ PT_CHECK(tir_predicate_agreement, Fast, Exact) {
 
 }  // namespace
 
-// --- Goodness of fit between where sampleBsdf's draws actually land and the density pdfBsdf reports for them:
-// Pearson's chi-square over equal-solid-angle bins of the sphere, with rejected draws a cell of their own, so this
-// tests the total sampling mass as well as its shape. Fresh scramble per sample, a chi-square needing iid draws.
+// --- Pearson chi-square over equal-solid-angle bins between sampleBsdf's draws and pdfBsdf, rejected draws their own cell; iid scrambles.
 struct ChiSquareCase {
     float roughness;
     float metallic;
@@ -2411,18 +2234,15 @@ struct ChiSquareCase {
 PT_CHECK(sampling_chi_square, Slow, Statistical) {
     constexpr int kCosBins = 16;
     constexpr int kPhiBins = 8;
-    // Even, for Simpson, per axis per bin. Measured, not guessed: the peaked refraction lobe at roughness 0.2 reports
-    // p=1e-78 on correct code at 48 panels, still fails at 64, passes from 96, and stops moving past this.
+    // Even, for Simpson, per axis per bin. Measured: the peaked refraction lobe at roughness 0.2 still fails at 64 panels, passes from 96.
     constexpr int kPanels = 256;
-    // Sized for power at the suite's family-wise rate: 200000 draws, scaled by the noncentrality ratio so the power
-    // against the same alternative is unchanged.
+    // Sized for power at the suite's family-wise rate: 200000 draws scaled by the noncentrality ratio, so power is unchanged.
     constexpr int kSampleCount = 280000;
     // Cochran's rule: the count below which a cell's chi-square term is not trustworthy and must be pooled.
     constexpr double kMinExpected = 5.0;
     constexpr std::uint32_t kSeed = 0x9E3779B9U;
 
-    // Transmissive rows sit either side of the interface so the transmitted multiple-scattering lobe is drawn at
-    // both eta orientations.
+    // Transmissive rows sit either side of the interface, so the transmitted multiple-scattering lobe is drawn at both eta orientations.
     const std::array<ChiSquareCase, 12> cases = {{
         {0.2F, 0.0F, 1.0F, 0.8F},  {0.2F, 0.0F, 1.0F, -0.6F},
         {0.4F, 0.0F, 1.0F, 0.8F},  {0.4F, 0.0F, 1.0F, -0.6F},
@@ -2481,8 +2301,7 @@ PT_CHECK(sampling_chi_square, Slow, Statistical) {
             observed[static_cast<std::size_t>((ci * kPhiBins) + pi)] += 1.0;
         }
 
-        // Cells too sparse to trust individually are merged into one, which is what keeps the statistic
-        // chi-square distributed rather than merely chi-square shaped.
+        // Cells too sparse to trust individually are merged into one, which keeps the statistic chi-square distributed, not merely shaped.
         double chiSquare = 0.0;
         int cells = 0;
         double pooledExpected = 0.0;
@@ -2521,9 +2340,7 @@ PT_CHECK(sampling_chi_square, Slow, Statistical) {
     return;
 }
 
-// fresnelAtMicrofacet is the path-traced Fresnel AOV's whole estimator, and it makes two claims nothing else checks:
-// that the half-vector comes from the same VNDF sampleBsdf draws from, and that E[F(wo.wh)] over it converges to a
-// roughness-dependent mean a single macro-normal evaluation cannot express.
+// fresnelAtMicrofacet, the Fresnel AOV's estimator: the half-vector must come from sampleBsdf's VNDF, and E[F(wo.wh)] varies with alpha.
 PT_CHECK(microfacet_fresnel, Slow, Statistical) {
     ctx.plan(3);
     constexpr int kDraws = 200000;
@@ -2571,9 +2388,7 @@ PT_CHECK(microfacet_fresnel, Slow, Statistical) {
                   static_cast<double>(roughMean.x), static_cast<double>(roughMacro.x));
     PT_EXPECT(ctx, roughMean.x < roughMacro.x, flatDetail);
 
-    // A coloured conductor: the reason the lane carries RGB rather than the (F, 1-F, 0) packing it replaced. Gulbrandsen
-    // 2014's edgeTint inverts to a per-channel complex IOR, so the expectation is chromatic and a single channel cannot
-    // stand in for it. Grazing again, where the edge tint acts.
+    // A coloured conductor, the reason the lane carries RGB: Gulbrandsen 2014's edgeTint inverts per channel, so the mean is chromatic.
     const BsdfParams tinted = makeColoredMetalParams(0.2F, glm::vec3(0.9F, 0.6F, 0.3F));
     const glm::vec3 tintedMean = expectation(tinted, kGrazing);
     const float spread = std::max({tintedMean.x, tintedMean.y, tintedMean.z}) -

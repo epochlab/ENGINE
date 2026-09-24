@@ -62,7 +62,7 @@ class Violation:
 
 @dataclass(frozen=True)
 class Stats:
-    """What a scan measured, for --report."""
+    """What a scan measured, for the summary line."""
 
     files: int = 0
     lines: int = 0
@@ -290,7 +290,6 @@ def sources(root: Path) -> list[Path]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parent.parent)
-    parser.add_argument("--report", action="store_true", help="print the measurement and always succeed")
     args = parser.parse_args()
 
     paths = sources(args.root)
@@ -321,8 +320,6 @@ def main() -> int:
         f"({density:.1f}%, {total.comment_bytes} bytes), {total.over_cols} over {MAX_COLS} cols "
         f"(longest {total.longest}), {total.over_run} multi-line (longest {total.longest_run})"
     )
-    if args.report:
-        return 0
     for violation in violations:
         print(violation, file=sys.stderr)
     return 1 if violations else 0

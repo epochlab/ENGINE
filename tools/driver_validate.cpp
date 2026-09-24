@@ -1,6 +1,4 @@
-// Correctness gate for PathTraceDriver (path_trace_driver.h), previously untested. Driven only through its public API
-// (requestTrace / latestResult / lastPassRecord, maxSamples as the stop condition); also pins the request invariant
-// that driverLoop's suppressed unchecked-optional-access reports rely on.
+// Correctness gate for PathTraceDriver, driven only through its public API; also pins the request invariant driverLoop relies on.
 
 #include <array>
 #include <chrono>
@@ -42,8 +40,7 @@ using pathtracer::scene::ShadingTriangle;
 using pathtracer::scene::ShadingVertex;
 using pathtracer::scene::Triangle;
 
-// Small enough that a pass is milliseconds -- this file measures accumulation arithmetic and thread handshakes, not
-// transport, so the image only has to be non-trivial, not converged.
+// Small enough that a pass is milliseconds: this measures accumulation arithmetic and handshakes, so the image need only be non-trivial.
 constexpr int kImageSize = 8;
 constexpr float kQuadExtent = 50.0F;
 // The camera sits at z = 5 looking down -z; the wall stands inside its field of view, right of centre.
@@ -51,8 +48,7 @@ constexpr float kFloorZ = -3.0F;
 constexpr float kWallX = 1.0F;
 constexpr float kWallTopZ = 3.0F;
 
-// A floor facing the camera and a transmissive wall standing on it, kept local because this file must build its scene
-// at a permanent address that outlives the driver (see PathTraceDriver's constructor contract).
+// A floor and a transmissive wall, kept local because this scene must sit at a permanent address that outlives the driver.
 struct TestScene {
     std::vector<Triangle> worldTriangles;
     std::vector<ShadingTriangle> shadingTriangles;
@@ -62,8 +58,7 @@ struct TestScene {
     std::vector<PathTraceSettings> perInstanceSettings;
 };
 
-// Corners wound counter-clockwise about `normal`, split along the 0-2 diagonal. The tangent is the first edge, which
-// lies in the quad's plane and so is orthogonal to the normal as the shading frame requires.
+// Corners wound counter-clockwise about `normal`, split along the 0-2 diagonal; the tangent is the first edge, so it lies in the plane.
 void pushQuad(TestScene& scene, const std::array<glm::vec3, 4>& corners, glm::vec3 normal, int instance) {
     const std::array<int, 6> order = {0, 1, 2, 0, 2, 3};
     const glm::vec4 tangent(glm::normalize(corners[1] - corners[0]), 1.0F);
@@ -102,8 +97,7 @@ PathTraceSettings makeSettings() {
     return settings;
 }
 
-// Everything the driver holds by reference must outlive it and never move, so the whole fixture is heap-allocated once
-// and the driver is constructed only after the referenced members are at their final addresses.
+// Everything the driver holds by reference must outlive it and never move, so the fixture is heap-allocated before the driver exists.
 struct DriverFixture {
     TestScene scene;
     std::optional<EmbreeAccel> accel;
@@ -117,9 +111,7 @@ struct DriverFixture {
 std::unique_ptr<DriverFixture> makeFixture() {
     auto fixture = std::make_unique<DriverFixture>();
     TestScene& scene = fixture->scene;
-    // Every accumulated image must vary across passes, or a missing accumulate entry for it is invisible (asserted in
-    // running_mean_matches_batch_mean): the wall's contact with the floor drives ao, the floor-wall interreflection
-    // the indirect lanes, and the wall's transmission lobe refraction.
+    // Every accumulated image must vary across passes, or a missing accumulate entry for it is invisible to the running-mean check.
     pushQuad(scene,
              {glm::vec3(-kQuadExtent, -kQuadExtent, kFloorZ), glm::vec3(kQuadExtent, -kQuadExtent, kFloorZ),
               glm::vec3(kQuadExtent, kQuadExtent, kFloorZ), glm::vec3(-kQuadExtent, kQuadExtent, kFloorZ)},
@@ -163,9 +155,7 @@ PathTraceDriver::Request makeRequest(int maxSamples, const Camera& camera) {
     return request;
 }
 
-// Polls until the predicate holds or the deadline passes. The deadline is a HANG DETECTOR, never a performance
-// assertion: an async driver may legitimately take any amount of time, so the only honest assertions are "eventually"
-// and "monotonically". Generous by an order of magnitude over the slowest configuration here.
+// Polls until the predicate holds or the deadline passes. The deadline is a HANG DETECTOR, never a performance assertion.
 template <typename Predicate>
 bool waitFor(Predicate predicate) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
@@ -178,7 +168,7 @@ bool waitFor(Predicate predicate) {
     return false;
 }
 
-// Polls until the driver publishes a result of `generation` averaging at least `samples` passes; nullptr on timeout. Keyed on the snapshot's own fields, which publish with its images, so the result returned is exactly the one counted.
+// Polls until a result of `generation` averages >= `samples` passes, nullptr on timeout; keyed on fields published with its images.
 std::shared_ptr<const PathTraceResult> waitForPublished(const PathTraceDriver& driver, std::uint64_t generation,
                                                         int samples) {
     std::shared_ptr<const PathTraceResult> result;
@@ -205,16 +195,14 @@ constexpr std::array<Lane, 10> kLanes{{{&PathTraceResult::beauty, "beauty"},
                                       {&PathTraceResult::refraction, "refraction"},
                                       {&PathTraceResult::fresnel, "fresnel"}}};
 
-// Per float of every lane: the batch mean rounded once to float, and the bound on the driver's distance from it. Per
-// lane: whether any float changed between passes, without which the lane cannot expose an accumulation defect.
+// Per float: the batch mean rounded once to float and the bound on the driver's distance from it; per lane, whether any float moved.
 struct OracleMean {
     std::array<std::vector<float>, kLanes.size()> mean;
     std::array<std::vector<double>, kLanes.size()> tolerance;
     std::array<bool, kLanes.size()> varies{};
 };
 
-// Renders the passes the driver would, synchronously, forming the exact batch mean m_k in double and, beside it, the
-// forward-error bound E_k of the driver's float32 running mean (derivation at running_mean_matches_batch_mean).
+// Renders the driver's passes synchronously: the exact batch mean m_k in double, beside the float32 running mean's error bound E_k.
 OracleMean oracleBatchMean(DriverFixture& fixture, const Camera& camera, int passes, std::uint32_t scrambleSeed) {
     constexpr double kUnitRoundoff = std::numeric_limits<float>::epsilon() / 2.0;
     constexpr double kGamma4 = (4.0 * kUnitRoundoff) / (1.0 - (4.0 * kUnitRoundoff));
@@ -268,17 +256,7 @@ OracleMean oracleBatchMean(DriverFixture& fixture, const Camera& camera, int pas
 
 // --- Checks ------------------------------------------------------------------------------------------------------
 
-// The core accumulation property, on all ten images. The driver publishes a RUNNING mean (Welford 1962; West 1979),
-// m_k = m_{k-1} + (x_k - m_{k-1})/k, a different rounding sequence from the batch mean sum(x)/n, so the two differ by a
-// deterministic forward error with no probability in it. Its float32 step, FMA-contracted or not, is
-// m^_k = fl(m^_{k-1} + fl(fl(x_k - m^_{k-1}) * fl(1/k))), and in Higham's theta/gamma calculus (Accuracy and Stability
-// of Numerical Algorithms, 2nd ed., Lemmas 3.1 and 3.3) its error e_k = m^_k - m_k obeys, exactly,
-// e_k = (1 - 1/k)(1 + d)e_{k-1} + (1 + d)theta_3 (x_k - m^_{k-1})/k + d m_k, |d| <= u, |theta_3| <= gamma_3, e_1 = 0,
-// so |e_k| <= E_k = (1 - 1/k)(1 + u)E_{k-1} + gamma_4(|x_k - m_{k-1}| + E_{k-1})/k + u|m_k| -- the updating-mean
-// analysis of Chan, Golub & LeVeque (1983) carried to a rigorous per-element bound. The oracle evaluates E_n per float
-// from the exact data plus u|m_n| for its own rounding; evaluating it in double perturbs it by ~2^-29 of itself.
-// A running sum published without its division, a stale previous mean, a wrong 1/n, or a missing entry in the
-// nine-image accumulate loop all miss by orders of magnitude over it.
+// The core accumulation property, on all ten images; bound E_k from docs/DERIVATIONS.md "Running-mean forward error".
 PT_CHECK(running_mean_matches_batch_mean, Slow, Exact) {
     constexpr int kPasses = 8;
     ctx.plan(3);
@@ -341,11 +319,7 @@ PT_CHECK(running_mean_matches_batch_mean, Slow, Exact) {
     PT_EXPECT(ctx, violations == 0, detail);
 }
 
-// The sampler's two inputs are not interchangeable (sampler.h), and a driver that held sampleBase at 0 would publish
-// the mean of N IDENTICAL passes -- the exact defect sampler_validate's pass-direction check was written against,
-// here asserted through the driver that would commit it.
-// Checked exactly at maxSamples = 1, where every published image must be bit-identical to the single oracle pass: no
-// averaging has happened yet, so there is no rounding difference to admit a tolerance.
+// A driver holding sampleBase at 0 publishes the mean of N identical passes (sampler.h); pinned at maxSamples = 1, bit-identical.
 PT_CHECK(first_pass_is_bit_identical_to_oracle, Slow, Exact) {
     ctx.plan(1);
     std::unique_ptr<DriverFixture> fixture = makeFixture();
@@ -376,8 +350,7 @@ PT_CHECK(first_pass_is_bit_identical_to_oracle, Slow, Exact) {
     PT_EXPECT(ctx, differing == 0, detail);
 }
 
-// The cap is a hard stop, not a target to overshoot: a driver that kept accumulating past it would keep a converged
-// image moving under a caller that had asked it to stop, and would burn a core doing it.
+// The cap is a hard stop, not a target: accumulating past it moves a converged image under a caller that asked it to stop.
 PT_CHECK(max_samples_cap_is_respected, Slow, Exact) {
     constexpr int kCap = 4;
     ctx.plan(1);
@@ -399,7 +372,7 @@ PT_CHECK(max_samples_cap_is_respected, Slow, Exact) {
     PT_EXPECT(ctx, samples == kCap, detail);
 }
 
-// The generation requestTrace returns is the one its passes carry, so a caller can tell its own accumulation's records from a superseded request's; a request replaced before pickup never runs.
+// The returned generation is the one its passes carry, so records are attributable; a request replaced before pickup never runs.
 PT_CHECK(request_generation_labels_its_passes, Slow, Exact) {
     constexpr int kCap = 3;
     ctx.plan(2);
@@ -419,10 +392,7 @@ PT_CHECK(request_generation_labels_its_passes, Slow, Exact) {
     PT_EXPECT(ctx, labelled, "the final pass never carried the generation requestTrace returned");
 }
 
-// A new request must RESTART accumulation rather than merge into it: the class comment's central invariant is that the
-// accumulator never mixes samples from two different camera poses. Also pins the invariant the sixteen suppressed
-// unchecked-optional-access reports rest on -- that a generation bump is always accompanied by an engaged request --
-// since a driver that read an empty request here would not survive the round trip.
+// A new request must RESTART accumulation, never mix camera poses; pins the bump-implies-engaged-request invariant 16 suppressions rest on.
 PT_CHECK(new_request_restarts_accumulation, Slow, Exact) {
     ctx.plan(2);
     std::unique_ptr<DriverFixture> fixture = makeFixture();
@@ -452,9 +422,7 @@ PT_CHECK(new_request_restarts_accumulation, Slow, Exact) {
     PT_EXPECT(ctx, samples == 4, detail);
 }
 
-// Suspension parks the driver while a rasterizer-backed AOV is shown, and must not cost the accumulation it parks:
-// the generation is also the sampler's scramble seed, so bumping it to cancel the in-flight pass would restart the
-// image. Asserted here: halts, then resumes the SAME generation from where it stopped.
+// Suspension parks the driver for a rasterizer AOV: the generation is the scramble seed, so bumping it to cancel would restart the image.
 PT_CHECK(suspension_halts_and_resumes, Slow, Exact) {
     ctx.plan(3);
     std::unique_ptr<DriverFixture> fixture = makeFixture();
@@ -496,11 +464,7 @@ PT_CHECK(suspension_halts_and_resumes, Slow, Exact) {
     PT_EXPECT(ctx, samples > parked->samples, resumeDetail);
 }
 
-// The stronger statement the check above cannot make on its own: a park and resume must leave the published images
-// BIT-IDENTICAL to an uninterrupted run of the same pass count. That is what makes suspension free rather than merely
-// cheap -- the sampler continues the same Sobol sequence under the same scramble seed, so no sample is redrawn and
-// none is skipped, and the running mean resumes on the exact floats it stopped on. A generation bump inside
-// setSuspended would fail this even if the count above happened to line up.
+// Stronger: park and resume must leave images BIT-IDENTICAL to an uninterrupted run -- same Sobol sequence, no sample redrawn or skipped.
 PT_CHECK(suspension_preserves_the_accumulation_exactly, Slow, Exact) {
     ctx.plan(1);
     constexpr int kSamples = 6;
@@ -514,8 +478,7 @@ PT_CHECK(suspension_preserves_the_accumulation_exactly, Slow, Exact) {
     const std::shared_ptr<const PathTraceResult> uninterrupted =
         waitForPublished(*reference->driver, referenceGeneration, kSamples);
 
-    // Identical request on a second driver, parked partway and resumed. Both fixtures build the same scene, and the
-    // generation is 1 on each, so the sampler input is identical and only the interruption differs.
+    // Same request on a second driver, parked partway: identical scene and generation 1 on each, so only the interruption differs.
     const std::uint64_t parkedGeneration = parked->driver->requestTrace(makeRequest(kSamples, makeCamera()));
     if (waitForPublished(*parked->driver, parkedGeneration, kSamples / 2) == nullptr || uninterrupted == nullptr) {
         PT_EXPECT(ctx, false, "a driver never reached its cap");
@@ -549,9 +512,7 @@ PT_CHECK(suspension_preserves_the_accumulation_exactly, Slow, Exact) {
     PT_EXPECT(ctx, differing == 0, detail);
 }
 
-// The buffer pool holds four images for up to three simultaneously-pinned results, an arithmetic nothing tested. A
-// caller holding strong references must never have one overwritten underneath it: acquireFreeBuffer is required to
-// STALL rather than hand back a buffer someone is still reading, and this is the only external test of that.
+// Four pooled images for three pinnable results: acquireFreeBuffer must STALL rather than return a buffer still being read.
 PT_CHECK(published_results_are_not_overwritten, Slow, Exact) {
     ctx.plan(1);
     std::unique_ptr<DriverFixture> fixture = makeFixture();
@@ -560,8 +521,7 @@ PT_CHECK(published_results_are_not_overwritten, Slow, Exact) {
         return;
     }
     const std::uint64_t generation = fixture->driver->requestTrace(makeRequest(0, makeCamera()));
-    // Pin a published result and snapshot it, then let the driver run many further passes. The running mean changes
-    // every pass, so if the pinned buffer were recycled its contents would move.
+    // Pin a published result and snapshot it, then run many more passes: the mean moves every pass, so a recycled buffer would show it.
     const std::shared_ptr<const PathTraceResult> pinned = waitForPublished(*fixture->driver, generation, 1);
     if (pinned == nullptr) {
         PT_EXPECT(ctx, false, "driver published nothing");
@@ -584,8 +544,7 @@ PT_CHECK(published_results_are_not_overwritten, Slow, Exact) {
     PT_EXPECT(ctx, moved == 0, detail);
 }
 
-// The over-range histogram is a parallel reduction with a published serial definition, so it is assertable exactly:
-// integer counts, recomputed single-threaded from the very image the driver published alongside them.
+// The over-range histogram is a parallel reduction with a serial definition, recomputed single-threaded from the published image.
 PT_CHECK(over_range_stats_match_serial_scan, Slow, Exact) {
     ctx.plan(4);
     std::unique_ptr<DriverFixture> fixture = makeFixture();
@@ -634,11 +593,7 @@ PT_CHECK(over_range_stats_match_serial_scan, Slow, Exact) {
     PT_EXPECT(ctx, stats.rawPeak == serialPeak, peakDetail);
 }
 
-// Thread-count invariance, checked one level DOWN on renderPathTraced rather than through the driver: the driver's
-// pool is private and default-sized, with no constructor hook, so the property is not reachable from its API. That is
-// the right level anyway. The assertion is bit-identity rather than a band, because tiles are owned outright by one
-// worker, the filter halo is re-traced rather than shared, and per-pixel sample order is fixed -- so the accumulation
-// order does not depend on the pool size. If this fails it is a finding, not a tolerance problem.
+// Thread-count invariance on renderPathTraced (the pool is private): bit-identical, as tiles are owned outright and sample order is fixed.
 PT_CHECK(render_is_invariant_to_thread_count, Slow, Exact) {
     ctx.plan(1);
     std::unique_ptr<DriverFixture> fixture = makeFixture();

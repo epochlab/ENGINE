@@ -1,8 +1,4 @@
-// Headless beauty render, for before/after comparison across a code change. Loads a scene exactly as main.cpp does, accumulates N path-traced passes, and writes one path-traced AOV (--aov, Beauty by default) as an 8-bit PNG through the same display encoding the viewer shows it under.
-// Exists because the renderer is a GLFW application: comparing two revisions otherwise means two manual screenshots, which cannot be pixel-differenced and cannot be trusted to share a camera. Everything here is deterministic -- fixed camera from profile.json, a fixed scramble seed for the whole render with the sample index advancing per pass, no interaction -- so two runs over unchanged code produce a byte-identical file, which is what makes a non-zero diff meaningful.
-// --bench-log appends the timing run to the benchmark log (bench_log.h), for bench_compare.
-// --compare takes a previously written PNG and reports max/RMS channel deviation against the render just produced, so "did this change the picture, and where" is answered numerically rather than by eye.
-// Same standalone-CLI convention as the validate tools: no test framework, non-zero exit on failure.
+// Headless beauty render for before/after comparison, writing one AOV as PNG; see docs/DERIVATIONS.md "Headless beauty render".
 
 #include <algorithm>
 #include <array>
@@ -47,36 +43,22 @@ struct Options {
     std::string scenePath = "scenes/cornell.json";
     std::string outPath;
     std::string comparePath;
-    // Linear-light companions to --out/--compare, for measuring convergence rather than inspecting an image. The PNG
-    // path cannot do that job: it is display-transformed and 8-bit, so it compresses highlights and clamps everything
-    // above display range, and a sampling change's effect on exactly those bright high-variance regions reads as zero.
+    // Linear-light companions to --out/--compare: the PNG path is display-transformed 8-bit, so it clamps the bright high-variance regions.
     std::string outExrPath;
     std::string compareExrPath;
-    // Reports how --compare-exr's error distributes over spatial frequency rather than only how large it is. A sampling
-    // change that rearranges error without reducing it is invisible to RMSE by construction, so RMSE alone cannot
-    // confirm or refute one.
+    // How --compare-exr's error distributes over frequency: a change that rearranges error without reducing it is invisible to RMSE.
     bool errorSpectrum = false;
     int width = 0;   // 0 = profile.json's window size
     int height = 0;
     int passes = 64;
-    // The scramble seed is one realization of the randomization, not a property of the sampler: two seeds give two
-    // independent error images with the same expected RMSE. Exposed because a claim that two samplers converge equally
-    // well needs the spread across seeds to say what "equally" means, and because a reference sharing a seed with the
-    // render measured against it also shares that render's exact samples, cancelling part of the error being measured.
+    // The scramble seed is one realization, not a sampler property: two seeds give independent error images with the same expected RMSE.
     std::uint32_t scrambleSeed = 1;
     float exposureEv = 0.0F;
-    // -1 = use the scene's own authored environment.lightEnabled default; 0/1 override it -- lets a
-    // headless capture of the classic (env-off) Cornell variant not need a second scene.json.
+    // -1 uses the scene's authored environment.lightEnabled; 0/1 override it, so an env-off Cornell capture needs no second scene.json.
     int envLight = -1;
-    // Gate modes: these set a non-zero exit code, which is what makes them usable as ctest entries. The reporting
-    // paths above deliberately do not -- their output is a number for a human to read.
-    // Determinism is the claim this file's own header makes ("two runs over unchanged code produce a byte-identical
-    // file") and that nothing verified until this flag existed. It is exact, needs no threshold, and catches the
-    // failure modes that make every other image comparison meaningless: thread-scheduling nondeterminism,
-    // uninitialised reads, sampler state leaking between passes.
+    // Gate modes set a non-zero exit code, which is what makes them ctest entries; the reporting paths above deliberately do not.
     bool assertDeterministic = false;
-    // Two independent randomizations of the same estimator must agree within their own measured error. No reference
-    // image, no tuned threshold -- see the gate itself for the construction.
+    // Two independent randomizations of one estimator must agree within their own measured error: no reference image, no tuned threshold.
     bool assertConverged = false;
     // Resolved by --aov. Defaulting to Beauty keeps every existing invocation -- and the bit-identity gate built on them -- unchanged.
     pathtracer::debug::AovId aov = pathtracer::debug::AovId::Beauty;
@@ -84,7 +66,7 @@ struct Options {
     std::string benchLogPath;
 };
 
-// Every AOV is reachable now that HeadlessRenderer drives the rasterizer and the Beauty filters as well as the path tracer; the name vocabulary is pathtracer/debug/aov.h's, shared with the viewer's dropdown and the C ABI rather than restated here.
+// All AOVs are reachable now HeadlessRenderer drives the rasterizer and filters; names come from pathtracer/debug/aov.h, not restated here.
 bool resolveAov(const std::string& requested, Options& options) {
     const pathtracer::debug::AovId aov = pathtracer::debug::aovIdFromName(requested);
     if (aov == pathtracer::debug::AovId::Count) {
@@ -118,7 +100,7 @@ void appendChunk(std::vector<unsigned char>& out, const char* type,
     appendBe32(out, static_cast<std::uint32_t>(crc));
 }
 
-// Minimal 8-bit RGB PNG writer. zlib arrives transitively with OpenEXR and ships with the platform, so this needs no vendored image library for what is ultimately a debug/reviewing artifact.
+// Minimal 8-bit RGB PNG writer: zlib arrives transitively with OpenEXR, so a debug artifact needs no vendored image library.
 bool writePng(const std::string& path, int width, int height,
                const std::vector<unsigned char>& rgb) {
     // Each scanline is prefixed with its filter byte; 0 = None, which compresses adequately here and keeps the encoder trivial.
@@ -164,7 +146,7 @@ bool writePng(const std::string& path, int width, int height,
     return file.good();
 }
 
-// Reads back an 8-bit RGB PNG this tool wrote, for --compare. Deliberately narrow: only the exact IHDR shape written above (8-bit, colour type 2, no interlace) and only filter type 0, since the sole producer is writePng. Anything else is rejected rather than half-decoded.
+// Reads back a PNG this tool wrote: only writePng's exact IHDR (8-bit, colour type 2, no interlace) and filter 0, anything else rejected.
 bool readPng(const std::string& path, int& width, int& height, std::vector<unsigned char>& rgb) {
     std::ifstream file(path, std::ios::binary);
     if (!file) {
@@ -194,7 +176,7 @@ bool readPng(const std::string& path, int& width, int& height, std::vector<unsig
             break;
         }
         if (type == "IHDR") {
-            // The 13-byte payload is indexed directly below; a chunk declaring less than that would read past the buffer on a truncated or hostile file.
+            // The 13-byte payload is indexed directly below; a chunk declaring less would read past the buffer on a truncated file.
             if (length < 13) {
                 std::cerr << "render_beauty: " << path << " has a malformed IHDR\n";
                 return false;
@@ -238,7 +220,7 @@ bool readPng(const std::string& path, int& width, int& height, std::vector<unsig
     return true;
 }
 
-// Deterministic triangular-PDF dither, byte-for-byte the ditherOffset() the display shader applies before the framebuffer's 8-bit quantization (ocio_display_transform.cpp). Reproduced rather than skipped so this output matches what the viewer shows; being a pure function of uv it is identical across runs and cancels in a before/after difference.
+// Triangular-PDF dither, byte-for-byte the shader's ditherOffset() (ocio_display_transform.cpp), so output matches the viewer.
 glm::vec3 ditherOffset(float u, float v) {
     const auto rand = [](float x, float y) {
         const float s = std::sin((x * 12.9898F) + (y * 78.233F)) * 43758.5453F;
@@ -248,9 +230,7 @@ glm::vec3 ditherOffset(float u, float v) {
     return {d, d, d};
 }
 
-// Scene-referred image -> display-referred 8-bit, matching the viewer's pipeline exactly: exposure multiply, the display curve, then dither and quantize.
-// applyDisplayTransform mirrors presentFrame's `isBeauty ? userLut : Raw`: only Beauty is scene-referred radiance, and putting a data AOV like AO or Shadow through a display curve would distort values that are already display-ready. Raw is the OCIO-free branch, exactly what buildRawFragmentSource does -- exposure, then dither and quantize.
-// Largest RGB value in the image, for an AOV whose raw range is not [0,1] and must be normalized before an 8-bit encode. Alpha is excluded: it is 1 by the broadcast convention and would pin the result at 1 for every scalar AOV.
+// Largest RGB value, for an AOV whose raw range is not [0,1]; alpha is excluded, being 1 by convention and pinning every scalar AOV at 1.
 float maxChannel(const pathtracer::gfx::HdrImage& image) {
     float peak = 0.0F;
     for (std::size_t texel = 0; texel + 3 < image.rgba.size(); texel += 4) {
@@ -259,6 +239,7 @@ float maxChannel(const pathtracer::gfx::HdrImage& image) {
     return peak;
 }
 
+// Scene-referred to display-referred 8-bit exactly as presentFrame does; see docs/DERIVATIONS.md "Headless beauty render".
 std::vector<unsigned char> encodeForDisplay(const pathtracer::gfx::HdrImage& image, float exposureEv,
                                              bool applyDisplayTransform) {
     std::vector<float> rgb(static_cast<std::size_t>(image.width) *
@@ -294,12 +275,7 @@ std::vector<unsigned char> encodeForDisplay(const pathtracer::gfx::HdrImage& ima
     return out;
 }
 
-// How the error against the reference distributes over spatial frequency, as each octave band's share of total power.
-// RMSE already reports the total; what a blue-noise sampler claims to change is the ARRANGEMENT, which is invisible to
-// any single number and is exactly this distribution. Normalised by the total so two renders with different error
-// magnitudes are still comparable as distributions -- the claim under test is that the total is unchanged and only its
-// placement moved, and those are two separate readings.
-// Luminance rather than per-channel: a scalar field is what has a spectrum, and error visibility is a luminance effect.
+// Each octave band's share of total error power; see docs/DERIVATIONS.md "Headless beauty render".
 void reportErrorSpectrum(const pathtracer::gfx::HdrImage& image, const pathtracer::gfx::HdrImage& reference) {
     const auto pixels = static_cast<std::size_t>(image.width) * static_cast<std::size_t>(image.height);
     std::vector<double> luminanceError(pixels);
@@ -315,8 +291,7 @@ void reportErrorSpectrum(const pathtracer::gfx::HdrImage& image, const pathtrace
 
     const std::array<double, pathtracer::debug::kSpectrumBands> bands =
         pathtracer::debug::octaveBandPower(luminanceError, image.width, image.height);
-    // Bands are far from equal in width, so a raw share says nothing on its own -- what matters is the share relative to
-    // what white noise would put there. Printed alongside, so a band reads directly as blue (below 1.0) or red (above).
+    // Bands differ widely in width, so the share relative to white noise is what matters; printed alongside, below 1.0 is blue, above red.
     const std::array<double, pathtracer::debug::kSpectrumBands> white =
         pathtracer::debug::whiteNoiseBandShare(image.width, image.height);
     const double total = std::accumulate(bands.begin(), bands.end(), 0.0);
@@ -337,7 +312,7 @@ void reportErrorSpectrum(const pathtracer::gfx::HdrImage& image, const pathtrace
     }
 }
 
-// Everything the timed loop's cost depends on goes in `config`; output paths and exposure do not, so they never split two otherwise comparable runs.
+// Everything the timed loop's cost depends on goes in config; output paths and exposure do not, so they never split two comparable runs.
 bool appendTimingRecord(const Options& options, int argc, char** argv, int width, int height,
                         const std::string& aovName, const pathtracer::scene::PathTraceSettings& settings,
                         bool envLightEnabled, double rasterMs,
@@ -475,13 +450,7 @@ int main(int argc, char** argv) {
     const bool envLightEnabled = envLightOverride.value_or(renderer->defaultEnvLightEnabled());
     const std::string aovName = pathtracer::debug::kAovNames[static_cast<int>(options.aov)];
 
-    // One accumulation, parameterised by its randomization. Factored out so the gates below can render the same scene
-    // several times: the scene, BVH, lights, camera and thread pool are built once by HeadlessRenderer and shared, so
-    // a gate costs renders and nothing else.
-    // Mean of `passes` single-sample passes -- the same accumulation PathTraceDriver performs, done synchronously.
-    // Each pass advances the sampler's sequence index rather than re-randomizing it, so the accumulated samples
-    // stratify against each other exactly as they do in the viewer; the scramble seed is held fixed for the whole
-    // render (--seed, default 1), which is what makes two runs over unchanged code byte-identical.
+    // One accumulation parameterised by its randomization: the mean of `passes` single-sample passes, as PathTraceDriver does.
     const auto accumulate = [&](std::uint32_t scrambleSeed, int passes) {
         const pathtracer::api::HeadlessRenderer::Request request{
             .camera = camera,
@@ -493,18 +462,14 @@ int main(int argc, char** argv) {
             .envLightEnabled = envLightOverride,
         };
         if (!renderer->render(request, error)) {
-            // Unreachable: parseArgs already rejects a non-positive pass count, and the resolution is positive by
-            // construction above -- those are render()'s only failure modes for a valid AOV.
+            // Unreachable: parseArgs rejects a non-positive pass count and the resolution is positive above, render()'s only failure modes.
             std::cerr << "render_beauty: " << error << "\n";
             std::exit(EXIT_FAILURE);
         }
         return renderer->lastImage(options.aov);
     };
 
-    // --- Determinism gate. Exact, and the only gate here that needs no statistics at all: the same seed must produce
-    // the same floats, because every input to the render is fixed. A failure means the renderer's output depends on
-    // something that is not its inputs -- thread scheduling, an uninitialised read, or sampler state surviving a pass
-    // -- and until that is true no other image comparison in this suite means anything.
+    // --- Determinism gate: same seed, same floats, no statistics; see docs/DERIVATIONS.md "Headless beauty render".
     if (options.assertDeterministic) {
         const pathtracer::gfx::HdrImage first = accumulate(options.scrambleSeed, options.passes);
         const pathtracer::gfx::HdrImage second = accumulate(options.scrambleSeed, options.passes);
@@ -527,17 +492,7 @@ int main(int argc, char** argv) {
                   << " floats bit-identical across two runs at seed " << options.scrambleSeed << "\n";
     }
 
-    // --- Convergence gate. Two independent randomizations of an unbiased estimator must agree within their own
-    // measured error, so this needs no reference image and no tuned threshold.
-    // Per-pixel error is estimated by SPLITTING each render into R independent sub-renders and taking the variance
-    // across them. That is the buffer-variance estimator standard in the sampling/denoising literature (Zwicker et al.
-    // 2015 STAR; Rousselle et al. 2011), and it is the only honest construction here: the renderer's samples are one
-    // Owen-scrambled Sobol set, so no closed-form sqrt(N) error applies, and splitting by PASS PARITY would not fix it
-    // either -- consecutive passes are stratified against each other, so parity halves are correlated and their spread
-    // understates the true error. Independent SCRAMBLE SEEDS are what make the sub-renders genuinely independent.
-    // R = 8 rather than 2 for a reason that is easy to miss: two buffers give the variance ONE degree of freedom, and a
-    // chi-square with 1 dof is so heavy-tailed that the standardised statistic is Cauchy-like and no normal quantile
-    // applies to it. Eight gives seven, and a Student-t that means what it says.
+    // --- Convergence gate: R=8 independent sub-renders, buffer-variance estimator; see docs/DERIVATIONS.md "Headless beauty render".
     if (options.assertConverged) {
         constexpr int kSubRenders = 8;
         const int perSubRender = std::max(1, options.passes / kSubRenders);
@@ -549,15 +504,12 @@ int main(int argc, char** argv) {
             }
             return members;
         };
-        // Disjoint seed ranges, so no sub-render is shared between the two families -- a shared one would correlate
-        // them and shrink the very difference being tested.
+        // Disjoint seed ranges, so no sub-render is shared between the families: sharing one would correlate them and shrink the gap.
         const std::vector<pathtracer::gfx::HdrImage> a = family(options.scrambleSeed);
         const std::vector<pathtracer::gfx::HdrImage> b = family(options.scrambleSeed + 1000U);
 
         const std::size_t pixels = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
-        // Sidak over the pixels actually examined, so the threshold follows the resolution instead of being restated
-        // for it. Luminance rather than per-channel: error visibility is a luminance effect, and a scalar field is what
-        // has a distribution.
+        // Sidak over the pixels examined, so the threshold follows the resolution; luminance, since error visibility is a luminance effect.
         const double perPixelAlpha = tools::stats::sidak(tools::check::kFamilyAlpha, static_cast<int>(pixels));
         double worstZ = 0.0;
         std::size_t worstPixel = 0;
@@ -577,8 +529,7 @@ int main(int argc, char** argv) {
             const double va = wa.sampleVariance() / kSubRenders;
             const double vb = wb.sampleVariance() / kSubRenders;
             const double combined = va + vb;
-            // Zero variance in both families: a z-score is undefined, but the verdict is not -- equal constants agree,
-            // unequal constants disagree with certainty.
+            // Zero variance in both families: the z-score is undefined but the verdict is not -- equal constants agree, unequal disagree.
             if (!(combined > 0.0)) {
                 constantDisagreements += wa.mean() != wb.mean() ? 1 : 0;
                 continue;
@@ -590,8 +541,7 @@ int main(int argc, char** argv) {
                 worstPixel = px;
             }
         }
-        // Welch degrees of freedom are bounded below by R-1 for equal-sized samples, so using that is conservative --
-        // it can only widen the threshold, never narrow it into a false failure.
+        // Welch dof is bounded below by R-1 for equal samples, so using it is conservative: it can widen the threshold, never narrow it.
         const double threshold = tools::stats::studentTTwoSided(perPixelAlpha, kSubRenders - 1);
         if (examined == 0 || constantDisagreements != 0) {
             std::cerr << "render_beauty: FAILED convergence -- " << examined << " pixels had measurable variance and "
@@ -617,14 +567,13 @@ int main(int argc, char** argv) {
         return EXIT_SUCCESS;  // a gate renders for its verdict, not for an image
     }
 
-    // Per-pass wall clock, so a change's traversal cost is measured rather than argued. Only the trace is timed: the accumulation inside HeadlessRenderer is O(pixels) and identical across revisions. Mean is the figure to compare -- unlike raster_bench's single-threaded frames, a pass's minimum is set by how the tile queue happened to drain and varies ~12% run to run, where the mean holds to ~1%. Reported alongside best/worst so a run disturbed by other load is visible rather than silently folded in. Pass 0 carries the pool spin-up and first-touch faults and is counted like any other: discarding it would change the image, and it biases both sides of an A/B equally.
+    // Per-pass wall clock on the trace only; the mean is the figure to compare (see docs/DERIVATIONS.md "Headless beauty render").
     const pathtracer::gfx::HdrImage accumulated = accumulate(options.scrambleSeed, options.passes);
     const std::vector<double>& milliseconds = renderer->lastStats().passMilliseconds;
 
     const pathtracer::api::HeadlessRenderer::RenderStats& stats = renderer->lastStats();
     const pathtracer::debug::RayCounts rays = stats.rays;
-    // A rasterizer-backed AOV traces no rays and runs no passes -- it is scan-converted once -- so there is no
-    // per-pass distribution to report for it, and reporting one would be a fabrication rather than a measurement.
+    // A rasterizer-backed AOV traces no rays and runs no passes, so there is no per-pass distribution to report for it.
     if (!milliseconds.empty()) {
         std::cout << "render_beauty: rays over " << options.passes << " passes -- primary " << rays.primary
                   << ", bounce " << rays.bounce << ", ao " << rays.ao << ", shadow " << rays.shadow << ", total "
@@ -667,11 +616,7 @@ int main(int argc, char** argv) {
                       << reference->height << ", this render is " << width << "x" << height << "\n";
             return EXIT_FAILURE;
         }
-        // Two metrics, because neither alone characterises a render's error. Absolute RMSE is dominated by the brightest
-        // pixels, so it tracks the highlights a sampling change moves most; relative MSE (Rousselle et al. 2011, the
-        // standard metric in the denoising/sampling literature) divides by the reference's own intensity, so a dim
-        // corner's noise counts as much as a bright one's. The epsilon is the conventional guard against dividing by a
-        // black pixel, not a tuned parameter.
+        // Absolute RMSE tracks the brightest pixels, relative MSE (Rousselle et al. 2011) dim ones equally; epsilon guards a black pixel.
         constexpr double kRelativeEpsilon = 1e-2;
         double squaredSum = 0.0;
         double relativeSum = 0.0;
@@ -696,10 +641,7 @@ int main(int argc, char** argv) {
     }
 
     const bool isBeauty = options.aov == pathtracer::debug::AovId::Beauty;
-    // Depth is auto-ranged to the buffer's own maximum, exactly as the viewer does (main.cpp's presentFrame): its raw
-    // metres exceed the 8-bit [0,1] range and would quantize to solid white, and Camera::farClip is a conservative ray
-    // tMax bound rather than a proxy for the scene's real depth extent, so normalizing by it reads as near-black. This
-    // overrides --exposure for Depth, which is again what the viewer does -- the AOV has no photographic exposure.
+    // Depth auto-ranges to its own maximum like presentFrame: raw metres quantize to white and farClip is a ray bound, not a depth span.
     const float exposureEv = options.aov == pathtracer::debug::AovId::Depth
                                  ? -std::log2(std::max(maxChannel(accumulated), 1e-4F))
                                  : options.exposureEv;
@@ -724,7 +666,7 @@ int main(int argc, char** argv) {
         }
         int maxDelta = 0;
         double squaredSum = 0.0;
-        // Signed mean alongside RMS: the direction of an energy change, not just its magnitude. Near-zero mean against non-zero RMS means light moved rather than appeared or vanished.
+        // Signed mean alongside RMS: near-zero mean against non-zero RMS means light moved rather than appeared or vanished.
         double signedSum = 0.0;
         std::size_t differing = 0;
         for (std::size_t i = 0; i < encoded.size(); ++i) {

@@ -1,6 +1,4 @@
-// Guards the harness's own invariants. The suite's whole discipline rests on the negated-pass assertion form (a NaN
-// must FAIL, not silently pass) and on seeds being derived from a check's name rather than its position; both are
-// properties nothing else would notice regressing, because a broken assert macro reports success.
+// Guards the harness's own invariants -- the negated-pass form and name-derived seeds -- which nothing else would notice regressing.
 
 #include <algorithm>
 #include <cmath>
@@ -18,8 +16,7 @@ namespace {
 
 const double kNaN = std::numeric_limits<double>::quiet_NaN();
 
-// A helper Context cannot be constructed outside the runner, so NaN-rejection is asserted on the raw comparison the
-// macro performs: !(pass) must be true for every ordered comparison against NaN.
+// A helper Context cannot be constructed outside the runner, so NaN rejection is asserted on the raw comparison the macro performs.
 PT_CHECK(nan_fails_every_ordered_comparison, Fast, Exact) {
     ctx.plan(5);
     PT_EXPECT(ctx, !(kNaN <= 1.0), "NaN <= x must be false, so a negated-pass assert rejects it");
@@ -29,8 +26,7 @@ PT_CHECK(nan_fails_every_ordered_comparison, Fast, Exact) {
     PT_EXPECT(ctx, !(kNaN == kNaN), "NaN == NaN must be false");
 }
 
-// A band stated as a pair of ordered comparisons must reject a NaN value AND a NaN bound. Both directions matter: a
-// measured NaN is a broken estimator, a NaN bound is a broken tolerance derivation, and neither may report success.
+// A band stated as ordered comparisons must reject a NaN value AND a NaN bound: a broken estimator and a broken tolerance derivation.
 PT_CHECK(nan_band_rejects_both_sides, Fast, Exact) {
     ctx.plan(2);
     const auto within = [](double v, double lo, double hi) { return v >= lo && v <= hi; };
@@ -41,15 +37,13 @@ PT_CHECK(nan_band_rejects_both_sides, Fast, Exact) {
 // Seeds are name-derived, so they must differ between checks and be stable within one.
 PT_CHECK(seed_is_name_derived_and_stable, Fast, Exact) {
     ctx.plan(3);
-    // Deliberately not `seed() == seed()`: that is a tautology the compiler may fold away, and it would pass even if
-    // the derivation returned a constant. These assert that the derivation actually mixes.
+    // Deliberately not `seed() == seed()`, a tautology the compiler may fold that would pass even if the derivation returned a constant.
     PT_EXPECT(ctx, ctx.seed() != 0, "a derived seed of zero means the mixing collapsed");
     PT_EXPECT(ctx, ctx.subSeed("row-a") != ctx.seed(), "a sub-seed must derive away from its master seed");
     PT_EXPECT(ctx, ctx.subSeed("row-a") != ctx.subSeed("row-b"), "distinct labels must give distinct sub-seeds");
 }
 
-// The correction must be strictly tighter than the family rate, and tighter still as a check makes more assertions:
-// this is what stops a check silently buying itself a looser band by asserting more.
+// The correction must be strictly tighter than the family rate, and tighter as a check asserts more, so more assertions buy no slack.
 PT_CHECK(significance_is_family_wise_corrected, Fast, Exact) {
     ctx.plan(2);
     const double perAssertion = ctx.alpha();
@@ -58,7 +52,7 @@ PT_CHECK(significance_is_family_wise_corrected, Fast, Exact) {
     PT_EXPECT(ctx, std::isfinite(perAssertion), "per-assertion alpha must be finite");
 }
 
-// Exact nulls against brute-force enumeration (an independent construction) and against published critical values: Wilcoxon n=10 P(T+ <= 8) = 0.0244, Mann-Whitney 8x8 P(U <= 13) = 0.0249 (Hollander et al. Tables A.4, A.6).
+// Exact nulls against brute-force enumeration and published values: Wilcoxon n=10 P(T+<=8)=0.0244, Mann-Whitney 8x8 P(U<=13)=0.0249.
 PT_CHECK(rank_nulls_match_enumeration, Fast, Exact) {
     ctx.plan(4);
     double worstSigned = 0.0;
@@ -127,7 +121,7 @@ PT_CHECK(rank_nulls_match_enumeration, Fast, Exact) {
     PT_EXPECT(ctx, std::fabs(uTail - 0.0249) < 5e-5, "Mann-Whitney 8x8 P(U <= 13) is not the tabulated 0.0249");
 }
 
-// Hand-computable estimates, and the too-small-sample case: at n = 5 even the most extreme T+ has probability 1/32 > alpha/2 = 0.025, so no interval exists.
+// Hand-computable estimates, and the too-small case: at n = 5 the most extreme T+ has probability 1/32 > alpha/2 = 0.025, so none exists.
 PT_CHECK(hodges_lehmann_point_estimates, Fast, Exact) {
     ctx.plan(3);
     PT_EXPECT(ctx, ::tools::stats::hodgesLehmannPaired({1.0, 2.0, 3.0}, 0.05).estimate == 2.0, "Walsh-average median of {1,2,3} must be 2");
@@ -136,7 +130,7 @@ PT_CHECK(hodges_lehmann_point_estimates, Fast, Exact) {
     PT_EXPECT(ctx, std::isinf(tooFew.lower) && std::isinf(tooFew.upper), "n = 5 cannot support a 95% signed-rank interval");
 }
 
-// Empirical coverage of each interval under a known shift must match its exact discrete coverage; a one-rank error in the order-statistic index moves coverage far outside the band.
+// Empirical coverage under a known shift must match the exact discrete coverage; a one-rank index error moves it far outside the band.
 PT_CHECK(hodges_lehmann_coverage_is_exact, Fast, Statistical) {
     ctx.plan(2);
     constexpr int kTrials = 20000;

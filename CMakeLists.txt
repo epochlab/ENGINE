@@ -33,7 +33,7 @@ if(CLANG_TIDY_EXE)
         --extra-arg=-isysroot --extra-arg=${MACOS_SDK_PATH})
 endif()
 
-# Every first-party target's compile flags in one place. NATIVE/IPO/TIDY are opt-in; see DERIVATIONS.md "Build flag policy".
+# Every first-party target's compile flags in one place. NATIVE/IPO/TIDY are opt-in; see docs/DERIVATIONS.md "Build flag policy".
 function(pathtracer_target_defaults target)
     cmake_parse_arguments(ARG "NATIVE;IPO;TIDY" "" "" ${ARGN})
     target_compile_options(${target} PRIVATE -Wall -Wextra -Werror)
@@ -74,13 +74,13 @@ if(CPPCHECK_EXE)
         COMMENT "cppcheck over src/ and tools/")
 endif()
 
-# The comment budget of notes/architect.md section 7 over every first-party source. Reporting-only until the tree is clean.
+# The comment budget of notes/architect.md section 7: one line per comment, 140 columns, over every first-party source.
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
     add_custom_target(comment_lint
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/comment_lint.py --report
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/comment_lint.py
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-        COMMENT "comment budget over src/, include/ and tools/")
+        COMMENT "comment budget over C++, GLSL, CMake, Python and the tool configs")
 endif()
 
 # Opt-in, default off: the pathtracer parses external glTF/JSON/EXR, where memory-safety tooling earns its keep.
@@ -191,7 +191,7 @@ target_link_libraries(pathtracer PRIVATE
     "-framework AppKit" "-framework QuartzCore")
 set_source_files_properties(src/platform/display_link.mm PROPERTIES COMPILE_OPTIONS -fobjc-arc)
 
-# Asset/codegen CLIs, deliberately not linking pathtracer_core. See DERIVATIONS.md "Build flag policy".
+# Asset/codegen CLIs, deliberately not linking pathtracer_core. See docs/DERIVATIONS.md "Build flag policy".
 add_executable(test_pattern tools/test_pattern.cpp)
 target_compile_definitions(test_pattern PRIVATE
     ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets")
@@ -322,6 +322,19 @@ add_test(NAME image.convergence
                  --assert-converged)
 set_tests_properties(image.convergence PROPERTIES LABELS "image;slow;statistical" TIMEOUT 900
                      PROCESSORS ${PATHTRACER_TEST_THREADS})
+
+# The comment budget is a gate, not a report, so it runs with the rest; its own lexer is tested separately.
+if(Python3_Interpreter_FOUND)
+    add_test(NAME style.comment_budget
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/comment_lint.py
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    set_tests_properties(style.comment_budget PROPERTIES LABELS "style;fast;exact" TIMEOUT 120)
+
+    add_test(NAME style.comment_lint_selftest
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/test_comment_lint.py
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    set_tests_properties(style.comment_lint_selftest PROPERTIES LABELS "style;fast;exact" TIMEOUT 120)
+endif()
 
 # Migrated to tools/check.h: one ctest entry per check, discovered from the binary itself.
 pathtracer_discover_checks(check_selftest)

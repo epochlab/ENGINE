@@ -1,4 +1,4 @@
-// Correctness gate for the CIE 1931 module (scene/cie.cpp) and the measured-metal fit built on it (tools/metal_fit.h), through to the Fresnel the renderer actually shades the shipped chrome with.
+// Gate for CIE 1931 (scene/cie.cpp), the measured-metal fit on it (tools/metal_fit.h), and the Fresnel shading the shipped chrome.
 
 #include <cfloat>
 #include <cmath>
@@ -48,7 +48,7 @@ PT_CHECK(cie_tables_sit_on_their_normalisation_points, Fast, Exact) {
     PT_EXPECT(ctx, d65At560 == 100.0, detail);
 }
 
-// RP 177's matrix is pinned by exactly these constraints: three primary chromaticities fix each column's direction, the white fixes their scales.
+// RP 177's matrix is pinned by these alone: the three primary chromaticities fix each column's direction, the white fixes their scales.
 PT_CHECK(rec709_matrix_reproduces_primaries_and_white, Fast, Exact) {
     ctx.plan(5);
     const glm::dmat3 rgbToXyz = glm::inverse(cie::xyzToRec709());
@@ -77,7 +77,7 @@ double rendererAverage(const pathtracer::scene::BsdfParams& params, int channel)
         [&](double mu) { return static_cast<double>(pathtracer::scene::fresnelAtViewAngle(params, static_cast<float>(mu))[channel]); });
 }
 
-// chrome.json must be exactly metal_fit's output, and the renderer shading it must reproduce the CIE-projected measured chromium at normal incidence and on cosine-weighted average.
+// chrome.json must be metal_fit's exact output; shading it must match CIE-projected measured chromium at normal incidence and on average.
 PT_CHECK(chrome_matches_measured_chromium, Fast, Exact) {
     ctx.plan(12);
     const auto table = tools::metal_fit::loadNkTable(kChromiumTable);
@@ -124,7 +124,7 @@ std::optional<std::vector<tools::metal_fit::NkSample>> loadText(const char* name
     return tools::metal_fit::loadNkTable(path.string());
 }
 
-// Each row is a table a real transcription or sourcing mistake produces; the shipped table row keeps the rejections from passing by rejecting everything.
+// Each row is a table some real transcription or sourcing mistake produces; the shipped row proves the rejections reject only those.
 PT_CHECK(nk_table_and_fit_reject_invalid_input, Fast, Exact) {
     ctx.plan(9);
     PT_EXPECT(ctx, tools::metal_fit::loadNkTable(kChromiumTable).has_value(), "shipped chromium table rejected");

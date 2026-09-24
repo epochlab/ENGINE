@@ -1,7 +1,7 @@
 #ifndef PATHTRACER_API_PATHTRACER_C_H
 #define PATHTRACER_API_PATHTRACER_C_H
 
-/* Flat C ABI over api/headless_renderer.h for runtimes without C++; one PtRenderer per thread. See DERIVATIONS.md "Flat C ABI". */
+/* Flat C ABI over api/headless_renderer.h for runtimes without C++; one PtRenderer per thread. See docs/DERIVATIONS.md "Flat C ABI". */
 
 #ifdef __cplusplus
 extern "C" {
