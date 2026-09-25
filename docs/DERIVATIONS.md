@@ -349,6 +349,24 @@ Two rules hold across the whole header:
   must be handed back for freeing, so there is no ownership protocol to get wrong across the
   boundary.
 
+**Tri-state request fields.** `show_sky` and `env_light_enabled` are `int`, not a bool, so the
+ABI can express *keep the default* as well as on and off. `PT_DEFAULT` (-1) defers — to `true`
+for `show_sky`, to the scene's authored `environment.lightEnabled` for the other. Any value
+outside {-1, 0, 1} is rejected through `err` rather than coerced, because a caller writing 2
+meant something the ABI cannot honour and silently reading it as *true* would hide that.
+
+The two flags are not interchangeable. `show_sky` gates the primary ray's own miss only, so it
+changes the background and nothing else; indirect bounces and NEE keep sampling the environment
+either way. `env_light_enabled` removes the environment from the light set entirely, which does
+change the lighting. Turning the background black is therefore free of any effect on the image
+inside the silhouette — verified per-texel, not merely asserted.
+
+**`pt_display_encode`.** Scene-referred linear RGB to display-referred 8-bit sRGB, so a caller
+holding `render()`'s floats can produce the picture the viewer shows without reimplementing the
+curve. It is the same `encodeForDisplay` the CLI writes its PNG through, so the two cannot
+drift; see "Headless beauty render". Exposure applies to a data AOV, the display transform does
+not — `display_transform` is the caller's switch, mirroring `isBeauty` in the CLI.
+
 ## GGX numerical forms
 
 `src/scene/bsdf.cpp` — `distributionGGX`, `smithRadical`, `smithVisibility`
@@ -1045,7 +1063,11 @@ reported for it.
 
 **Display encoding.** `encodeForDisplay` takes the scene-referred image to display-referred 8-bit
 matching the viewer's pipeline exactly: exposure multiply, the display curve, then dither and
-quantize. Its `applyDisplayTransform` flag mirrors `presentFrame`'s `isBeauty ? userLut : Raw` —
+quantize. It lives in `gfx/ocio_cpu_transform` beside `applyOcioDisplayTransform`, not in this
+tool, because `pt_display_encode` hands the same function to the C ABI: one CPU definition, so a
+Python preview and this PNG cannot disagree. It takes packed RGB rather than an `HdrImage` so the
+ABI can pass a caller's buffer without materializing an RGBA copy; this tool gathers three
+channels of four at the call site, the one copy it already made. Its `applyDisplayTransform` flag mirrors `presentFrame`'s `isBeauty ? userLut : Raw` —
 only Beauty is scene-referred radiance, and putting a data AOV like AO or Shadow through a display
 curve would distort values that are already display-ready. `Raw` is the OCIO-free branch, exactly
 what `buildRawFragmentSource` does. The dither is reproduced rather than skipped so the output

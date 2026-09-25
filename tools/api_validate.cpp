@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -310,6 +312,70 @@ PT_CHECK(multi_aov_request_matches_single_aov_requests, Slow, Exact) {
                       std::string(pathtracer::debug::kAovNames[static_cast<int>(combined[i])]) +
                           " differs between a combined and a single-AOV request");
     }
+}
+
+// showSky gates the primary ray's own miss, so it must blacken the background and leave every texel the camera hits untouched.
+PT_CHECK(show_sky_changes_only_the_background, Slow, Exact) {
+    ctx.plan(3);
+    std::string error;
+    const auto renderer = pathtracer::api::HeadlessRenderer::open(ASSET_ROOT_DIR, "scenes/cornell.json", error);
+    if (!renderer) {
+        PT_EXPECT(ctx, false, "scene load failed: " + error);
+        return;
+    }
+
+    constexpr int kWidth = 64;
+    constexpr int kHeight = 36;
+    const auto render = [&](std::optional<bool> showSky, std::vector<float>& out) {
+        const pathtracer::api::HeadlessRenderer::Request request{
+            .camera = renderer->defaultCamera(),
+            .width = kWidth,
+            .height = kHeight,
+            .samples = 2,
+            .scrambleSeed = 1,
+            .aovs = {AovId::Beauty},
+            .showSky = showSky,
+        };
+        out.assign(static_cast<std::size_t>(kWidth) * kHeight * 3, 0.0F);
+        float* pointer = out.data();
+        return renderer->render(request, std::span<float* const>(&pointer, 1), error);
+    };
+
+    std::vector<float> sky;
+    std::vector<float> without;
+    std::vector<float> defaulted;
+    if (!render(true, sky) || !render(false, without) || !render(std::nullopt, defaulted)) {
+        PT_EXPECT(ctx, false, "render failed: " + error);
+        return;
+    }
+
+    // nullopt must keep the sky on, or every existing headless caller silently changes output.
+    PT_EXPECT(ctx, defaulted == sky, "the default must match showSky=true");
+
+    // The top-left corner sits outside the box, where a primary ray misses; the centre is box interior the camera hits.
+    const auto texel = [](int x, int y) { return ((static_cast<std::size_t>(y) * kWidth) + static_cast<std::size_t>(x)) * 3; };
+    bool backgroundLit = false;
+    bool backgroundBlack = true;
+    for (int y = 0; y < 4; ++y) {
+        for (int x = 0; x < 4; ++x) {
+            for (int c = 0; c < 3; ++c) {
+                backgroundLit = backgroundLit || sky[texel(x, y) + static_cast<std::size_t>(c)] > 0.0F;
+                backgroundBlack = backgroundBlack && without[texel(x, y) + static_cast<std::size_t>(c)] == 0.0F;
+            }
+        }
+    }
+    PT_EXPECT(ctx, backgroundLit && backgroundBlack, "showSky must light the background and showSky=false must blacken it");
+
+    bool interiorIdentical = true;
+    for (int y = kHeight / 3; y < (2 * kHeight) / 3; ++y) {
+        for (int x = kWidth / 3; x < (2 * kWidth) / 3; ++x) {
+            for (int c = 0; c < 3; ++c) {
+                const std::size_t i = texel(x, y) + static_cast<std::size_t>(c);
+                interiorIdentical = interiorIdentical && sky[i] == without[i];
+            }
+        }
+    }
+    PT_EXPECT(ctx, interiorIdentical, "showSky must not change a texel the camera hits");
 }
 
 PT_CHECK_MAIN("api")

@@ -3,6 +3,60 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Headless display parity: one CPU display encode, and a background the caller controls
+
+A Beauty render through the Python API looked nothing like the same scene in the viewer -- darker
+throughout, and with the HDRI behind the Cornell box where the window shows black. Two independent
+causes, both real divergences rather than sampling noise.
+
+`Renderer.render` returns scene-referred linear radiance, by design, but nothing in the C ABI or the
+Python package could turn it into a picture: `applyOcioDisplayTransform` had exactly one caller,
+`tools/render_beauty.cpp`. `plt.imshow` on the raw floats clips to [0,1] and maps *linearly*, which
+the notebook recorded itself -- `Clipping input data ... Got range [0.00034091552..14.97626]`. The
+viewer meanwhile applies exposure and `Linear Rec.709 (sRGB)` -> `sRGB - Display` under the
+`Un-tone-mapped` view, a curve with no tone mapping in it at all. Measured on one buffer, the median
+texel reads 0.0419 clipped-linear against 0.2275 encoded -- **5.43x** -- and the lift runs from 5.85x
+in the [0.01,0.05) band to 1.23x above 0.5, which is the sRGB inverse EOTF's shape and not a
+brightness offset.
+
+Second, `headless_renderer.cpp` passed `/*showSky=*/true` as a literal while the viewer defaults
+`showSky` to `false`, and the ABI had no field to say otherwise -- nor for `envLightEnabled`, which
+already existed as `std::optional<bool>` on the C++ Request but was pinned to `nullopt`.
+
+- refactor: `encodeForDisplay` and `ditherOffset` move out of `render_beauty.cpp`'s anonymous
+  namespace into `gfx/ocio_cpu_transform`, beside `applyOcioDisplayTransform`. One CPU definition now
+  serves the CLI and the new ABI entry point, so a Python preview and the CLI's PNG cannot drift --
+  the same argument `ocio_cpu_transform.h` already made for the transform itself. It takes
+  `std::span<const float>` of packed RGB rather than an `HdrImage`, so the ABI hands over the caller's
+  buffer with no copy of its own and the only copy left is the in-place working buffer OCIO needs
+- feat: `pt_display_encode` and `pathtracer.display_encode(image, exposure_ev=, display_transform=)`,
+  scene-referred linear to display-referred 8-bit sRGB. Verified against `render_beauty`'s PNG at
+  256x144x32: **0/110592 channels differ** -- exact rather than within a tolerance, both calling one
+  function whose dither is a pure function of `uv`
+- feat: tri-state `show_sky` and `env_light_enabled` on `PtRenderRequest` and `Renderer.render`,
+  backed by `std::optional<bool> showSky` on `HeadlessRenderer::Request`. `PT_DEFAULT` (-1) defers --
+  to `true` for `show_sky`, to the scene's authored `environment.lightEnabled` for the other -- so no
+  existing caller changes behaviour. Anything outside {-1, 0, 1} is rejected through `err` rather than
+  coerced, a caller writing 2 having meant something the ABI cannot honour
+- note: the two flags are not interchangeable and the difference is now asserted, not described.
+  `show_sky` gates the primary ray's own miss, so the box interior is **bit-identical** with the sky
+  on and off; `env_light_enabled` removes the environment from the light set and does change the
+  image. Carried at both levels: `api.show_sky_changes_only_the_background` and four Python tests
+- note: the renderer is untouched and the evidence is byte-level -- `render_beauty`'s PNG has the same
+  SHA-256 before and after the hoist (0/110592 channels differ), and Python's Beauty is still
+  bit-identical to the CLI's linear EXR. `std::lround` replaces `(value * 255.0F) + 0.5F`, silencing
+  `bugprone-incorrect-roundings` now that the code sits in a clang-tidy-checked translation unit; the
+  two agree over the clamped [0,1] domain and the identical golden is the proof rather than the claim
+- note: `show_sky=False` measures 1.015x faster at 256x144x8 (274.6 -> 270.7 ms, best of 5). A primary
+  miss returns early instead of sampling the environment, but misses are a small fraction of this
+  frame, so it is reported as measured rather than claimed as a benefit
+- note: still divergent, and deliberately left for their own commits -- the headless default remains
+  sky-on where the viewer defaults sky-off, flipping it being a behavioural change to `render_beauty`
+  and its goldens; env rotation and env exposure stops stay hardcoded at `headless_renderer.cpp`
+  188-189 with no headless equivalent of the viewer's sliders; and `aperture`/`shutter_seconds`/`iso`
+  remain inert headlessly, `ev100()` being read only by the GUI and only as a delta against the
+  profile defaults. Full write-up and artifacts in `results/HEADLESS_DISPLAY_PARITY.md`
+
 ## Render resolution unified: `profile.json` authors it, the window is only a viewport
 
 `profile.json`'s `window.width/height` meant two incompatible things. The GUI handed them to

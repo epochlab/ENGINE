@@ -12,6 +12,8 @@ typedef struct PtRenderer PtRenderer;
 
 #define PT_OK 0
 #define PT_ERROR 1
+/* Tri-state sentinel for the optional request fields: defer to the default rather than forcing on or off. Any other value is rejected. */
+#define PT_DEFAULT (-1)
 
 /* Loads a scene; NULL on failure with a NUL-terminated reason in err (truncated to err_cap). scene_path is relative to asset_root. */
 PtRenderer* pt_renderer_open(const char* asset_root, const char* scene_path, char* err, int err_cap);
@@ -56,10 +58,18 @@ typedef struct {
     unsigned int seed;
     const int* aovs;
     int aov_count;
+    /* Tri-state, PT_DEFAULT for the current default: environment radiance on a camera miss. Primary miss only, so it unlights nothing. */
+    int show_sky;
+    /* Tri-state, PT_DEFAULT keeping the scene's authored environment.lightEnabled: whether the environment is a light at all. */
+    int env_light_enabled;
 } PtRenderRequest;
 
 /* Renders every requested AOV. out parallels request->aovs at width * height * pt_aov_channels(aovs[i]) floats, row-major top-left. */
 int pt_render(PtRenderer* renderer, const PtRenderRequest* request, float* const* out, char* err, int err_cap);
+
+/* Scene-referred linear to display-referred 8-bit sRGB, the viewer's chain: exposure, OCIO, dither, quantize. Buffers hold w*h*3. */
+int pt_display_encode(const float* rgb, int width, int height, float exposure_ev, int display_transform,
+                      unsigned char* out, char* err, int err_cap);
 
 #ifdef __cplusplus
 }  /* extern "C" */

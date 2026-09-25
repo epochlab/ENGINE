@@ -14,6 +14,9 @@ from pathlib import Path
 
 _ERROR_CAPACITY = 512
 
+#: Mirrors PT_DEFAULT: the tri-state sentinel asking an optional request field to keep its default.
+PT_DEFAULT = -1
+
 
 class PtCamera(ctypes.Structure):
     """Mirrors ``PtCamera`` in include/pathtracer/api/pathtracer_c.h, field for field and in order."""
@@ -43,6 +46,8 @@ class PtRenderRequest(ctypes.Structure):
         ("seed", ctypes.c_uint),
         ("aovs", ctypes.POINTER(ctypes.c_int)),
         ("aov_count", ctypes.c_int),
+        ("show_sky", ctypes.c_int),
+        ("env_light_enabled", ctypes.c_int),
     ]
 
 
@@ -108,6 +113,18 @@ def load_library() -> ctypes.CDLL:
         ctypes.c_int,
     ]
     library.pt_render.restype = ctypes.c_int
+
+    library.pt_display_encode.argtypes = [
+        ctypes.POINTER(ctypes.c_float),
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_float,
+        ctypes.c_int,
+        ctypes.POINTER(ctypes.c_ubyte),
+        ctypes.c_char_p,
+        ctypes.c_int,
+    ]
+    library.pt_display_encode.restype = ctypes.c_int
     return library
 
 
