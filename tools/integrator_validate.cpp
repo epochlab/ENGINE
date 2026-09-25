@@ -150,10 +150,11 @@ TestScene makeCornerScene(float roughness, glm::vec3 f0, float wallX = 1.0F) {
 }
 
 // UV sphere, poles on Y so the camera reads the tessellated equator; curvature is the point, as flat quads zero transmissionOffsetEpsilon.
-TestScene makeSphereScene(float roughness, glm::vec3 f0) {
+TestScene makeSphereScene(float roughness, glm::vec3 f0, int slices = kSphereSlices,
+                           int stacks = kSphereStacks) {
     const auto vertexAt = [&](int stack, int slice) {
-        const float phi = kPi * static_cast<float>(stack) / static_cast<float>(kSphereStacks);
-        const float theta = 2.0F * kPi * static_cast<float>(slice) / static_cast<float>(kSphereSlices);
+        const float phi = kPi * static_cast<float>(stack) / static_cast<float>(stacks);
+        const float theta = 2.0F * kPi * static_cast<float>(slice) / static_cast<float>(slices);
         const glm::vec3 normal(std::sin(phi) * std::sin(theta), std::cos(phi),
                                 std::sin(phi) * std::cos(theta));
         return ShadingVertex{normal * kSphereRadius, normal, glm::vec2(0.5F, 0.5F),
@@ -161,14 +162,14 @@ TestScene makeSphereScene(float roughness, glm::vec3 f0) {
     };
 
     TestScene scene;
-    for (int stack = 0; stack < kSphereStacks; ++stack) {
-        for (int slice = 0; slice < kSphereSlices; ++slice) {
+    for (int stack = 0; stack < stacks; ++stack) {
+        for (int slice = 0; slice < slices; ++slice) {
             const ShadingVertex v00 = vertexAt(stack, slice);
             const ShadingVertex v10 = vertexAt(stack + 1, slice);
             const ShadingVertex v11 = vertexAt(stack + 1, slice + 1);
             const ShadingVertex v01 = vertexAt(stack, slice + 1);
             // Wound so geometricNormalOf points outward; each pole row contributes one triangle, the collapsed half-quad being degenerate.
-            if (stack + 1 < kSphereStacks) {
+            if (stack + 1 < stacks) {
                 scene.worldTriangles.push_back(Triangle{v00.position, v10.position, v11.position});
                 scene.shadingTriangles.push_back(ShadingTriangle{v00, v10, v11, 0});
             }
@@ -1205,6 +1206,56 @@ PT_CHECK(quad_light_irradiance_and_occlusion, Slow, Statistical) {
         }
     }
     finish(ctx, ok, "quad_light_irradiance_and_occlusion failed; see the rows above");
+    return;
+}
+
+// A convex receiver cannot occlude itself from a light it faces, so Shadow is exactly 0 however coarsely the sphere is tessellated.
+PT_CHECK(quad_light_visibility_on_curved_receiver, Slow, Exact) {
+    pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
+    bool ok = true;
+
+    // At z=3, offset in x: clear of the view cone (half-width 0.18 there), yet every visible fragment keeps geoCos > 0.44 -- no terminator.
+    const pathtracer::scene::QuadLight light{glm::vec3(0.5F, -0.5F, 3.0F), glm::vec3(0.0F, 1.0F, 0.0F),
+                                              glm::vec3(1.0F, 0.0F, 0.0F), glm::vec3(3.0F), false};
+
+    // Chiang's origin offset is a tangent-plane distance, ~e^2/2R, so refining the mesh shrinks it: both rows must read 0 regardless.
+    struct Row {
+        const char* name;
+        int slices;
+        int stacks;
+    };
+    const std::array<Row, 2> rows{{{"fine   (64x32, equator edge 0.098)", kSphereSlices, kSphereStacks},
+                                    {"coarse (32x16, equator edge 0.196)", 32, 16}}};
+
+    for (const Row& row : rows) {
+        TestScene scene = makeSphereScene(/*roughness=*/1.0F, glm::vec3(0.0F), row.slices, row.stacks);
+        std::vector<int> instanceLightIndex(scene.instances.size(), -1);
+        appendLightGeometry(scene, light, /*quadIndex=*/0, instanceLightIndex);
+
+        std::optional<EmbreeAccel> accel = EmbreeAccel::build(scene.worldTriangles);
+        if (!accel.has_value()) {
+            std::cerr << "integrator_validate: FAILED to build Embree scene for curved-receiver check\n";
+            finish(ctx, false, "quad_light_visibility_on_curved_receiver failed; see the rows above");
+            return;
+        }
+        const std::vector<pathtracer::scene::QuadLight> quads{light};
+        // Whole frame, not centreMean: (0,0,1) is a vertex, where the terminator offset vanishes and the failure is weakest.
+        const pathtracer::scene::PathTraceResult result = renderPassWithLights(
+            scene, instanceLightIndex, quads, /*env=*/nullptr, makeLambertianSettings(0), *accel, pool,
+            /*showSky=*/false);
+        const float shadow = regionMean(result.shadow, 0, 0, kImageSize, kImageSize).x;
+        std::cout << "  " << row.name << "   shadow " << shadow << "\n";
+        if (shadow != 0.0F) {
+            std::cerr << "integrator_validate: FAILED curved-receiver visibility -- " << row.name
+                      << " reads shadow " << shadow
+                      << ", expected exactly 0. Nothing lies between a convex receiver and a light it "
+                         "faces, so a non-zero reading means the shadow ray is stopped by the light's "
+                         "own front face: tMax measured at shading.position while the ray leaves from "
+                         "the Chiang-offset origin.\n";
+            ok = false;
+        }
+    }
+    finish(ctx, ok, "quad_light_visibility_on_curved_receiver failed; see the rows above");
     return;
 }
 
