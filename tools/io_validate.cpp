@@ -603,11 +603,11 @@ PT_CHECK(image_texture_bilinear_half_bound, Fast, Exact) {
 // The film-back catalogue's contract: every preset's dimensions feed verticalFovRadians() as a denominator and an aspect ratio.
 PT_CHECK(film_back_presets_are_physically_valid, Fast, Exact) {
     ctx.plan(2);
-    const std::filesystem::path camera = std::filesystem::path(ASSET_ROOT_DIR) / "config" / "camera.json";
+    const std::filesystem::path sensor = std::filesystem::path(ASSET_ROOT_DIR) / "config" / "sensor.json";
     const std::optional<std::vector<pathtracer::scene::Camera::FilmBackPreset>> presets =
-        pathtracer::config::loadFilmBackPresets(camera.string());
+        pathtracer::config::loadFilmBackPresets(sensor.string());
     if (!presets.has_value()) {
-        PT_EXPECT(ctx, false, "loadFilmBackPresets rejected the shipped camera.json");
+        PT_EXPECT(ctx, false, "loadFilmBackPresets rejected the shipped sensor.json");
         PT_EXPECT(ctx, false, "presets unavailable");
         return;
     }

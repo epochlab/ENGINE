@@ -55,14 +55,14 @@ using pathtracer::gfx::HdrImage;
     };
 }
 
-// profile.json names a film-back preset, assets/config/camera.json supplies its dimensions. Resolved as initializeApp does.
+// profile.json names a film-back preset, assets/config/sensor.json supplies its dimensions. Resolved as initializeApp does.
 [[nodiscard]] std::optional<pathtracer::scene::Camera> resolveCamera(const std::string& assetRoot,
                                                                  const pathtracer::config::ProfileConfig& profile,
                                                                  std::string& error) {
     const std::optional<std::vector<pathtracer::scene::Camera::FilmBackPreset>> presets =
-        pathtracer::config::loadFilmBackPresets(assetRoot + "/config/camera.json");
+        pathtracer::config::loadFilmBackPresets(assetRoot + "/config/sensor.json");
     if (!presets) {
-        error = "failed to load " + assetRoot + "/config/camera.json";
+        error = "failed to load " + assetRoot + "/config/sensor.json";
         return std::nullopt;
     }
     const auto preset = std::find_if(presets->begin(), presets->end(),
@@ -71,7 +71,7 @@ using pathtracer::gfx::HdrImage;
                                       });
     if (preset == presets->end()) {
         error = "profile.json filmBackPreset \"" + profile.camera.defaultFilmBackPresetName +
-                "\" not found in camera.json";
+                "\" not found in sensor.json";
         return std::nullopt;
     }
     const pathtracer::config::CameraConfig& camera = profile.camera;

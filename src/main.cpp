@@ -343,7 +343,7 @@ std::optional<AppResources> initializeApp(const pathtracer::config::SceneConfig&
 
     // Loaded separately from profile.json, then resolved by name against defaultFilmBackPresetName, as loadMaterialConfig already does.
     std::optional<std::vector<pathtracer::scene::Camera::FilmBackPreset>> filmBackPresets =
-        pathtracer::config::loadFilmBackPresets(ASSET_ROOT_DIR "/config/camera.json");
+        pathtracer::config::loadFilmBackPresets(ASSET_ROOT_DIR "/config/sensor.json");
     if (!filmBackPresets) {
         std::cerr << "main: film back preset load failed, aborting startup\n";
         return std::nullopt;
@@ -355,7 +355,7 @@ std::optional<AppResources> initializeApp(const pathtracer::config::SceneConfig&
                      });
     if (filmBackPresetIt == filmBackPresets->end()) {
         std::cerr << "main: profile.json filmBackPreset \"" << profileConfig.camera.defaultFilmBackPresetName
-                   << "\" not found in camera.json\n";
+                   << "\" not found in sensor.json\n";
         return std::nullopt;
     }
     const int filmBackPresetIndex =
