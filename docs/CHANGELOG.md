@@ -3,6 +3,30 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Performance pass, wave 1: closure-constant hoisting, tile occupancy, threaded EXR decode
+
+`ROADMAP.md`'s "Performance and Memory efficiency pass" item, which had monitoring but no reduction work.
+Measured first: a `-bench` baseline at 2048x1152 put `pass_trace_ms` at **98.4%** of pass cost, leaving
+`accumulate_ms` at 1.44% and the frame loop with 12.6 ms/frame of vsync slack -- so this wave is entirely
+in the integrator, the interactive tile split and startup, and not in the display or accumulate paths the
+plan had ranked higher before measuring. A `sample` profile then named the hotspots; three of the top five
+turned out to be closure constants recomputed per evaluation. Full numbers in the local capture set
+(`results/WAVE1.md`, gitignored like `results/wave7`).
+
+- perf: **`evaluateContinuousLobes` evaluated `directionalAlbedo(wi.z, roughness)` twice** -- once for the specular energy compensation, once inside `diffuseKdAt` -- for one bilinear pair over two 256 KB tables. Resolved once in the caller and passed to both lobes
+- perf: **the Kulla-Conty tint was rebuilt on every evaluation** from `fresnelAvg` and `albedoAvg`, both closure constants `computeLobeProbabilities` had already combined for `msReflectEnergy`. Now carried on `LobeProbabilities` as `multiScatterFms` and consumed by both
+- perf: **EON's uniform-mix weight is a function of `wo.z` and `diffuseRoughness` alone**, so its `std::pow(r, 0.1)` was a per-evaluation cost on a per-vertex quantity. Hoisted to `lobes.eonUniformMix`; `sampleEon` and `pdfEon` now read it
+- perf: **EON's clipped-LTC state is likewise wo-only** -- the fit coefficients, the LTC basis (a `sqrt`), the normalisation `s` (a second `sqrt` and a divide) and `detM` were all rebuilt inside `cltcPdf` on every call, where only `wh` and `lenSq` depend on `wi`. Stored as `eonLtcM`/`eonLtcBasisT`/`eonLtcS`; `cltcSample` transposes the stored basis back, which is exact and costs no arithmetic
+- perf: **`rotateAboutY` took the angle and called `sin`/`cos` per ray**, up to three times per bounce, for a rotation that is constant across a whole pass. `YRotation` carries the resolved pair, built once in `LightSet`'s constructor. Its `inverse()` negates the sine rather than calling trig again -- exact, since `cos` is even and `sin` odd bit-for-bit, verified over 400k angles
+- perf: **`sampleBilinear` filtered four taps that resolve to one texel.** Where the wrapped coordinates coincide -- every 1x1 default map, which is every material slot in `cornell.json` -- the three redundant fetches and the three `mix`es are skipped. The condition is on the resolved coordinates, not on a size, so it also covers a width-1 or height-1 map. Bilinear interpolation of a constant field *is* that constant, but glm's `mix` is `x*(1-a)+y*a` and does not realise that exactly: `mix(V,V,t)` differs from `V` by 1 ULP for a minority of `(V,t)`. The early return is therefore the exact value where the mix rounded -- strictly more correct, not merely equal. Byte-identical on every scene verified here; a different constant could shift a last bit, in the correct direction
+- perf: **the path-trace tile size is derived from the render target** rather than pinned at 96 px. At `interactiveRenderScale 0.1` a 2048x1152 framebuffer renders 205x115, which 96 px tiles split into 6 across 8 workers. `kTilesPerThread = 2` shrinks the tile only where the grid cannot fill the pool, floored at `kMinPathTraceTileSize = 32` where the `(4t+4)/t^2` halo re-trace reaches 12.9%. **59.09% faster** at 205x115, `pass_ms` B/A 0.4091 [0.4013, 0.4226] at n = 24
+- perf: **`Imf::setGlobalThreadCount` was never called**, so OpenEXR decompressed every scanline block of the HDRI on the calling thread. Process wall for a 64x64x1 render drops **111.91 -> 69.38 ms** median at n = 12, roughly halving the load phase
+- fix: `samplePixelProbe` ran before the `showHud` check, so its synchronous 1x1 `glReadPixels` -- taken for the four post-filter AOVs, and documented in place as "the one place the thread blocks" -- was paid every frame with the HUD hidden. Now gated
+- note: **no image change from any of the above.** The beauty EXR is byte-identical to the pre-change binary at 640x360x32 (`linear RMSE 0, relMSE 0`, crc32 `639671753`) and at 205x115x32 (crc32 `1416599511`), and `ctest` is **128/128**
+- note: the tile change is the one item that is **not work-neutral**: primary rays rise 7.4% at 205x115 because smaller tiles re-trace more halo, against a predicted ~8%. `bench_compare` correctly reports `work: DIFFERS` there. The image is unaffected because a pixel accumulates its 3x3 neighbourhood in raster order whatever rectangle encloses it, which the 1 px halo guarantees its owner traces. 2048x1152, 1024x576 and 640x360 keep 96 px tiles and are untouched in both image and timing
+- note: **cumulative trace gain is 6.31%** at 640x360x32, `pass_ms` B/A 0.9369 [0.9204, 0.9489] at n = 18. Two candidate changes measured as not resolved and were reverted rather than kept: power-of-two masking in `wrapPixel` (1.0024 [0.9956, 1.0086]), and a `kTilesPerThread` of 4 that reshaped grids which did not need it
+- note: the profile's remaining top entries are Embree's `BVHNIntersector1::intersect` at ~15%, which needs the packet/stream tracing that ROADMAP Large #3 owns, and `sampleBilinear` still at ~11% on 1x1 maps -- the structural fix there is resolving a constant texture slot to a constant at load, which is a `Material` change rather than a sampling one
+
 ## Repository hygiene: the header lint gate, the pathtracer namespace, licensing
 
 `.clang-tidy`'s `HeaderFilterRegex` was `^(?!.*third_party).*(include|src)/.*`. clang-tidy matches with
