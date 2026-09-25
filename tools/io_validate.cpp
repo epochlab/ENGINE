@@ -464,11 +464,12 @@ PT_CHECK(profile_config_integer_counts, Fast, Exact) {
         cases.push_back({std::string(key) + " " + std::to_string(floor - 1), "pathTracer", key, floor - 1, false});
         cases.push_back({std::string(key) + " missing", "pathTracer", key, nlohmann::json(nullptr), false});
     }
-    // The framebuffer renderScale multiplies and the denominator of the primary ray's aspect ratio.
+    // The traced image renderScale multiplies and the denominator of the primary ray's aspect ratio.
     for (const char* key : {"width", "height"}) {
-        cases.push_back({std::string("window.") + key + " 1", "window", key, 1, true});
-        cases.push_back({std::string("window.") + key + " 0", "window", key, 0, false});
-        cases.push_back({std::string("window.") + key + " -1", "window", key, -1, false});
+        cases.push_back({std::string("render.") + key + " 1", "render", key, 1, true});
+        cases.push_back({std::string("render.") + key + " 0", "render", key, 0, false});
+        cases.push_back({std::string("render.") + key + " -1", "render", key, -1, false});
+        cases.push_back({std::string("render.") + key + " missing", "render", key, nlohmann::json(nullptr), false});
     }
 
     const std::filesystem::path shippedPath = std::filesystem::path(ASSET_ROOT_DIR) / "config" / "profile.json";

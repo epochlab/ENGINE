@@ -88,16 +88,17 @@ Histogram& Histogram::operator=(Histogram&& other) noexcept {
     return *this;
 }
 
-void Histogram::update(int windowWidth, int windowHeight) {
+void Histogram::update(pathtracer::gfx::ViewportRect imageRect) {
     ++frameCounter_;
     if (frameCounter_ % kCaptureIntervalFrames != 0) {
         return;
     }
 
-    // Downsample the just-composited default framebuffer into the fixed small FBO.
+    // Downsample the just-composited image into the fixed small FBO. Read from imageRect alone, so letterbox bars never reach the bins.
     GL_CALL(glBindFramebuffer(GL_READ_FRAMEBUFFER, 0));
     GL_CALL(glBindFramebuffer(GL_DRAW_FRAMEBUFFER, downsampleFbo_));
-    GL_CALL(glBlitFramebuffer(0, 0, windowWidth, windowHeight, 0, 0, kWidth, kHeight,
+    GL_CALL(glBlitFramebuffer(imageRect.x, imageRect.y, imageRect.x + imageRect.width,
+                              imageRect.y + imageRect.height, 0, 0, kWidth, kHeight,
                               GL_COLOR_BUFFER_BIT, GL_LINEAR));
 
     // Kick off this capture's async readback into the current PBO -- non-blocking, since the target is a bound PBO, not client memory.

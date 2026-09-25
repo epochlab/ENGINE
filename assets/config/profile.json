@@ -1,8 +1,4 @@
 {
-    "window": {
-        "width": 1024,
-        "height": 576
-    },
     "camera": {
         "position": [0.0, 0.0, 6.0],
         "yawDegrees": 0.0,
@@ -20,6 +16,8 @@
         "orbitSensitivityDegPerPixel": 0.25
     },
     "render": {
+        "width": 1024,
+        "height": 576,
         "renderScale": 1.0,
         "interactiveRenderScale": 0.1,
         "defaultAOV": 0,

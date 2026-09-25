@@ -3,6 +3,24 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## Render resolution unified: `profile.json` authors it, the window is only a viewport
+
+`profile.json`'s `window.width/height` meant two incompatible things. The GUI handed them to
+`glfwCreateWindow` as *screen points*, and GLFW's macOS default doubled that into a 2048x1152 backing
+store which `framebufferSize()` fed straight to the tracer -- 4x the authored pixel count. The headless
+path read the same two numbers as *render pixels* and rendered 1024x576. The two readouts printed both
+figures under the same label: the startup block `window 1024x576`, the dashboard `window 2048x1152`.
+`raster_bench` carried the 2x as a hand-typed `2048` with a comment explaining Retina.
+
+- refactor: **the resolution moves to `render.width`/`render.height`, in pixels, and the `window` block is deleted.** It sits beside `renderScale`, which multiplies it rather than the framebuffer. `HeadlessRenderer::defaultWidth/Height` now read it, so the GUI and the C/Python API size from one number by construction instead of by coincidence
+- feat: **the window is an independent viewport.** It opens 1:1 -- `glfwGetWindowContentScale` on the window GLFW actually placed, not a guessed monitor, so no scale factor is assumed or hardcoded -- and is freely resizable after. A resize changes no trace input, so it cannot restart an accumulation; `GLFW_SCALE_FRAMEBUFFER` is now stated rather than left to a per-platform default. Under fractional scaling the opening framebuffer may land a pixel off, which costs nothing now that nothing reads it as the render size
+- feat: **letterboxed and nearest-magnified.** `fitAspect` (`gfx/viewport.h`) returns the largest rect of the image's aspect that fits the viewport, centred, so a mismatched window shows bars rather than a distorted frame. `GL_TEXTURE_MAG_FILTER` becomes `GL_NEAREST`, superseding the `GL_LINEAR` upscale the `renderScale` entry below describes: one traced pixel reads as one visible block rather than an interpolated value that was never rendered, so a 320x180 render can be inspected full-screen and the probe agrees with what is on screen. Minification stays `GL_LINEAR`
+- fix: **the readbacks no longer assume the image fills the window.** The pixel probe maps the cursor into the image rect and reports nothing over a bar; the histogram blits the rect alone, so bars never reach the bins. Both were previously normalised by the whole framebuffer
+- refactor: the resolution leaves `ViewInputState`. It is fixed for the session and the traced size varies only through `renderScale`, which the trigger already carries, so comparing it every frame was work that could never fire
+- refactor: readouts renamed to what they are. The startup block prints `resolution`, the dashboard prints `image` / `trace` / `window`, and the HUD's `Viewport` section becomes `Resolution`. `image` and `resolution` cannot disagree, being the same field
+- test: `viewport_fit_preserves_aspect_and_centres` (`display_validate`), 8 cases x 3 assertions -- expected rects from exact halves and thirds, containment within the viewport, and aspect held to the `(0.5 + 0.5*aspect)/h` bound that half a pixel of rounding on each extent allows. `profile_config_integer_counts` retargets `render.width/height` and gains the missing-key case the window loop never had. `ctest` **132/132**
+- note: **image-neutral where the resolution is unchanged, and the defaults are now consistent.** `render_beauty` at the profile default is byte-identical across the change (CRC32 `3396778085`, ray counts identical to the digit), as is `raster_bench` at an explicit 1024x576 (CRC32 `2784833415`). What changes is the GUI's default: it now traces the authored 1024x576 rather than 2048x1152, a 4x reduction in paths per pass. Historical entries below keep the resolutions they were measured at
+
 ## NEE shadow rays: exact target reconstruction from the offset origin
 
 Reported as a dot lattice in the Shadow AOV across `cornell.json`'s spheres. Not a mesh fault -- the glTF

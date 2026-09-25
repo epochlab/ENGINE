@@ -15,6 +15,7 @@
 
 #include <glm/glm.hpp>
 
+#include "pathtracer/config/profile_config.h"
 #include "pathtracer/debug/bench_log.h"
 #include "pathtracer/gfx/hdr_image.h"
 #include "pathtracer/scene/camera.h"
@@ -36,8 +37,8 @@ constexpr float kVertexAngleStep = 2.0943951F;  // 2*pi/3, the three vertices of
 
 struct Options {
     int triangleCount = 20561;  // scene.json's rkswd_tier_2.gltf, the shipped default
-    int width = 2048;           // profile.json's 1024x576 window on a Retina display
-    int height = 1152;
+    int width = 0;              // both filled from profile.json by parseOptions before any flag applies, so it sizes as the renderer does
+    int height = 0;
     int frames = 5;
     int layers = 1;
     unsigned int seed = 42;
@@ -113,7 +114,14 @@ std::vector<ShadingTriangle> makeLayeredTriangles(const Options& options, const 
 
 // nullopt on an unrecognized flag, missing value, or out-of-range value: argv is a boundary, so a bad value surfaces rather than clamps.
 std::optional<Options> parseOptions(int argc, char** argv) {
+    const std::optional<pathtracer::config::ProfileConfig> profile =
+        pathtracer::config::loadProfileConfig(ASSET_ROOT_DIR "/config/profile.json");
+    if (!profile) {
+        return std::nullopt;
+    }
     Options options;
+    options.width = profile->render.width;
+    options.height = profile->render.height;
     for (int i = 1; i < argc; ++i) {
         if (i + 1 >= argc) {
             std::cerr << "raster_bench: " << argv[i] << " expects a value\n";

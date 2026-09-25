@@ -1,5 +1,7 @@
 #pragma once
 
+#include "pathtracer/gfx/viewport.h"
+
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -23,7 +25,7 @@ public:
     Histogram& operator=(Histogram&& other) noexcept;
 
     // Once per frame, after the composited image reaches the default framebuffer and before the HUD is drawn over it.
-    void update(int windowWidth, int windowHeight);
+    void update(pathtracer::gfx::ViewportRect imageRect);
 
     [[nodiscard]] const std::array<std::array<std::uint32_t, kBins>, 3>& bins() const {
         return bins_;

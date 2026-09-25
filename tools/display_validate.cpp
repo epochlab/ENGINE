@@ -9,6 +9,7 @@
 #include "check.h"
 #include "pathtracer/debug/frame_stats.h"
 #include "pathtracer/gfx/ocio_cpu_transform.h"
+#include "pathtracer/gfx/viewport.h"
 
 namespace {
 
@@ -169,6 +170,57 @@ PT_CHECK(frame_stats_percentiles_are_correct, Fast, Exact) {
     char p95[160];
     std::snprintf(p95, sizeof(p95), "p95 of 1..100 ms read as %.6g", static_cast<double>(stats.percentileMs(0.95F)));
     PT_EXPECT(ctx, std::fabs(stats.percentileMs(0.95F) - 96.0F) <= 1.5F, p95);
+}
+
+// The letterbox contract: the fitted rect stays inside the viewport, is centred in it, and never distorts the authored aspect.
+PT_CHECK(viewport_fit_preserves_aspect_and_centres, Fast, Exact) {
+    struct Case {
+        const char* name;
+        int imageWidth;
+        int imageHeight;
+        int viewportWidth;
+        int viewportHeight;
+        pathtracer::gfx::ViewportRect expected;
+    };
+    // Hand-checkable ratios: exact halves and thirds, so the expected rect is arithmetic rather than a recorded output.
+    const std::vector<Case> cases = {
+        {"matching aspect fills the viewport", 1024, 576, 1024, 576, {0, 0, 1024, 576}},
+        {"matching aspect magnified 2x", 1024, 576, 2048, 1152, {0, 0, 2048, 1152}},
+        {"wider viewport bars on x", 1024, 576, 2048, 576, {512, 0, 1024, 576}},
+        {"taller viewport bars on y", 1024, 576, 1024, 1152, {0, 288, 1024, 576}},
+        {"square viewport, 16:9 image", 1600, 900, 1000, 1000, {0, 218, 1000, 563}},
+        {"minified below the authored size", 1024, 576, 512, 288, {0, 0, 512, 288}},
+        {"non-positive viewport yields nothing", 1024, 576, 0, 576, {0, 0, 0, 0}},
+        {"non-positive image yields nothing", 0, 576, 1024, 576, {0, 0, 0, 0}},
+    };
+    ctx.plan(static_cast<int>(cases.size()) * 3);
+    for (const Case& testCase : cases) {
+        const pathtracer::gfx::ViewportRect rect = pathtracer::gfx::fitAspect(
+            testCase.imageWidth, testCase.imageHeight, testCase.viewportWidth, testCase.viewportHeight);
+        char detail[224];
+        std::snprintf(detail, sizeof(detail), "%s: got {%d,%d,%d,%d}, expected {%d,%d,%d,%d}", testCase.name, rect.x,
+                      rect.y, rect.width, rect.height, testCase.expected.x, testCase.expected.y,
+                      testCase.expected.width, testCase.expected.height);
+        PT_EXPECT(ctx, rect.x == testCase.expected.x && rect.y == testCase.expected.y &&
+                           rect.width == testCase.expected.width && rect.height == testCase.expected.height,
+                  detail);
+        char bounds[224];
+        std::snprintf(bounds, sizeof(bounds), "%s: rect {%d,%d,%d,%d} escapes a %dx%d viewport", testCase.name, rect.x,
+                      rect.y, rect.width, rect.height, testCase.viewportWidth, testCase.viewportHeight);
+        PT_EXPECT(ctx, rect.x >= 0 && rect.y >= 0 && rect.x + rect.width <= std::max(0, testCase.viewportWidth) &&
+                           rect.y + rect.height <= std::max(0, testCase.viewportHeight),
+                  bounds);
+        // Half a pixel of rounding on each extent, propagated through w/h: d(w/h) <= (0.5 + 0.5*aspect)/h. Anything above that distorts.
+        const bool degenerate = rect.width == 0 || rect.height == 0;
+        const double imageAspect = degenerate ? 0.0
+                                              : static_cast<double>(testCase.imageWidth) / testCase.imageHeight;
+        const double rectAspect = degenerate ? 0.0 : static_cast<double>(rect.width) / rect.height;
+        const double allowed = degenerate ? 0.0 : (0.5 + (0.5 * imageAspect)) / rect.height;
+        char aspect[224];
+        std::snprintf(aspect, sizeof(aspect), "%s: aspect %.6f against the image's %.6f", testCase.name, rectAspect,
+                      imageAspect);
+        PT_EXPECT(ctx, std::fabs(rectAspect - imageAspect) <= allowed, aspect);
+    }
 }
 
 }  // namespace

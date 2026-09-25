@@ -688,10 +688,15 @@ images, so which one is displayed cannot change what the driver has to compute. 
 restarted a converged accumulation on every AOV switch — including between two of its own
 lanes, and including into the four GPU post-filters, which only ever re-read beauty.
 
-**Camera and framebuffer geometry are factored out** into a shared sub-struct: it is the whole
-of what `renderRasterGBuffer`'s output depends on (`rasterizer.h` takes no environment
+**Camera geometry is factored out** into a shared sub-struct: it is the whole of what
+`renderRasterGBuffer`'s output depends on that can change (`rasterizer.h` takes no environment
 argument) and the leading part of what `renderPathTraced`'s does. Factored rather than
 duplicated so the two producers compare the same fields.
+
+**The resolution is not in it.** `profile.json`'s `render.width`/`render.height` are fixed for
+the session and the window is an independent viewport, so the traced size varies only through
+`renderScale`, which the trigger already carries. Comparing two values that cannot differ would
+be work that can never fire.
 
 **Inputs and render scale are two structs, not one.** `renderScale` is *derived* from whether
 the inputs changed. Folding it in would make the settle-time promotion to full resolution read

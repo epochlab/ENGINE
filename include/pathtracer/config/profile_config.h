@@ -12,11 +12,6 @@
 
 namespace pathtracer::config {
 
-struct WindowConfig {
-    int width;
-    int height;
-};
-
 struct CameraConfig {
     glm::vec3 position;
     float yawDegrees;
@@ -38,7 +33,10 @@ struct ControlsConfig {
 };
 
 struct RenderConfig {
-    // Fraction of the framebuffer rendered, upscaled by the display blit's GL_LINEAR filter. Both in (0,1].
+    // The authored image, in pixels. Independent of the window: the display viewport letterboxes and magnifies it.
+    int width;
+    int height;
+    // Fraction of width x height traced, magnified to the viewport by the display draw. Both in (0,1].
     float renderScale;
     float interactiveRenderScale;  // the same, while the camera is moving
     // Index into pathtracer::debug::AovId / kAovNames (aov.h) (0 = Beauty).
@@ -62,7 +60,6 @@ struct PathTracerConfig {
 
 // Session-wide defaults: the controller's initial and reset pose, lens, exposure and tuning constants -- what is not specific to one scene.
 struct ProfileConfig {
-    WindowConfig window;
     CameraConfig camera;
     ControlsConfig controls;
     RenderConfig render;

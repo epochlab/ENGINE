@@ -2,13 +2,13 @@
 
 namespace pathtracer::debug {
 
-// Per-frame scene/viewport counts for the HUD's Scene section.
+// Per-frame scene counts and the authored resolution, for the HUD's Resolution and Scene sections.
 struct SceneStats {
     int objectCount;
     long long trianglesTotal;
     long long pointsTotal;
-    int viewportWidth;
-    int viewportHeight;
+    int imageWidth;
+    int imageHeight;
 };
 
 }  // namespace pathtracer::debug
