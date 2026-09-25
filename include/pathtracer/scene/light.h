@@ -76,7 +76,7 @@ public:
 
 private:
     const EnvironmentMap* environment_;
-    float envRotationRadians_;
+    YRotation envRotation_;  // resolved once per LightSet, i.e. once per pass, rather than per environment query
     float envExposure_;
     const std::vector<QuadLight>& quads_;
 };

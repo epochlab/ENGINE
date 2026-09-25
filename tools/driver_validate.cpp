@@ -627,6 +627,89 @@ PT_CHECK(over_range_stats_match_serial_scan, Slow, Exact) {
     PT_EXPECT(ctx, stats.rawPeak == serialPeak, peakDetail);
 }
 
+// The tiling is a work split, so it must cover the target exactly and never hand the pool fewer tiles than it can use.
+PT_CHECK(tile_size_covers_the_target_and_fills_the_pool, Fast, Exact) {
+    using pathtracer::scene::kMinPathTraceTileSize;
+    using pathtracer::scene::kPathTraceTileSize;
+    using pathtracer::scene::kTilesPerThread;
+    using pathtracer::scene::pathTraceTileSize;
+    constexpr std::array<int, 9> kExtents{0, 1, 8, 32, 96, 115, 205, 1152, 2048};
+    constexpr std::array<unsigned int, 5> kThreads{1, 2, 8, 64, 4096};
+    ctx.plan(static_cast<int>(kExtents.size() * kExtents.size() * kThreads.size() * 3));
+    for (const int width : kExtents) {
+        for (const int height : kExtents) {
+            for (const unsigned int threads : kThreads) {
+                const int size = pathTraceTileSize(width, height, threads);
+                char detail[192];
+                std::snprintf(detail, sizeof(detail), "%dx%d on %u threads gave tile %d, outside [%d, %d]",
+                              width, height, threads, size, kMinPathTraceTileSize, kPathTraceTileSize);
+                PT_EXPECT(ctx, size >= kMinPathTraceTileSize && size <= kPathTraceTileSize, detail);
+
+                // Ceiling division must reach every pixel: a grid short of the target would silently drop a strip.
+                const int tilesX = (width + size - 1) / size;
+                const int tilesY = (height + size - 1) / size;
+                std::snprintf(detail, sizeof(detail), "%dx%d tile %d leaves %dx%d uncovered", width, height, size,
+                              width - (tilesX * size), height - (tilesY * size));
+                PT_EXPECT(ctx, tilesX * size >= width && tilesY * size >= height, detail);
+
+                // Largest such tile: shrinking is only justified where the next size up could not fill the pool.
+                const bool wantedMet = static_cast<long long>(tilesX) * tilesY >=
+                                        static_cast<long long>(threads) * kTilesPerThread;
+                const bool atFloor = size == kMinPathTraceTileSize;
+                const bool atCeiling = size == kPathTraceTileSize;
+                std::snprintf(detail, sizeof(detail), "%dx%d on %u threads shrank to %d without needing to", width,
+                              height, threads, size);
+                PT_EXPECT(ctx, atCeiling || atFloor || wantedMet, detail);
+            }
+        }
+    }
+}
+
+// The load-bearing property of a resolution-derived tile size: it partitions the work, it must not change the result.
+PT_CHECK(render_is_invariant_to_tile_size, Slow, Exact) {
+    ctx.plan(2);
+    std::unique_ptr<DriverFixture> fixture = makeFixture();
+    if (!fixture->valid()) {
+        PT_EXPECT(ctx, false, "scene construction failed");
+        return;
+    }
+    // Chosen so the two thread counts resolve to different tiles on any host: the counts are explicit, not hardware_concurrency.
+    constexpr int kTiledImageSize = 96;
+    constexpr unsigned int kFewThreads = 1;
+    constexpr unsigned int kManyThreads = 8;
+    const int coarse = pathtracer::scene::pathTraceTileSize(kTiledImageSize, kTiledImageSize, kFewThreads);
+    const int fine = pathtracer::scene::pathTraceTileSize(kTiledImageSize, kTiledImageSize, kManyThreads);
+    char sizes[160];
+    std::snprintf(sizes, sizeof(sizes), "both thread counts resolved to tile %d, so this check would prove nothing", coarse);
+    PT_EXPECT(ctx, coarse != fine, sizes);
+
+    const Camera camera = makeCamera();
+    const pathtracer::scene::LightSet lights(&fixture->environment, 0.0F, 1.0F, fixture->scene.quadLights);
+    const std::atomic<std::uint64_t> generation{1};
+    pathtracer::debug::PassStats stats;
+    const auto renderWith = [&](unsigned int threads) {
+        pathtracer::scene::ThreadPool pool(threads);
+        PathTraceResult out = pathtracer::scene::makePathTraceResult(kTiledImageSize, kTiledImageSize);
+        stats.reset();
+        pathtracer::scene::renderPathTraced(camera, *fixture->accel, fixture->scene.shadingTriangles,
+                                         fixture->scene.instances, fixture->scene.instanceLightIndex, lights,
+                                         kTiledImageSize, kTiledImageSize, /*showSky=*/true, makeSettings(),
+                                         fixture->scene.perInstanceSettings, /*scrambleSeed=*/1U, /*sampleBase=*/0,
+                                         /*sampleCount=*/1, generation, 1U, pool, stats, out);
+        return out.beauty.rgba;
+    };
+    const std::vector<float> coarseImage = renderWith(kFewThreads);
+    const std::vector<float> fineImage = renderWith(kManyThreads);
+    std::size_t differing = 0;
+    for (std::size_t i = 0; i < coarseImage.size(); ++i) {
+        differing += coarseImage[i] != fineImage[i] ? 1 : 0;
+    }
+    char detail[192];
+    std::snprintf(detail, sizeof(detail), "%zu of %zu floats differ between a %d px and a %d px tile grid", differing,
+                  coarseImage.size(), coarse, fine);
+    PT_EXPECT(ctx, differing == 0, detail);
+}
+
 // Thread-count invariance on renderPathTraced (the pool is private): bit-identical, as tiles are owned outright and sample order is fixed.
 PT_CHECK(render_is_invariant_to_thread_count, Slow, Exact) {
     ctx.plan(1);

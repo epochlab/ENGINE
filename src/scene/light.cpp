@@ -101,7 +101,7 @@ glm::vec3 SphericalRectangle::sample(glm::vec2 u) const {
 LightSet::LightSet(const EnvironmentMap* environment, float envRotationRadians, float envExposure,
                     const std::vector<QuadLight>& quads)
     : environment_(environment),
-      envRotationRadians_(envRotationRadians),
+      envRotation_(YRotation::of(envRotationRadians)),
       envExposure_(envExposure),
       quads_(quads) {}
 
@@ -113,14 +113,14 @@ glm::vec3 LightSet::environmentRadiance(const glm::vec3& direction) const {
     if (environment_ == nullptr) {
         return glm::vec3(0.0F);
     }
-    return environment_->sampleDirection(direction, envRotationRadians_) * envExposure_;
+    return environment_->sampleDirection(direction, envRotation_) * envExposure_;
 }
 
 float LightSet::pdfEnvironment(const glm::vec3& dir) const {
     if (environment_ == nullptr) {
         return 0.0F;
     }
-    return environment_->pdf(dir, envRotationRadians_) / static_cast<float>(count());
+    return environment_->pdf(dir, envRotation_) / static_cast<float>(count());
 }
 
 glm::vec3 LightSet::quadRadianceToward(int quadIndex, const glm::vec3& direction) const {
@@ -156,7 +156,7 @@ std::optional<LightSample> LightSet::sample(const glm::vec3& p, Sampler& sampler
 
     if (envPresent && index == 0) {
         const EnvironmentMap::EnvSample envSample =
-            environment_->importanceSampleDirection(sampler.next2D(), envRotationRadians_);
+            environment_->importanceSampleDirection(sampler.next2D(), envRotation_);
         // The miss path's lookup, not the nearest texel: MIS weights sum to 1 across strategies, so both must evaluate one Le.
         return LightSample{envSample.direction, environmentRadiance(envSample.direction),
                             envSample.pdf * selectionPdf, std::numeric_limits<float>::max()};

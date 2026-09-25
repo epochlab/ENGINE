@@ -1053,9 +1053,11 @@ void updateHud(AppResources& app, const pathtracer::platform::Window& window,
     float shutterSeconds = app.debugCamera.shutterSeconds();
     float iso = app.debugCamera.iso();
     int filmBackPresetIndex = app.filmBackPresetIndex;
+    // Only the HUD reads it, and for the post-filter AOVs it is a synchronous glReadPixels: with the HUD hidden that stall bought nothing.
     const pathtracer::debug::PixelProbeSample pixelProbe =
-        samplePixelProbe(window, pathTraceSnapshot, app,
-                          static_cast<pathtracer::debug::AovId>(app.aov), app.stages.probeMs);
+        app.showHud ? samplePixelProbe(window, pathTraceSnapshot, app,
+                                        static_cast<pathtracer::debug::AovId>(app.aov), app.stages.probeMs)
+                     : pathtracer::debug::PixelProbeSample{};
     const pathtracer::debug::ScopedCpuTimer hudTimer(app.stages.hudMs);
     if (app.showHud) {
         app.hud.draw(hudFrameData, app.aov, focalLengthMm, aperture, shutterSeconds, iso,
