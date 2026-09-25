@@ -17,7 +17,7 @@ struct CameraConfig {
     float yawDegrees;
     float pitchDegrees;
 
-    // Resolved against assets/config/camera.json by name at startup; loadProfileConfig cannot validate it, not loading that file.
+    // Resolved against assets/config/sensor.json by name at startup; loadProfileConfig cannot validate it, not loading that file.
     std::string defaultFilmBackPresetName;
     float focalLengthMm;
     float nearClip;

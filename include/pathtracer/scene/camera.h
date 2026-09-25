@@ -17,7 +17,7 @@ public:
         float heightMm;
     };
 
-    // A named, real-world FilmBack ("ARRI Alexa 65"): the HUD preset dropdown and assets/config/camera.json key off name.
+    // A named, real-world FilmBack ("ARRI Alexa 65"): the HUD preset dropdown and assets/config/sensor.json key off name.
     struct FilmBackPreset {
         std::string name;
         FilmBack filmBack;
