@@ -1,4 +1,4 @@
-# Registers one ctest entry per tools/check.h check by asking the binary itself. See docs/DERIVATIONS.md "Check discovery".
+# Registers one ctest entry per tools/check.h check by asking the binary itself.
 function(pathtracer_discover_checks target)
     set(fragment "${CMAKE_CURRENT_BINARY_DIR}/${target}_checks.cmake")
     add_custom_command(TARGET ${target} POST_BUILD

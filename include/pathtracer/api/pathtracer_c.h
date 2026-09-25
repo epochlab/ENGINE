@@ -1,7 +1,7 @@
 #ifndef PATHTRACER_API_PATHTRACER_C_H
 #define PATHTRACER_API_PATHTRACER_C_H
 
-/* Flat C ABI over api/headless_renderer.h for runtimes without C++; one PtRenderer per thread. See docs/DERIVATIONS.md "Flat C ABI". */
+/* Flat C ABI over headless_renderer.h. One PtRenderer per thread, never shared; the caller allocates all output buffers and frees none. */
 
 #ifdef __cplusplus
 extern "C" {
@@ -67,7 +67,7 @@ typedef struct {
 /* Renders every requested AOV. out parallels request->aovs at width * height * pt_aov_channels(aovs[i]) floats, row-major top-left. */
 int pt_render(PtRenderer* renderer, const PtRenderRequest* request, float* const* out, char* err, int err_cap);
 
-/* Scene-referred linear to display-referred 8-bit sRGB, the viewer's chain: exposure, OCIO, dither, quantize. Buffers hold w*h*3. */
+/* Scene-referred linear to display-referred 8-bit sRGB, the viewer's chain and render_beauty's PNG encode. Buffers hold w*h*3. */
 int pt_display_encode(const float* rgb, int width, int height, float exposure_ev, int display_transform,
                       unsigned char* out, char* err, int err_cap);
 

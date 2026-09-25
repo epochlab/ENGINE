@@ -3,6 +3,34 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## `docs/DERIVATIONS.md` removed: the load-bearing lines move to the code they govern
+
+1706 lines across 31 sections, addressed from 48 source comments. Measured before deleting: **188 of its
+234 measurements already appear in this file or the README**, so most of it was a second rendering of
+what the chronology already held -- its "Running-mean forward error" section, for instance, is reproduced
+recurrence and citations at the `driver_validate` entry below. Of the 46 unique figures, 29 sat in the
+three validation sections, where they justify a tolerance.
+
+- refactor: the contract material moves to the declaration it governs rather than to this file, which is
+  chronological and so cannot be looked up by topic: the generation/requestedGeneration cancellation onto
+  `renderPathTraced`, the one-renderer-per-thread and caller-allocates rules onto `pathtracer_c.h`, the
+  bucket rule onto `PathTraceResult`, the binade bracket onto `kOverRangeEvRadius`
+- refactor: the 7 measurements found nowhere in the tree land beside the constant they size -- the Karis
+  revert's 7.8e-4 and the 2.03e-7 residual on `index_matched_coat`, 3.5e-5 at ior 1.33 on
+  `coat_fresnel_average`, the roughness <= 0.022 / mu <= 4.4e-3 corner on `albedo_table_interpolation`,
+  1.93e-2 on the sphere tessellation, and the 3.6e-3 and 3.9e-3 transmit-side residuals in `albedo_table`
+- refactor: all 48 pointers lose the trailing reference and keep their claim. Six comments that ended
+  "...are in docs/DERIVATIONS.md" were truncated mid-sentence by that strip and are rewritten to carry the
+  fact instead of pointing at it; `.clang-tidy` now names the three false positives rather than counting
+  them, the file having six disabled checks
+- note: `tools/comment_lint.py` is the constraint that shaped this -- one line per comment, 140 columns,
+  enforced by `style.comment_budget`. It is why the `renderPathTraced` parameter table could not survive as
+  comments: `showSky`'s primary-miss-only gating, `instanceLightIndex`'s -1 sentinel, and the
+  `scrambleSeed`/`sampleBase` pairing are now stated only where they are already documented elsewhere
+- note: comment-only, and the evidence is byte-level -- `render_beauty` at the profile default is
+  **byte-identical** across the change (CRC32 `94635855`), the diff contains **zero** non-comment changed
+  lines in `.cpp`/`.h`, and `ctest` is **133/133**
+
 ## Headless display parity: one CPU display encode, and a background the caller controls
 
 A Beauty render through the Python API looked nothing like the same scene in the viewer -- darker

@@ -1,4 +1,4 @@
-// Timing harness for renderRasterGBuffer, not a correctness gate. See docs/DERIVATIONS.md "Rasterizer benchmark design".
+// Timing harness for renderRasterGBuffer, not a correctness gate.
 
 #include <algorithm>
 #include <array>

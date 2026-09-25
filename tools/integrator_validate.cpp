@@ -1,4 +1,4 @@
-// Correctness check for path_tracer.cpp's integrator (renderPathTraced/tracePath); see docs/DERIVATIONS.md "Integrator validation".
+// Correctness check for path_tracer.cpp's integrator (renderPathTraced/tracePath).
 
 #include <array>
 #include <atomic>
@@ -67,6 +67,7 @@ void finish(tools::check::Context& ctx, bool ok, const char* what) {
 constexpr float kQuadExtent = 1000.0F;
 // Sphere geometry shared by its two checks so tessellations cannot drift: checkBeerLambert's transmittance depends on this exact mesh.
 constexpr float kSphereRadius = 1.0F;
+// 64x32 sets transmissionOffsetEpsilon to 1.93e-2 on a unit sphere, backing each origin in and shortening every measured chord.
 constexpr int kSphereSlices = 64;
 constexpr int kSphereStacks = 32;
 // Narrow FOV (200mm on a 36x24 gate, ~6.9 degrees vertical) so every pixel direction is within a fraction of a degree of the quad normal.
@@ -471,7 +472,7 @@ PT_CHECK(transmissive_sphere_energy, Slow, Statistical) {
         }
     }
 
-    // The same invariant with a dispersive index, gating the one-sample channel estimator; see docs/DERIVATIONS.md "Integrator validation".
+    // The same invariant with a dispersive index, gating the one-sample channel estimator.
     struct DispersiveGlass {
         const char* name;
         float ior;
@@ -515,7 +516,7 @@ PT_CHECK(transmissive_sphere_energy, Slow, Statistical) {
 PT_CHECK(beer_lambert_absorption, Slow, Statistical) {
     constexpr int kBounces = 8;
     constexpr float kSlabThickness = 0.5F;
-    // Relative, since the squared row's green channel is 0.0625; the sphere row reads high from two path-shortening biases (DERIVATIONS).
+    // Relative, the squared row's green being 0.0625; the sphere row reads high from the tessellated chord and the offset epsilon.
     constexpr float kRelativeTolerance = 0.03F;
     const glm::vec3 colour(0.5F, 0.25F, 0.75F);
 
@@ -526,7 +527,7 @@ PT_CHECK(beer_lambert_absorption, Slow, Statistical) {
         glm::vec3 expected;
         float abbe;
     };
-    // The dispersive row crosses the hero channel with a per-channel sigmaA, asserting the two do not interact; see docs/DERIVATIONS.md.
+    // The dispersive row crosses the hero channel with a per-channel sigmaA, asserting the two do not interact.
     const std::array<AbsorptionCase, 4> cases{{
         {"flat slab, depth == thickness", false, kSlabThickness, colour, 0.0F},
         {"flat slab, depth == half thickness", false, kSlabThickness * 0.5F, colour * colour, 0.0F},
@@ -955,7 +956,7 @@ pathtracer::scene::PathTraceResult renderPassWithLights(const TestScene& scene,
     return result;
 }
 
-// The rough lobe's half of the transmissionDepth 0 convention: Lo is exactly linear in transmissionColor; see docs/DERIVATIONS.md.
+// The rough lobe's half of the transmissionDepth 0 convention: Lo is exactly linear in transmissionColor.
 PT_CHECK(rough_transmission_tint, Slow, Exact) {
     constexpr int kBounces = 4;
     // Numerical, not physical: the paths are identical, so the only slack is fl(t*x) summed vs fl(t * sum(x)); measured worst 1.37e-06.
@@ -1073,7 +1074,7 @@ pathtracer::scene::QuadLight makeOverheadLight(bool twoSided = false) {
                                      glm::vec3(1.0F, 0.0F, 0.0F), glm::vec3(3.0F), twoSided};
 }
 
-// Irradiance against the closed form, a one-sided face reading 0 and an occluded light 0; see docs/DERIVATIONS.md "Integrator validation".
+// Irradiance against the closed form, a one-sided face reading 0 and an occluded light 0.
 PT_CHECK(quad_light_irradiance_and_occlusion, Slow, Statistical) {
     constexpr float kTolerance = 0.02F;  // Monte Carlo NEE noise at kSamplesPerPixel, not a formula slop
     pathtracer::scene::ThreadPool& pool = sharedPool(ctx.threads());
@@ -1369,14 +1370,14 @@ PT_CHECK(quad_light_inverse_square, Slow, Statistical) {
 
 // --- Ray-traced ambient occlusion (path_tracer.cpp's AO lane) ---------------------------------------
 
-// Wall distance for the AO checks, ten times makeCornerScene's default; both reasons are quantitative, in docs/DERIVATIONS.md.
+// Wall distance for the AO checks, 10x makeCornerScene's default: holds AO(c) curvature bias to 3.3e-5 and keeps c > 1 at every pixel.
 constexpr float kAoWallDistance = 10.0F;
 // One rho draw per sample, so error falls as 1/sqrt(N); this count puts the 6-sigma tolerance 8x below every curve the sweep excludes.
 constexpr int kAoSamplesPerPixel = 1024;
 // Every pixel, not centreMean's 4x4: AO ignores view direction, so the whole frame gives the same N for a sixteenth of the paths.
 constexpr float kAoMeasuredPixels = static_cast<float>(kImageSize) * static_cast<float>(kImageSize);
 
-// Closed-form cosine-weighted obscurance for the corner scene, in double for its (1-c)^(7/2) cancellation; derived in docs/DERIVATIONS.md.
+// Closed-form cosine-weighted obscurance for the corner scene, in double: three O(1) terms whose sum vanishes as (1-c)^(7/2).
 float analyticAmbientOcclusion(float c) {
     if (c >= 1.0F) {
         return 1.0F;
@@ -1388,7 +1389,7 @@ float analyticAmbientOcclusion(float c) {
     return static_cast<float>(1.0 - (deficit / std::numbers::pi));
 }
 
-// Standard error on the mean at ~6 sigma, from the estimator's own statistics, conservative by the Bhatia-Davis bound; docs/DERIVATIONS.md.
+// Standard error on the mean at ~6 sigma, from the estimator's own statistics, conservative by the Bhatia-Davis bound
 float aoTolerance(float expected) {
     const float n = static_cast<float>(kAoSamplesPerPixel) * kAoMeasuredPixels;
     return 6.0F * std::sqrt(expected * (1.0F - expected) / n);
@@ -1423,7 +1424,7 @@ struct AoCase {
     float c;  // d / aoMaxDistance
 };
 
-// Ray-traced AO against its closed form: an unoccluded plane, then a sweep over c excluding three wrong integrators; docs/DERIVATIONS.md.
+// Ray-traced AO against its closed form: an unoccluded plane, then a sweep over c excluding three wrong integrators
 PT_CHECK(ambient_occlusion_analytic, Slow, Statistical) {
     std::cout << "integrator_validate: ambient occlusion vs analytic cosine-weighted visibility\n";
     const EnvironmentMap env = makeUniformEnvironment();

@@ -557,7 +557,7 @@ glm::vec3 referenceEon(const glm::vec3& rho, float r, const glm::vec3& wi, const
 
 // The instrument for coatAlbedo's fresnelAvg argument: ior=1 is the only point resolvable without the albedo table, exact from x*1.0F == x.
 PT_CHECK(index_matched_coat, Fast, Exact) {
-    // Exact, from the collapse above; the second bound is a float32-against-double residual on the same closed form, ~15 operations deep.
+    // Exact from the collapse above; the second is a float32-vs-double residual, worst 2.03e-7. The Karis revert breaks it by 7.8e-4.
     constexpr float kInvarianceTolerance = 0.0F;
     constexpr float kValueTolerance = 1e-6F;
     // 0.0 is the reference row every other is compared against; 0.3661 and 0.92 sit deliberately off the table's grid.
@@ -1099,7 +1099,7 @@ void parallelRows(int rows, int threads, Row row) {
 }
 
 PT_CHECK(albedo_table_interpolation, Slow, Exact) {
-    // Each bound is the measured worst plus headroom, thin enough that a regeneration losing one axis trips that axis' own row.
+    // Each bound is the measured worst plus ~1.7x; the three directional worsts sit at roughness <= 0.022 and mu <= 4.4e-3.
     constexpr double kControlTolerance = 5e-5;
     constexpr double kRoughnessAxisTolerance = 1e-3;
     constexpr double kMuAxisTolerance = 3.7e-3;
@@ -1271,6 +1271,7 @@ double referenceCoupling(const CoatGeometry& geometry, double fresnelAvg) {
 
 // The instrument for coatAlbedo's fresnelAvg value, recovered by inverting the coupling, not as diffuse(ior)/diffuse(1), which cancels it.
 PT_CHECK(coat_fresnel_average, Slow, Exact) {
+    // Measured worst 3.5e-5 at ior 1.33, so ~1.7x headroom. Spent by the albedo table and this inversion, not by the reference (~1e-13).
     constexpr double kTolerance = 6e-5;
     // Residual of the recovered root, not an accuracy claim: it catches a coupling the model cannot reproduce at any fresnelAvg.
     constexpr double kResidualTolerance = 1e-6;
@@ -1801,7 +1802,7 @@ PT_CHECK(reciprocity, Fast, Exact) {
     return;
 }
 
-// eta^2-corrected transmission reciprocity, single scatter only (ROADMAP transport #1); wi is constructed, else the check passes vacuously.
+// eta^2-corrected transmission reciprocity, single scatter only and permanently so (ROADMAP transport #1): roughness 0.40 fails 5x.
 PT_CHECK(transmission_reciprocity, Fast, Exact) {
     // Not checkReciprocity's 1e-4: D is sharply peaked at these alphas and the two queries build ht from differently scaled sums.
     constexpr float kRelativeTolerance = 1e-2F;

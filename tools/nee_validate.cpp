@@ -1,4 +1,4 @@
-// NEE+MIS (Veach & Guibas 1995 power heuristic) against EnvironmentMap and LightSet; see docs/DERIVATIONS.md "NEE and MIS validation".
+// NEE+MIS (Veach & Guibas 1995 power heuristic) against EnvironmentMap and LightSet.
 
 #include <array>
 #include <cmath>
@@ -97,7 +97,7 @@ PT_CHECK(environment_pdf_consistency, Fast, Exact) {
     }
 }
 
-// CDFs must come from the values the map returns: 1 + 2^-11 stores as 1.0 in binary16 (docs/DERIVATIONS.md "NEE and MIS validation").
+// CDFs must come from the values the map returns: 1 + 2^-11 stores as 1.0 in binary16.
 PT_CHECK(environment_pdf_tracks_stored_luminance, Fast, Exact) {
     constexpr int kWidth = 64;
     constexpr int kHeight = 32;

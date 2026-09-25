@@ -290,7 +290,7 @@ PT_CHECK(thread_pool_rethrows_and_stays_usable, Fast, Exact) {
     PT_EXPECT(ctx, count.load() == 256, detail);
 }
 
-// The core accumulation property, on all ten images; bound E_k from docs/DERIVATIONS.md "Running-mean forward error".
+// The core accumulation property, on all ten images, under Higham's exact forward-error bound E_k for the running mean.
 PT_CHECK(running_mean_matches_batch_mean, Slow, Exact) {
     constexpr int kPasses = 8;
     ctx.plan(3);

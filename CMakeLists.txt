@@ -33,7 +33,7 @@ if(CLANG_TIDY_EXE)
         --extra-arg=-isysroot --extra-arg=${MACOS_SDK_PATH})
 endif()
 
-# Every first-party target's compile flags in one place. NATIVE/IPO/TIDY are opt-in; see docs/DERIVATIONS.md "Build flag policy".
+# Every first-party target's compile flags in one place. NATIVE/IPO/TIDY are opt-in.
 function(pathtracer_target_defaults target)
     cmake_parse_arguments(ARG "NATIVE;IPO;TIDY" "" "" ${ARGN})
     target_compile_options(${target} PRIVATE -Wall -Wextra -Werror)
@@ -192,7 +192,7 @@ target_link_libraries(pathtracer PRIVATE
     "-framework AppKit" "-framework QuartzCore")
 set_source_files_properties(src/platform/display_link.mm PROPERTIES COMPILE_OPTIONS -fobjc-arc)
 
-# Asset/codegen CLIs, deliberately not linking pathtracer_core. See docs/DERIVATIONS.md "Build flag policy".
+# Asset/codegen CLIs, deliberately not linking pathtracer_core.
 add_executable(test_pattern tools/test_pattern.cpp)
 target_compile_definitions(test_pattern PRIVATE
     ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets")

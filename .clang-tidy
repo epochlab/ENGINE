@@ -1,5 +1,5 @@
 ---
-# Static-analysis policy; see docs/DERIVATIONS.md "Static analysis policy" for the vendored exemptions and the three disabled checks.
+# RAII, pointers, a ~60-line function rule, bugprone-*. Vendored code is exempt; glm unions, ImGui varargs and main() are disabled as noise.
 Checks: >
   bugprone-*,
   cppcoreguidelines-owning-memory,
