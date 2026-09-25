@@ -27,6 +27,9 @@ inline constexpr int kMinPathTraceTileSize = 32;
 // Tiles per worker the split aims for: two leaves no worker idle and bounds the straggler tail at half a worker's share, without more halo.
 inline constexpr int kTilesPerThread = 2;
 
+// Tile edge renderPathTraced splits `width` x `height` into for `threadCount` workers: kPathTraceTileSize unless that leaves the pool idle.
+[[nodiscard]] int pathTraceTileSize(int width, int height, unsigned int threadCount);
+
 // samplesPerPixel is per renderPathTraced() call -- under PathTraceDriver, samples per accumulated pass (typically 1), not the total.
 struct PathTraceSettings {
     int samplesPerPixel;

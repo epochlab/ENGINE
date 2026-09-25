@@ -86,6 +86,8 @@ float filterWeight(float distance) {
     return kFilterTable[static_cast<std::size_t>(t * static_cast<float>(kFilterTableSize - 1))];
 }
 
+}  // namespace
+
 // Largest tile at or below kPathTraceTileSize still giving the pool kTilesPerThread each: at interactive scale 96 leaves most workers idle.
 int pathTraceTileSize(int width, int height, unsigned int threadCount) {
     const auto tileCount = [width, height](int size) {
@@ -98,6 +100,8 @@ int pathTraceTileSize(int width, int height, unsigned int threadCount) {
     }
     return size;
 }
+
+namespace {
 
 struct TraceResult {
     glm::vec3 radiance;
