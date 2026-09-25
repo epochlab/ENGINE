@@ -80,8 +80,8 @@ PT_CHECK(environment_pdf_consistency, Fast, Exact) {
         float worstRelative = 0.0F;
         for (int i = 0; i < kSampleCount; ++i) {
             const EnvironmentMap::EnvSample sample =
-                env.importanceSampleDirection(glm::vec2(unit(rng), unit(rng)), kRotation);
-            const float queried = env.pdf(sample.direction, kRotation);
+                env.importanceSampleDirection(glm::vec2(unit(rng), unit(rng)), pathtracer::scene::YRotation::of(kRotation));
+            const float queried = env.pdf(sample.direction, pathtracer::scene::YRotation::of(kRotation));
             const float relative = std::fabs(queried - sample.pdf) / std::max(sample.pdf, 1e-6F);
             if (relative > worstRelative) {
                 worstRelative = relative;
@@ -124,7 +124,7 @@ PT_CHECK(environment_pdf_tracks_stored_luminance, Fast, Exact) {
         const float sourceRatio = midpoint;
         const EnvironmentMap env(image);
         // Same row, so sin(theta) cancels and the solid-angle pdf ratio is the luminance ratio.
-        const float pdfRatio = env.pdf(centre(kPatchX, kPatchY), 0.0F) / env.pdf(centre(kBackgroundX, kPatchY), 0.0F);
+        const float pdfRatio = env.pdf(centre(kPatchX, kPatchY)) / env.pdf(centre(kBackgroundX, kPatchY));
         const bool tracksStored = type == pathtracer::gfx::ScalarType::Float16
                                       ? std::fabs(pdfRatio - storedRatio) < std::fabs(pdfRatio - sourceRatio)
                                       : std::fabs(pdfRatio - sourceRatio) < std::fabs(pdfRatio - 1.0F);
@@ -145,7 +145,7 @@ float misCombinedLo(const BsdfParams& params, const glm::vec3& wo, const Environ
 
         // NEE.
         const EnvironmentMap::EnvSample lightSample =
-            env.importanceSampleDirection(sampler.next2D(), 0.0F);
+            env.importanceSampleDirection(sampler.next2D());
         if (lightSample.direction.z > 0.0F) {
             const glm::vec3 bsdfValue = pathtracer::scene::evaluateBsdf(params, wo, lightSample.direction);
             const float bsdfPdf = pathtracer::scene::pdfBsdf(params, wo, lightSample.direction);
@@ -161,7 +161,7 @@ float misCombinedLo(const BsdfParams& params, const glm::vec3& wo, const Environ
         const std::optional<pathtracer::scene::BsdfSample> sample = pathtracer::scene::sampleBsdf(params, wo, sampler);
         if (sample.has_value() && sample->type != LobeType::Transmission) {
             const float bsdfPdf = pathtracer::scene::pdfBsdf(params, wo, sample->wiLocal);
-            const float lightPdf = env.pdf(sample->wiLocal, 0.0F);
+            const float lightPdf = env.pdf(sample->wiLocal);
             const float bsdfPdf2 = bsdfPdf * bsdfPdf;
             const float lightPdf2 = lightPdf * lightPdf;
             const float misWeight = bsdfPdf2 / (bsdfPdf2 + lightPdf2);
@@ -192,8 +192,8 @@ PT_CHECK(environment_poles_do_not_blend_opposite_rows, Fast, Exact) {
     const EnvironmentMap env(
         tools::fixtures::makeImageTexture(kWidth, kHeight, rgba, pathtracer::gfx::ScalarType::Float32));
 
-    const glm::vec3 zenith = env.sampleDirection(glm::vec3(0.0F, 1.0F, 0.0F), 0.0F);
-    const glm::vec3 nadir = env.sampleDirection(glm::vec3(0.0F, -1.0F, 0.0F), 0.0F);
+    const glm::vec3 zenith = env.sampleDirection(glm::vec3(0.0F, 1.0F, 0.0F));
+    const glm::vec3 nadir = env.sampleDirection(glm::vec3(0.0F, -1.0F, 0.0F));
     ctx.plan(2);
     char detail[224];
     std::snprintf(detail, sizeof(detail), "zenith reads (%.4f, %.4f, %.4f), expected the top row (1, 0, 0)",
