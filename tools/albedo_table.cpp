@@ -1,4 +1,4 @@
-// Offline generator for src/scene/albedo_table.inc, the Kulla-Conty energy tables; see docs/DERIVATIONS.md "Albedo table bake".
+// Offline generator for src/scene/albedo_table.inc, the Kulla-Conty energy tables.
 
 #include <algorithm>
 #include <array>
@@ -31,14 +31,14 @@ constexpr double kPi = 3.14159265358979323846;
 // Must match bsdf.cpp's roughness floor: each row stores the albedo of the lobe that ships at r, alpha = max(r*r, kMinAlpha).
 constexpr float kMinAlpha = 0.02F * 0.02F;
 
-// Reflect side, three resolutions sized by checkAlbedoTableInterpolation; the axis choices and measurements are in docs/DERIVATIONS.md.
+// Reflect side, three resolutions each sized by what checkAlbedoTableInterpolation measures on that axis; the bilinear read dominates.
 constexpr int kAlbedoRoughnessRes = 256;
 constexpr int kAlbedoMuRes = 256;
 
 // The reflected MS lobe's sampling grid, uniform in mu and its own constant: bsdf.cpp's inversion needs one step width, not that warp.
 constexpr int kMsReflectMuRes = 128;
 
-// Transmit side, sized by the energy closure it buys; the mu/eta/roughness node counts are in docs/DERIVATIONS.md "Albedo table bake".
+// Transmit side, sized by the energy closure it buys: 64 mu and 64 eta nodes close to 3e-4, where 32 each lost 2% at mu 0.02.
 constexpr int kTransmitRoughnessRes = 32;
 constexpr int kTransmitMuRes = 64;
 constexpr int kEtaRes = 64;
@@ -58,7 +58,7 @@ double smithG2OverCosO(double cosO, double cosI, double alpha) {
     return 2.0 * cosI / ((cosI * smithRadical(cosO, alpha)) + (cosO * smithRadical(cosI, alpha)));
 }
 
-// --- Reflect side: exact-domain Gauss-Legendre, not Monte Carlo. Measure and horizon domain in docs/DERIVATIONS.md "Albedo table bake".
+// --- Reflect side: exact-domain Gauss-Legendre, not Monte Carlo, whose horizon discontinuity caps any quadrature at first order.
 struct Split {
     double a;
     double b;
@@ -124,11 +124,11 @@ Split reflectAlbedo(double mu, double alpha, const GaussLegendre& phiRule, const
             }
         }
     }
-    // The 1/mu is inside smithG2OverCosO, which is what lets mu = 0 be a node; never 0/0, by the two panel arguments in docs/DERIVATIONS.
+    // The 1/mu is inside smithG2OverCosO, which lets mu = 0 be a node; never 0/0, psiMax being unreachable on panel one and 0 on panel two.
     return {a, b};
 }
 
-// --- Transmit side: the reflect measure, panelled at the interface's own boundaries; see docs/DERIVATIONS.md "Albedo table bake".
+// --- Transmit side: the reflect measure panelled at the interface's boundaries; a VNDF midpoint rule lumps the slope tail in, 3.6e-3.
 
 // log-spaced so eta and 1/eta are symmetric about index kEtaRes/2.
 double etaAtIndex(int index) {
@@ -151,7 +151,7 @@ EscapeSums escapeAlbedo(double mu, double alpha, const GaussLegendre& rule) {
         const auto eta = static_cast<float>(etaAtIndex(ei));
         // wo.h below which a facet totally internally reflects; zero when entering, where there is no cone.
         const double criticalCos = eta > 1.0F ? std::sqrt(1.0 - (1.0 / (static_cast<double>(eta) * eta))) : 0.0;
-        // phi is even about 0, so half the circle is integrated and doubled; split at pi/2 and at the TIR tangency R = criticalCos.
+        // phi even about 0, so half the circle is doubled; split at pi/2 and the TIR tangency, where 1-F is sqrt-singular (3.9e-3 without).
         std::array<double, 5> phiBreaks{0.0, 0.5 * kPi, kPi, 0.0, 0.0};
         int phiCount = 3;
         if (criticalCos > mu && sinTv > 0.0) {
@@ -354,7 +354,7 @@ float reflectAtUniformMu(const AlbedoTable& table, int ri, int mi) {
     return at(m0) + (mt * (at(m0 + 1) - at(m0)));
 }
 
-// --- Sampling shape for the reflected multiple-scattering lobe, the exact (1-E)cos sampler; see docs/DERIVATIONS.md "Albedo table bake".
+// --- Sampling shape for the reflected multiple-scattering lobe, the exact (1-E)cos sampler.
 void buildMultipleScatteringShape(AlbedoTable& table) {
     const double step = 1.0 / (kMsReflectMuRes - 1);
     table.msDensity.assign(static_cast<std::size_t>(kAlbedoRoughnessRes) * kMsReflectMuRes, 0.0F);
@@ -400,7 +400,7 @@ float escapeAtUniformMu(const AlbedoTable& table, int ri, int mi, int ei) {
     return at(m0) + (mt * (at(m0 + 1) - at(m0)));
 }
 
-// Escape-deficit shape for the transmissive MS lobes, stored UNNORMALISED and uniform in mu; see docs/DERIVATIONS.md "Albedo table bake".
+// Escape-deficit shape for the transmissive MS lobes, stored UNNORMALISED and uniform in mu.
 void buildTransmitMultipleScatteringShape(AlbedoTable& table) {
     const double step = 1.0 / (kTransmitMuRes - 1);
     const auto size = static_cast<std::size_t>(kTransmitRoughnessRes) * kTransmitMuRes * kEtaRes;

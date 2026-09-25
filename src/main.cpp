@@ -87,7 +87,7 @@ struct ViewInputState {
     bool operator==(const ViewInputState&) const = default;
 };
 
-// Every input renderPathTraced depends on bar the resolution, compared frame to frame. See docs/DERIVATIONS.md "Retrace trigger state".
+// Every input renderPathTraced depends on bar the resolution, compared frame to frame.
 struct PathTraceInputState {
     ViewInputState view;
     int envRotationDegrees = 0;
@@ -217,7 +217,7 @@ struct AppResources {
     // The rasterizer runs only on a trigger change, so its cost is a last-actual plus duty cycle rather than a per-frame average.
     float lastRasterMs;
 
-    // Async path-traced view, selected by `aov`; requestTrace() is called only from requestPathTraceIfTriggerChanged. See docs/DERIVATIONS.
+    // Async path-traced view, selected by `aov`; requestTrace() is called only from requestPathTraceIfTriggerChanged.
     pathtracer::scene::PathTraceSettings pathTraceSettings;
     // Per-instance material fields, parallel to stumpModel.instances, overridden by name. Renderer-only fields stay scene-wide.
     std::vector<pathtracer::scene::PathTraceSettings> perInstanceSettings;

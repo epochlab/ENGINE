@@ -23,7 +23,7 @@ struct BsdfParams {
     float transmissionFactor;  // KHR_materials_transmission, 0 = opaque
     // EON rough-diffuse r in [0,1] (Portsmouth, Kutz, Hill 2025, JCGT 14(1)); 0 = Lambertian. Not `roughness`, which drives specular.
     float diffuseRoughness;
-    // EON single-scattering albedo rho, the diffuse lobe's input, not the authored colour. See docs/DERIVATIONS.md "EON albedo inversion".
+    // EON single-scattering albedo rho, the diffuse lobe's input, not the authored colour.
     glm::vec3 diffuseRho;
     // The transmission lobe's only tint (OpenPBR/Arnold): carried by Beer-Lambert at transmissionDepth > 0, applied per crossing at 0.
     glm::vec3 transmissionTint;
@@ -53,7 +53,7 @@ struct BsdfSample {
     float pdf;
 };
 
-// The BSDF's continuous lobes at one wi, split by transport type in one pass. See docs/DERIVATIONS.md "Transport AOV bucketing".
+// The BSDF's continuous lobes at one wi, split by transport type in one pass.
 struct BsdfEval {
     glm::vec3 diffuse;
     glm::vec3 specular;
@@ -137,15 +137,15 @@ struct BsdfClosure {
 // Cosine-weighted hemisphere direction about +z, pdf = cos(theta)/pi. The AO lane relies on the pdf cancelling the cosine (Miller 1994).
 [[nodiscard]] glm::vec3 sampleCosineHemisphere(glm::vec2 u);
 
-// Cosine-weighted average Fresnel, 2*int_0^1 F(mu)*mu dmu, the Kulla-Conty tint. See docs/DERIVATIONS.md "Average Fresnel quadrature".
+// Cosine-weighted average Fresnel, 2*int_0^1 F(mu)*mu dmu, the Kulla-Conty tint.
 [[nodiscard]] glm::vec3 conductorFresnelAvg(const glm::vec3& n, const glm::vec3& k);
 [[nodiscard]] float dielectricFresnelAvg(float ior);
 
-// Schlick-split directional albedo E(mu, roughness) = a+b and its mean Eavg. See docs/DERIVATIONS.md "Kulla-Conty energy tables".
+// Schlick-split directional albedo E(mu, roughness) = a+b and its mean Eavg.
 [[nodiscard]] glm::vec2 directionalAlbedoSplit(float mu, float roughness);
 [[nodiscard]] glm::vec2 averageAlbedoSplit(float roughness);
 
-// The grid those two index. mu is uniform in sqrt(mu), so never assume k/(res-1). See docs/DERIVATIONS.md "Kulla-Conty energy tables".
+// The grid those two index. mu is uniform in sqrt(mu), so never assume k/(res-1).
 [[nodiscard]] glm::ivec2 albedoGridRes();
 [[nodiscard]] float albedoGridRoughness(float index);
 [[nodiscard]] float albedoGridMu(float index);
@@ -156,7 +156,7 @@ struct BsdfClosure {
 // Representative wavelength per RGB channel (Adobe's OpenPBR reference); the RGB banding is known, see docs/ROADMAP.md transport #5.
 inline constexpr glm::vec3 kRgbWavelengthsNm(620.0F, 540.0F, 450.0F);
 
-// Cauchy n(lambda) from an authored (ior at d line, Abbe V_d), per KHR_materials_dispersion. See docs/DERIVATIONS.md "Cauchy dispersion".
+// Cauchy n(lambda) from an authored (ior at d line, Abbe V_d), per KHR_materials_dispersion.
 [[nodiscard]] float cauchyIor(float iorD, float abbe, float lambdaNm);
 
 // Value and pdf of the continuous lobes at wiLocal, split by transport type; one call, so GGX, Fresnel and albedo are computed once.
@@ -169,7 +169,7 @@ inline constexpr glm::vec3 kRgbWavelengthsNm(620.0F, 540.0F, 450.0F);
 [[nodiscard]] glm::vec3 evaluateBsdf(const BsdfParams& params, const glm::vec3& woLocal,
                                       const glm::vec3& wiLocal);
 
-// Samples one lobe by Fresnel/energy probability, returning its throughput or nullopt. See docs/DERIVATIONS.md "BSDF lobe selection".
+// Samples one lobe by Fresnel/energy probability, returning its throughput or nullopt.
 [[nodiscard]] std::optional<BsdfSample> sampleBsdf(const BsdfParams& params,
                                                     const glm::vec3& woLocal, Sampler& sampler);
 

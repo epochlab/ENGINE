@@ -1,4 +1,4 @@
-// Headless beauty render for before/after comparison, writing one AOV as PNG; see docs/DERIVATIONS.md "Headless beauty render".
+// Headless beauty render for before/after comparison, writing one AOV as PNG.
 
 #include <algorithm>
 #include <array>
@@ -228,7 +228,7 @@ float maxChannel(const pathtracer::gfx::HdrImage& image) {
     return peak;
 }
 
-// Each octave band's share of total error power; see docs/DERIVATIONS.md "Headless beauty render".
+// Each octave band's share of total error power.
 void reportErrorSpectrum(const pathtracer::gfx::HdrImage& image, const pathtracer::gfx::HdrImage& reference) {
     const auto pixels = static_cast<std::size_t>(image.width) * static_cast<std::size_t>(image.height);
     std::vector<double> luminanceError(pixels);
@@ -422,7 +422,7 @@ int main(int argc, char** argv) {
         return renderer->lastImage(options.aov);
     };
 
-    // --- Determinism gate: same seed, same floats, no statistics; see docs/DERIVATIONS.md "Headless beauty render".
+    // --- Determinism gate: same seed, same floats, no statistics.
     if (options.assertDeterministic) {
         const pathtracer::gfx::HdrImage first = accumulate(options.scrambleSeed, options.passes);
         const pathtracer::gfx::HdrImage second = accumulate(options.scrambleSeed, options.passes);
@@ -445,7 +445,7 @@ int main(int argc, char** argv) {
                   << " floats bit-identical across two runs at seed " << options.scrambleSeed << "\n";
     }
 
-    // --- Convergence gate: R=8 independent sub-renders, buffer-variance estimator; see docs/DERIVATIONS.md "Headless beauty render".
+    // --- Convergence gate: R=8 independent sub-renders, buffer-variance estimator.
     if (options.assertConverged) {
         constexpr int kSubRenders = 8;
         const int perSubRender = std::max(1, options.passes / kSubRenders);
@@ -520,7 +520,7 @@ int main(int argc, char** argv) {
         return EXIT_SUCCESS;  // a gate renders for its verdict, not for an image
     }
 
-    // Per-pass wall clock on the trace only; the mean is the figure to compare (see docs/DERIVATIONS.md "Headless beauty render").
+    // Per-pass wall clock on the trace only; compare the mean, which holds to ~1% where a pass minimum varies ~12% run to run.
     const pathtracer::gfx::HdrImage accumulated = accumulate(options.scrambleSeed, options.passes);
     const std::vector<double>& milliseconds = renderer->lastStats().passMilliseconds;
 

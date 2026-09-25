@@ -36,7 +36,7 @@ glm::vec3 sigmaAFromTransmission(const glm::vec3& color, float depth) {
     return -glm::log(glm::max(color, glm::vec3(1e-6F))) / depth;
 }
 
-// Transmission needs a curvature-scaled offset, measured ~1e-3 on a 500-triangle sphere. See docs/DERIVATIONS.md "Transmission ray offset".
+// Transmission needs a curvature-scaled offset, ~1e-3 on a 500-triangle sphere; raw edge length has no zero and blew up on a flat slab.
 float transmissionOffsetEpsilon(const ShadingTriangle& tri) {
     const glm::vec3 n0 = glm::normalize(tri.v0.normal);
     const glm::vec3 n1 = glm::normalize(tri.v1.normal);
@@ -236,7 +236,7 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
         const PathTraceSettings& instanceSettings =
             perInstanceSettings[static_cast<std::size_t>(triangle.instanceIndex)];
 
-        // Commit to one RGB channel at the first dispersive interface. See docs/DERIVATIONS.md "Dispersion channel commitment".
+        // Commit to one RGB channel at the first dispersive interface; sum == 0 is reachable, rrMinProb keeps zero-throughput paths alive.
         if (!heroChannel.has_value() && instanceSettings.abbe > 0.0F &&
             instanceSettings.transmissionFactor > 0.0F) {
             const float sum = throughput.x + throughput.y + throughput.z;

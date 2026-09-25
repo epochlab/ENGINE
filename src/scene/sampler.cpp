@@ -36,7 +36,7 @@ constexpr std::array<SobolPolynomial, kSobolDimensions - 1> kSobolPolynomials = 
 #include "sobol_direction_seeds.inc"
 }};
 
-// Direction vectors V from Joe & Kuo (ACM Alg. 659), derived at static init. See docs/DERIVATIONS.md "Sobol padding and net quality".
+// Direction vectors V from Joe & Kuo (ACM Alg. 659), derived at static init.
 using SobolDirections = std::array<std::array<std::uint32_t, kSobolBits>, kSobolDimensions>;
 
 SobolDirections buildSobolDirections() {
