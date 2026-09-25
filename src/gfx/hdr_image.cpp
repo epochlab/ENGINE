@@ -5,6 +5,7 @@
 #include <cmath>
 #include <exception>
 #include <iostream>
+#include <thread>
 #include <type_traits>
 #include <utility>
 
@@ -14,6 +15,7 @@
 #include <OpenEXR/ImfInputFile.h>
 #include <OpenEXR/ImfOutputFile.h>
 #include <OpenEXR/ImfStandardAttributes.h>
+#include <OpenEXR/ImfThreading.h>
 
 namespace pathtracer::gfx {
 
@@ -53,6 +55,16 @@ struct ExrPixels {
     std::vector<T> rgba;
 };
 
+// OpenEXR's global thread count defaults to 0, leaving every compressed scanline block to decompress on the calling thread.
+void ensureExrThreadPool() {
+    static const int configured = [] {
+        const int threads = static_cast<int>(std::max(1U, std::thread::hardware_concurrency()));
+        Imf::setGlobalThreadCount(threads);
+        return threads;
+    }();
+    (void)configured;
+}
+
 std::size_t texelIndex(int x, int y, int width) {
     return ((static_cast<std::size_t>(y) * static_cast<std::size_t>(width)) + static_cast<std::size_t>(x)) * 4;
 }
@@ -76,6 +88,7 @@ glm::vec4 widenTexel(const std::vector<T>& rgba, std::size_t idx) {
 template <typename T>
 std::optional<ExrPixels<T>> readExrRgba(const std::string& path) {
     try {
+        ensureExrThreadPool();
         Imf::InputFile file(path.c_str());
         const Imath::Box2i& dw = file.header().dataWindow();
         if (dw.isEmpty()) {
@@ -216,6 +229,11 @@ glm::vec4 sampleBilinear(const ImageTexture& image, glm::vec2 uv, WrapMode wrap)
     };
     const int wy0 = resolveV(y0);
     const int wy1 = resolveV(y0 + 1);
+
+    // Four taps resolving to one texel make bilinear exactly that texel: the mix would only round a constant, and 1x1 maps are the norm.
+    if (wx0 == wx1 && wy0 == wy1) {
+        return image.texel(wx0, wy0);
+    }
 
     return withTexels(image, [&](const auto& rgba) {
         const auto texel = [&](int x, int y) { return widenTexel(rgba, texelIndex(x, y, image.width)); };
