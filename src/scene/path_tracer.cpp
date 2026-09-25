@@ -86,6 +86,19 @@ float filterWeight(float distance) {
     return kFilterTable[static_cast<std::size_t>(t * static_cast<float>(kFilterTableSize - 1))];
 }
 
+// Largest tile at or below kPathTraceTileSize still giving the pool kTilesPerThread each: at interactive scale 96 leaves most workers idle.
+int pathTraceTileSize(int width, int height, unsigned int threadCount) {
+    const auto tileCount = [width, height](int size) {
+        return ((width + size - 1) / size) * ((height + size - 1) / size);
+    };
+    const int wanted = static_cast<int>(threadCount) * kTilesPerThread;
+    int size = kPathTraceTileSize;
+    while (size > kMinPathTraceTileSize && tileCount(size) < wanted) {
+        size = std::max(size / 2, kMinPathTraceTileSize);
+    }
+    return size;
+}
+
 struct TraceResult {
     glm::vec3 radiance;
     int terminationBounce;  // bounce index the path stopped at (== maxBounces + 1 if depth-capped)
@@ -412,24 +425,26 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
     const float aspect = static_cast<float>(width) / static_cast<float>(height);
     // Constant for the whole pass, so built once: the aspect-taking primaryRay rebuilds it on every one of millions of rays.
     const Camera::ViewBasis basis = camera.viewBasis(aspect);
-    const int tilesX = (width + kPathTraceTileSize - 1) / kPathTraceTileSize;
-    const int tilesY = (height + kPathTraceTileSize - 1) / kPathTraceTileSize;
+    // Derived from the target, not fixed: the interactive scale renders a fraction of the frame, where a 96 px grid is only a few tiles.
+    const int tileSize = pathTraceTileSize(width, height, threadPool.threadCount());
+    const int tilesX = (width + tileSize - 1) / tileSize;
+    const int tilesY = (height + tileSize - 1) / tileSize;
 
     // One worker owns every output pixel of one tile and traces every pixel within the filter radius: the halo is traced twice.
     const auto renderTile = [&](int tileIndex) {
-        const int tileX0 = (tileIndex % tilesX) * kPathTraceTileSize;
-        const int tileY0 = (tileIndex / tilesX) * kPathTraceTileSize;
-        const int tileX1 = std::min(tileX0 + kPathTraceTileSize, width);
-        const int tileY1 = std::min(tileY0 + kPathTraceTileSize, height);
+        const int tileX0 = (tileIndex % tilesX) * tileSize;
+        const int tileY0 = (tileIndex / tilesX) * tileSize;
+        const int tileX1 = std::min(tileX0 + tileSize, width);
+        const int tileY1 = std::min(tileY0 + tileSize, height);
 
         // Stack-local, not thread_local: zeroed by construction, so the reset boundary is the tile boundary with no bookkeeping.
         pathtracer::debug::RayCounts tileRays;
 
-        // Reused for the worker's life, so a pass allocates nothing; sized for a full tile so the stride stays kPathTraceTileSize.
+        // Reused for the worker's life, so a pass allocates nothing; sized for a full tile so the stride stays tileSize.
 
         // NOLINTNEXTLINE(misc-use-internal-linkage)
         thread_local std::vector<float> accumulator;
-        accumulator.assign(static_cast<std::size_t>(kPathTraceTileSize) * kPathTraceTileSize * kTileLanes, 0.0F);
+        accumulator.assign(static_cast<std::size_t>(tileSize) * tileSize * kTileLanes, 0.0F);
 
         for (int y = std::max(tileY0 - kFilterExtent, 0);
              y < std::min(tileY1 + kFilterExtent, height); ++y) {
@@ -488,7 +503,7 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
                             }
                             float* lanes =
                                 accumulator.data() +
-                                ((static_cast<std::size_t>(splatY - tileY0) * kPathTraceTileSize) +
+                                ((static_cast<std::size_t>(splatY - tileY0) * tileSize) +
                                  static_cast<std::size_t>(splatX - tileX0)) * kTileLanes;
                             for (int lane = 0; lane < kSampleLanes; ++lane) {
                                 lanes[lane] += weight * values[lane];
@@ -503,7 +518,7 @@ void renderPathTraced(const Camera& camera, const EmbreeAccel& accel,
         for (int y = tileY0; y < tileY1; ++y) {
             for (int x = tileX0; x < tileX1; ++x) {
                 const float* lanes = accumulator.data() +
-                                      ((static_cast<std::size_t>(y - tileY0) * kPathTraceTileSize) +
+                                      ((static_cast<std::size_t>(y - tileY0) * tileSize) +
                                        static_cast<std::size_t>(x - tileX0)) * kTileLanes;
                 // Always positive: a pixel's own samples land within half a pixel of its centre, well inside the 1.5px support.
                 const float invWeight = 1.0F / lanes[kSampleLanes];
