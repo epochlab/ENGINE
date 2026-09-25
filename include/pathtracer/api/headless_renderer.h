@@ -64,8 +64,8 @@ public:
 
     // profile.json's authored camera, the one render_beauty and the viewer both start from.
     [[nodiscard]] const pathtracer::scene::Camera& defaultCamera() const { return defaultCamera_; }
-    [[nodiscard]] int defaultWidth() const { return profile_.window.width; }
-    [[nodiscard]] int defaultHeight() const { return profile_.window.height; }
+    [[nodiscard]] int defaultWidth() const { return profile_.render.width; }
+    [[nodiscard]] int defaultHeight() const { return profile_.render.height; }
 
     // Blocking. outputs parallels request.aovs, caller-allocated at width * height * aovChannels(aovs[i]); each producer runs at most once.
     [[nodiscard]] bool render(const Request& request, std::span<float* const> outputs,

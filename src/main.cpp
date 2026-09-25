@@ -46,6 +46,7 @@
 #include "pathtracer/gfx/post_process_pass.h"
 #include "pathtracer/gfx/shader_program.h"
 #include "pathtracer/gfx/texture.h"
+#include "pathtracer/gfx/viewport.h"
 #include "pathtracer/platform/display_link.h"
 #include "pathtracer/platform/window.h"
 #include "pathtracer/scene/camera.h"
@@ -74,7 +75,7 @@ const char* lutName(pathtracer::gfx::OcioDisplayTransform::Lut lut) {
     return lut == Lut::SRGB ? "sRGB" : lut == Lut::Rec709 ? "Rec709" : "Raw";
 }
 
-// Camera and framebuffer geometry, all renderRasterGBuffer's output depends on: factored so the two producers compare the same fields.
+// Camera geometry, every renderRasterGBuffer input that can change: factored so the two producers compare the same fields.
 struct ViewInputState {
     glm::vec3 cameraPosition{0.0F};
     float cameraYawDegrees = 0.0F;
@@ -82,8 +83,6 @@ struct ViewInputState {
     float focalLengthMm = 0.0F;
     // The only FilmBack component feeding the render; widthMm is display-only, so tracking it would retrace for no visible effect.
     float filmBackHeightMm = 0.0F;
-    int fbWidth = 0;
-    int fbHeight = 0;
 
     bool operator==(const ViewInputState&) const = default;
 };
@@ -239,7 +238,10 @@ struct AppResources {
     std::shared_ptr<const void> pathTraceDisplayedOwner;
     PathTraceTriggerState lastPathTraceTrigger;  // sentinel-initialized, see its own doc comment
     RasterTriggerState lastRasterTrigger;        // the same, for the rasterizer's independent refresh
-    // Render resolution as a fraction of the framebuffer: renderScale settled, interactiveRenderScale while input changes.
+    // The authored image in pixels (profile.json render.width/height), fixed for the session and independent of the window.
+    int imageWidth;
+    int imageHeight;
+    // Fraction of imageWidth x imageHeight traced: renderScale settled, interactiveRenderScale while input changes.
     float renderScale;
     float interactiveRenderScale;
     std::chrono::steady_clock::time_point lastInputChange;
@@ -475,8 +477,8 @@ std::optional<AppResources> initializeApp(const pathtracer::config::SceneConfig&
         scenePath.c_str(),
         sceneConfig.environment.hdriPath.c_str(),
         pathtracer::debug::kAovNames[profileConfig.render.defaultAov],
-        profileConfig.window.width,
-        profileConfig.window.height,
+        profileConfig.render.width,
+        profileConfig.render.height,
         profileConfig.render.renderScale,
         profileConfig.render.interactiveRenderScale,
         basePathTraceSettings.samplesPerPixel,
@@ -564,6 +566,8 @@ std::optional<AppResources> initializeApp(const pathtracer::config::SceneConfig&
         .pathTraceDisplayedOwner = nullptr,
         .lastPathTraceTrigger = PathTraceTriggerState{},
         .lastRasterTrigger = RasterTriggerState{},
+        .imageWidth = profileConfig.render.width,
+        .imageHeight = profileConfig.render.height,
         .renderScale = profileConfig.render.renderScale,
         .interactiveRenderScale = profileConfig.render.interactiveRenderScale,
         .lastInputChange = std::chrono::steady_clock::time_point{},
@@ -739,21 +743,40 @@ PathTracedAovSource selectPathTracedImage(
     return {};
 }
 
+// Cursor offset within imageRect, in framebuffer pixels with GL's bottom-left origin. Nullopt off-window or over a letterbox bar.
+std::optional<std::pair<int, int>> cursorInImageRect(const pathtracer::platform::Window& window,
+                                                      pathtracer::gfx::ViewportRect imageRect) {
+    const auto [windowWidth, windowHeight] = window.windowSize();
+    const auto [fbWidth, fbHeight] = window.framebufferSize();
+    if (windowWidth <= 0 || windowHeight <= 0 || fbWidth <= 0 || fbHeight <= 0) {
+        return std::nullopt;
+    }
+    const auto [cursorX, cursorY] = window.cursorPosition();
+    if (cursorX < 0.0 || cursorY < 0.0 || cursorX >= windowWidth || cursorY >= windowHeight) {
+        return std::nullopt;
+    }
+    // Points to pixels by the framebuffer ratio, which is the display's content scale, then flipped into GL's bottom-up rows.
+    const int x = static_cast<int>(cursorX / windowWidth * fbWidth) - imageRect.x;
+    const int y = (fbHeight - 1 - static_cast<int>(cursorY / windowHeight * fbHeight)) - imageRect.y;
+    if (x < 0 || y < 0 || x >= imageRect.width || y >= imageRect.height) {
+        return std::nullopt;
+    }
+    return std::pair{x, y};
+}
+
 // Bottom-right HUD probe: post-filter AOVs read back the composited framebuffer texel, every other AOV its own raw HdrImage texel.
 pathtracer::debug::PixelProbeSample samplePixelProbe(
     const pathtracer::platform::Window& window,
     const std::shared_ptr<const pathtracer::scene::PathTraceResult>& pathTraceSnapshot,
-    const AppResources& app, pathtracer::debug::AovId aovId, float& probeMs) {
+    const AppResources& app, pathtracer::debug::AovId aovId, pathtracer::gfx::ViewportRect imageRect,
+    float& probeMs) {
     // Timed here so updateHud stays one screen. For the post-filter AOVs this is a synchronous GPU stall, the one place the thread blocks.
     const pathtracer::debug::ScopedCpuTimer probeTimer(probeMs);
-    const auto [windowWidth, windowHeight] = window.windowSize();
-    if (windowWidth <= 0 || windowHeight <= 0) {
+    const std::optional<std::pair<int, int>> cursor = cursorInImageRect(window, imageRect);
+    if (!cursor.has_value()) {
         return {};
     }
-    const auto [cursorX, cursorY] = window.cursorPosition();
-    if (cursorX < 0.0 || cursorY < 0.0 || cursorX >= windowWidth || cursorY >= windowHeight) {
-        return {};
-    }
+    const auto [rectX, rectY] = *cursor;
 
     const bool isPostFilterAov =
         aovId == pathtracer::debug::AovId::HSV || aovId == pathtracer::debug::AovId::Luminance ||
@@ -764,27 +787,20 @@ pathtracer::debug::PixelProbeSample samplePixelProbe(
         if (source.image == nullptr) {
             return {};
         }
-        const int imgX = std::min(source.image->width - 1,
-                                   static_cast<int>(cursorX / windowWidth * source.image->width));
-        const int imgY = std::min(source.image->height - 1,
-                                   static_cast<int>(cursorY / windowHeight * source.image->height));
+        // Normalised by the rect, not the window: the image occupies only the rect, and its rows run top-down.
+        const double u = rectX / static_cast<double>(imageRect.width);
+        const double v = (imageRect.height - 1 - rectY) / static_cast<double>(imageRect.height);
+        const int imgX = std::min(source.image->width - 1, static_cast<int>(u * source.image->width));
+        const int imgY = std::min(source.image->height - 1, static_cast<int>(v * source.image->height));
         const glm::vec3 texel = sampleTexel(*source.image, imgX, imgY);
         const glm::vec3 color =
             aovId == pathtracer::debug::AovId::Beauty ? applyBeautyDisplayTransform(texel, app) : texel;
         return {true, glm::vec4(color, 1.0F)};
     }
 
-    const auto [fbWidth, fbHeight] = window.framebufferSize();
-    if (fbWidth <= 0 || fbHeight <= 0) {
-        return {};
-    }
-    const int fbX = std::min(fbWidth - 1, static_cast<int>(cursorX / windowWidth * fbWidth));
-    const int fbY = std::min(fbHeight - 1,
-                              fbHeight - 1 - static_cast<int>(cursorY / windowHeight * fbHeight));
-
     std::array<unsigned char, 4> pixel{};
     GL_CALL(glBindFramebuffer(GL_READ_FRAMEBUFFER, 0));
-    GL_CALL(glReadPixels(fbX, fbY, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel.data()));
+    GL_CALL(glReadPixels(imageRect.x + rectX, imageRect.y + rectY, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel.data()));
     return {true, glm::vec4(pixel[0], pixel[1], pixel[2], pixel[3]) / 255.0F};
 }
 
@@ -845,10 +861,10 @@ void ensurePathTraceDisplayTexture(AppResources& app, const std::shared_ptr<cons
     app.pathTraceDisplayedGeneration = generation;
 }
 
-// Nothing to show yet, or the selected AOV has no buffer: clear the framebuffer rather than leave stale contents on screen.
-void clearToBlack(int winWidth, int winHeight) {
+// Clears the whole viewport, so the letterbox bars are black and an AOV with no buffer leaves no stale contents on screen.
+void clearToBlack(int viewportWidth, int viewportHeight) {
     GL_CALL(glBindFramebuffer(GL_FRAMEBUFFER, 0));
-    GL_CALL(glViewport(0, 0, winWidth, winHeight));
+    GL_CALL(glViewport(0, 0, viewportWidth, viewportHeight));
     GL_CALL(glClearColor(0.0F, 0.0F, 0.0F, 1.0F));
     GL_CALL(glClear(GL_COLOR_BUFFER_BIT));
 }
@@ -856,8 +872,10 @@ void clearToBlack(int winWidth, int winHeight) {
 // Blits the selected AOV through the shared OCIO path. Beauty uses the user's LUT; everything else forces Raw, not being radiance.
 void presentFrame(AppResources& app,
                    const std::shared_ptr<const pathtracer::scene::PathTraceResult>& pathTraceSnapshot,
-                   int winWidth, int winHeight) {
+                   int viewportWidth, int viewportHeight, pathtracer::gfx::ViewportRect imageRect) {
     const auto aovId = static_cast<pathtracer::debug::AovId>(app.aov);
+    // Unconditional: the draw covers only imageRect, so the bars need clearing whether or not there is an image to draw into it.
+    clearToBlack(viewportWidth, viewportHeight);
 
     const bool isPostFilterAov =
         aovId == pathtracer::debug::AovId::HSV || aovId == pathtracer::debug::AovId::Luminance ||
@@ -865,7 +883,6 @@ void presentFrame(AppResources& app,
     if (isPostFilterAov) {
         // 2D filters of the beauty image, not per-AOV buffers: all four read path-traced Beauty, so they need a completed pass.
         if (!pathTraceSnapshot) {
-            clearToBlack(winWidth, winHeight);
             return;
         }
         const bool isHsv = aovId == pathtracer::debug::AovId::HSV;
@@ -881,8 +898,7 @@ void presentFrame(AppResources& app,
             // Engaged by the ensurePathTraceDisplayTexture call above, which the analyser cannot carry through the call.
 
             // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
-            app.postProcess.draw(app.pathTraceDisplayTexture->id(), app.hsvDisplayShader,
-                                  {winWidth, winHeight});
+            app.postProcess.draw(app.pathTraceDisplayTexture->id(), app.hsvDisplayShader, imageRect);
         } else {
             app.edgeFilterShader.use();
             const int filterMode = aovId == pathtracer::debug::AovId::Gabor ? 1
@@ -892,8 +908,7 @@ void presentFrame(AppResources& app,
             GL_CALL(glUniform1i(app.uEdgeChannelViewLoc, app.channelView));
             GL_CALL(glUniform1f(app.uEdgeExposureLoc, exposure));
             GL_CALL(glUniform1i(app.uEdgeInvertLoc, app.invert ? 1 : 0));
-            app.postProcess.draw(app.pathTraceDisplayTexture->id(), app.edgeFilterShader,
-                                  {winWidth, winHeight});
+            app.postProcess.draw(app.pathTraceDisplayTexture->id(), app.edgeFilterShader, imageRect);
         }
         return;
     }
@@ -919,34 +934,27 @@ void presentFrame(AppResources& app,
         // Beauty only -- an artistic lens effect over the rendered image, not meaningful on a raw data AOV like Normal/Depth/Albedo.
         app.ocioTransform.setAberration(isBeauty ? app.aberrationStrength : 0.0F);
         app.ocioTransform.bind();
-        app.postProcess.draw(app.pathTraceDisplayTexture->id(), app.ocioTransform.activeShader(),
-                              {winWidth, winHeight});
-        return;
+        app.postProcess.draw(app.pathTraceDisplayTexture->id(), app.ocioTransform.activeShader(), imageRect);
     }
-
-    clearToBlack(winWidth, winHeight);
 }
 
 // Non-blocking: hands a fresh request to PathTraceDriver, which restarts accumulation at this pose and size on its own thread.
-std::uint64_t requestPathTrace(AppResources& app, const pathtracer::scene::Camera& camera, int winWidth,
-                               int winHeight) {
+std::uint64_t requestPathTrace(AppResources& app, const pathtracer::scene::Camera& camera, int traceWidth,
+                               int traceHeight) {
     return app.pathTraceDriver->requestTrace(pathtracer::scene::PathTraceDriver::Request{
-        camera, winWidth, winHeight, glm::radians(static_cast<float>(app.envRotationDegrees)),
+        camera, traceWidth, traceHeight, glm::radians(static_cast<float>(app.envRotationDegrees)),
         app.showSky, app.envLightEnabled, std::exp2(app.envExposureStops), app.pathTraceSettings,
         app.maxSamples});
 }
 
-// Once per frame, re-tracing on any input that changes the image. The rasterizer is synchronous, ~150ms at 2048x1152, so it stays gated.
+// Once per frame, re-tracing on any input that changes the image. The rasterizer is synchronous, 21 ms at 1024x576, so it stays gated.
 void requestPathTraceIfTriggerChanged(AppResources& app, const pathtracer::scene::Camera& camera,
-                                       int fbWidth, int fbHeight,
                                        std::chrono::steady_clock::time_point now) {
     const ViewInputState view{camera.position(),
                                app.debugCamera.yawDegrees(),
                                app.debugCamera.pitchDegrees(),
                                app.debugCamera.focalLengthMm(),
-                               app.debugCamera.filmBack().heightMm,
-                               fbWidth,
-                               fbHeight};
+                               app.debugCamera.filmBack().heightMm};
     const PathTraceInputState input{view, app.envRotationDegrees, app.showSky, app.envLightEnabled,
                                      app.envExposureStops};
 
@@ -957,8 +965,8 @@ void requestPathTraceIfTriggerChanged(AppResources& app, const pathtracer::scene
     const bool settled =
         std::chrono::duration<double>(now - app.lastInputChange).count() >= kInteractiveSettleSeconds;
     const float renderScale = settled ? app.renderScale : app.interactiveRenderScale;
-    const int renderWidth = scaledExtent(fbWidth, renderScale);
-    const int renderHeight = scaledExtent(fbHeight, renderScale);
+    const int traceWidth = scaledExtent(app.imageWidth, renderScale);
+    const int traceHeight = scaledExtent(app.imageHeight, renderScale);
     const bool needsLightTransport = aovNeedsLightTransport(static_cast<pathtracer::debug::AovId>(app.aov));
 
     // Park the driver when the selected AOV is not its own: otherwise it accumulates an off-screen image on every core.
@@ -966,7 +974,7 @@ void requestPathTraceIfTriggerChanged(AppResources& app, const pathtracer::scene
 
     const PathTraceTriggerState pathTrace{input, renderScale};
     if (pathTrace != app.lastPathTraceTrigger) {
-        const std::uint64_t generation = requestPathTrace(app, camera, renderWidth, renderHeight);
+        const std::uint64_t generation = requestPathTrace(app, camera, traceWidth, traceHeight);
         if (app.bench) {
             app.bench->restart(generation);
         }
@@ -974,7 +982,7 @@ void requestPathTraceIfTriggerChanged(AppResources& app, const pathtracer::scene
     }
 
     const RasterTriggerState raster{view, renderScale};
-    if (needsLightTransport || raster == app.lastRasterTrigger || renderWidth <= 0 || renderHeight <= 0) {
+    if (needsLightTransport || raster == app.lastRasterTrigger || traceWidth <= 0 || traceHeight <= 0) {
         return;
     }
     {
@@ -982,7 +990,7 @@ void requestPathTraceIfTriggerChanged(AppResources& app, const pathtracer::scene
         pathtracer::scene::renderRasterGBuffer(camera, app.stumpModel.shadingTriangles,
                                             app.stumpModel.instances, app.perInstanceSettings,
                                             app.instanceBounds,
-                                            renderWidth, renderHeight, *app.rasterThreadPool,
+                                            traceWidth, traceHeight, *app.rasterThreadPool,
                                             *app.rasterGBuffer);
     }
     app.lastRasterTrigger = raster;
@@ -1011,8 +1019,7 @@ void updateOverRangeStats(AppResources& app,
 void updateHud(AppResources& app, const pathtracer::platform::Window& window,
                const pathtracer::scene::Camera& camera,
                const std::shared_ptr<const pathtracer::scene::PathTraceResult>& pathTraceSnapshot,
-               int winWidth,
-               int winHeight) {
+               pathtracer::gfx::ViewportRect imageRect) {
     const pathtracer::debug::PathTracedStatus pathTracedStatus{
         pathTraceSnapshot != nullptr,
         // PassRecord is the single source of truth for pass timing now; the HUD wants seconds, the record carries milliseconds.
@@ -1022,8 +1029,8 @@ void updateHud(AppResources& app, const pathtracer::platform::Window& window,
         static_cast<int>(app.stumpModel.instances.size()),
         app.totalTriangles,
         app.totalPoints,
-        winWidth,
-        winHeight,
+        app.imageWidth,
+        app.imageHeight,
     };
     const pathtracer::debug::HudFrameData hudFrameData{
         app.gpuInfo,
@@ -1056,7 +1063,7 @@ void updateHud(AppResources& app, const pathtracer::platform::Window& window,
     // Only the HUD reads it, and for the post-filter AOVs it is a synchronous glReadPixels: with the HUD hidden that stall bought nothing.
     const pathtracer::debug::PixelProbeSample pixelProbe =
         app.showHud ? samplePixelProbe(window, pathTraceSnapshot, app,
-                                        static_cast<pathtracer::debug::AovId>(app.aov), app.stages.probeMs)
+                                        static_cast<pathtracer::debug::AovId>(app.aov), imageRect, app.stages.probeMs)
                      : pathtracer::debug::PixelProbeSample{};
     const pathtracer::debug::ScopedCpuTimer hudTimer(app.stages.hudMs);
     if (app.showHud) {
@@ -1081,10 +1088,10 @@ void updateHud(AppResources& app, const pathtracer::platform::Window& window,
 // The per-frame read-backs after the composited image lands and before the HUD draws: only the histogram reads the framebuffer.
 void sampleDisplayedFrame(AppResources& app,
                            const std::shared_ptr<const pathtracer::scene::PathTraceResult>& pathTraceSnapshot,
-                           int winWidth, int winHeight) {
+                           pathtracer::gfx::ViewportRect imageRect) {
     {
         const pathtracer::debug::ScopedCpuTimer histogramTimer(app.stages.histogramMs);
-        app.histogram.update(winWidth, winHeight);
+        app.histogram.update(imageRect);
     }
     updateOverRangeStats(app, pathTraceSnapshot);
 
@@ -1100,7 +1107,7 @@ void sampleDisplayedFrame(AppResources& app,
 // Assembles one DashboardFrame and hands it over; the dashboard decides whether to redraw. Split so renderFrame stays readable.
 void updateDashboard(AppResources& app,
                      const std::shared_ptr<const pathtracer::scene::PathTraceResult>& pathTraceSnapshot, float frameMs,
-                     int winWidth, int winHeight) {
+                     int viewportWidth, int viewportHeight) {
     const pathtracer::debug::PassRecord pass =
         app.pathTraceDriver != nullptr ? app.pathTraceDriver->lastPassRecord()
                                         : pathtracer::debug::PassRecord{};
@@ -1124,10 +1131,12 @@ void updateDashboard(AppResources& app,
         static_cast<int>(app.stumpModel.instances.size()),
         static_cast<int>(app.quadLights.size()),
         static_cast<int>(app.totalTriangles),
-        winWidth,
-        winHeight,
+        app.imageWidth,
+        app.imageHeight,
         pass.width,
         pass.height,
+        viewportWidth,
+        viewportHeight,
         app.lastPathTraceTrigger.renderScale,
         interactive,
         app.refreshHz,
@@ -1344,9 +1353,12 @@ void renderFrame(pathtracer::platform::Window& window, pathtracer::platform::Dis
         const pathtracer::debug::ScopedCpuTimer cameraTimer(app.stages.cameraMs);
         return updateCamera(window, app, dtSeconds);
     }();
-    const auto [winWidth, winHeight] = window.framebufferSize();
+    const auto [viewportWidth, viewportHeight] = window.framebufferSize();
+    // The window only frames the image; what is traced is the authored resolution, so a resize never restarts an accumulation.
+    const pathtracer::gfx::ViewportRect imageRect =
+        pathtracer::gfx::fitAspect(app.imageWidth, app.imageHeight, viewportWidth, viewportHeight);
 
-    requestPathTraceIfTriggerChanged(app, camera, winWidth, winHeight, frameNow);
+    requestPathTraceIfTriggerChanged(app, camera, frameNow);
 
     // Read before the snapshot so a final record guarantees the snapshot holds the final image -- see captureBenchFrame.
     const pathtracer::debug::PassRecord benchPass =
@@ -1361,14 +1373,14 @@ void renderFrame(pathtracer::platform::Window& window, pathtracer::platform::Dis
     {
         // Inclusive of the display-texture upload inside it; the blit's own cost is the difference, which the dashboard subtracts.
         const pathtracer::debug::ScopedCpuTimer presentTimer(app.stages.presentMs);
-        presentFrame(app, pathTraceSnapshot, winWidth, winHeight);
+        presentFrame(app, pathTraceSnapshot, viewportWidth, viewportHeight, imageRect);
     }
     app.postTimer.end();
 
     // Captured after the composited image lands in the default framebuffer, before the HUD draws on top of it.
-    sampleDisplayedFrame(app, pathTraceSnapshot, winWidth, winHeight);
+    sampleDisplayedFrame(app, pathTraceSnapshot, imageRect);
 
-    updateHud(app, window, camera, pathTraceSnapshot, winWidth, winHeight);
+    updateHud(app, window, camera, pathTraceSnapshot, imageRect);
 
     {
         const pathtracer::debug::ScopedCpuTimer swapTimer(app.stages.swapMs);
@@ -1378,7 +1390,7 @@ void renderFrame(pathtracer::platform::Window& window, pathtracer::platform::Dis
 
     if (app.statsEnabled) {
         // After swapBuffers, so the dashboard's write(2) lands in the frame's slack. It times its own draw, the stages being zeroed first.
-        updateDashboard(app, pathTraceSnapshot, dtSeconds * 1000.0F, winWidth, winHeight);
+        updateDashboard(app, pathTraceSnapshot, dtSeconds * 1000.0F, viewportWidth, viewportHeight);
     }
     if (app.bench) {
         captureBenchFrame(window, app, *app.bench, benchPass, pathTraceSnapshot, dtSeconds * 1000.0F, frameNow);
@@ -1497,7 +1509,7 @@ int main(int argc, char** argv) {
             exitCode = EXIT_FAILURE;
         } else {
             // Window construction creates the GL 4.1 core context and makes it current; a fatal failure inside exits the process.
-            pathtracer::platform::Window window(profileConfig->window.width, profileConfig->window.height,
+            pathtracer::platform::Window window(profileConfig->render.width, profileConfig->render.height,
                                              "PATHTRACER");
 
             glewExperimental = GL_TRUE;

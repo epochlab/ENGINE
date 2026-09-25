@@ -363,9 +363,10 @@ void PerfDashboard::drawFooter(const DashboardFrame& frame) {
             static_cast<double>(frame.systemTotalBytes) / kGiB);
     append("\x1b[2K SCENE   %s   %d inst   %d light   %d tri   aov %s\n", frame.sceneName,
             frame.instanceCount, frame.lightCount, frame.triangleCount, frame.aovName);
-    append("\x1b[2K RENDER  window %dx%d   scale %.2f%s   render %dx%d\n", frame.windowWidth,
-            frame.windowHeight, static_cast<double>(frame.renderScale),
-            frame.interactiveScale ? " interactive" : "", frame.renderWidth, frame.renderHeight);
+    append("\x1b[2K RENDER  image %dx%d   scale %.2f%s   trace %dx%d   window %dx%d\n", frame.imageWidth,
+            frame.imageHeight, static_cast<double>(frame.renderScale),
+            frame.interactiveScale ? " interactive" : "", frame.traceWidth, frame.traceHeight,
+            frame.viewportWidth, frame.viewportHeight);
     append("\x1b[2K==============================================================================\n");
     // Blank line inside the block, not after: it separates the table from the shell cursor and the next cursor-up still erases it.
     append("\x1b[2K\n");

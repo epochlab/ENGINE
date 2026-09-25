@@ -32,7 +32,7 @@ std::optional<pathtracer::gfx::ScalarType> parseBitDepth(const nlohmann::json& b
 }
 
 // The counts loadProfileConfig otherwise takes on trust. Nothing downstream re-checks them, and each has a concrete failure mode.
-bool validCounts(const WindowConfig& window, const PathTracerConfig& pathTracer, const std::string& path) {
+bool validCounts(const RenderConfig& render, const PathTracerConfig& pathTracer, const std::string& path) {
     bool ok = true;
     const auto atLeast = [&](const char* name, int v, int low) {
         if (v < low) {
@@ -48,9 +48,9 @@ bool validCounts(const WindowConfig& window, const PathTracerConfig& pathTracer,
     atLeast("russianRouletteStartBounce", pathTracer.russianRouletteStartBounce, 0);
     // Zero is the documented unbounded case; negative would cap accumulation below the first pass.
     atLeast("maxSamples", pathTracer.maxSamples, 0);
-    // The framebuffer the render scale multiplies, and the denominator of the primary ray's aspect ratio.
-    atLeast("window.width", window.width, 1);
-    atLeast("window.height", window.height, 1);
+    // The traced image the render scale multiplies, and the denominator of the primary ray's aspect ratio.
+    atLeast("render.width", render.width, 1);
+    atLeast("render.height", render.height, 1);
     return ok;
 }
 
@@ -67,7 +67,6 @@ std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
         nlohmann::json j;
         file >> j;
 
-        const nlohmann::json& window = j.at("window");
         const nlohmann::json& camera = j.at("camera");
         const nlohmann::json& controls = j.at("controls");
         const nlohmann::json& render = j.at("render");
@@ -92,8 +91,8 @@ std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
             return std::nullopt;
         }
 
-        const int windowWidth = window.at("width").get<int>();
-        const int windowHeight = window.at("height").get<int>();
+        const int renderWidth = render.at("width").get<int>();
+        const int renderHeight = render.at("height").get<int>();
         const glm::vec3 position = camera.at("position").get<glm::vec3>();
         const float yawDegrees = camera.at("yawDegrees").get<float>();
         const float pitchDegrees = camera.at("pitchDegrees").get<float>();
@@ -147,9 +146,16 @@ std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
             return std::nullopt;
         }
 
-        const WindowConfig windowConfig{
-            windowWidth,
-            windowHeight,
+        const RenderConfig renderConfig{
+            renderWidth,
+            renderHeight,
+            renderScale,
+            interactiveRenderScale,
+            defaultAov,
+            *defaultLut,
+            vsync,
+            *displayFormat,
+            *textureType,
         };
         const PathTracerConfig pathTracerConfig{
             samplesPerPixel,
@@ -159,12 +165,11 @@ std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
             aoMaxDistance,
             lookaheadDistance,
         };
-        if (!validCounts(windowConfig, pathTracerConfig, path)) {
+        if (!validCounts(renderConfig, pathTracerConfig, path)) {
             return std::nullopt;
         }
 
         return ProfileConfig{
-            windowConfig,
             CameraConfig{
                 position,
                 yawDegrees,
@@ -181,15 +186,7 @@ std::optional<ProfileConfig> loadProfileConfig(const std::string& path) {
                 flySpeed,
                 orbitSensitivity,
             },
-            RenderConfig{
-                renderScale,
-                interactiveRenderScale,
-                defaultAov,
-                *defaultLut,
-                vsync,
-                *displayFormat,
-                *textureType,
-            },
+            renderConfig,
             pathTracerConfig,
         };
     } catch (const nlohmann::json::exception& e) {

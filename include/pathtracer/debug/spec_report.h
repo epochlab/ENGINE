@@ -11,8 +11,8 @@ struct EngineSpec {
     const char* scenePath;
     const char* hdriPath;
     const char* aovName;
-    int windowWidth;
-    int windowHeight;
+    int imageWidth;
+    int imageHeight;
     float renderScale;
     float interactiveRenderScale;
     int samplesPerPass;

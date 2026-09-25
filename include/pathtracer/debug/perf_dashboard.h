@@ -32,10 +32,12 @@ struct DashboardFrame {
     int instanceCount;
     int lightCount;
     int triangleCount;
-    int windowWidth;
-    int windowHeight;
-    int renderWidth;
-    int renderHeight;
+    int imageWidth;   // profile.json's authored resolution, what the spec block prints
+    int imageHeight;
+    int traceWidth;   // imageWidth x renderScale, the last completed pass
+    int traceHeight;
+    int viewportWidth;  // the window's framebuffer, presentation only
+    int viewportHeight;
     float renderScale;
     bool interactiveScale;
     double refreshHz;  // the window's display, measured by DisplayLink

@@ -91,8 +91,8 @@ void printSpec(const EngineSpec& spec, const GpuInfo& gpu) {
         static_cast<double>(spec.bvhBytes) / kMiB);
 
     section("RENDER");
-    row("window", "%dx%d  scale %.2f (interactive %.2f)  aov %s", spec.windowWidth,
-        spec.windowHeight, spec.renderScale, spec.interactiveRenderScale, spec.aovName);
+    row("resolution", "%dx%d  scale %.2f (interactive %.2f)  aov %s", spec.imageWidth,
+        spec.imageHeight, spec.renderScale, spec.interactiveRenderScale, spec.aovName);
     row("path trace", "%u threads  %d px tiles  %d spp/pass  %d bounces  RR@%d",
         spec.pathTraceThreads, spec.tileSize, spec.samplesPerPass, spec.maxBounces,
         spec.russianRouletteStartBounce);

@@ -130,6 +130,7 @@ add_library(pathtracer_core STATIC
     src/debug/power_spectrum.cpp
     src/gfx/hdr_image.cpp
     src/gfx/ocio_cpu_transform.cpp
+    src/gfx/viewport.cpp
     src/scene/bsdf.cpp
     src/scene/camera.cpp
     src/scene/embree_accel.cpp
@@ -280,6 +281,7 @@ target_link_libraries(render_beauty PRIVATE pathtracer_core)
 
 # Timing harness, not a correctness gate, so it stays out of the add_test loop. Same flags as the validators, timing the shipped codegen.
 add_executable(raster_bench tools/raster_bench.cpp)
+target_compile_definitions(raster_bench PRIVATE ASSET_ROOT_DIR="${CMAKE_SOURCE_DIR}/assets")
 pathtracer_target_defaults(raster_bench NATIVE IPO)
 target_link_libraries(raster_bench PRIVATE pathtracer_core)
 

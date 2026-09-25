@@ -1,6 +1,6 @@
 #pragma once
 
-#include <utility>
+#include "pathtracer/gfx/viewport.h"
 
 namespace pathtracer::gfx {
 
@@ -17,9 +17,8 @@ public:
     PostProcessPass(PostProcessPass&& other) noexcept;
     PostProcessPass& operator=(PostProcessPass&& other) noexcept;
 
-    // Binds framebuffer 0, sets the viewport to windowFramebufferSize, binds displayShader and hdrColorTexture on unit 0, draws.
-    void draw(unsigned int hdrColorTexture, const ShaderProgram& displayShader,
-              std::pair<int, int> windowFramebufferSize) const;
+    // Binds framebuffer 0, sets the viewport to imageRect, binds displayShader and hdrColorTexture on unit 0, draws. Never clears.
+    void draw(unsigned int hdrColorTexture, const ShaderProgram& displayShader, ViewportRect imageRect) const;
 
 private:
     unsigned int vao_ = 0;

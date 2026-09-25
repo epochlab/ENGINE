@@ -318,9 +318,9 @@ void drawMemorySection(const HudFrameData& frame) {
     ImGui::Separator();
 }
 
-void drawViewportAndSceneSection(const HudFrameData& frame) {
-    ImGui::TextColored(kCyan, "Viewport");
-    ImGui::Text("%d x %d", frame.sceneStats.viewportWidth, frame.sceneStats.viewportHeight);
+void drawResolutionAndSceneSection(const HudFrameData& frame) {
+    ImGui::TextColored(kCyan, "Resolution");
+    ImGui::Text("%d x %d", frame.sceneStats.imageWidth, frame.sceneStats.imageHeight);
     ImGui::Separator();
 
     ImGui::TextColored(kCyan, "Scene");
@@ -508,7 +508,7 @@ void HudOverlay::draw(const HudFrameData& frame, int& aov, float& focalLengthMm,
     drawGpuSection(frame);
     drawFrameSection(frame);
     drawMemorySection(frame);
-    drawViewportAndSceneSection(frame);
+    drawResolutionAndSceneSection(frame);
 
     if (frame.histogram.hasData()) {
         drawHistogramPanel(frame.histogram.bins(), frame.overRangeFraction, frame.overRangePeakMultiple);

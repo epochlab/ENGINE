@@ -151,7 +151,7 @@ Timing runs append one JSON Lines record each to a local log: `pathtracer -bench
 | Frame pacing | `DisplayLink` (`display_link.mm`): `-[NSView displayLinkWithTarget:selector:]` on a user-interactive-QoS thread wakes the render loop once per vblank of the window's own display, at swap interval 0 with a one-frame GPU fence. NSGL's swap interval lets two swaps through per refresh on current macOS, and GLFW substitutes a fixed 60 Hz `usleep` while occluded, so neither is used. A minimised window, whose link stops ticking, free-runs on the display's period grid. `render.vsync: false` (`profile.json`) skips the vblank wait and runs uncapped, still bounded to one frame in flight by the fence. The measured period is the refresh rate every consumer reports. `swap_ms` still has a tail outside the pathtracer: NSOpenGL's flush makes a synchronous WindowServer query (`SLSFlushSurfaceWithOptionsAndIndex` -> `_CGSWindowIsOrderedIn`). In 7 visible convergences (88k frames), 808 of the 827 1 ms samples that found the render thread blocked inside a swap over a quarter period were in it, and none found it runnable-waiting for a core. Swaps over half a period were 96-98% off-CPU, unchanged with the trace and driver threads at utility QoS (13 vs 9, P = 0.52) and over-represented right after display-texture uploads (7 vs 1.3 expected). A per-frame maximum of `swap_ms` or `frame_ms` therefore measures WindowServer, not the pathtracer |
 | Frame-timing HUD | Ring buffer of recent frame times; rolling FPS/avg/min/max, GPU timer query around the post-process blit — makes blit cost measurable frame to frame |
 | Memory HUD | Live RAM readout plus GPU allocation tracked at alloc/free (the path-traced display texture is the only GPU allocation left) — surfaces a memory regression immediately, not after VRAM exhaustion |
-| Scene stats | Object/triangle/point counts, viewport resolution — a scene-complexity readout |
+| Scene stats | Object/triangle/point counts, plus the authored render resolution — a scene-complexity readout |
 | Debug camera controls | WASD/QE fly, R reset, LMB-drag orbit around a pivot read from the path tracer's own G-buffer (world-space hit position + hit mask at its centre pixel) — interactive navigation without hand-editing camera parameters |
 | Camera framing overlays | Centre crosshair, always on, drawn on the foreground overlay — a composition aid that never contaminates the AOV buffers being debugged |
 | AOV selector | Dropdown across the full AOV set (`aov.h`), plus R/G/B channel-isolation hotkeys, to isolate one signal at a time |
@@ -161,6 +161,10 @@ Timing runs append one JSON Lines record each to a local log: `pathtracer -bench
 ## Session settings (`profile.json`)
 
 Session settings live in `assets/config/profile.json`.
+
+`render.width` and `render.height` are the authored image in **pixels**, and the single authority on what gets traced: the GUI, `render_beauty`, `raster_bench` and the C/Python API all size from them. `renderScale` and `interactiveRenderScale` are fractions of that, not of the window.
+
+The window is an independent viewport. It opens showing the image 1:1 — GLFW reports the display's content scale, so a 1024x576 image is a 512x288-point window on a 2x display — and is then freely resizable. Resizing never changes what is traced and never restarts an accumulation: the image is letterboxed to preserve its aspect, with black bars on the short axis, and magnified with `GL_NEAREST` so one traced pixel reads as one visible block rather than an interpolated value that was never rendered. A 320x180 render can therefore be inspected full-screen. The pixel probe reports nothing over a bar, and the histogram bins the image rect alone.
 
 `render.vsync` caps the frame rate to the display's vblank (`true`) or runs uncapped (`false`); uncapped, the render thread competes with the trace workers for cores, measured at **1.58x** `pass_ms` on cornell and **1.47x** on the stump (8 cores).
 
