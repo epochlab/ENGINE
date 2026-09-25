@@ -440,8 +440,7 @@ glm::vec3 transmitMultiScatter(const BsdfParams& params, float mu, float msPdf, 
 }
 
 // The full reciprocal coupling at wi: the wo half is in lobes.diffuseKd, the wi half the same (1 - coatAlbedo) evaluated here.
-float diffuseKdAt(const BsdfParams& params, const glm::vec3& wi, const LobeProbabilities& lobes) {
-    const AlbedoSplit splitWi = directionalAlbedo(wi.z, params.roughness);
+float diffuseKdAt(const glm::vec3& wi, const LobeProbabilities& lobes, const AlbedoSplit& splitWi) {
     const float coat = coatAlbedo(splitWi, lobes.albedoAvg, lobes.coatF0,
                                    coatFresnelRatio(wi.z, lobes.etaI, lobes.etaT, lobes.coatF0),
                                    lobes.coatFresnelAvg);
@@ -534,29 +533,24 @@ glm::mat3 orthonormalBasisLtc(const glm::vec3& wLocal) {
 }
 
 // Clipped-LTC sample (paper Sec. 4, Listing 3): cosine sampling of the hemisphere clipped to the lobe, so no sample lands below.
-glm::vec3 cltcSample(const glm::vec3& woLocal, float r, glm::vec2 u) {
-    const EonLtcCoeffs m = eonLtcCoeffs(woLocal.z, r);
+glm::vec3 cltcSample(const glm::vec4& m, const glm::mat3& basisT, float s, glm::vec2 u) {
     const float radius = std::sqrt(u.x);
     const float phi = 2.0F * kPi * u.y;
     const float y = radius * std::sin(phi);
-    const float vz = 1.0F / std::sqrt((m.d * m.d) + 1.0F);
-    const float s = 0.5F * (1.0F + vz);
     const float x = -lerp1(std::sqrt(std::max(0.0F, 1.0F - (y * y))), radius * std::cos(phi), s);
     const glm::vec3 wh(x, y, std::sqrt(std::max(0.0F, 1.0F - (x * x) - (y * y))));
-    const glm::vec3 wiUnnormalized((m.a * wh.x) + (m.b * wh.z), m.c * wh.y, (m.d * wh.x) + wh.z);
-    return glm::normalize(orthonormalBasisLtc(woLocal) * wiUnnormalized);
+    const glm::vec3 wiUnnormalized((m.x * wh.x) + (m.y * wh.z), m.z * wh.y, (m.w * wh.x) + wh.z);
+    // Transposing back costs no arithmetic and keeps one stored basis for both directions of the transform.
+    return glm::normalize(glm::transpose(basisT) * wiUnnormalized);
 }
 
 // pdf of cltcSample's distribution at an arbitrary wiLocal (paper Listing 3's cltc_pdf), evaluated independently of how wiLocal arose.
-float cltcPdf(const glm::vec3& woLocal, const glm::vec3& wiLocal, float r) {
-    const EonLtcCoeffs m = eonLtcCoeffs(woLocal.z, r);
-    const glm::vec3 wi = glm::transpose(orthonormalBasisLtc(woLocal)) * wiLocal;
-    const glm::vec3 wh(m.c * (wi.x - (m.b * wi.z)), (m.a - (m.b * m.d)) * wi.y,
-                        -m.c * ((m.d * wi.x) - (m.a * wi.z)));
+float cltcPdf(const glm::vec4& m, const glm::mat3& basisT, float s, const glm::vec3& wiLocal) {
+    const glm::vec3 wi = basisT * wiLocal;
+    const glm::vec3 wh(m.z * (wi.x - (m.y * wi.z)), (m.x - (m.y * m.w)) * wi.y,
+                        -m.z * ((m.w * wi.x) - (m.x * wi.z)));
     const float lenSq = glm::dot(wh, wh);
-    const float detM = m.c * (m.a - (m.b * m.d));
-    const float vz = 1.0F / std::sqrt((m.d * m.d) + 1.0F);
-    const float s = 0.5F * (1.0F + vz);
+    const float detM = m.z * (m.x - (m.y * m.w));
     return (detM * detM) / std::max(lenSq * lenSq, 1e-12F) * std::max(wh.z, 0.0F) / (kPi * s);
 }
 
@@ -568,31 +562,32 @@ float eonUniformMixWeight(float mu, float r) {
 }
 
 // Samples EON's distribution (paper Sec. 4), one-sample MIS between CLTC and uniform. Direction only; pdfEon owns the density.
-glm::vec3 sampleEon(const glm::vec3& woLocal, float r, glm::vec2 u) {
-    const float pUniform = eonUniformMixWeight(woLocal.z, r);
+glm::vec3 sampleEon(const LobeProbabilities& lobes, glm::vec2 u) {
+    const float pUniform = lobes.eonUniformMix;
     // Strict: pUniform is exactly 0 at r=0, where an inclusive test admits u.x==0 and reshuffles it as 0/0, poisoning the pixel with NaN.
     if (u.x < pUniform) {
         u.x /= pUniform;
         return sampleUniformHemisphereEon(u);
     }
     u.x = (u.x - pUniform) / (1.0F - pUniform);
-    return cltcSample(woLocal, r, u);
+    return cltcSample(lobes.eonLtcM, lobes.eonLtcBasisT, lobes.eonLtcS, u);
 }
 
 // pdf of sampleEon's distribution at an arbitrary wiLocal.
-float pdfEon(const glm::vec3& woLocal, const glm::vec3& wiLocal, float r) {
-    const float pUniform = eonUniformMixWeight(woLocal.z, r);
+float pdfEon(const glm::vec3& wiLocal, const LobeProbabilities& lobes) {
+    const float pUniform = lobes.eonUniformMix;
     constexpr float kUniformHemispherePdf = 1.0F / (2.0F * kPi);
-    return (pUniform * kUniformHemispherePdf) + ((1.0F - pUniform) * cltcPdf(woLocal, wiLocal, r));
+    return (pUniform * kUniformHemispherePdf) +
+           ((1.0F - pUniform) * cltcPdf(lobes.eonLtcM, lobes.eonLtcBasisT, lobes.eonLtcS, wiLocal));
 }
 
 LobeEval evaluateDiffuseLobe(const BsdfParams& params, const glm::vec3& wo, const glm::vec3& wi,
-                              const LobeProbabilities& lobes) {
+                              const LobeProbabilities& lobes, const AlbedoSplit& splitWi) {
     if (wi.z <= 0.0F || wo.z <= 0.0F) {
         return {glm::vec3(0.0F), 0.0F};
     }
     const glm::vec3 f = evaluateEon(params.diffuseRho, params.diffuseRoughness, wi, wo);
-    return {f * diffuseKdAt(params, wi, lobes), pdfEon(wo, wi, params.diffuseRoughness)};
+    return {f * diffuseKdAt(wi, lobes, splitWi), pdfEon(wi, lobes)};
 }
 
 // Channel mean of the Fresnel evaluateSpecularLobe applies at a facet, metallic blend included.
@@ -612,7 +607,7 @@ float facetReflectProbability(const BsdfParams& params, float cosTheta, float fD
 
 // Single scatter D*G2*F/(4*ndotV*ndotL) plus the Kulla-Conty lobe, and the VNDF pdf (Heitz 2018 eq.3) times its Jacobian.
 LobeEval evaluateSpecularLobe(const BsdfParams& params, const glm::vec3& wo, const glm::vec3& wi,
-                               float alpha, const LobeProbabilities& lobes) {
+                               float alpha, const LobeProbabilities& lobes, const AlbedoSplit& splitWi) {
     if (wo.z <= 0.0F || wi.z <= 0.0F) {
         return {glm::vec3(0.0F), 0.0F};
     }
@@ -632,10 +627,8 @@ LobeEval evaluateSpecularLobe(const BsdfParams& params, const glm::vec3& wo, con
     const glm::vec3 singleScatter = d * smithVisibility(wo.z, wi.z, alpha) * f;
 
     // Kulla & Conty 2017. Integrates to (1-E(mu_o)) at Favg=1, so a white conductor conserves within the 1% the furnace bounds.
-    const glm::vec3 fms(multiScatterTint(lobes.fresnelAvg.x, lobes.albedoAvg),
-                         multiScatterTint(lobes.fresnelAvg.y, lobes.albedoAvg),
-                         multiScatterTint(lobes.fresnelAvg.z, lobes.albedoAvg));
-    const float albedoWi = directionalAlbedo(wi.z, params.roughness).total();
+    const glm::vec3& fms = lobes.multiScatterFms;
+    const float albedoWi = splitWi.total();
     const glm::vec3 opaqueMs = fms * ((1.0F - lobes.albedoWo) * (1.0F - albedoWi)) /
                                 (kPi * std::max(1.0F - lobes.albedoAvg, 1e-4F));
     // transmitWeight is exactly zero for every opaque material, so skip the escape-shape row rather than mix it away at weight 0.
@@ -693,17 +686,17 @@ LobeProbabilities computeLobeProbabilities(const BsdfParams& params, const glm::
     // Each interface's own cosine mean over the Fresnel its single scatter evaluates; conductorAvg is 0 off the metal path.
     const glm::vec3 fresnelAvg = glm::mix(glm::vec3(dielectricAvg), conductorAvg, params.metallic);
     // msEnergy is exact: opaqueMs integrates to fms*(1-E(mu_o)), since int (1-E(mu_i)) cos = pi*(1-Eavg). Mass need only be proportional.
-    const float msReflectEnergy = ((multiScatterTint(fresnelAvg.x, splitAvg.total()) +
-                                     multiScatterTint(fresnelAvg.y, splitAvg.total()) +
-                                     multiScatterTint(fresnelAvg.z, splitAvg.total())) /
-                                    3.0F) *
-                                   std::max(1.0F - splitWo.total(), 0.0F);
+    const glm::vec3 fms(multiScatterTint(fresnelAvg.x, splitAvg.total()),
+                         multiScatterTint(fresnelAvg.y, splitAvg.total()),
+                         multiScatterTint(fresnelAvg.z, splitAvg.total()));
+    const float msReflectEnergy = ((fms.x + fms.y + fms.z) / 3.0F) * std::max(1.0F - splitWo.total(), 0.0F);
     const float diffuseEnergy =
         diffuseKd * (params.diffuseRho.x + params.diffuseRho.y + params.diffuseRho.z) / 3.0F;
     // R_ss uses the coat's Schlick split with exact-Fresnel rescale, T_ss is (1-fc) scaled by (1-f0). transmitWeight gates entry only.
     const float eta = etaI / etaT;
     const float effectiveTransmission = exiting ? 1.0F : params.transmissionFactor;
     const float transmitWeight = effectiveTransmission * (1.0F - params.metallic);
+    const EonLtcCoeffs eonLtc = eonLtcCoeffs(wo.z, params.diffuseRoughness);
     LobeProbabilities lobes{.specular = 0.0F,
                             .diffuse = 0.0F,
                             .msReflect = 0.0F,
@@ -719,6 +712,11 @@ LobeProbabilities computeLobeProbabilities(const BsdfParams& params, const glm::
                             .coatF0 = coatF0,
                             .coatFresnelAvg = dielectricAvg,
                             .fresnelAvg = fresnelAvg,
+                            .multiScatterFms = fms,
+                            .eonUniformMix = eonUniformMixWeight(wo.z, params.diffuseRoughness),
+                            .eonLtcM = glm::vec4(eonLtc.a, eonLtc.b, eonLtc.c, eonLtc.d),
+                            .eonLtcBasisT = glm::transpose(orthonormalBasisLtc(wo)),
+                            .eonLtcS = 0.5F * (1.0F + (1.0F / std::sqrt((eonLtc.d * eonLtc.d) + 1.0F))),
                             .conductorN = conductor.n,
                             .conductorK = conductor.k,
                             .escapeWo = 0.0F,
@@ -836,8 +834,10 @@ BsdfEval evaluateContinuousLobes(const BsdfParams& params, const glm::vec3& wo, 
         return {glm::vec3(0.0F), glm::vec3(0.0F), transmission.f + transmitMultiScatter(params, -wi.z, msPdf, lobes),
                 (lobes.specular * transmission.pdf) + (lobes.msTransmit * msPdf)};
     }
-    const LobeEval specular = evaluateSpecularLobe(params, wo, wi, alpha, lobes);
-    const LobeEval diffuse = evaluateDiffuseLobe(params, wo, wi, lobes);
+    // One wi-side table lookup for both lobes: the specular energy compensation and the diffuse coat coupling read the same split.
+    const AlbedoSplit splitWi = directionalAlbedo(wi.z, params.roughness);
+    const LobeEval specular = evaluateSpecularLobe(params, wo, wi, alpha, lobes, splitWi);
+    const LobeEval diffuse = evaluateDiffuseLobe(params, wo, wi, lobes, splitWi);
     float pdf = (lobes.specular * specular.pdf) + (lobes.diffuse * diffuse.pdf) +
                 (lobes.msReflect * msReflectPdf(wi.z, params.roughness));
     // Gated so an opaque material skips the row lookup; the term is 0 there either way.
@@ -940,7 +940,7 @@ std::optional<BsdfSample> sampleBsdf(const BsdfClosure& closure, Sampler& sample
         const bool sampledDiffuse = lobeU < lobes.specular + lobes.diffuse;
         glm::vec3 wi;
         if (sampledDiffuse) {
-            wi = sampleEon(wo, params.diffuseRoughness, sampler.next2D());
+            wi = sampleEon(lobes, sampler.next2D());
         } else if (lobeU < lobes.specular + lobes.diffuse + lobes.msReflect) {
             wi = sampleMsReflect(params.roughness, sampler.next2D());
         } else {

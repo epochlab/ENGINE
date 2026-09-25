@@ -88,6 +88,14 @@ struct LobeProbabilities {
     // The coat's own cosine-mean Fresnel, separate from the metallic-blended fresnelAvg below, which is wrong for the coat.
     float coatFresnelAvg;
     glm::vec3 fresnelAvg;
+    // Kulla-Conty tint per channel, a pure function of fresnelAvg and albedoAvg, so the reflection lobe reads it per evaluation.
+    glm::vec3 multiScatterFms;
+    // EON's CLTC/uniform mixing weight at wo: a function of wo.z and diffuseRoughness alone, so its pow() is not a per-call cost.
+    float eonUniformMix;
+    // EON's clipped-LTC fit at wo: coefficients (a,b,c,d), the transposed LTC basis and its normalisation, none depending on wi.
+    glm::vec4 eonLtcM;
+    glm::mat3 eonLtcBasisT;
+    float eonLtcS;
     // Complex IOR inverted from (f0, edgeTint) once per evaluation. Index-matched (1, 0) at metallic==0, where no consumer reads them.
     glm::vec3 conductorN;
     glm::vec3 conductorK;
