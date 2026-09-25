@@ -330,8 +330,15 @@ TraceResult tracePath(const Ray& primaryRay, const EmbreeAccel& accel,
                     const glm::vec3 shadowOrigin =
                         shadowTerminatorOffset(triangle, hit->u, hit->v, geoCos > 0.0F) +
                         (geoNormal * shadowEpsilon * (geoCos > 0.0F ? 1.0F : -1.0F));
-                    const Ray shadowRay{shadowOrigin, lightSample->direction, shadowEpsilon,
-                                         lightSample->distance * (1.0F - kShadowDistanceEpsilon)};
+                    // pbrt's SpawnRayTo: re-formed from the offset origin to the sampled point, which a back-off along wi cannot reach.
+                    const bool finiteLight = lightSample->distance < std::numeric_limits<float>::max();
+                    const glm::vec3 toLight =
+                        finiteLight ? (shading.position - shadowOrigin) +
+                                           (lightSample->direction * lightSample->distance)
+                                     : lightSample->direction;  // the environment's point is at infinity
+                    const float shadowDistance = finiteLight ? glm::length(toLight) : lightSample->distance;
+                    const Ray shadowRay{shadowOrigin, finiteLight ? toLight / shadowDistance : toLight,
+                                         shadowEpsilon, shadowDistance * (1.0F - kShadowDistanceEpsilon)};
                     ++rays.shadow;
                     if (!accel.occluded(shadowRay)) {
                         if (bounce == 0) {

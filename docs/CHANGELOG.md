@@ -3,6 +3,20 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## NEE shadow rays: exact target reconstruction from the offset origin
+
+Reported as a dot lattice in the Shadow AOV across `cornell.json`'s spheres. Not a mesh fault -- the glTF
+is 980 near-equal-area triangles, consistent winding, unit radial normals, no degenerates -- and not the
+AOV's own gates: dropping `nearSide`'s `geoCos` term and hoisting the occlusion test out of the
+`eval.pdf`/`bsdfValue` gate each changed the image by nothing. Instrumenting the blocker's `t/distance`
+put it at `~1.0`: the blocker was the light itself.
+
+- fix: **the NEE shadow ray's `tMax` was measured at `shading.position` while the ray leaves from the Chiang/Li/Burley offset origin.** On curved geometry that offset is a tangent-plane displacement of order `e^2/(2R)`, which for `cornell.json`'s spheres (`e = 0.026`, `R = 0.15`) is `~2e-3` against `kShadowDistanceEpsilon`'s `6e-4` back-off at that distance -- so the ray crossed the emitter's plane beyond `tMax` and the light's own front face, which `appendQuadLights` puts in the BVH, occluded it. The ray is now pbrt's `SpawnRayTo` (PBR 6.8.6): the sampled point is reconstructed as `shading.position + wi*distance` and the ray re-formed from the offset origin to it, so the back-off is relative to the distance actually travelled. A back-off along `wi` alone is not sufficient and was measured failing -- the offset origin's ray is a parallel shift, meeting the light's plane at `distance - dot(delta, n_light)/dot(wi, n_light)`, not at `distance - dot(delta, wi)`. The environment keeps the direction as drawn: its point is at infinity
+- fix: **this was an energy loss, not an AOV-only defect.** Direct light from an area light was being discarded wherever the offset exceeded the back-off, which is every sufficiently curved emitter-facing surface. On a diffuse variant of `cornell.json` the spheres carried the same lattice in *beauty*: `relMSE 0.0149`, `linear RMSE 0.0463` at 640x360x64. The shipped scene hides it because chrome and glass take most of their light through the BSDF-sampled MIS half, leaving `relMSE 6.0e-06`
+- test: `quad_light_visibility_on_curved_receiver`, a hard zero rather than a tolerance -- nothing lies between a convex receiver and a light it faces, so the Shadow AOV over a sphere under an unobstructed quad must read exactly 0. Two tessellations, `64x32` and `32x16`, because the offset scales with `e^2`; `makeSphereScene` takes slices/stacks, defaulted so its four existing callers are unchanged. The suite's other quad-light checks all use a FLAT receiver, where `shadowTerminatorOffset` is a no-op and the offset is `kRayEpsilon` alone -- one part in `1e4` of the distance, comfortably inside the back-off -- which is why 130/130 passed over this
+- test: verified by breaking the code under test. The old construction fails both rows, at 0.874 (fine) and 0.987 (coarse); the `wi`-only back-off fails the coarse row at 0.535 while the fine row passes, which is the `e^2` scaling showing up as detection. `ctest` **131/131**
+- note: work-neutral and perf-neutral. Ray counts identical to the digit at 640x360x64 (`primary 15272448, bounce 27615693, ao 7778812, shadow 21871231`) -- no sampler dimension is consumed and no ray is added. `pass_ms` B/A **1.0041 [0.9864, 1.0193]** at n = 16, not resolved
+
 ## Performance pass, wave 1: closure-constant hoisting, tile occupancy, threaded EXR decode
 
 `ROADMAP.md`'s "Performance and Memory efficiency pass" item, which had monitoring but no reduction work.

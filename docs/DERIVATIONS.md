@@ -1474,6 +1474,29 @@ the wall's `z=1.0` that projects by similar triangles to `x[0.333,1.0] y[-0.333,
 wall is oversized around that with margin) rather than `kQuadExtent`, which would also swallow the
 camera's own sightline and read the wall's lit topside instead of testing occlusion.
 
+**Curved receiver.** Those three share a FLAT receiver, where `shadowTerminatorOffset` is a no-op and
+the shadow ray leaves from `shading.position + geoNormal*kRayEpsilon`, one part in `1e4` of the
+distance to the light and so comfortably inside the `1e-3` relative back-off. On curved geometry the
+Chiang/Li/Burley origin is pulled onto the vertex tangent planes, a displacement of order `e^2/(2R)`
+for edge length `e` on radius `R`, which on ordinary tessellation is the SAME order as the back-off:
+`cornell.json`'s spheres (`e = 0.026`, `R = 0.15`) put it at `~2e-3` against a back-off of `6e-4`.
+The ray then crosses the light's plane BEYOND `tMax`, and the emitter's own front face — which is in
+the BVH — registers as its own occluder. No choice of `kShadowDistanceEpsilon` fixes this, because
+the offset does not scale with the distance to the light.
+
+The construction is therefore pbrt's `SpawnRayTo` (PBR 6.8.6) rather than a back-off along `wi`: the
+sampled point is reconstructed as `shading.position + wi*distance` and the ray is re-formed FROM the
+offset origin TO that point, so the back-off is relative to the distance actually travelled whatever
+the light's orientation. A back-off along `wi` alone is not enough — the offset origin's ray is a
+parallel shift, and it meets the light's plane at `distance - dot(delta, n_light)/dot(wi, n_light)`,
+not at `distance - dot(delta, wi)`. The environment keeps the direction as drawn: its point is at
+infinity, and `FLT_MAX` is already effectively unbounded.
+
+`quad_light_visibility_on_curved_receiver` locks it, as a hard zero rather than a tolerance: nothing
+lies between a CONVEX receiver and a light it faces, so the Shadow AOV over a sphere lit by an
+unobstructed quad must read exactly 0 at every tessellation. Two rows, `64x32` and `32x16`, because
+the offset scales with `e^2` — both read 0.874 and 0.987 against the old construction.
+
 **Inverse square.** Quadratic falloff is IMPLICIT in this renderer — NEE divides by
 `pdf = selectionPdf/solidAngle`, so the light's subtended solid angle enters as a multiplier and
 shrinks as `A*cos(theta_l)/d^2` with distance. There is deliberately no explicit `1/d^2` term
