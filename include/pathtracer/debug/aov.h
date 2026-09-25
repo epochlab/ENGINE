@@ -4,7 +4,7 @@
 
 namespace pathtracer::debug {
 
-// Single source of truth for every selectable AOV. AppResources.aov stays int because ImGui::Combo needs int&. Grouped by README.md "AOV".
+// Single source of truth for every selectable AOV. AppResources.aov stays int because ImGui::Combo needs int&.
 enum class AovId : int {
     // Utility.
     Beauty = 0,

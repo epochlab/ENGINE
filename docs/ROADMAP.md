@@ -28,7 +28,7 @@
 
 ## Parked
 
-**Performance** — each item justified by the benchmark log ([components](../README.md#benchmark-tooling)).
+**Performance** — each item justified by the benchmark log ([components](PIPELINE.md#benchmark-tooling)).
 - **Display-texture upload rebuilds the whole image every published pass**: `ensurePathTraceDisplayTexture` (`main.cpp`) re-uploads the full RGBA32F buffer whenever the cache key changes, once per completed pass — 37.7 MB at 2048x1152, measured at **3.6-7.4 ms, median 4.6 ms** on the render thread over the 128 uploads of one `pathtracer -bench` convergence. Most of it is the driver's float-to-half conversion, not the transfer (46% on cornell, 68% on the stump), so a 16-bit display copy only pays off if the conversion leaves the render thread (`displayBitDepth: 32` measured `upload_ms` **0.54x [0.50, 0.83]** of 16 on cornell and **0.32x [0.31, 0.33]** on the stump, `results/wave7`). Untried: convert to half on the trace workers and upload `GL_HALF_FLOAT`, a PBO so the copy leaves the render thread, or uploading only the tiles the pass rewrote; decide each with `bench_compare run --metric upload_ms` over `pathtracer -bench`.
 - **Scene textures carry more channels than they use**: every map is stored RGBA whatever it encodes, so roughness and bump (read as `.r` only, `gbuffer_shading.cpp`) hold 4x their payload, and `aoTexture` is loaded but never read now that AO is path-traced (`material.h`) — 268 MB at float32 on the stump's 4K map. Channel count is the next step of the data type `textureBitDepth` started, followed by the framebuffers (`HdrImage` AOVs, still float RGBA).
 - **Blue-noise sample matrix beyond d = 1**: the dither mask is a scalar void-and-cluster array, so a pixel's d-dimensional shift is one value replicated along the torus diagonal and relative shifts lie on a line. Georgiev & Fajardo Sec. 3 anneals a true d-vector matrix; adopting it changes the baked table and its lookup, not the sampler.
@@ -54,8 +54,8 @@
 - **Depth of field**: thin-lens sampling in `primaryRay` plus a focus distance. Unblocked today; cheaper after adaptive sampling.
 - **Motion blur**: blocked on a scene graph/animation foundation that does not exist, plus Embree multi-timestep geometry.
 - **Adaptive per-pixel sample budget**: variance-driven; `samplesPerPixel` is one fixed global today.
-- **Fisheye lens**: equidistant/equisolid-angle/orthographic/stereographic projection families in `primaryRay` (Kannala & Brandt 2006, [references](../README.md#references)).
-- **Physical camera filters**: CPL/polarising filters, which need polarised transport (Chandrasekhar 1960, [references](../README.md#references)).
+- **Fisheye lens**: equidistant/equisolid-angle/orthographic/stereographic projection families in `primaryRay` (Kannala & Brandt 2006, [references](PIPELINE.md#references)).
+- **Physical camera filters**: CPL/polarising filters, which need polarised transport (Chandrasekhar 1960, [references](PIPELINE.md#references)).
 
 **Geometry and texture**
 - **Hierarchical frustum culling**: reject per instance against `instanceBounds` before `buildSubTriangles` walks the whole scene.

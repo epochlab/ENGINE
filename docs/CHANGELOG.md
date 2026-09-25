@@ -3,6 +3,28 @@
 Newest first. The `Phase 0`-`Phase 5` blocks at the end are the original ordered build-out and keep
 their own sequence; every entry above them is standalone, most recent first.
 
+## `README.md` becomes a landing page, the reference body moves to `docs/PIPELINE.md`
+
+316 lines to 60. The README answered "what is this" and "how do I use the thing" in the same file as every
+subsystem table, so neither read well: a first-time reader scrolled past 28 AOV rows to reach the build
+command.
+
+- docs: `docs/PIPELINE.md` (new, 236 lines) takes Pipeline, Components, Session settings, Benchmark tooling,
+  Testing, Material Library, AOV and References verbatim in structure and rewritten for density -- the AOV
+  table splits into the four HUD groups with a **Source** column naming the producer (10 traced, 14 raster,
+  4 filter, gated by `aov.h`'s own `static_assert`)
+- docs: the README keeps the abstract, sample image, build, run, controls and the Python quickstart, and a
+  one-line pointer at `PIPELINE.md` and `ROADMAP.md` replaces the six-row documentation table
+- docs: a Controls table replaces the prose that named `R` as the camera reset. `R` isolates the red channel;
+  `0` resets the camera (`main.cpp`), and `PIPELINE.md`'s "Debug camera controls" row carried the same stale
+  key over from the README
+- refactor: `ROADMAP.md`'s three `../README.md#...` links repoint at `PIPELINE.md`, and the `aov.h` grouping
+  comment drops its "Grouped by README.md" pointer, keeping the claim
+- note: dropped rather than moved -- the build-target inventory, the static-analysis section (clang-tidy and
+  the `cppcheck` target), the `third_party/README.md` pointer, the `bench_compare run` A/B invocation, and the
+  Python prose on the C ABI, scene-referred values, `show_sky` and per-call producer cost. All still hold;
+  none has a home in the tree now
+
 ## `docs/DERIVATIONS.md` removed: the load-bearing lines move to the code they govern
 
 1706 lines across 31 sections, addressed from 48 source comments. Measured before deleting: **188 of its
