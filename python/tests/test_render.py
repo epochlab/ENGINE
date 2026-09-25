@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from pathtracer import AOVS, Renderer, aov_channels, aov_needs_samples
+from pathtracer import AOVS, Renderer, aov_channels, aov_needs_samples, display_encode
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCENE = "scenes/cornell.json"
@@ -188,3 +188,88 @@ def test_beauty_matches_render_beauty_cli(renderer: Renderer, tmp_path: Path) ->
 
     actual = renderer.render(aovs=("beauty",), width=64, height=64, samples=8, seed=1)["beauty"]
     assert np.array_equal(actual, expected)
+
+
+def _srgb_encode(linear: np.ndarray) -> np.ndarray:
+    """The IEC 61966-2-1 inverse EOTF, the curve the OCIO "Un-tone-mapped" sRGB view reduces to."""
+    return np.where(linear <= 0.0031308, linear * 12.92, (1.055 * linear ** (1 / 2.4)) - 0.055)
+
+
+def test_display_encode_follows_the_srgb_curve() -> None:
+    """The encode must be sRGB, not a gamma-2.2 approximation of it; dither moves the result by at most one count."""
+    linear = np.array([[[0.0] * 3, [0.05] * 3, [0.2] * 3, [0.5] * 3, [1.0] * 3]], dtype=np.float32)
+    encoded = display_encode(linear)[0, :, 0].astype(np.int16)
+    expected = np.rint(_srgb_encode(linear[0, :, 0].astype(np.float64)) * 255.0).astype(np.int16)
+    assert np.all(np.abs(encoded - expected) <= 1)
+    # The endpoints are exact: clamping pins them either side of the dither.
+    assert encoded[0] == 0 and encoded[-1] == 255
+
+
+def test_display_encode_is_monotonic_and_clamps() -> None:
+    ramp = np.linspace(-1.0, 3.0, 256, dtype=np.float32).repeat(3).reshape(1, 256, 3)
+    encoded = display_encode(ramp)[0, :, 0].astype(np.int16)
+    assert encoded[0] == 0 and encoded[-1] == 255
+    # Dither is a pure function of uv, so it perturbs neighbours independently; monotonicity holds to one count.
+    assert np.all(np.diff(encoded) >= -1)
+
+
+def test_display_encode_exposure_is_a_stop() -> None:
+    """exposure_ev must be stops, so +1 EV doubles the linear value before the curve rather than the encoded one."""
+    linear = np.full((1, 1, 3), 0.1, dtype=np.float32)
+    assert abs(int(display_encode(linear, exposure_ev=1.0)[0, 0, 0]) -
+               int(display_encode(np.full((1, 1, 3), 0.2, dtype=np.float32))[0, 0, 0])) <= 1
+
+
+def test_display_encode_without_transform_is_linear() -> None:
+    linear = np.full((1, 1, 3), 0.5, dtype=np.float32)
+    assert abs(int(display_encode(linear, display_transform=False)[0, 0, 0]) - 128) <= 1
+
+
+def test_display_encode_rejects_wrong_shape() -> None:
+    for bad in (np.zeros((4, 4), dtype=np.float32), np.zeros((4, 4, 2), dtype=np.float32)):
+        with pytest.raises(ValueError):
+            display_encode(bad)
+
+
+def test_display_encode_accepts_a_non_contiguous_view() -> None:
+    """A caller slicing an RGBA buffer passes a strided view; the encode must copy rather than read past it."""
+    padded = np.zeros((2, 3, 4), dtype=np.float32)
+    padded[..., :3] = 0.5
+    assert display_encode(padded[..., :3]).shape == (2, 3, 3)
+
+
+def test_show_sky_blackens_only_the_background(renderer: Renderer) -> None:
+    """showSky gates the primary ray's own miss, so it must change the background and nothing the camera hits."""
+    common = {"aovs": ("beauty",), "width": 64, "height": 36, "samples": 2, "seed": 1}
+    sky = renderer.render(**common, show_sky=True)["beauty"]
+    without = renderer.render(**common, show_sky=False)["beauty"]
+
+    corner = (slice(0, 6), slice(0, 6))
+    assert sky[corner].max() > 0.0
+    assert np.array_equal(without[corner], np.zeros_like(without[corner]))
+    # The Cornell box fills the centre, and it is lit by the environment in both renders.
+    interior = (slice(12, 24), slice(24, 40))
+    assert np.array_equal(sky[interior], without[interior])
+
+
+def test_show_sky_default_is_unchanged(renderer: Renderer) -> None:
+    """The default must stay sky-on, or every existing headless caller silently changes output."""
+    common = {"aovs": ("beauty",), "width": 32, "height": 18, "samples": 2, "seed": 1}
+    assert np.array_equal(renderer.render(**common)["beauty"],
+                          renderer.render(**common, show_sky=True)["beauty"])
+
+
+def test_optional_flags_reject_a_non_tristate(renderer: Renderer) -> None:
+    """The ABI rejects anything outside {PT_DEFAULT, 0, 1} rather than coercing it to true."""
+    for field in ("show_sky", "env_light_enabled"):
+        with pytest.raises(RuntimeError, match=field):
+            renderer.render(aovs=("beauty",), width=8, height=8, samples=1, **{field: 2})
+
+
+def test_env_light_enabled_changes_the_lighting(renderer: Renderer) -> None:
+    """Unlike show_sky, removing the environment from the light set must change what the camera hits."""
+    common = {"aovs": ("beauty",), "width": 64, "height": 36, "samples": 2, "seed": 1, "show_sky": False}
+    lit = renderer.render(**common, env_light_enabled=True)["beauty"]
+    unlit = renderer.render(**common, env_light_enabled=False)["beauty"]
+    assert not np.array_equal(lit, unlit)
+    assert unlit.mean() < lit.mean()

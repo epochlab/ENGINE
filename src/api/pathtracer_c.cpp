@@ -9,6 +9,7 @@
 
 #include "pathtracer/api/headless_renderer.h"
 #include "pathtracer/debug/aov.h"
+#include "pathtracer/gfx/ocio_cpu_transform.h"
 
 namespace {
 
@@ -27,6 +28,14 @@ void writeError(char* err, int errCap, const std::string& message) {
 
 [[nodiscard]] bool validAov(int aov) {
     return aov >= 0 && aov < static_cast<int>(AovId::Count);
+}
+
+// A boundary value, so anything outside the three the ABI defines is rejected rather than coerced to on or off.
+[[nodiscard]] bool toOptionalBool(int triState, const char* field, std::optional<bool>& out, std::string& error) {
+    if (triState == PT_DEFAULT) { out = std::nullopt; return true; }
+    if (triState == 0 || triState == 1) { out = triState != 0; return true; }
+    error = std::string(field) + " must be PT_DEFAULT, 0 or 1, got " + std::to_string(triState);
+    return false;
 }
 
 [[nodiscard]] pathtracer::scene::Camera toCamera(const PtCamera& camera) {
@@ -150,6 +159,14 @@ int pt_render(PtRenderer* renderer, const PtRenderRequest* request, float* const
             }
             aovs.push_back(static_cast<AovId>(request->aovs[i]));
         }
+        std::optional<bool> envLightEnabled;
+        std::optional<bool> showSky;
+        std::string decodeError;
+        if (!toOptionalBool(request->env_light_enabled, "env_light_enabled", envLightEnabled, decodeError) ||
+            !toOptionalBool(request->show_sky, "show_sky", showSky, decodeError)) {
+            writeError(err, err_cap, decodeError);
+            return PT_ERROR;
+        }
         const HeadlessRenderer::Request internal{
             .camera = toCamera(request->camera),
             .width = request->width,
@@ -157,8 +174,8 @@ int pt_render(PtRenderer* renderer, const PtRenderRequest* request, float* const
             .samples = request->samples,
             .scrambleSeed = request->seed,
             .aovs = std::move(aovs),
-            // No env-light override on the C ABI: nullopt keeps the scene's authored environment.lightEnabled.
-            .envLightEnabled = std::nullopt,
+            .envLightEnabled = envLightEnabled,
+            .showSky = showSky,
         };
         for (int i = 0; i < request->aov_count; ++i) {
             if (out[i] == nullptr) {
@@ -179,6 +196,31 @@ int pt_render(PtRenderer* renderer, const PtRenderRequest* request, float* const
         return PT_ERROR;
     } catch (...) {
         writeError(err, err_cap, "unknown error during render");
+        return PT_ERROR;
+    }
+}
+
+int pt_display_encode(const float* rgb, int width, int height, float exposure_ev, int display_transform,
+                      unsigned char* out, char* err, int err_cap) {
+    try {
+        if (rgb == nullptr || out == nullptr) {
+            writeError(err, err_cap, "null input or output buffer");
+            return PT_ERROR;
+        }
+        if (width <= 0 || height <= 0) {
+            writeError(err, err_cap, "resolution must be positive");
+            return PT_ERROR;
+        }
+        const auto count = static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 3;
+        const std::vector<unsigned char> encoded = pathtracer::gfx::encodeForDisplay(
+            std::span<const float>(rgb, count), width, height, exposure_ev, display_transform != 0);
+        std::memcpy(out, encoded.data(), encoded.size());
+        return PT_OK;
+    } catch (const std::exception& e) {
+        writeError(err, err_cap, e.what());
+        return PT_ERROR;
+    } catch (...) {
+        writeError(err, err_cap, "unknown error during display encode");
         return PT_ERROR;
     }
 }

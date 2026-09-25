@@ -288,6 +288,8 @@ bool HeadlessRenderer::render(const Request& request, std::string& error) {
         pathtracer::debug::PassStats stats;
         const pathtracer::scene::LightSet& lights =
             request.envLightEnabled.value_or(defaultEnvLightEnabled_) ? lights_ : lightsEnvOff_;
+        // Loop-invariant like `lights` above it: the background is a property of the request, not of the pass index.
+        const bool showSky = request.showSky.value_or(true);
         stats_.passMilliseconds.reserve(static_cast<std::size_t>(request.samples));
         // Resolved once: the lane set is fixed for this request, and pathTracedLane is a switch the row loop would otherwise re-run.
         std::vector<const std::vector<float>*> laneSources;
@@ -302,7 +304,7 @@ bool HeadlessRenderer::render(const Request& request, std::string& error) {
             // scrambleSeed fixed, sampleBase advancing: the pair that keeps accumulated samples stratified rather than N independent draws.
             pathtracer::scene::renderPathTraced(request.camera, accel_, model_.shadingTriangles, model_.instances,
                                              instanceLightIndex_, lights, request.width, request.height,
-                                             /*showSky=*/true, baseSettings_, perInstanceSettings_,
+                                             showSky, baseSettings_, perInstanceSettings_,
                                              request.scrambleSeed, /*sampleBase=*/pass,
                                              /*sampleCount=*/request.samples, generation,
                                              /*requestedGeneration=*/1U, threadPool_, stats, pathTraced_);

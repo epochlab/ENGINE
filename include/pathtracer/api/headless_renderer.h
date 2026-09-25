@@ -39,6 +39,8 @@ public:
         std::vector<pathtracer::debug::AovId> aovs;
         // nullopt keeps the scene's authored environment.lightEnabled; true/false override it, so one scene.json renders lit and unlit.
         std::optional<bool> envLightEnabled;
+        // Whether a camera ray that hits nothing returns environment radiance. Gates the primary miss only, so it unlights nothing.
+        std::optional<bool> showSky;
     };
 
     // Per-pass wall clock and ray counts for the most recent render(), so a benchmark measures the renderer rather than re-deriving it.

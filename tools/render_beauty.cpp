@@ -19,7 +19,6 @@
 #include <vector>
 
 #include <OpenColorIO/OpenColorIO.h>
-#include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <zlib.h>
 
@@ -220,16 +219,6 @@ bool readPng(const std::string& path, int& width, int& height, std::vector<unsig
     return true;
 }
 
-// Triangular-PDF dither, byte-for-byte the shader's ditherOffset() (ocio_display_transform.cpp), so output matches the viewer.
-glm::vec3 ditherOffset(float u, float v) {
-    const auto rand = [](float x, float y) {
-        const float s = std::sin((x * 12.9898F) + (y * 78.233F)) * 43758.5453F;
-        return s - std::floor(s);
-    };
-    const float d = (rand(u, v) - rand(u + 0.618F, v + 0.618F)) / 255.0F;
-    return {d, d, d};
-}
-
 // Largest RGB value, for an AOV whose raw range is not [0,1]; alpha is excluded, being 1 by convention and pinning every scalar AOV at 1.
 float maxChannel(const pathtracer::gfx::HdrImage& image) {
     float peak = 0.0F;
@@ -237,42 +226,6 @@ float maxChannel(const pathtracer::gfx::HdrImage& image) {
         peak = std::max({peak, image.rgba[texel], image.rgba[texel + 1], image.rgba[texel + 2]});
     }
     return peak;
-}
-
-// Scene-referred to display-referred 8-bit exactly as presentFrame does; see docs/DERIVATIONS.md "Headless beauty render".
-std::vector<unsigned char> encodeForDisplay(const pathtracer::gfx::HdrImage& image, float exposureEv,
-                                             bool applyDisplayTransform) {
-    std::vector<float> rgb(static_cast<std::size_t>(image.width) *
-                            static_cast<std::size_t>(image.height) * 3);
-    const float exposure = std::pow(2.0F, exposureEv);
-    for (std::size_t i = 0; i < rgb.size() / 3; ++i) {
-        rgb[(i * 3) + 0] = image.rgba[(i * 4) + 0] * exposure;
-        rgb[(i * 3) + 1] = image.rgba[(i * 4) + 1] * exposure;
-        rgb[(i * 3) + 2] = image.rgba[(i * 4) + 2] * exposure;
-    }
-
-    if (applyDisplayTransform) {
-        pathtracer::gfx::applyOcioDisplayTransform(rgb, image.width, image.height);
-    }
-
-    std::vector<unsigned char> out(rgb.size());
-    for (int y = 0; y < image.height; ++y) {
-        for (int x = 0; x < image.width; ++x) {
-            const std::size_t i = ((static_cast<std::size_t>(y) *
-                                     static_cast<std::size_t>(image.width)) +
-                                    static_cast<std::size_t>(x)) * 3;
-            const glm::vec3 dither =
-                ditherOffset((static_cast<float>(x) + 0.5F) / static_cast<float>(image.width),
-                              (static_cast<float>(y) + 0.5F) / static_cast<float>(image.height));
-            for (int c = 0; c < 3; ++c) {
-                const float value = std::clamp(rgb[i + static_cast<std::size_t>(c)] + dither[c],
-                                                0.0F, 1.0F);
-                out[i + static_cast<std::size_t>(c)] =
-                    static_cast<unsigned char>((value * 255.0F) + 0.5F);
-            }
-        }
-    }
-    return out;
 }
 
 // Each octave band's share of total error power; see docs/DERIVATIONS.md "Headless beauty render".
@@ -645,7 +598,15 @@ int main(int argc, char** argv) {
     const float exposureEv = options.aov == pathtracer::debug::AovId::Depth
                                  ? -std::log2(std::max(maxChannel(accumulated), 1e-4F))
                                  : options.exposureEv;
-    const std::vector<unsigned char> encoded = encodeForDisplay(accumulated, exposureEv, isBeauty);
+    // HdrImage carries RGBA; the shared encode takes packed RGB, so gather the three channels the display path reads.
+    std::vector<float> linearRgb(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 3);
+    for (std::size_t texel = 0; texel < linearRgb.size() / 3; ++texel) {
+        for (std::size_t channel = 0; channel < 3; ++channel) {
+            linearRgb[(texel * 3) + channel] = accumulated.rgba[(texel * 4) + channel];
+        }
+    }
+    const std::vector<unsigned char> encoded =
+        pathtracer::gfx::encodeForDisplay(linearRgb, width, height, exposureEv, isBeauty);
     if (!writePng(options.outPath, width, height, encoded)) {
         return EXIT_FAILURE;
     }

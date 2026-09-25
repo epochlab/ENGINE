@@ -74,7 +74,7 @@ frame["depth"]    # (64, 128, 1) float32, camera-space Z
 frame["normal"]   # (64, 128, 3) float32, normal-mapped shading normal
 ```
 
-Values are scene-referred linear and unclamped, with no display transform: what a model trains on, not what a monitor shows. Use `render_beauty --out` for a display-encoded picture. Arrays are C-contiguous float32, so `torch.from_numpy(...)` shares memory and leaves one explicit `.to(device)`.
+Values are scene-referred linear and unclamped, with no display transform: what a model trains on, not what a monitor shows. Pass one through `display_encode` for a picture that matches the viewer, or use `render_beauty --out` to write one from the CLI. `render(show_sky=...)` gates the background the way the viewer's "Show/Hide Background" checkbox does. Arrays are C-contiguous float32, so `torch.from_numpy(...)` shares memory and leaves one explicit `.to(device)`.
 
 Each producer runs at most once per call, so requesting several AOVs together costs far less than requesting them one at a time; a request with no path-traced AOV skips the integrator entirely. Override the camera with `dataclasses.replace(renderer.default_camera, ...)` — note that `aperture`/`shutter_seconds`/`iso` set exposure only, since the camera is a pinhole with no depth of field.
 

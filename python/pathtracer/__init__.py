@@ -7,7 +7,8 @@
     (256, 256, 3)
 
 Values are scene-referred linear, unclamped, with no display transform applied: what a model should train on, not
-what a monitor should show. Use ``render_beauty --out`` for a display-encoded picture.
+what a monitor should show. Pass one through ``display_encode`` for a picture that matches the viewer, or use
+``render_beauty --out`` to write one from the CLI.
 
 Arrays are C-contiguous float32, so ``torch.from_numpy(frame["beauty"])`` shares memory with no copy, leaving one
 explicit ``.to(device)``.
@@ -23,7 +24,7 @@ import numpy as np
 
 from . import _ffi
 
-__all__ = ["AOVS", "Camera", "Renderer", "aov_channels", "aov_needs_samples"]
+__all__ = ["AOVS", "Camera", "Renderer", "aov_channels", "aov_needs_samples", "display_encode"]
 
 _LIB = _ffi.load_library()
 
@@ -53,6 +54,42 @@ def aov_needs_samples(name: str) -> bool:
     converge immediately, so raising ``samples`` for them only wastes time.
     """
     return bool(_LIB.pt_aov_needs_samples(_aov_id(name)))
+
+
+def display_encode(
+    image: np.ndarray, *, exposure_ev: float = 0.0, display_transform: bool = True
+) -> np.ndarray:
+    """Scene-referred linear RGB to display-referred 8-bit sRGB, the viewer's own chain.
+
+    Applies exposure, the OCIO display transform the window and ``render_beauty`` both use, triangular-PDF dither,
+    then quantises. Takes ``(height, width, 3)`` float32 and returns ``(height, width, 3)`` uint8, ready for
+    ``imshow`` or a PNG write.
+
+    Pass ``display_transform=False`` for a data AOV such as depth or normal, whose raw range is not
+    display-referred; exposure and the quantise still apply.
+    """
+    if image.ndim != 3 or image.shape[2] != 3:
+        raise ValueError(f"display_encode takes (height, width, 3), got {image.shape}")
+    height, width = image.shape[0], image.shape[1]
+    if height < 1 or width < 1:
+        raise ValueError(f"resolution must be positive, got {width}x{height}")
+    # A caller may pass a slice or a non-float32 AOV, and the ABI reads raw float32; this is the one copy that costs.
+    source = np.ascontiguousarray(image, dtype=np.float32)
+    out = np.empty((height, width, 3), dtype=np.uint8)
+
+    error = _ffi.make_error_buffer()
+    if _LIB.pt_display_encode(
+        source.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+        width,
+        height,
+        exposure_ev,
+        1 if display_transform else 0,
+        out.ctypes.data_as(ctypes.POINTER(ctypes.c_ubyte)),
+        error,
+        len(error),
+    ) != 0:
+        raise RuntimeError(error.value.decode())
+    return out
 
 
 @dataclass(frozen=True)
@@ -161,6 +198,8 @@ class Renderer:
         samples: int = 1,
         seed: int = 1,
         camera: Camera | None = None,
+        show_sky: bool | None = None,
+        env_light_enabled: bool | None = None,
     ) -> Mapping[str, np.ndarray]:
         """Renders the requested AOVs and returns them keyed by the names given.
 
@@ -170,6 +209,14 @@ class Renderer:
 
         ``samples`` is the number of one-sample passes averaged. The sampler's scramble is fixed by ``seed`` and its
         sequence index advances per pass, so the same arguments always reproduce the same floats exactly.
+
+        ``show_sky`` decides whether a camera ray that hits nothing returns environment radiance. It gates the
+        primary miss only -- indirect bounces and next-event estimation sample the environment either way -- so
+        turning it off blackens the background without unlighting the scene. ``None`` keeps the headless default of
+        showing it; the viewer's own default is off.
+
+        ``env_light_enabled`` decides whether the environment is in the light set at all, which does change the
+        lighting. ``None`` keeps the scene's authored ``environment.lightEnabled``.
 
         Returns arrays of shape ``(height, width, channels)``, float32, row 0 at the top.
         """
@@ -203,6 +250,8 @@ class Renderer:
         request.seed = seed
         request.aovs = (ctypes.c_int * len(identifiers))(*identifiers)
         request.aov_count = len(identifiers)
+        request.show_sky = _ffi.PT_DEFAULT if show_sky is None else int(show_sky)
+        request.env_light_enabled = _ffi.PT_DEFAULT if env_light_enabled is None else int(env_light_enabled)
 
         error = _ffi.make_error_buffer()
         if _LIB.pt_render(self._handle, ctypes.byref(request), pointers, error, len(error)) != 0:
